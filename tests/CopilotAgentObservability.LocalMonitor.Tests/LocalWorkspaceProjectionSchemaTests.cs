@@ -155,24 +155,16 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     [Theory]
     [InlineData(256, true)]
     [InlineData(257, false)]
-    public void ExecutionBoundIsExactAndNeverTruncates(int count, bool succeeds)
+    public void ExecutionOverflowIsPersistedAsBoundedEvidenceForDetailRejection(int count, bool succeeds)
     {
         using var connection = OpenSessionDatabase();
         Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');");
         for (var index = 0; index < count; index++)
             Execute(connection, $"INSERT INTO session_runs VALUES('run-{index:D4}','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
 
-        if (succeeds)
-        {
-            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-            Assert.Equal(count, Strings(connection, "SELECT execution_id FROM local_workspace_execution_headers;").Length);
-        }
-        else
-        {
-            Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() =>
-                LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
-            Assert.Empty(Strings(connection, "SELECT component FROM schema_version WHERE component='local_workspace_projection';"));
-        }
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal(count, Strings(connection, "SELECT execution_id FROM local_workspace_execution_headers;").Length);
+        Assert.Equal(succeeds ? "0" : "1", Strings(connection, "SELECT EXISTS(SELECT 1 FROM local_workspace_execution_headers LIMIT 1 OFFSET 256);").Single());
     }
 
     [Fact]
@@ -224,7 +216,7 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     [Theory]
     [InlineData(4095, true)]
     [InlineData(4096, false)]
-    public void NodeBoundCountsExecutionRoot(int eventCount, bool succeeds)
+    public void NodeOverflowIsPersistedAsBoundedEvidenceForDetailRejection(int eventCount, bool succeeds)
     {
         using var connection = OpenSessionDatabase();
         Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
@@ -238,16 +230,9 @@ public sealed class LocalWorkspaceProjectionSchemaTests
             transaction.Commit();
         }
 
-        if (succeeds)
-        {
-            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-            Assert.Equal(4096, Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Length);
-        }
-        else
-        {
-            Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() => LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
-            Assert.Empty(Strings(connection, "SELECT component FROM schema_version WHERE component='local_workspace_projection';"));
-        }
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal(eventCount + 1, Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Length);
+        Assert.Equal(succeeds ? "0" : "1", Strings(connection, "SELECT EXISTS(SELECT 1 FROM local_workspace_nodes LIMIT 1 OFFSET 4096);").Single());
     }
 
     [Fact]

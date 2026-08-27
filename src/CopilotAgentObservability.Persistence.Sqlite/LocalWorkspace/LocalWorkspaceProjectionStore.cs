@@ -160,19 +160,13 @@ internal static class LocalWorkspaceProjectionStore
             DELETE FROM local_workspace_execution_headers WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, idsJson);
 
-        using (var limits = connection.CreateCommand())
-        {
-            limits.Transaction = transaction;
-            limits.CommandText = "SELECT EXISTS(SELECT 1 FROM session_runs WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id HAVING COUNT(*)>256);";
-            limits.Parameters.AddWithValue("$ids", idsJson);
-            SqliteCommandExecutionObserver.Executing();
-            if (Convert.ToInt64(limits.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-                throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
-        }
         Execute(connection, transaction, """
+            WITH ranked_runs AS (
+              SELECT r.*,row_number() OVER(PARTITION BY r.session_id ORDER BY r.run_id COLLATE BINARY)-1 AS workspace_ordinal
+              FROM session_runs r WHERE r.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)))
             INSERT INTO local_workspace_execution_headers(execution_id,session_id,source_kind,source_identity,source_ordinal,lifecycle,status,model,trace_id,time_authority,start_utc_ticks,end_utc_ticks,duration_ms)
             SELECT local_workspace_execution_id('session_run',r.run_id),r.session_id,'session_run',r.run_id,
-                   row_number() OVER(PARTITION BY r.session_id ORDER BY r.run_id COLLATE BINARY)-1,
+                   r.workspace_ordinal,
                    CASE r.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
                    CASE r.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,r.model,
                    CASE WHEN length(r.trace_id)=32 AND r.trace_id NOT GLOB '*[^0-9a-f]*' THEN r.trace_id END,
@@ -180,7 +174,7 @@ internal static class LocalWorkspaceProjectionStore
                    local_workspace_ticks(r.started_at),
                    CASE WHEN local_workspace_ticks(r.started_at) IS NOT NULL AND local_workspace_ticks(r.ended_at)>=local_workspace_ticks(r.started_at) THEN local_workspace_ticks(r.ended_at) END,
                    CASE WHEN local_workspace_ticks(r.started_at) IS NOT NULL AND local_workspace_ticks(r.ended_at)>=local_workspace_ticks(r.started_at) THEN (local_workspace_ticks(r.ended_at)-local_workspace_ticks(r.started_at))/10000 END
-            FROM session_runs r WHERE r.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            FROM ranked_runs r WHERE r.workspace_ordinal<=256;
             INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,token_state)
             SELECT local_workspace_node_id('execution_root',h.source_identity),h.session_id,h.execution_id,'execution_root',h.source_identity,0,NULL,'exact','execution','not_observed',NULL,
                    CASE h.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
@@ -419,13 +413,13 @@ internal static class LocalWorkspaceProjectionStore
             Execute(connection, transaction, contentSql, ("$ids", idsJson), ("$now", Canonical(now)));
         }
 
-        using var bound = connection.CreateCommand();
-        bound.Transaction = transaction;
-        bound.CommandText = "SELECT EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id HAVING COUNT(*)>4096);";
-        bound.Parameters.AddWithValue("$ids", idsJson);
-        SqliteCommandExecutionObserver.Executing();
-        if (Convert.ToInt64(bound.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-            throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
+        ExecuteWithIds(connection, transaction, """
+            DELETE FROM local_workspace_nodes WHERE node_id IN (
+              SELECT node_id FROM (
+                SELECT node_id,row_number() OVER(PARTITION BY session_id ORDER BY CASE source_kind WHEN 'execution_root' THEN 0 ELSE 1 END,execution_id COLLATE BINARY,source_ordinal,node_id COLLATE BINARY) ordinal
+                FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)))
+              WHERE ordinal>4097);
+            """, idsJson);
     }
 
     internal static string StableExecutionId(string sessionId, string sourceKind, string sourceIdentity)

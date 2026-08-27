@@ -232,8 +232,8 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Equal(1, fixture.CountDetailSkillNodes("boundary"));
 
         fixture.AddGenericEvents("boundary", 1);
-        Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() =>
-            fixture.RefreshWorkspaceProjection("boundary")).Message);
+        fixture.RefreshWorkspaceProjection("boundary");
+        Assert.Equal(4097, fixture.DetailNodeCount("boundary"));
     }
 
     [Fact]
@@ -458,7 +458,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         {
             var write = NewWrite(sessionKey, $"skill-{index:D5}", "1.0.65", "available", "none", expired: false);
             var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
-                connection, transaction, write, new LocalWorkspaceProjectionTransactionParticipant(authority), out _);
+                connection, transaction, write, NoOpWorkspaceParticipant.Instance, out _);
             Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, outcome);
             latestWrites[sessionKey] = write;
         }
@@ -1002,6 +1002,13 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         }
         private sealed class Capture : ISkillRegistryGenerationCapture { }
         private sealed class Lease : ISkillRegistryGenerationLease { public void Dispose() { } }
+    }
+
+    private sealed class NoOpWorkspaceParticipant : ILocalWorkspaceProjectionTransactionParticipant
+    {
+        internal static NoOpWorkspaceParticipant Instance { get; } = new();
+        public void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now) { }
+        public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now) { }
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider

@@ -511,8 +511,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
                      WHERE c.store_kind<>'session_event_content' OR n.source_kind<>'session_event' OR n.source_identity<>c.source_item_id)
               {retentionValidation}
               OR EXISTS(SELECT 1 FROM local_workspace_nodes WHERE source_kind='skill_invocation' AND otel_source_identity IS NULL AND sdk_source_identity IS NULL)
-              OR EXISTS(SELECT 1 FROM local_workspace_execution_headers GROUP BY session_id HAVING COUNT(*)>256)
-              OR EXISTS(SELECT 1 FROM local_workspace_nodes GROUP BY session_id HAVING COUNT(*)>4096);
+              OR EXISTS(SELECT 1 FROM local_workspace_execution_headers GROUP BY session_id HAVING COUNT(*)>257)
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes GROUP BY session_id HAVING COUNT(*)>4097);
             """;
         if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidOperationException("local_workspace_projection_semantic_validation_failed");

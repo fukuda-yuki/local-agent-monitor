@@ -50,13 +50,32 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
-    public async Task NodeReadRejectsAProjectionWithFourThousandNinetySevenTotalNodes()
+    public async Task SummaryReadRejectsTwoHundredFiftySevenPersistedExecutionsAfterProjectionSucceeds()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00');");
+        for (var index = 0; index < 257; index++)
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"INSERT INTO session_runs VALUES('run-{index:D4}','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        using var transaction = connection.BeginTransaction();
+        var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await contributor.ReadAsync(new DirectReadTransaction(connection, transaction),
+                new(LocalRepositorySessionDetailRequestKind.Summary, SessionId), CancellationToken.None));
+
+        Assert.Equal("workspace_too_large", error.Error);
+    }
+
+    [Fact]
+    public async Task NodeReadRejectsFourThousandNinetySevenSourceProjectedNodesAfterProjectionSucceeds()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        for (var index = 0; index < 4096; index++)
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"INSERT INTO session_events VALUES('event-{index:D4}','018f0000-0000-7000-8000-000000000001','run-1','copilot-sdk',NULL,NULL,NULL,'synthetic','source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);");
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Single();
-        CloneUnrelatedNodes(connection, 4096);
+        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE source_kind='execution_root';").Single();
         using var transaction = connection.BeginTransaction();
         var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(
             registryAuthority: FixedSkillRegistryGenerationAuthority.Load());
