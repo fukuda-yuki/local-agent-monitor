@@ -38,7 +38,7 @@ public sealed class SqliteRuntimeBackupService
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
         ["local_repository_catalog"] = 1,
-        ["local_workspace_projection"] = 4,
+        ["local_workspace_projection"] = LocalWorkspaceProjectionSchemaV1.Version,
         ["monitor"] = 11,
         ["pricing"] = 1,
         ["retention"] = 1,
@@ -77,6 +77,7 @@ public sealed class SqliteRuntimeBackupService
     private readonly string archiveWriterVersion = SkillInvocationV2ArtifactRegistry.CurrentWriterVersion;
     private readonly ILocalWorkspacePublicationGate? publicationGate;
     private ISkillRegistryGenerationAuthority? skillRegistryAuthority;
+    private bool useInjectedSkillRegistryAuthority;
 
     public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) :
         this(timeProvider, (Action<string>?)null, null, null) { }
@@ -89,6 +90,7 @@ public sealed class SqliteRuntimeBackupService
     {
         this.skillRegistryAuthority = skillRegistryAuthority ?? throw new ArgumentNullException(nameof(skillRegistryAuthority));
         this.publicationGate = publicationGate ?? throw new ArgumentNullException(nameof(publicationGate));
+        useInjectedSkillRegistryAuthority = true;
     }
 
     internal SqliteRuntimeBackupService(
@@ -123,8 +125,11 @@ public sealed class SqliteRuntimeBackupService
         publicationGate = new LocalWorkspacePublicationGate();
     }
 
-    internal void ConfigureSkillRegistryAuthority(ISkillRegistryGenerationAuthority authority) =>
+    internal void ConfigureSkillRegistryAuthority(ISkillRegistryGenerationAuthority authority)
+    {
         skillRegistryAuthority = authority ?? throw new ArgumentNullException(nameof(authority));
+        useInjectedSkillRegistryAuthority = true;
+    }
 
     public RuntimeBackupPreflightResult Initialize(string databasePath)
     {
@@ -391,10 +396,10 @@ public sealed class SqliteRuntimeBackupService
     {
         using var connection = Open(databasePath, SqliteOpenMode.ReadWrite);
         using var transaction = connection.BeginTransaction(deferred: false);
-        using var installed = connection.CreateCommand();
-        installed.Transaction = transaction;
-        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=4);";
-        if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        if (state == LocalWorkspaceProjectionInstallationState.Current)
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, publicationTime,
                 skillRegistryAuthority ?? throw new InvalidOperationException("local_workspace_projection_authority_unavailable"));
         transaction.Commit();
@@ -531,10 +536,27 @@ public sealed class SqliteRuntimeBackupService
             && versions.TryGetValue("local_repository_catalog", out var catalogVersion)
             && catalogVersion == SupportedComponents["local_repository_catalog"];
 
-    private static bool HasValidLocalWorkspaceProjectionParents(IReadOnlyDictionary<string, int> versions) =>
-        !versions.ContainsKey("local_workspace_projection")
-        || versions.TryGetValue("session", out var sessionVersion)
-            && sessionVersion == SupportedComponents["session"];
+    private static bool HasValidLocalWorkspaceProjectionParents(IReadOnlyDictionary<string, int> versions)
+    {
+        if (!versions.TryGetValue("local_workspace_projection", out var workspaceVersion)) return true;
+        if (workspaceVersion < SupportedComponents["local_workspace_projection"])
+            return versions.TryGetValue("session", out var legacySessionVersion)
+                && IsCurrentOrLegacySessionParent(legacySessionVersion)
+                && versions.TryGetValue("retention", out var legacyRetentionVersion)
+                && legacyRetentionVersion == SupportedComponents["retention"];
+        return versions.TryGetValue("session", out var sessionVersion)
+            && sessionVersion == SupportedComponents["session"]
+            && versions.TryGetValue("local_repository_catalog", out var catalogVersion)
+            && catalogVersion == SupportedComponents["local_repository_catalog"]
+            && versions.TryGetValue("local_archive", out var archiveVersion)
+            && archiveVersion == SupportedComponents["local_archive"]
+            && versions.TryGetValue("retention", out var retentionVersion)
+            && retentionVersion == SupportedComponents["retention"]
+            && versions.TryGetValue("skill_projection", out var skillProjectionVersion)
+            && skillProjectionVersion == SupportedComponents["skill_projection"]
+            && versions.TryGetValue("skill_invocation_snapshot", out var skillSnapshotVersion)
+            && skillSnapshotVersion == SupportedComponents["skill_invocation_snapshot"];
+    }
 
     // The child component's Session-14 conditional trigger registry only activates for the exact
     // parent version, so a legacy Session parent is never acceptable here.
@@ -665,7 +687,7 @@ public sealed class SqliteRuntimeBackupService
                 restorableSafetyCopy: false);
             var migratedExternalError = ValidateDatabaseExternalRawState(context.StagePath, immutableReadOnly: true);
             if (migratedExternalError is not null) return PreviewFailure(migratedExternalError, context.Result.ArchiveSha256);
-            _ = ValidateInstalledDatabase(context.StagePath, immutableReadOnly: true);
+            _ = ValidateInstalledDatabase(context.StagePath, immutableReadOnly: true, skillRegistryAuthority: skillRegistryAuthority);
             var comparison = targetExists
                 ? CompareRetention(database, context.StagePath, context.Result.ArchiveSha256!, currentImmutableReadOnly: false)
                 : RetentionComparison.Empty;
@@ -799,10 +821,19 @@ public sealed class SqliteRuntimeBackupService
             InvokeCheckpoint(RuntimeBackupCheckpoints.AfterArchiveExtracted);
             var stagedExternalError = ValidateDatabaseExternalRawState(context.StagePath, immutableReadOnly: true);
             if (stagedExternalError is not null) throw new RuntimeBackupException(stagedExternalError);
+            var useLiveStagingAuthority = useInjectedSkillRegistryAuthority
+                && context.Manifest.SourceApplicationVersion == archiveWriterVersion;
+            DateTimeOffset? stagingPublicationTime = null;
+            if (useLiveStagingAuthority)
+            {
+                using var stagedConnection = Open(context.StagePath, SqliteOpenMode.ReadOnly, immutableReadOnly: true);
+                stagingPublicationTime = ReadWorkspacePublicationTime(stagedConnection, context.Manifest.ComponentVersions);
+            }
             var preflight = PreflightForMigration(
                 context.StagePath,
                 immutableReadOnly: true,
-                archiveWriterVersion: context.Manifest.SourceApplicationVersion);
+                publicationTime: stagingPublicationTime,
+                archiveWriterVersion: useLiveStagingAuthority ? null : context.Manifest.SourceApplicationVersion);
             if (!preflight.Success) throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
             MigrateStaging(
                 context.StagePath,
@@ -822,6 +853,8 @@ public sealed class SqliteRuntimeBackupService
             if (targetExisted && !ReconcileTerminal(database, context.StagePath, comparison))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreTombstoneReconcileFailed);
             if (targetExisted && !ReconcileNonTerminal(database, context.StagePath, comparison))
+                throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreTombstoneReconcileFailed);
+            if (targetExisted && !RefreshWorkspaceAfterRetentionReconciliation(context.StagePath))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreTombstoneReconcileFailed);
 
             if (targetExisted)
@@ -845,7 +878,7 @@ public sealed class SqliteRuntimeBackupService
             InvokeCheckpoint(RuntimeBackupCheckpoints.AfterReceiptPersisted);
             if (HasActiveSqliteSidecar(context.StagePath))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
-            var stagedFacts = ValidateInstalledDatabase(context.StagePath, immutableReadOnly: true);
+            var stagedFacts = ValidateInstalledDatabase(context.StagePath, immutableReadOnly: true, skillRegistryAuthority: skillRegistryAuthority);
             if (!HasMatchingRestoreReceipt(context.StagePath, operationId, context.Result.ArchiveSha256!, immutableReadOnly: true))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
             InvokeCheckpoint(RuntimeBackupCheckpoints.AfterStageValidated);
@@ -880,7 +913,7 @@ public sealed class SqliteRuntimeBackupService
             if (HasActiveSqliteSidecar(database) || !HashEquals(database, stagedHash))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
             InvokeCheckpoint(CatalogBeforeInstalledValidationCheckpoint);
-            ValidateInstalledDatabase(database, immutableReadOnly: false, expected: stagedFacts);
+            ValidateInstalledDatabase(database, immutableReadOnly: false, expected: stagedFacts, skillRegistryAuthority: skillRegistryAuthority);
             if (!HasMatchingRestoreReceipt(database, operationId, context.Result.ArchiveSha256!, immutableReadOnly: false))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
             doctorCheck = installedDoctorCheck(database);
@@ -1015,7 +1048,7 @@ public sealed class SqliteRuntimeBackupService
                     snapshot,
                     snapshotPreflight.ComponentVersions ?? new Dictionary<string, int>(),
                     restorableSafetyCopy: true);
-                _ = ValidateInstalledDatabase(snapshot, immutableReadOnly: true);
+                _ = ValidateInstalledDatabase(snapshot, immutableReadOnly: true, skillRegistryAuthority: skillRegistryAuthority);
             }
             var capturedExternalError = ValidateDatabaseExternalRawState(snapshot, immutableReadOnly: true);
             if (capturedExternalError is not null) return CreateFailure(capturedExternalError);
@@ -1203,7 +1236,7 @@ public sealed class SqliteRuntimeBackupService
         ValidateIntegrity(destination);
     }
 
-    private static void ValidateDatabaseMatchesManifest(string path, RuntimeBackupManifestData manifest)
+    private void ValidateDatabaseMatchesManifest(string path, RuntimeBackupManifestData manifest)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: true);
         ValidateIntegrity(connection);
@@ -1213,11 +1246,15 @@ public sealed class SqliteRuntimeBackupService
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.ManifestInvalid);
         if (!ReadRowCounts(connection).OrderBy(item => item.Key, StringComparer.Ordinal).SequenceEqual(manifest.RowCounts.OrderBy(item => item.Key, StringComparer.Ordinal)))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.ManifestInvalid);
+        var useLiveAuthority = useInjectedSkillRegistryAuthority
+            && manifest.SourceApplicationVersion == archiveWriterVersion;
         if (!ValidateComponentShapes(
                 path,
                 manifest.ComponentVersions,
                 immutableReadOnly: true,
-                archiveWriterVersion: manifest.SourceApplicationVersion))
+                publicationTime: useLiveAuthority ? ReadWorkspacePublicationTime(connection, manifest.ComponentVersions) : null,
+                skillRegistryAuthority: useLiveAuthority ? skillRegistryAuthority : null,
+                archiveWriterVersion: useLiveAuthority ? null : manifest.SourceApplicationVersion))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         ValidateRetentionPreflightBounds(connection);
         if (manifest.ComponentVersions.ContainsKey("retention"))
@@ -1242,7 +1279,8 @@ public sealed class SqliteRuntimeBackupService
     private static InstalledDatabaseFacts ValidateInstalledDatabase(
         string path,
         bool immutableReadOnly,
-        InstalledDatabaseFacts? expected = null)
+        InstalledDatabaseFacts? expected = null,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly);
         ValidateIntegrity(connection);
@@ -1257,7 +1295,7 @@ public sealed class SqliteRuntimeBackupService
                 versions,
                 immutableReadOnly,
                 publicationTime: ReadWorkspacePublicationTime(connection, versions),
-                skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load()))
+                skillRegistryAuthority: skillRegistryAuthority ?? FixedSkillRegistryGenerationAuthority.Load()))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         ValidateRetentionPreflightBounds(connection);
         ValidateRetentionCoverage(path, immutableReadOnly);
@@ -1276,7 +1314,7 @@ public sealed class SqliteRuntimeBackupService
         SqliteConnection connection,
         IReadOnlyDictionary<string, int> versions)
     {
-        if (!versions.TryGetValue("local_workspace_projection", out var version) || version != 4)
+        if (!versions.TryGetValue("local_workspace_projection", out var version) || version != LocalWorkspaceProjectionSchemaV1.Version)
             return null;
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
@@ -1458,7 +1496,7 @@ public sealed class SqliteRuntimeBackupService
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
-                    if (versions["local_workspace_projection"] is 1 or 2 or 3)
+                    if (versions["local_workspace_projection"] is 1 or 2 or 3 or 4)
                         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, componentTransaction);
                     else
                     {
@@ -2364,15 +2402,28 @@ public sealed class SqliteRuntimeBackupService
                 var stagedPrimaryRow = LoadGenericRow(staged, "retention_items", "item_id", itemId, transaction);
                 if (stagedPrimaryRow is not null && !string.Equals(Identity(stagedPrimaryRow), identity, StringComparison.Ordinal)) return false;
                 if (stagedRow is not null && (!BytesEqual(row["ownership_receipt"], stagedRow["ownership_receipt"]) || Convert.ToString(row["item_id"], CultureInfo.InvariantCulture) != Convert.ToString(stagedRow["item_id"], CultureInfo.InvariantCulture))) return false;
-                if (stagedRow is not null && IsSqliteKind(stagedRow)) DeleteSource(staged, transaction, stagedRow);
                 UpsertGenericRow(current, currentTransaction, staged, transaction, "retention_items", "item_id", row);
                 if (Convert.ToString(row["state"], CultureInfo.InvariantCulture) == "deleted")
                 {
                     var tombstone = LoadGenericRow(current, "retention_tombstones", "item_id", itemId, currentTransaction);
                     if (tombstone is null) return false;
                     UpsertGenericRow(current, currentTransaction, staged, transaction, "retention_tombstones", "item_id", tombstone);
+                    if (string.Equals(Convert.ToString(row["store_kind"], CultureInfo.InvariantCulture), "session_event_content", StringComparison.Ordinal)
+                        && TableExists(staged, "local_workspace_content_tombstones", transaction))
+                    {
+                        var sourceItemId = Convert.ToString(row["source_item_id"], CultureInfo.InvariantCulture);
+                        var deletedAt = Convert.ToString(row["deleted_at"], CultureInfo.InvariantCulture);
+                        if (string.IsNullOrEmpty(sourceItemId) || !DateTimeOffset.TryParse(deletedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var completedAt))
+                            return false;
+                        LocalWorkspaceProjectionStore.CompleteSessionEventContentDeletion(
+                            staged,
+                            transaction,
+                            sourceItemId,
+                            completedAt);
+                    }
                 }
                 else DeleteIfTable(staged, transaction, "retention_tombstones", "item_id", itemId);
+                if (stagedRow is not null && IsSqliteKind(stagedRow)) DeleteSource(staged, transaction, stagedRow);
                 if (IsSqliteKind(row) && SourceExists(staged, row, transaction)) return false;
                 DeleteIfTable(staged, transaction, "retention_leases", "item_id", itemId);
                 var intent = LoadGenericRow(current, "retention_delete_journal", "item_id", itemId, currentTransaction);
@@ -2386,6 +2437,35 @@ public sealed class SqliteRuntimeBackupService
             return true;
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException or FormatException) { return false; }
+    }
+
+    private bool RefreshWorkspaceAfterRetentionReconciliation(string stagedPath)
+    {
+        try
+        {
+            using var staged = Open(stagedPath, SqliteOpenMode.ReadWrite);
+            using var transaction = staged.BeginTransaction(deferred: false);
+            var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(staged, transaction);
+            if (state == LocalWorkspaceProjectionInstallationState.Absent)
+            {
+                transaction.Rollback();
+                return true;
+            }
+            if (state != LocalWorkspaceProjectionInstallationState.Current)
+                return false;
+            LocalWorkspaceProjectionStore.Refresh(
+                staged,
+                transaction,
+                timeProvider.GetUtcNow(),
+                skillRegistryAuthority ?? throw new InvalidOperationException("local_workspace_projection_authority_unavailable"));
+            EnsureForeignKeysValid(staged, transaction);
+            transaction.Commit();
+            return true;
+        }
+        catch (Exception exception) when (exception is SqliteException or InvalidOperationException or FormatException or OverflowException)
+        {
+            return false;
+        }
     }
 
     private static bool ReconcileNonTerminal(string currentPath, string stagedPath, RetentionComparison expected)
@@ -2572,7 +2652,7 @@ public sealed class SqliteRuntimeBackupService
             ?? throw new InvalidOperationException("Skill registry authority is unavailable for restore staging.");
         if (HasCompleteCurrentVector(versions))
         {
-            _ = ValidateInstalledDatabase(path, immutableReadOnly: false);
+            _ = ValidateInstalledDatabase(path, immutableReadOnly: false, skillRegistryAuthority: skillRegistryAuthority);
             using (var connection = Open(path, SqliteOpenMode.ReadWrite))
             {
                 try
@@ -2596,7 +2676,7 @@ public sealed class SqliteRuntimeBackupService
                     SetPragma(connection, "foreign_keys", true);
                 }
             }
-            _ = ValidateInstalledDatabase(path, immutableReadOnly: false);
+            _ = ValidateInstalledDatabase(path, immutableReadOnly: false, skillRegistryAuthority: skillRegistryAuthority);
             return;
         }
 
@@ -2755,16 +2835,14 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction(deferred: false);
         LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
         LocalArchiveSchemaV1.Ensure(connection, transaction);
+        RetentionSchemaMigrator.Apply(connection, transaction);
+        SkillProjectionSchemaV1.Ensure(connection, transaction);
+        SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
         LocalWorkspaceProjectionSchemaV1.Ensure(
             connection,
             transaction,
             publicationTime ?? timeProvider.GetUtcNow(),
             skillRegistryAuthority);
-        // The child component installs only behind its declared parents. A current database that
-        // predates Retention or Skill Projection has no parent graph to hang it on, and installing
-        // it there would create the objects without a validatable owner.
-        if (versions.ContainsKey("retention") && versions.ContainsKey("skill_projection"))
-            SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
         RuntimeBackupSchemaV1.Ensure(connection, transaction);
         PricingSchemaV1.Ensure(connection, transaction);
         transaction.Commit();

@@ -20,13 +20,13 @@ internal static class LocalWorkspaceProjectionStore
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO local_workspace_content_tombstones(source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision)
-            SELECT c.source_item_id,c.part,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,$at,i.item_id,i.revision
+            INSERT INTO local_workspace_content_tombstones(store_kind,source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision)
+            SELECT c.store_kind,c.source_item_id,c.part,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,$at,i.item_id,i.revision
             FROM local_workspace_node_content_refs c
             JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=c.source_item_id
             WHERE c.source_item_id=$source
               AND c.availability_state IN ('available','expired','read_denied','oversized')
-            ON CONFLICT(source_item_id) DO UPDATE SET
+            ON CONFLICT(store_kind,source_item_id,part) DO UPDATE SET
               deleted_at=excluded.deleted_at,retention_item_id=excluded.retention_item_id,retention_revision=excluded.retention_revision;
             UPDATE local_workspace_node_content_refs SET
               revision_input=revision_input||'|deleted|'||(SELECT CAST(revision AS TEXT) FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source),
@@ -35,7 +35,7 @@ internal static class LocalWorkspaceProjectionStore
               retention_revision=(SELECT revision FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source),
               retention_ownership_receipt=NULL,retention_owner_token=NULL,availability_state='deleted'
             WHERE source_item_id=$source
-              AND EXISTS(SELECT 1 FROM local_workspace_content_tombstones t WHERE t.source_item_id=$source);
+              AND EXISTS(SELECT 1 FROM local_workspace_content_tombstones t WHERE t.store_kind=local_workspace_node_content_refs.store_kind AND t.source_item_id=$source AND t.part=local_workspace_node_content_refs.part);
             """;
         command.Parameters.AddWithValue("$source", sourceItemId);
         command.Parameters.AddWithValue("$at", Canonical(completedAt));
@@ -47,8 +47,8 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now, ISkillRegistryGenerationAuthority skillRegistryAuthority)
     {
-        var ids = ReadSessionIds(connection, transaction);
-        RefreshSessions(connection, transaction, ids, now, skillRegistryAuthority);
+        using var pinnedAuthority = PinnedSkillRegistryGenerationAuthority.TryCreate(skillRegistryAuthority);
+        RefreshAllSessionBatches(connection, transaction, now, pinnedAuthority);
         Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
     }
 
@@ -57,18 +57,39 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static void RefreshStructural(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
     {
-        var ids = ReadSessionIds(connection, transaction);
-        RefreshSessionsStructural(connection, transaction, ids, now);
+        RefreshAllSessionBatches(connection, transaction, now, null);
         Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
     }
 
     internal static void RefreshSessionsStructural(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
         => RefreshSessionsCore(connection, transaction, sessionIds, now, null);
 
+    private static void RefreshAllSessionBatches(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset now,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority)
+    {
+        string? after = null;
+        var refreshed = false;
+        while (true)
+        {
+            var ids = ReadSessionIdBatch(connection, transaction, after);
+            if (ids.Length == 0) break;
+            RefreshSessionsCore(connection, transaction, ids, now, skillRegistryAuthority);
+            refreshed = true;
+            after = ids[^1];
+        }
+        if (!refreshed)
+            RefreshSessionsCore(connection, transaction, [], now, skillRegistryAuthority);
+    }
+
     private static void RefreshSessionsCore(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
     {
         RegisterProjectionFunctions(connection);
         var idsJson = JsonSerializer.Serialize(sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
+        if (TableExists(connection, transaction, "local_workspace_semantic_receipts"))
+            PreserveSemanticProjection(connection, transaction, idsJson);
         ExecuteWithIds(connection, transaction, """
             DELETE FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_session_activity WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
@@ -109,15 +130,75 @@ internal static class LocalWorkspaceProjectionStore
               CROSS JOIN (SELECT 'skill' kind UNION ALL SELECT 'tool' UNION ALL SELECT 'subagent' UNION ALL SELECT 'error' UNION ALL SELECT 'retry') k
               WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             UPDATE local_workspace_session_activity AS a SET
-              state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) THEN CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.status='gap_before_capture') THEN 'capture_gap' ELSE 'source_unsupported' END WHEN a.kind<>'retry' AND (EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full') THEN 'recorded' ELSE 'not_observed' END,
-              count=CASE WHEN NOT EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) AND (a.kind<>'retry') AND (EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full') THEN (SELECT COUNT(DISTINCT e.event_id) FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) END
+              state=CASE
+                WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.status='gap_before_capture' AND CASE a.kind
+                  WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse')
+                  WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart')
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) THEN 'capture_gap'
+                WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.content_state='unsupported' AND CASE a.kind
+                  WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse')
+                  WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart')
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) THEN 'source_unsupported'
+                WHEN a.kind<>'retry' AND EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind
+                  WHEN 'tool' THEN
+                    (e.type='tool.execution_start' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'')
+                    OR (e.type='PreToolUse' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook'
+                      AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'' AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+                      AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                      AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                        OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
+                  WHEN 'subagent' THEN
+                    (e.type='subagent.started' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'')
+                    OR (e.type='SubagentStart' AND e.run_id IS NOT NULL AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook'
+                      AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'' AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+                      AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                      AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                        OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) THEN 'recorded'
+                ELSE 'not_observed' END,
+              count=CASE WHEN a.kind<>'retry' THEN (SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END
+                FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind
+                  WHEN 'tool' THEN
+                    (e.type='tool.execution_start' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'')
+                    OR (e.type='PreToolUse' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook'
+                      AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'' AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+                      AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                      AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                        OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
+                  WHEN 'subagent' THEN
+                    (e.type='subagent.started' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'')
+                    OR (e.type='SubagentStart' AND e.run_id IS NOT NULL AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook'
+                      AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'' AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+                      AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                      AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                        OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) END
               WHERE a.kind IN ('tool','subagent','error','retry');
+            UPDATE local_workspace_session_activity SET count=NULL
+              WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND state<>'recorded';
             INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
               SELECT session_id,run_id,'session_run',0,run_id,input_tokens,output_tokens,total_tokens,NULL,NULL,NULL FROM session_runs
               WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, idsJson);
         if (TableExists(connection, transaction, "monitor_spans"))
         {
+            ExecuteWithIds(connection, transaction, """
+                WITH incomplete_retry AS (
+                  SELECT e.session_id,
+                         CASE WHEN MAX(e.status='gap_before_capture')=1 THEN 'capture_gap'
+                              WHEN MAX(e.content_state='unsupported')=1 THEN 'source_unsupported' END state
+                  FROM session_events e
+                  JOIN monitor_spans ms ON e.source_adapter='otel-exact' COLLATE BINARY
+                    AND e.source_event_id=ms.trace_id||'/'||ms.span_id COLLATE BINARY
+                    AND e.trace_id=ms.trace_id COLLATE BINARY
+                  JOIN local_workspace_span_facts f ON f.raw_record_id=ms.raw_record_id AND f.span_ordinal=ms.span_ordinal
+                  WHERE ms.operation='chat' COLLATE BINARY AND f.retry_count IS NOT NULL
+                    AND (e.status='gap_before_capture' OR e.content_state='unsupported')
+                    AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                  GROUP BY e.session_id)
+                UPDATE local_workspace_session_activity AS a SET state=i.state,count=NULL
+                FROM incomplete_retry i WHERE a.session_id=i.session_id AND a.kind='retry' AND i.state IS NOT NULL;
+                """, idsJson);
             ExecuteWithIds(connection, transaction, $"""
                 INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
                 SELECT e.session_id,e.run_id,'llm_span',1,CAST(ms.raw_record_id AS TEXT)||':'||CAST(ms.span_ordinal AS TEXT),ms.input_tokens,ms.output_tokens,f.producer_total_tokens,ms.reasoning_tokens,ms.cache_read_tokens,ms.cache_creation_tokens
@@ -132,13 +213,31 @@ internal static class LocalWorkspaceProjectionStore
                 totals AS (SELECT session_id,SUM(retry_count) retry_count FROM exact_spans GROUP BY session_id)
                 UPDATE local_workspace_session_activity AS a SET state='recorded',count=t.retry_count FROM totals t WHERE a.session_id=t.session_id AND a.kind='retry' AND a.state='not_observed';
                 """, idsJson);
+            ExecuteWithIds(connection, transaction, """
+                WITH exact_tools AS (
+                  SELECT DISTINCT e.session_id,ms.trace_id,ms.span_id
+                  FROM session_events e JOIN monitor_spans ms
+                    ON e.source_adapter='otel-exact' COLLATE BINARY
+                   AND e.source_event_id=ms.trace_id||'/'||ms.span_id COLLATE BINARY
+                   AND e.trace_id=ms.trace_id COLLATE BINARY
+                  WHERE ms.operation='execute_tool' COLLATE BINARY AND ms.category IN ('tool_call','error')
+                    AND length(ms.trace_id)=32 AND ms.trace_id=lower(ms.trace_id) AND ms.trace_id NOT GLOB '*[^0-9a-f]*'
+                    AND length(ms.span_id)=16 AND ms.span_id=lower(ms.span_id) AND ms.span_id NOT GLOB '*[^0-9a-f]*'
+                    AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
+                totals AS (SELECT session_id,COUNT(*) tool_count FROM exact_tools GROUP BY session_id)
+                UPDATE local_workspace_session_activity AS a SET state='recorded',count=t.tool_count
+                FROM totals t WHERE a.session_id=t.session_id AND a.kind='tool' AND a.state='not_observed';
+                """, idsJson);
         }
         ApplyLabels(connection, transaction, idsJson, now);
         var skillProjection = SkillProjectionReadService.ReadCurrentInvocationProjection(
             connection, transaction, sessionIds, now, skillRegistryAuthority);
         ApplySearchFacts(connection, transaction, idsJson, now, skillProjection);
         if (TableExists(connection, transaction, "local_workspace_execution_headers"))
-            RefreshDetailProjection(connection, transaction, sessionIds, skillProjection, now);
+            RefreshDetailProjection(connection, transaction, sessionIds, skillProjection, now,
+                skillProjection.Values.Any(static projection => projection.Invocations.Count > 0)
+                    ? ReadRegistryGenerationIdentity(skillRegistryAuthority)
+                    : "unavailable");
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
         state.Parameters.AddWithValue("$now", Canonical(now)); SqliteCommandExecutionObserver.Executing(); state.ExecuteNonQuery();
@@ -149,10 +248,24 @@ internal static class LocalWorkspaceProjectionStore
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
         IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> skillProjection,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        string registryGenerationIdentity)
     {
         var ids = sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var idsJson = JsonSerializer.Serialize(ids);
+        var semanticTablesInstalled = TableExists(connection, transaction, "local_workspace_semantic_receipts");
+        if (semanticTablesInstalled)
+        {
+            if (!TempTableExists(connection, transaction, "local_workspace_preserved_semantic_nodes"))
+                PreserveSemanticProjection(connection, transaction, idsJson);
+            ExecuteWithIds(connection, transaction, """
+                DELETE FROM local_workspace_tool_metadata WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+                DELETE FROM local_workspace_skill_metadata WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+                DELETE FROM local_workspace_subagent_lifecycle WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+                DELETE FROM local_workspace_node_source_references WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+                DELETE FROM local_workspace_semantic_receipts WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+                """, idsJson);
+        }
         ExecuteWithIds(connection, transaction, """
             DELETE FROM local_workspace_node_content_refs WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
             DELETE FROM local_workspace_node_edges WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))) OR related_node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
@@ -181,17 +294,24 @@ internal static class LocalWorkspaceProjectionStore
                    CASE h.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
                    h.time_authority,h.start_utc_ticks,h.end_utc_ticks,h.duration_ms,'not_observed'
             FROM local_workspace_execution_headers h WHERE h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            WITH ranked_events AS (
+              SELECT e.*,h.execution_id,
+                     row_number() OVER(PARTITION BY e.run_id ORDER BY e.event_id COLLATE BINARY) source_ordinal,
+                     row_number() OVER(PARTITION BY e.session_id ORDER BY h.source_ordinal,e.event_id COLLATE BINARY) session_ordinal,
+                     (SELECT COUNT(*) FROM local_workspace_execution_headers x WHERE x.session_id=e.session_id) execution_count
+              FROM session_events e JOIN local_workspace_execution_headers h ON h.session_id=e.session_id AND h.source_identity=e.run_id
+              WHERE e.run_id IS NOT NULL AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)))
             INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,token_state,trace_id,span_id,event_id)
-            SELECT local_workspace_node_id('session_event',e.event_id),e.session_id,h.execution_id,'session_event',e.event_id,
-                   row_number() OVER(PARTITION BY e.run_id ORDER BY e.event_id COLLATE BINARY),NULL,'unknown',local_workspace_node_kind(e.type),'recorded',e.type,
+            SELECT local_workspace_node_id('session_event',e.event_id),e.session_id,e.execution_id,'session_event',e.event_id,
+                   e.source_ordinal,NULL,'unknown',local_workspace_node_kind(e.type),'recorded',e.type,
                    CASE e.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
                    CASE e.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
                    CASE WHEN local_workspace_ticks(e.occurred_at) IS NOT NULL THEN 'recorded' WHEN e.occurred_at IS NULL THEN 'missing' ELSE 'invalid' END,
                    local_workspace_ticks(e.occurred_at),local_workspace_ticks(e.occurred_at),CASE WHEN local_workspace_ticks(e.occurred_at) IS NULL THEN NULL ELSE 0 END,'not_observed',
                    CASE WHEN e.source_adapter='otel-exact' AND e.trace_id IS NOT NULL AND e.source_event_id LIKE e.trace_id||'/%' THEN e.trace_id END,
                    CASE WHEN e.source_adapter='otel-exact' AND e.trace_id IS NOT NULL AND e.source_event_id LIKE e.trace_id||'/%' THEN substr(e.source_event_id,length(e.trace_id)+2) END,e.event_id
-            FROM session_events e JOIN local_workspace_execution_headers h ON h.session_id=e.session_id AND h.source_identity=e.run_id
-            WHERE e.run_id IS NOT NULL AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            FROM ranked_events e
+            WHERE e.session_ordinal<=MAX(0,4097-e.execution_count);
             INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,token_state)
             SELECT local_workspace_node_id('unknown_relation_group',h.source_identity),h.session_id,h.execution_id,'unknown_relation_group',h.source_identity,
                    (SELECT COUNT(*)+1 FROM session_events x WHERE x.run_id=h.source_identity),NULL,'unknown','unknown_relation_group','not_observed',NULL,'unknown','unknown','missing',NULL,'not_observed'
@@ -219,12 +339,28 @@ internal static class LocalWorkspaceProjectionStore
             UPDATE local_workspace_execution_headers AS h SET
               skill_activity_state=COALESCE((SELECT CASE state WHEN 'unavailable' THEN 'projection_invalid' ELSE state END FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='skill'),'not_observed'),
               skill_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='skill')='recorded' THEN 0 END,
-              tool_activity_state=COALESCE((SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='tool'),'not_observed'),
-              tool_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='tool')='recorded' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity AND e.type IN ('tool.execution_start','PreToolUse')) END,
-              subagent_activity_state=COALESCE((SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='subagent'),'not_observed'),
-              subagent_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='subagent')='recorded' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity AND e.type IN ('subagent.started','SubagentStart')) END,
-              error_activity_state=COALESCE((SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='error'),'not_observed'),
-              error_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='error')='recorded' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed')) END,
+              tool_activity_state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.run_id=h.source_identity AND (
+                (e.type='tool.execution_start' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'') OR
+                (e.type='PreToolUse' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>''
+                  AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>'' AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                  AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'') OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))))) THEN 'recorded' ELSE 'not_observed' END,
+              tool_activity_count=(SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END FROM session_events e WHERE e.run_id=h.source_identity AND (
+                (e.type='tool.execution_start' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'') OR
+                (e.type='PreToolUse' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>''
+                  AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>'' AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                  AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'') OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))))),
+              subagent_activity_state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.run_id=h.source_identity AND (
+                (e.type='subagent.started' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'') OR
+                (e.type='SubagentStart' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>''
+                  AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>'' AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                  AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'') OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))))) THEN 'recorded' ELSE 'not_observed' END,
+              subagent_activity_count=(SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END FROM session_events e WHERE e.run_id=h.source_identity AND (
+                (e.type='subagent.started' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'') OR
+                (e.type='SubagentStart' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>''
+                  AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>'' AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                  AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'') OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))))),
+              error_activity_state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed')) THEN 'recorded' ELSE 'not_observed' END,
+              error_activity_count=(SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END FROM session_events e WHERE e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed')),
               retry_activity_state='not_observed',
               retry_activity_count=NULL,
               token_authority=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 'none'
@@ -284,9 +420,8 @@ internal static class LocalWorkspaceProjectionStore
         }
 
         var canonicalSkillsJson = JsonSerializer.Serialize(skillProjection
-            .Where(static pair => pair.Value.State == "current")
-            .SelectMany(static pair => pair.Value.Invocations)
-            .Select(static invocation => new
+            .Where(static pair => pair.Value.State is "current" or "certification_pending")
+            .SelectMany(static pair => pair.Value.Invocations.Select(invocation => new
             {
                 identity = invocation.CanonicalIdentity,
                 session = invocation.SessionId,
@@ -300,16 +435,22 @@ internal static class LocalWorkspaceProjectionStore
                 otelEvent = invocation.OtelCarrierEventId,
                 sdkEvent = invocation.SdkCarrierEventId,
                 sdkParent = invocation.SdkSourceParentEventId,
-                sdkAdapter = invocation.SdkSourceAdapter
-            }));
+                sdkAdapter = invocation.SdkSourceAdapter,
+                source = invocation.SkillSource,
+                trigger = invocation.InvocationTrigger,
+                historical = invocation.HistoricalSnapshotReference,
+                state = pair.Value.State,
+            })));
+        const string pendingSkillAdmission = "1=1";
         Execute(connection, transaction, $"""
             WITH canonical AS (
               SELECT value->>'identity' canonical_identity,value->>'session' session_id,
                      value->>'trace' trace_id,value->>'span' span_id,value->>'otel' otel_source_identity,
                      value->>'sdk' sdk_source_identity,value->>'name' skill_name,value->>'executionKind' execution_source_kind,
                      value->>'execution' execution_source_identity,value->>'otelEvent' otel_event_id,value->>'sdkEvent' sdk_event_id,
-                     value->>'sdkParent' sdk_parent_source_event_id,value->>'sdkAdapter' sdk_source_adapter
-              FROM json_each($skills)),
+                     value->>'sdkParent' sdk_parent_source_event_id,value->>'sdkAdapter' sdk_source_adapter,value->>'state' projection_state
+              FROM json_each($skills)
+              WHERE value->>'state'='current' OR {pendingSkillAdmission}),
             unresolved AS (
               SELECT c.*,h.execution_id FROM canonical c JOIN local_workspace_execution_headers h
                 ON h.session_id=c.session_id AND h.source_kind=c.execution_source_kind AND h.source_identity=c.execution_source_identity
@@ -325,8 +466,9 @@ internal static class LocalWorkspaceProjectionStore
                      value->>'trace' trace_id,value->>'span' span_id,value->>'otel' otel_source_identity,
                      value->>'sdk' sdk_source_identity,value->>'name' skill_name,value->>'executionKind' execution_source_kind,
                      value->>'execution' execution_source_identity,value->>'otelEvent' otel_event_id,value->>'sdkEvent' sdk_event_id,
-                     value->>'sdkParent' sdk_parent_source_event_id,value->>'sdkAdapter' sdk_source_adapter
-              FROM json_each($skills)),
+                     value->>'sdkParent' sdk_parent_source_event_id,value->>'sdkAdapter' sdk_source_adapter,value->>'state' projection_state
+              FROM json_each($skills)
+              WHERE value->>'state'='current' OR {pendingSkillAdmission}),
             rows AS (
               SELECT c.*,h.execution_id,local_workspace_node_id('skill_invocation',c.canonical_identity) node_id,
                      CASE WHEN c.sdk_parent_source_event_id IS NULL THEN local_workspace_node_id('execution_root',h.source_identity)
@@ -347,7 +489,9 @@ internal static class LocalWorkspaceProjectionStore
                    CASE WHEN skill_name IS NULL OR trim(skill_name)='' THEN 'invalid' ELSE 'recorded' END,
                    CASE WHEN skill_name IS NULL OR trim(skill_name)='' THEN NULL ELSE skill_name END,
                    'completed','completed',CASE WHEN local_workspace_ticks(occurred_at) IS NULL THEN CASE WHEN occurred_at IS NULL THEN 'missing' ELSE 'invalid' END ELSE 'recorded' END,
-                   local_workspace_ticks(occurred_at),local_workspace_ticks(occurred_at),CASE WHEN local_workspace_ticks(occurred_at) IS NULL THEN NULL ELSE 0 END,'recorded',1,'not_observed',trace_id,span_id,event_id,otel_source_identity,sdk_source_identity
+                   local_workspace_ticks(occurred_at),local_workspace_ticks(occurred_at),CASE WHEN local_workspace_ticks(occurred_at) IS NULL THEN NULL ELSE 0 END,
+                   CASE projection_state WHEN 'current' THEN 'recorded' ELSE projection_state END,
+                   CASE projection_state WHEN 'current' THEN 1 END,'not_observed',trace_id,span_id,event_id,otel_source_identity,sdk_source_identity
             FROM rows;
             INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
             SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes
@@ -359,11 +503,51 @@ internal static class LocalWorkspaceProjectionStore
               AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, ("$ids", idsJson), ("$skills", canonicalSkillsJson));
 
+        if (semanticTablesInstalled)
+        {
+            Execute(connection, transaction, """
+                INSERT INTO local_workspace_node_source_references(node_id,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input)
+                SELECT n.node_id,0,'session_run',n.source_identity,NULL,NULL,NULL,
+                       h.source_kind||'|'||h.source_identity||'|'||h.lifecycle||'|'||h.status||'|'||COALESCE(CAST(h.start_utc_ticks AS TEXT),'')
+                FROM local_workspace_nodes n JOIN local_workspace_execution_headers h ON h.execution_id=n.execution_id
+                WHERE n.source_kind='execution_root' AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                INSERT INTO local_workspace_node_source_references(node_id,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input)
+                SELECT n.node_id,0,'session_event',e.event_id,n.trace_id,n.span_id,e.event_id,
+                       e.source_adapter||'|'||e.source_event_id||'|'||e.type||'|'||COALESCE(e.occurred_at,'')
+                FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
+                WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                INSERT INTO local_workspace_node_source_references(node_id,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input)
+                SELECT n.node_id,0,'skill_claim',n.otel_source_identity,n.trace_id,n.span_id,j.value->>'otelEvent',
+                       n.source_identity||'|'||COALESCE(n.otel_source_identity,'')||'|'||COALESCE(n.sdk_source_identity,'')
+                FROM local_workspace_nodes n JOIN json_each($skills) j ON j.value->>'identity'=n.source_identity
+                WHERE n.source_kind='skill_invocation'
+                  AND n.otel_source_identity IS NOT NULL AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                INSERT INTO local_workspace_node_source_references(node_id,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input)
+                SELECT n.node_id,CASE WHEN n.otel_source_identity IS NULL THEN 0 ELSE 1 END,'skill_claim',n.sdk_source_identity,NULL,NULL,j.value->>'sdkEvent',
+                       n.source_identity||'|'||COALESCE(n.otel_source_identity,'')||'|'||COALESCE(n.sdk_source_identity,'')
+                FROM local_workspace_nodes n JOIN json_each($skills) j ON j.value->>'identity'=n.source_identity
+                WHERE n.source_kind='skill_invocation'
+                  AND n.sdk_source_identity IS NOT NULL AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, ("$ids", idsJson), ("$skills", canonicalSkillsJson));
+            Execute(connection, transaction, $"""
+                INSERT INTO local_workspace_skill_metadata(node_id,current_valid_state,source_state,source,trigger_state,trigger,
+                  inventory_reference_state,inventory_reference,historical_snapshot_reference_state,historical_snapshot_reference,registry_generation_identity)
+                SELECT local_workspace_node_id('skill_invocation',value->>'identity'),value->>'state',
+                       CASE WHEN value->>'source' IS NULL THEN 'not_observed' ELSE 'recorded' END,value->>'source',
+                       CASE WHEN value->>'trigger' IS NULL THEN 'not_observed' ELSE 'recorded' END,value->>'trigger',
+                       'unavailable',NULL,CASE WHEN value->>'historical' IS NULL THEN 'not_observed' ELSE 'recorded' END,value->>'historical',$registry
+                FROM json_each($skills)
+                WHERE (value->>'state'='current' OR {pendingSkillAdmission})
+                  AND EXISTS(SELECT 1 FROM local_workspace_nodes n WHERE n.node_id=local_workspace_node_id('skill_invocation',value->>'identity'));
+                """, ("$skills", canonicalSkillsJson), ("$registry", registryGenerationIdentity));
+        }
+
         if (TableExists(connection, transaction, "session_event_content"))
         {
             var hasRetentionAuthority = TableExists(connection, transaction, "retention_items")
                 && TableExists(connection, transaction, "retention_store_instances")
                 && TableExists(connection, transaction, "retention_tombstones")
+                && ColumnExists(connection, transaction, "local_workspace_content_tombstones", "store_kind")
                 && ColumnExists(connection, transaction, "retention_items", "item_id")
                 && ColumnExists(connection, transaction, "retention_items", "ownership_receipt");
             var contentSql = hasRetentionAuthority
@@ -390,7 +574,7 @@ internal static class LocalWorkspaceProjectionStore
                          ELSE 'invalid' END
                   FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
                   LEFT JOIN session_event_content c ON c.event_id=e.event_id
-                  LEFT JOIN local_workspace_content_tombstones t ON t.source_item_id=e.event_id
+                  LEFT JOIN local_workspace_content_tombstones t ON t.store_kind='session_event_content' AND t.source_item_id=e.event_id
                   LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
                     AND ((c.event_id IS NOT NULL AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at)
                       OR i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))
@@ -413,9 +597,26 @@ internal static class LocalWorkspaceProjectionStore
             Execute(connection, transaction, contentSql, ("$ids", idsJson), ("$now", Canonical(now)));
         }
 
+        if (semanticTablesInstalled)
+        {
+            ExecuteWithIds(connection, transaction, """
+                UPDATE local_workspace_sessions AS session SET node_overflow=CASE WHEN
+                  (SELECT COUNT(*) FROM local_workspace_nodes node WHERE node.session_id=session.session_id)>4096 THEN 1 ELSE 0 END
+                WHERE session.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                DELETE FROM local_workspace_nodes WHERE node_id IN (
+                  SELECT node_id FROM (
+                    SELECT node_id,row_number() OVER(PARTITION BY session_id ORDER BY CASE source_kind WHEN 'execution_root' THEN 0 ELSE 1 END,execution_id COLLATE BINARY,source_ordinal,node_id COLLATE BINARY) ordinal
+                    FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)))
+                  WHERE ordinal>4097);
+                """, idsJson);
+            RefreshSemanticProjection(connection, transaction, idsJson);
+            RestoreSemanticProjection(connection, transaction, "[]");
+            RefreshOtelSemanticFacts(connection, transaction, idsJson);
+        }
+
         ExecuteWithIds(connection, transaction, """
             UPDATE local_workspace_sessions AS s SET node_overflow=CASE WHEN
-              (SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.session_id=s.session_id)>4096 THEN 1 ELSE 0 END
+              s.node_overflow=1 OR (SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.session_id=s.session_id)>4096 THEN 1 ELSE 0 END
             WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_nodes WHERE node_id IN (
               SELECT node_id FROM (
@@ -432,6 +633,558 @@ internal static class LocalWorkspaceProjectionStore
         bytes[6] = (byte)((bytes[6] & 0x0f) | 0x70);
         bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
         return new Guid(bytes.AsSpan(0, 16), bigEndian: true).ToString("D", CultureInfo.InvariantCulture);
+    }
+
+    private static void PreserveSemanticProjection(SqliteConnection connection, SqliteTransaction transaction, string idsJson) =>
+        Execute(connection, transaction, """
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_semantic_nodes;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_semantic_receipts;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_semantic_references;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_semantic_tools;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_semantic_subagents;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_semantic_edges;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_pending_skill_nodes;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_pending_skill_metadata;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_pending_skill_references;
+            DROP TABLE IF EXISTS temp.local_workspace_preserved_pending_skill_edges;
+            CREATE TEMP TABLE local_workspace_preserved_semantic_nodes AS
+              SELECT node.* FROM local_workspace_nodes node
+              JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=node.node_id
+              WHERE node.source_kind IN ('semantic_tool','semantic_subagent')
+                AND receipt.source_family IN ('session_sdk','otel')
+                AND node.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            CREATE TEMP TABLE local_workspace_preserved_semantic_receipts AS
+              SELECT receipt.* FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_preserved_semantic_nodes node ON node.node_id=receipt.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_semantic_references AS
+              SELECT reference.* FROM local_workspace_node_source_references reference
+              JOIN local_workspace_preserved_semantic_nodes node ON node.node_id=reference.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_semantic_tools AS
+              SELECT metadata.* FROM local_workspace_tool_metadata metadata
+              JOIN local_workspace_preserved_semantic_nodes node ON node.node_id=metadata.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_semantic_subagents AS
+              SELECT lifecycle.* FROM local_workspace_subagent_lifecycle lifecycle
+              JOIN local_workspace_preserved_semantic_nodes node ON node.node_id=lifecycle.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_semantic_edges AS
+              SELECT edge.* FROM local_workspace_node_edges edge
+              JOIN local_workspace_preserved_semantic_nodes node ON node.node_id=edge.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_pending_skill_nodes AS
+              SELECT node.* FROM local_workspace_nodes node
+              JOIN local_workspace_skill_metadata metadata ON metadata.node_id=node.node_id
+              WHERE node.source_kind='skill_invocation' AND metadata.current_valid_state IN ('current','certification_pending')
+                AND node.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            CREATE TEMP TABLE local_workspace_preserved_pending_skill_metadata AS
+              SELECT metadata.* FROM local_workspace_skill_metadata metadata
+              JOIN local_workspace_preserved_pending_skill_nodes node ON node.node_id=metadata.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_pending_skill_references AS
+              SELECT reference.* FROM local_workspace_node_source_references reference
+              JOIN local_workspace_preserved_pending_skill_nodes node ON node.node_id=reference.node_id;
+            CREATE TEMP TABLE local_workspace_preserved_pending_skill_edges AS
+              SELECT edge.* FROM local_workspace_node_edges edge
+              JOIN local_workspace_preserved_pending_skill_nodes node ON node.node_id=edge.node_id;
+            """, ("$ids", idsJson));
+
+    private static void RestoreSemanticProjection(SqliteConnection connection, SqliteTransaction transaction, string pendingSkillSessionIdsJson) =>
+        Execute(connection, transaction, """
+            WITH missing AS (
+              SELECT preserved.node_id,preserved.execution_id,
+                     row_number() OVER(PARTITION BY preserved.execution_id ORDER BY preserved.node_id COLLATE BINARY) ordinal
+              FROM local_workspace_preserved_semantic_nodes preserved
+              WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes current WHERE current.node_id=preserved.node_id))
+            UPDATE local_workspace_preserved_semantic_nodes AS preserved SET source_ordinal=
+              COALESCE((SELECT MAX(current.source_ordinal) FROM local_workspace_nodes current WHERE current.execution_id=preserved.execution_id),0)
+              +(SELECT missing.ordinal FROM missing WHERE missing.node_id=preserved.node_id)
+            WHERE preserved.node_id IN (SELECT node_id FROM missing);
+            INSERT INTO local_workspace_nodes SELECT * FROM local_workspace_preserved_semantic_nodes
+              WHERE node_id NOT IN (SELECT node_id FROM local_workspace_nodes);
+            CREATE TEMP TABLE local_workspace_merged_semantic_receipts AS
+              WITH combined AS (
+                SELECT * FROM local_workspace_semantic_receipts
+                UNION ALL
+                SELECT * FROM local_workspace_preserved_semantic_receipts)
+              SELECT node_id,MIN(semantic_kind) semantic_kind,MIN(source_family) source_family,MIN(scope_kind) scope_kind,
+                     MIN(carrier_digest) carrier_digest,MIN(authority_receipt) authority_receipt,
+                     COUNT(DISTINCT authority_receipt) authority_count,
+                     COUNT(DISTINCT semantic_kind||'|'||source_family||'|'||scope_kind||'|'||carrier_digest) identity_count
+              FROM combined GROUP BY node_id;
+            DELETE FROM local_workspace_semantic_receipts
+              WHERE node_id IN (SELECT node_id FROM local_workspace_merged_semantic_receipts);
+            INSERT INTO local_workspace_semantic_receipts(node_id,semantic_kind,source_family,scope_kind,carrier_digest,authority_receipt)
+              SELECT node_id,semantic_kind,source_family,scope_kind,carrier_digest,authority_receipt
+              FROM local_workspace_merged_semantic_receipts;
+            CREATE TEMP TABLE local_workspace_merged_semantic_references AS
+              WITH combined AS (
+                SELECT reference.node_id,reference.source_kind,reference.source_identity,reference.trace_id,reference.span_id,reference.event_id,reference.revision_input,0 freshness
+                FROM local_workspace_node_source_references reference
+                JOIN local_workspace_merged_semantic_receipts receipt ON receipt.node_id=reference.node_id
+                UNION ALL
+                SELECT node_id,source_kind,source_identity,trace_id,span_id,event_id,revision_input,1
+                FROM local_workspace_preserved_semantic_references),
+              ranked AS (
+                SELECT combined.*,row_number() OVER(PARTITION BY node_id,source_kind,source_identity,event_id
+                  ORDER BY freshness,revision_input COLLATE BINARY) identity_rank FROM combined)
+              SELECT node_id,source_kind,source_identity,trace_id,span_id,event_id,revision_input
+              FROM ranked WHERE identity_rank=1;
+            DELETE FROM local_workspace_node_source_references
+              WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);
+            INSERT INTO local_workspace_node_source_references(node_id,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input)
+            SELECT node_id,ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input
+            FROM (
+              SELECT merged.*,row_number() OVER(PARTITION BY node_id ORDER BY source_kind COLLATE BINARY,source_identity COLLATE BINARY,event_id COLLATE BINARY)-1 ordinal
+              FROM local_workspace_merged_semantic_references merged)
+            WHERE ordinal<16;
+            INSERT OR IGNORE INTO local_workspace_tool_metadata SELECT * FROM local_workspace_preserved_semantic_tools;
+            INSERT OR IGNORE INTO local_workspace_subagent_lifecycle SELECT * FROM local_workspace_preserved_semantic_subagents;
+            WITH facts AS (
+              SELECT receipt.node_id,
+                     receipt.authority_count authority_count,
+                     receipt.identity_count,COUNT(reference.event_id) reference_count,
+                     SUM(event.type='tool.execution_start' OR instr(reference.revision_input,'|otel.tool.started|')>0) started_count,
+                     SUM(event.type='tool.execution_complete' OR instr(reference.revision_input,'|otel.tool.completed|')>0) completed_count,
+                     SUM(instr(reference.revision_input,'|otel.tool.failed|')>0) failed_count
+              FROM local_workspace_merged_semantic_receipts receipt
+              JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
+              JOIN session_events event ON event.event_id=reference.event_id
+              WHERE receipt.semantic_kind='tool' GROUP BY receipt.node_id)
+            UPDATE local_workspace_tool_metadata AS metadata SET
+              started_state=CASE WHEN facts.started_count>1 OR facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1 THEN 'inconsistent' WHEN facts.started_count=1 THEN 'recorded' ELSE 'not_observed' END,
+              completed_state=CASE WHEN facts.completed_count>1 OR facts.completed_count>0 AND facts.failed_count>0 OR facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1 THEN 'inconsistent' WHEN facts.completed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+              failed_state=CASE WHEN facts.failed_count>1 OR facts.completed_count>0 AND facts.failed_count>0 OR facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1 THEN 'inconsistent' WHEN facts.failed_count=1 THEN 'recorded' ELSE 'not_observed' END
+            FROM facts WHERE metadata.node_id=facts.node_id;
+            WITH facts AS (
+              SELECT receipt.node_id,
+                     receipt.authority_count authority_count,
+                     receipt.identity_count,COUNT(reference.event_id) reference_count,
+                     SUM(event.type='tool.execution_start' OR instr(reference.revision_input,'|otel.tool.started|')>0) started_count,
+                     SUM(event.type='tool.execution_complete' OR instr(reference.revision_input,'|otel.tool.completed|')>0) completed_count,
+                     SUM(instr(reference.revision_input,'|otel.tool.failed|')>0) failed_count
+              FROM local_workspace_merged_semantic_receipts receipt
+              JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
+              JOIN session_events event ON event.event_id=reference.event_id
+              WHERE receipt.semantic_kind='tool' GROUP BY receipt.node_id)
+            UPDATE local_workspace_nodes AS node SET
+              lifecycle=CASE WHEN facts.authority_count=1 AND facts.identity_count=1 AND facts.reference_count<=16 AND facts.failed_count=1 AND facts.completed_count=0 AND facts.started_count<=1 THEN 'failed'
+                             WHEN facts.authority_count=1 AND facts.identity_count=1 AND facts.reference_count<=16 AND facts.completed_count=1 AND facts.failed_count=0 AND facts.started_count<=1 THEN 'completed'
+                             WHEN facts.authority_count=1 AND facts.identity_count=1 AND facts.reference_count<=16 AND facts.started_count=1 AND facts.completed_count=0 AND facts.failed_count=0 THEN 'started' ELSE 'unknown' END,
+              status=CASE WHEN facts.authority_count=1 AND facts.identity_count=1 AND facts.reference_count<=16 AND facts.failed_count=1 AND facts.completed_count=0 AND facts.started_count<=1 THEN 'failed'
+                          WHEN facts.authority_count=1 AND facts.identity_count=1 AND facts.reference_count<=16 AND facts.completed_count=1 AND facts.failed_count=0 AND facts.started_count<=1 THEN 'completed'
+                          WHEN facts.authority_count=1 AND facts.identity_count=1 AND facts.reference_count<=16 AND facts.started_count=1 AND facts.completed_count=0 AND facts.failed_count=0 THEN 'active' ELSE 'unknown' END
+            FROM facts WHERE node.node_id=facts.node_id;
+            WITH facts AS (
+              SELECT receipt.node_id,
+                     receipt.authority_count authority_count,
+                     receipt.identity_count,COUNT(reference.event_id) reference_count,
+                     SUM(event.type='subagent.selected') selected_count,SUM(event.type='subagent.started') started_count,
+                     SUM(event.type='subagent.completed') completed_count,SUM(event.type='subagent.failed') failed_count,
+                     SUM(event.type='subagent.deselected') deselected_count
+              FROM local_workspace_merged_semantic_receipts receipt
+              JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
+              JOIN session_events event ON event.event_id=reference.event_id
+              WHERE receipt.semantic_kind='subagent' GROUP BY receipt.node_id)
+            UPDATE local_workspace_subagent_lifecycle AS lifecycle SET
+              selected_state=CASE WHEN facts.selected_count>1 OR facts.selected_count>0 AND (facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1) THEN 'inconsistent' WHEN facts.selected_count=1 THEN 'recorded' ELSE 'not_observed' END,
+              started_state=CASE WHEN facts.started_count>1 OR facts.started_count>0 AND (facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1) THEN 'inconsistent' WHEN facts.started_count=1 THEN 'recorded' ELSE 'not_observed' END,
+              completed_state=CASE WHEN facts.completed_count>1 OR facts.completed_count>0 AND (facts.failed_count>0 OR facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1) THEN 'inconsistent' WHEN facts.completed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+              failed_state=CASE WHEN facts.failed_count>1 OR facts.failed_count>0 AND (facts.completed_count>0 OR facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1) THEN 'inconsistent' WHEN facts.failed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+              deselected_state=CASE WHEN facts.deselected_count>1 OR facts.deselected_count>0 AND (facts.reference_count>16 OR facts.authority_count>1 OR facts.identity_count>1) THEN 'inconsistent' WHEN facts.deselected_count=1 THEN 'recorded' ELSE 'not_observed' END
+            FROM facts WHERE lifecycle.node_id=facts.node_id;
+            INSERT OR IGNORE INTO local_workspace_node_edges SELECT * FROM local_workspace_preserved_semantic_edges;
+            INSERT OR IGNORE INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,
+              retention_item_id,retention_store_instance_id,source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token,availability_state)
+            SELECT DISTINCT receipt.node_id,content.part,content.store_kind,content.source_item_id,content.locator_kind,content.json_pointer,content.selected_utf8_bytes,content.revision_input,
+              content.retention_item_id,content.retention_store_instance_id,content.source_captured_at,content.source_expires_at,content.retention_revision,content.retention_ownership_receipt,content.retention_owner_token,content.availability_state
+            FROM local_workspace_semantic_receipts receipt
+            JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id AND reference.event_id IS NOT NULL
+            JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=reference.event_id
+            JOIN local_workspace_node_content_refs content ON content.node_id=raw.node_id
+            WHERE receipt.semantic_kind='tool'
+              AND NOT EXISTS (
+                SELECT 1 FROM local_workspace_node_source_references other_reference
+                JOIN local_workspace_nodes other_raw ON other_raw.source_kind='session_event' AND other_raw.source_identity=other_reference.event_id
+                JOIN local_workspace_node_content_refs other_content ON other_content.node_id=other_raw.node_id AND other_content.part=content.part
+                WHERE other_reference.node_id=receipt.node_id AND other_content.source_item_id<>content.source_item_id);
+            WITH competing AS (
+              SELECT receipt.node_id,content.part,MIN(content.source_item_id) source_item_id,COUNT(DISTINCT content.source_item_id) source_count
+              FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
+              JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=reference.event_id
+              JOIN local_workspace_node_content_refs content ON content.node_id=raw.node_id
+              WHERE receipt.semantic_kind='tool'
+              GROUP BY receipt.node_id,content.part HAVING COUNT(DISTINCT content.source_item_id)>1)
+            INSERT OR REPLACE INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,availability_state)
+              SELECT node_id,part,'session_event_content',source_item_id,
+                     CASE part WHEN 'event_content' THEN 'whole_event' ELSE 'json_pointer' END,
+                     CASE part WHEN 'instruction' THEN '/prompt' WHEN 'tool_input' THEN '/tool_input' WHEN 'tool_result' THEN '/tool_response' WHEN 'error_message' THEN '/error' END,NULL,
+                     'projection_invalid|competing_exact_sources|'||source_count,'invalid'
+              FROM competing;
+            DROP TABLE local_workspace_preserved_semantic_nodes;
+            DROP TABLE local_workspace_preserved_semantic_receipts;
+            DROP TABLE local_workspace_preserved_semantic_references;
+            DROP TABLE local_workspace_preserved_semantic_tools;
+            DROP TABLE local_workspace_preserved_semantic_subagents;
+            DROP TABLE local_workspace_preserved_semantic_edges;
+            DROP TABLE local_workspace_merged_semantic_references;
+            DROP TABLE local_workspace_merged_semantic_receipts;
+            INSERT INTO local_workspace_nodes
+              SELECT preserved.* FROM local_workspace_preserved_pending_skill_nodes preserved
+              WHERE preserved.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($pending_skill_ids))
+                AND EXISTS(SELECT 1 FROM local_workspace_execution_headers execution WHERE execution.execution_id=preserved.execution_id)
+                AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes current WHERE current.node_id=preserved.node_id);
+            INSERT INTO local_workspace_skill_metadata
+              SELECT metadata.node_id,'certification_pending',metadata.source_state,metadata.source,metadata.trigger_state,metadata.trigger,
+                     'unavailable',NULL,metadata.historical_snapshot_reference_state,metadata.historical_snapshot_reference,metadata.registry_generation_identity
+              FROM local_workspace_preserved_pending_skill_metadata metadata
+              JOIN local_workspace_nodes node ON node.node_id=metadata.node_id
+              WHERE node.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($pending_skill_ids))
+                AND NOT EXISTS(SELECT 1 FROM local_workspace_skill_metadata current WHERE current.node_id=metadata.node_id);
+            UPDATE local_workspace_nodes AS node SET skill_activity_state='certification_pending',skill_activity_count=NULL
+              WHERE node.node_id IN (SELECT metadata.node_id FROM local_workspace_skill_metadata metadata
+                WHERE metadata.current_valid_state='certification_pending');
+            INSERT INTO local_workspace_node_source_references
+              SELECT reference.* FROM local_workspace_preserved_pending_skill_references reference
+              JOIN local_workspace_nodes node ON node.node_id=reference.node_id
+              WHERE node.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($pending_skill_ids));
+            INSERT OR IGNORE INTO local_workspace_node_edges
+              SELECT edge.* FROM local_workspace_preserved_pending_skill_edges edge
+              JOIN local_workspace_nodes node ON node.node_id=edge.node_id
+              WHERE node.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($pending_skill_ids));
+            DROP TABLE local_workspace_preserved_pending_skill_nodes;
+            DROP TABLE local_workspace_preserved_pending_skill_metadata;
+            DROP TABLE local_workspace_preserved_pending_skill_references;
+            DROP TABLE local_workspace_preserved_pending_skill_edges;
+            """, ("$pending_skill_ids", pendingSkillSessionIdsJson));
+
+    private static void RefreshSemanticProjection(SqliteConnection connection, SqliteTransaction transaction, string idsJson)
+    {
+        Execute(connection, transaction, """
+            DROP TABLE IF EXISTS temp.local_workspace_semantic_candidates;
+            CREATE TEMP TABLE local_workspace_semantic_candidates AS
+            SELECT 'tool' semantic_kind,'session_sdk' source_family,'native_run' scope_kind,
+                   local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,e.source_event_id) carrier_digest,
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL tool_name,
+                   e.source_adapter||'|exact_sdk_tool|v1' authority_receipt
+            FROM session_events e JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
+            JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+            WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND e.source_surface='copilot-sdk' COLLATE BINARY AND run.source_surface='copilot-sdk' COLLATE BINARY
+              AND e.source_adapter='copilot-sdk-stream' COLLATE BINARY AND e.type='tool.execution_start'
+              AND e.source_event_id IS NOT NULL AND length(e.source_event_id)>0
+              AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+              AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+            UNION ALL
+            SELECT 'tool','session_sdk','native_run',
+                   local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,p.source_event_id),
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,
+                   e.source_adapter||'|exact_sdk_tool|v1'
+            FROM session_events e JOIN session_events p
+              ON p.event_id=e.parent_event_id AND p.session_id=e.session_id AND p.run_id=e.run_id
+             AND p.source_adapter=e.source_adapter COLLATE BINARY AND p.type='tool.execution_start'
+            JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
+            JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+            WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND e.source_surface='copilot-sdk' COLLATE BINARY AND p.source_surface='copilot-sdk' COLLATE BINARY AND run.source_surface='copilot-sdk' COLLATE BINARY
+              AND e.source_adapter='copilot-sdk-stream' COLLATE BINARY AND e.type='tool.execution_complete'
+              AND p.source_event_id IS NOT NULL AND length(p.source_event_id)>0
+              AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+              AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+            UNION ALL
+            SELECT 'subagent','session_sdk','native_run',
+                   local_workspace_semantic_digest('session_sdk_subagent',native.native_session_id,r.native_run_id),
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,
+                   e.source_adapter||'|native_run|v1'
+            FROM session_events e JOIN session_runs r ON r.session_id=e.session_id AND r.run_id=e.run_id
+            JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
+            JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+            WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND e.source_adapter='copilot-sdk-stream' COLLATE BINARY
+              AND e.source_surface='copilot-sdk' COLLATE BINARY AND r.source_surface='copilot-sdk' COLLATE BINARY
+              AND e.type IN ('subagent.selected','subagent.started','subagent.completed','subagent.failed','subagent.deselected')
+              AND r.native_run_id IS NOT NULL AND length(r.native_run_id)>0
+              AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=e.session_id AND binding.source_surface='copilot-sdk' COLLATE BINARY)=1
+              AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=r.native_run_id COLLATE BINARY)=1;
+
+            """, ("$ids", idsJson));
+
+        var hasSemanticMonitorSpans = TableExists(connection, transaction, "monitor_spans")
+            && ColumnExists(connection, transaction, "monitor_spans", "parent_span_id")
+            && ColumnExists(connection, transaction, "monitor_spans", "operation")
+            && ColumnExists(connection, transaction, "monitor_spans", "category")
+            && ColumnExists(connection, transaction, "monitor_spans", "status")
+            && ColumnExists(connection, transaction, "monitor_spans", "start_time")
+            && ColumnExists(connection, transaction, "monitor_spans", "end_time")
+            && ColumnExists(connection, transaction, "monitor_spans", "mcp_tool_name")
+            && ColumnExists(connection, transaction, "monitor_spans", "mcp_server_hash");
+        if (hasSemanticMonitorSpans)
+        {
+            Execute(connection, transaction, """
+                INSERT INTO local_workspace_semantic_candidates
+                SELECT 'tool','otel','otel_span',
+                       local_workspace_semantic_digest('otel_tool',e.trace_id,m.span_id),
+                       e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,
+                       CASE WHEN local_workspace_ticks(m.start_time) IS NOT NULL THEN 'otel.tool.started' ELSE 'otel.tool.observed' END,
+                       e.occurred_at,COALESCE(m.mcp_tool_name,m.tool_name),'otel-exact|normalized-tool-span|v1'
+                FROM session_events e JOIN monitor_spans m
+                  ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
+                 AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+                WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                  AND e.run_id IS NOT NULL AND m.operation='execute_tool' COLLATE BINARY AND m.category IN ('tool_call','error')
+                  AND (SELECT COUNT(*) FROM session_events x WHERE x.session_id=e.session_id AND x.source_adapter='otel-exact' COLLATE BINARY
+                       AND x.trace_id=m.trace_id COLLATE BINARY AND x.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY)=1;
+                INSERT INTO local_workspace_semantic_candidates
+                SELECT 'tool','otel','otel_span',
+                       local_workspace_semantic_digest('otel_tool',e.trace_id,m.span_id),
+                       e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,
+                       CASE WHEN m.status='error' COLLATE BINARY THEN 'otel.tool.failed' ELSE 'otel.tool.completed' END,
+                       e.occurred_at,COALESCE(m.mcp_tool_name,m.tool_name),'otel-exact|normalized-tool-span|v1'
+                FROM session_events e JOIN monitor_spans m
+                  ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
+                 AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+                WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                  AND e.run_id IS NOT NULL AND m.operation='execute_tool' COLLATE BINARY AND m.category IN ('tool_call','error')
+                  AND (m.status IN ('ok','error') OR local_workspace_ticks(m.end_time) IS NOT NULL)
+                  AND (SELECT COUNT(*) FROM session_events x WHERE x.session_id=e.session_id AND x.source_adapter='otel-exact' COLLATE BINARY
+                       AND x.trace_id=m.trace_id COLLATE BINARY AND x.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY)=1;
+                """, ("$ids", idsJson));
+        }
+
+        Execute(connection, transaction, """
+
+            WITH groups AS (
+              SELECT c.semantic_kind,c.source_family,c.scope_kind,c.carrier_digest,
+                     (SELECT chosen.session_id FROM local_workspace_semantic_candidates chosen WHERE chosen.semantic_kind=c.semantic_kind AND chosen.source_family=c.source_family AND chosen.carrier_digest=c.carrier_digest ORDER BY chosen.event_id COLLATE BINARY LIMIT 1) session_id,
+                     (SELECT chosen.run_id FROM local_workspace_semantic_candidates chosen WHERE chosen.semantic_kind=c.semantic_kind AND chosen.source_family=c.source_family AND chosen.carrier_digest=c.carrier_digest ORDER BY chosen.event_id COLLATE BINARY LIMIT 1) run_id,
+                     MIN(c.authority_receipt) authority_receipt,COUNT(DISTINCT c.authority_receipt) authority_count,COUNT(DISTINCT c.event_id) reference_count,
+                     SUM(c.type IN ('PreToolUse','tool.execution_start','otel.tool.started')) started_count,SUM(c.type IN ('PostToolUse','tool.execution_complete','otel.tool.completed')) completed_count,SUM(c.type IN ('PostToolUseFailure','otel.tool.failed')) failed_count,
+                     COUNT(DISTINCT c.tool_name) tool_name_count,MIN(c.tool_name) tool_name
+              FROM local_workspace_semantic_candidates c GROUP BY c.semantic_kind,c.source_family,c.scope_kind,c.carrier_digest),
+            ranked AS (
+              SELECT g.*,h.execution_id,(SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id)+
+                     row_number() OVER(PARTITION BY h.execution_id ORDER BY g.semantic_kind,g.carrier_digest COLLATE BINARY) source_ordinal
+              FROM groups g JOIN local_workspace_execution_headers h ON h.session_id=g.session_id AND h.source_identity=g.run_id)
+            INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,token_state,
+                tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count)
+            SELECT local_workspace_node_id(CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest),session_id,execution_id,
+                   CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest,source_ordinal,
+                   local_workspace_node_id('execution_root',run_id),'exact',semantic_kind,
+                   CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN tool_name END,
+                   CASE WHEN semantic_kind='tool' AND authority_count=1 AND failed_count=1 AND completed_count=0 AND started_count<=1 THEN 'failed'
+                        WHEN semantic_kind='tool' AND authority_count=1 AND completed_count=1 AND failed_count=0 AND started_count<=1 THEN 'completed'
+                        WHEN semantic_kind='tool' AND authority_count=1 AND started_count=1 AND completed_count=0 AND failed_count=0 THEN 'started'
+                        ELSE 'unknown' END,
+                   CASE WHEN semantic_kind='tool' AND authority_count=1 AND failed_count=1 AND completed_count=0 AND started_count<=1 THEN 'failed'
+                        WHEN semantic_kind='tool' AND authority_count=1 AND completed_count=1 AND failed_count=0 AND started_count<=1 THEN 'completed'
+                        WHEN semantic_kind='tool' AND authority_count=1 AND started_count=1 AND completed_count=0 AND failed_count=0 THEN 'active'
+                        ELSE 'unknown' END,
+                   'missing',NULL,'not_observed',
+                   CASE semantic_kind WHEN 'tool' THEN 'recorded' ELSE 'not_observed' END,CASE semantic_kind WHEN 'tool' THEN 1 END,
+                   CASE semantic_kind WHEN 'subagent' THEN 'recorded' ELSE 'not_observed' END,CASE semantic_kind WHEN 'subagent' THEN 1 END
+            FROM ranked;
+
+            INSERT INTO local_workspace_semantic_receipts(node_id,semantic_kind,source_family,scope_kind,carrier_digest,authority_receipt)
+            SELECT local_workspace_node_id(CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest),semantic_kind,source_family,scope_kind,carrier_digest,MIN(authority_receipt)
+            FROM local_workspace_semantic_candidates GROUP BY semantic_kind,source_family,scope_kind,carrier_digest;
+
+            WITH exact_references AS (
+              SELECT c.semantic_kind,c.source_family,c.carrier_digest,c.event_id,MIN(c.source_adapter) source_adapter,
+                     MIN(c.source_event_id) source_event_id,MIN(c.type)||'|'||MAX(c.type)||'|'||COUNT(DISTINCT c.type) type,MIN(c.occurred_at) occurred_at,MIN(c.authority_receipt) authority_receipt
+              FROM local_workspace_semantic_candidates c GROUP BY c.semantic_kind,c.source_family,c.carrier_digest,c.event_id),
+            ranked AS (
+              SELECT c.*,row_number() OVER(PARTITION BY c.semantic_kind,c.source_family,c.carrier_digest ORDER BY c.event_id COLLATE BINARY)-1 ordinal
+              FROM exact_references c)
+            INSERT INTO local_workspace_node_source_references(node_id,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input)
+            SELECT local_workspace_node_id(CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest),ordinal,
+                   CASE source_family WHEN 'otel' THEN 'otel_span' ELSE 'session_event' END,ranked.event_id,
+                   CASE source_family WHEN 'otel' THEN e.trace_id END,
+                   CASE source_family WHEN 'otel' THEN substr(e.source_event_id,length(e.trace_id)+2) END,ranked.event_id,
+                   ranked.source_adapter||'|'||ranked.source_event_id||'|'||ranked.type||'|'||COALESCE(ranked.occurred_at,'')||'|'||ranked.authority_receipt
+            FROM ranked JOIN session_events e ON e.event_id=ranked.event_id WHERE ordinal<16;
+
+            UPDATE local_workspace_nodes AS node SET
+              trace_id=reference.trace_id,span_id=reference.span_id,event_id=reference.event_id
+            FROM local_workspace_semantic_receipts receipt
+            JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id AND reference.source_ordinal=0
+            WHERE node.node_id=receipt.node_id AND receipt.semantic_kind='tool' AND receipt.source_family='otel';
+
+            WITH groups AS (
+              SELECT source_family,carrier_digest,SUM(type IN ('PreToolUse','tool.execution_start','otel.tool.started')) started_count,SUM(type IN ('PostToolUse','tool.execution_complete','otel.tool.completed')) completed_count,
+                     SUM(type IN ('PostToolUseFailure','otel.tool.failed')) failed_count,COUNT(DISTINCT event_id) reference_count,COUNT(DISTINCT authority_receipt) authority_count,COUNT(DISTINCT tool_name) tool_name_count,MIN(tool_name) tool_name
+              FROM local_workspace_semantic_candidates WHERE semantic_kind='tool' GROUP BY source_family,carrier_digest)
+            INSERT INTO local_workspace_tool_metadata(node_id,caller_state,caller_node_id,started_state,completed_state,failed_state,exit_state,exit_code,
+              mcp_server_identity_state,mcp_server_identity,mcp_server_name_state,mcp_server_name,mcp_tool_name_state,mcp_tool_name,retry_state,recovery_state,child_activity_state,child_activity_count)
+            SELECT local_workspace_node_id('semantic_tool',carrier_digest),'not_observed',NULL,
+                   CASE WHEN started_count>1 OR reference_count>16 OR authority_count>1 THEN 'inconsistent' WHEN started_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN completed_count>1 OR completed_count>0 AND failed_count>0 OR reference_count>16 OR authority_count>1 THEN 'inconsistent' WHEN completed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN failed_count>1 OR completed_count>0 AND failed_count>0 OR reference_count>16 OR authority_count>1 THEN 'inconsistent' WHEN failed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   'source_unsupported',NULL,'not_observed',NULL,'source_unsupported',NULL,
+                   CASE WHEN tool_name_count=1 THEN 'recorded' ELSE 'invalid' END,CASE WHEN tool_name_count=1 THEN tool_name END,
+                   'not_observed','not_observed','not_observed',NULL
+            FROM groups;
+
+            UPDATE local_workspace_nodes AS node SET
+              parent_node_id=local_workspace_node_id('session_event',parent.event_id),relationship_authority='exact'
+            FROM local_workspace_semantic_receipts receipt
+            JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id
+            JOIN session_events start ON start.event_id=reference.event_id AND start.type='tool.execution_start'
+            JOIN session_events parent ON parent.event_id=start.parent_event_id AND parent.session_id=start.session_id AND parent.run_id=start.run_id
+              AND parent.source_adapter=start.source_adapter COLLATE BINARY
+            WHERE node.node_id=receipt.node_id AND receipt.source_family='session_sdk';
+            UPDATE local_workspace_tool_metadata AS metadata SET
+              caller_state='recorded',caller_node_id=node.parent_node_id
+            FROM local_workspace_nodes node JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=node.node_id
+            WHERE metadata.node_id=node.node_id AND receipt.source_family='session_sdk' AND node.parent_node_id IS NOT NULL
+              AND node.parent_node_id<>(SELECT local_workspace_node_id('execution_root',h.source_identity) FROM local_workspace_execution_headers h WHERE h.execution_id=node.execution_id);
+
+            WITH groups AS (
+              SELECT carrier_digest,
+                     SUM(type='subagent.selected') selected_count,SUM(type IN ('subagent.started','SubagentStart')) started_count,
+                     SUM(type IN ('subagent.completed','SubagentStop')) completed_count,SUM(type='subagent.failed') failed_count,
+                     SUM(type='subagent.deselected') deselected_count,COUNT(DISTINCT event_id) reference_count,
+                     COUNT(DISTINCT authority_receipt) authority_count
+              FROM local_workspace_semantic_candidates WHERE semantic_kind='subagent' GROUP BY carrier_digest)
+            INSERT INTO local_workspace_subagent_lifecycle(node_id,selected_state,started_state,completed_state,failed_state,deselected_state,input_state)
+            SELECT local_workspace_node_id('semantic_subagent',carrier_digest),
+                   CASE WHEN selected_count>1 OR selected_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN selected_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN started_count>1 OR started_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN started_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN completed_count>1 OR completed_count>0 AND (failed_count>0 OR reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN completed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN failed_count>1 OR failed_count>0 AND (completed_count>0 OR reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN failed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN deselected_count>1 OR deselected_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN deselected_count=1 THEN 'recorded' ELSE 'not_observed' END,'source_unsupported'
+            FROM groups;
+
+            INSERT OR IGNORE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
+            SELECT n.node_id,n.parent_node_id,'parent','exact',n.source_ordinal FROM local_workspace_nodes n
+            WHERE n.source_kind IN ('semantic_tool','semantic_subagent') AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+
+            WITH candidate_content AS (
+              SELECT DISTINCT c.carrier_digest,c.event_id,r.*
+              FROM local_workspace_semantic_candidates c
+              JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=c.event_id
+              JOIN local_workspace_node_content_refs r ON r.node_id=raw.node_id
+              WHERE c.semantic_kind='tool'),
+            content_groups AS (
+              SELECT carrier_digest,part,COUNT(*) source_count FROM candidate_content GROUP BY carrier_digest,part),
+            ranked AS (
+              SELECT content.*,groups.source_count,
+                     row_number() OVER(PARTITION BY carrier_digest,part ORDER BY event_id COLLATE BINARY) source_rank
+              FROM candidate_content content JOIN content_groups groups USING(carrier_digest,part))
+            INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,
+              retention_item_id,retention_store_instance_id,source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token,availability_state)
+            SELECT local_workspace_node_id('semantic_tool',carrier_digest),part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,
+                   retention_item_id,retention_store_instance_id,source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token,availability_state
+            FROM ranked WHERE source_count=1 AND source_rank=1;
+
+            WITH candidate_content AS (
+              SELECT c.carrier_digest,c.event_id,r.part,r.json_pointer
+              FROM local_workspace_semantic_candidates c
+              JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=c.event_id
+              JOIN local_workspace_node_content_refs r ON r.node_id=raw.node_id
+              WHERE c.semantic_kind='tool'),
+            collisions AS (
+              SELECT carrier_digest,part,MIN(event_id) anchor_event_id,MIN(json_pointer) json_pointer,COUNT(DISTINCT event_id) source_count
+              FROM candidate_content GROUP BY carrier_digest,part HAVING COUNT(DISTINCT event_id)>1)
+            INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,availability_state)
+            SELECT local_workspace_node_id('semantic_tool',carrier_digest),part,'session_event_content',anchor_event_id,
+                   CASE part WHEN 'event_content' THEN 'whole_event' ELSE 'json_pointer' END,
+                   CASE part WHEN 'event_content' THEN NULL ELSE COALESCE(json_pointer,'/'||part) END,NULL,
+                   'projection_invalid|competing_exact_sources|'||source_count,'invalid'
+            FROM collisions;
+
+            DROP TABLE local_workspace_semantic_candidates;
+            """, ("$ids", idsJson));
+        if (hasSemanticMonitorSpans)
+        {
+            Execute(connection, transaction, """
+                UPDATE local_workspace_nodes AS node SET
+                  parent_node_id=local_workspace_node_id('session_event',parent.event_id),relationship_authority='exact'
+                FROM local_workspace_semantic_receipts receipt
+                JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id AND reference.source_kind='otel_span'
+                JOIN session_events child ON child.event_id=reference.event_id
+                JOIN monitor_spans span ON span.trace_id=reference.trace_id AND span.span_id=reference.span_id
+                JOIN session_events parent ON parent.session_id=child.session_id AND parent.run_id=child.run_id
+                  AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.trace_id=span.trace_id COLLATE BINARY
+                  AND parent.source_event_id=span.trace_id||'/'||span.parent_span_id COLLATE BINARY
+                WHERE node.node_id=receipt.node_id AND receipt.source_family='otel' AND span.parent_span_id IS NOT NULL
+                  AND (SELECT COUNT(*) FROM session_events candidate WHERE candidate.session_id=child.session_id AND candidate.run_id=child.run_id
+                    AND candidate.source_adapter='otel-exact' COLLATE BINARY AND candidate.trace_id=span.trace_id COLLATE BINARY
+                    AND candidate.source_event_id=span.trace_id||'/'||span.parent_span_id COLLATE BINARY)=1;
+                UPDATE local_workspace_node_edges AS edge SET
+                  related_node_id=node.parent_node_id,relationship_authority='exact'
+                FROM local_workspace_nodes node JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=node.node_id
+                WHERE edge.node_id=node.node_id AND edge.relation_kind='parent' AND receipt.source_family='otel';
+                UPDATE local_workspace_tool_metadata AS metadata SET
+                  caller_state='recorded',caller_node_id=node.parent_node_id
+                FROM local_workspace_nodes node JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=node.node_id
+                WHERE metadata.node_id=node.node_id AND receipt.source_family='otel' AND node.parent_node_id IS NOT NULL
+                  AND node.parent_node_id<>(SELECT local_workspace_node_id('execution_root',h.source_identity) FROM local_workspace_execution_headers h WHERE h.execution_id=node.execution_id);
+
+                UPDATE local_workspace_tool_metadata AS metadata SET
+                  mcp_server_identity_state='recorded',
+                  mcp_server_identity=(SELECT m.mcp_server_hash FROM local_workspace_semantic_receipts receipt
+                    JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id
+                    JOIN session_events e ON e.event_id=reference.event_id
+                    JOIN monitor_spans m ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
+                      AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                    WHERE receipt.node_id=metadata.node_id AND receipt.source_family='otel'
+                      AND length(m.mcp_server_hash)=64 AND m.mcp_server_hash NOT GLOB '*[^0-9a-f]*'),
+                  mcp_server_name_state='source_unsupported'
+                WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts WHERE source_family='otel')
+                  AND EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
+                    JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id
+                    JOIN session_events e ON e.event_id=reference.event_id
+                    JOIN monitor_spans m ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
+                      AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                    WHERE receipt.node_id=metadata.node_id AND receipt.source_family='otel'
+                      AND length(m.mcp_server_hash)=64 AND m.mcp_server_hash NOT GLOB '*[^0-9a-f]*');
+                """);
+        }
+    }
+
+    private static void RefreshOtelSemanticFacts(SqliteConnection connection, SqliteTransaction transaction, string idsJson)
+    {
+        if (!TableExists(connection, transaction, "monitor_spans")
+            || !ColumnExists(connection, transaction, "monitor_spans", "status")
+            || !ColumnExists(connection, transaction, "monitor_spans", "start_time")
+            || !ColumnExists(connection, transaction, "monitor_spans", "end_time"))
+            return;
+        Execute(connection, transaction, """
+            WITH exact AS (
+              SELECT receipt.node_id,span.status,span.start_time,span.end_time,
+                     local_workspace_ticks(span.start_time) start_ticks,local_workspace_ticks(span.end_time) end_ticks
+              FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id AND reference.source_kind='otel_span'
+              JOIN monitor_spans span ON span.trace_id=reference.trace_id COLLATE BINARY AND span.span_id=reference.span_id COLLATE BINARY
+              WHERE receipt.source_family='otel' AND receipt.semantic_kind='tool'
+                AND EXISTS(SELECT 1 FROM local_workspace_nodes owned WHERE owned.node_id=receipt.node_id
+                  AND owned.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))))
+            UPDATE local_workspace_nodes AS node SET
+              lifecycle=CASE WHEN exact.status='error' COLLATE BINARY THEN 'failed'
+                             WHEN exact.status='ok' COLLATE BINARY OR exact.end_ticks IS NOT NULL THEN 'completed'
+                             WHEN exact.start_ticks IS NOT NULL THEN 'started' ELSE 'unknown' END,
+              status=CASE exact.status WHEN 'error' THEN 'failed' WHEN 'ok' THEN 'completed' ELSE 'unknown' END,
+              time_authority=CASE WHEN exact.start_time IS NULL AND exact.end_time IS NULL THEN 'missing'
+                                  WHEN exact.start_ticks IS NULL OR exact.end_time IS NOT NULL AND (exact.end_ticks IS NULL OR exact.end_ticks<exact.start_ticks) THEN 'invalid'
+                                  ELSE 'recorded' END,
+              start_utc_ticks=CASE WHEN exact.start_ticks IS NOT NULL AND (exact.end_time IS NULL OR exact.end_ticks>=exact.start_ticks) THEN exact.start_ticks END,
+              end_utc_ticks=CASE WHEN exact.start_ticks IS NOT NULL AND exact.end_ticks>=exact.start_ticks THEN exact.end_ticks END,
+              duration_ms=CASE WHEN exact.start_ticks IS NOT NULL AND exact.end_ticks>=exact.start_ticks THEN (exact.end_ticks-exact.start_ticks)/10000 END
+            FROM exact WHERE node.node_id=exact.node_id;
+            WITH exact AS (
+              SELECT receipt.node_id,span.status,local_workspace_ticks(span.start_time) start_ticks,local_workspace_ticks(span.end_time) end_ticks
+              FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_node_source_references reference ON reference.node_id=receipt.node_id AND reference.source_kind='otel_span'
+              JOIN monitor_spans span ON span.trace_id=reference.trace_id COLLATE BINARY AND span.span_id=reference.span_id COLLATE BINARY
+              WHERE receipt.source_family='otel' AND receipt.semantic_kind='tool'
+                AND EXISTS(SELECT 1 FROM local_workspace_nodes owned WHERE owned.node_id=receipt.node_id
+                  AND owned.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))))
+            UPDATE local_workspace_tool_metadata AS metadata SET
+              started_state=CASE WHEN exact.start_ticks IS NOT NULL THEN 'recorded' ELSE 'not_observed' END,
+              completed_state=CASE WHEN exact.status='error' COLLATE BINARY THEN 'not_observed'
+                                   WHEN exact.status='ok' COLLATE BINARY OR exact.end_ticks IS NOT NULL THEN 'recorded' ELSE 'not_observed' END,
+              failed_state=CASE WHEN exact.status='error' COLLATE BINARY THEN 'recorded' ELSE 'not_observed' END
+            FROM exact WHERE metadata.node_id=exact.node_id;
+            """, ("$ids", idsJson));
     }
 
     internal static string StableNodeId(string sourceKind, string sourceIdentity) =>
@@ -452,6 +1205,17 @@ internal static class LocalWorkspaceProjectionStore
         return hash.GetHashAndReset();
     }
 
+    private static string ReadRegistryGenerationIdentity(ISkillRegistryGenerationAuthority? authority)
+    {
+        if (authority is null) return "unavailable";
+        var capture = authority.CaptureGeneration();
+        if (capture is null || !authority.TryAcquireGenerationReadLease(capture, out var lease)) return "unavailable";
+        using (lease)
+            return authority.VerifyGenerationIdentity(capture, lease)
+                ? authority.GetCanonicalGenerationIdentity(capture, lease)
+                : "unavailable";
+    }
+
     private static (string Authority, long? Ticks) Time(string? value)
     {
         if (value is null) return ("missing", null);
@@ -462,9 +1226,8 @@ internal static class LocalWorkspaceProjectionStore
 
     private static string NodeKind(string type) => type switch
     {
-        "tool.execution_start" or "PreToolUse" => "tool",
-        "subagent.started" or "SubagentStart" => "subagent",
         "PostToolUseFailure" or "StopFailure" or "subagent.failed" => "error",
+        "PermissionRequest" => "permission",
         _ => "event",
     };
 
@@ -474,7 +1237,6 @@ internal static class LocalWorkspaceProjectionStore
         "/tool_input" => "tool_input",
         "/tool_response" => "tool_result",
         "/error" => "error_message",
-        "/agent_id" => "subagent_input",
         _ => "event_content",
     };
 
@@ -488,7 +1250,6 @@ internal static class LocalWorkspaceProjectionStore
             "PreToolUse" => ("/tool_input", "tool_input", JsonValueKind.Object),
             "PostToolUse" => ("/tool_response", "tool_response", JsonValueKind.Undefined),
             "PostToolUseFailure" or "StopFailure" => ("/error", "error", JsonValueKind.String),
-            "SubagentStart" => ("/agent_id", "agent_id", JsonValueKind.String),
             _ => default,
         };
         if (candidate.Item1 is null) return null;
@@ -621,12 +1382,14 @@ internal static class LocalWorkspaceProjectionStore
                 """, idsJson, Canonical(now));
     }
 
-    private static void RegisterProjectionFunctions(SqliteConnection connection)
+    internal static void RegisterProjectionFunctions(SqliteConnection connection)
     {
         connection.CreateFunction<string?, long?>("local_workspace_epoch", static value => TryInstant(value, out var instant) ? instant.ToUnixTimeMilliseconds() : null, isDeterministic: true);
         connection.CreateFunction<string?, string?>("local_workspace_canonical", static value => TryInstant(value, out var instant) ? Canonical(instant) : null, isDeterministic: true);
         connection.CreateFunction<string?, string?>("local_workspace_search", static value => value is null ? null : Search(value), isDeterministic: true);
         connection.CreateFunction<string, string, string>("local_workspace_node_id", StableNodeId, isDeterministic: true);
+        connection.CreateFunction<string, string, string, string>("local_workspace_semantic_digest", static (kind, scope, carrier) =>
+            Convert.ToHexString(Hash("local-workspace-semantic-carrier\0v1\0" + kind + "\0", scope, carrier)).ToLowerInvariant(), isDeterministic: true);
         connection.CreateFunction<string, string, string>("local_workspace_execution_id", static (kind, identity) => StableExecutionId(string.Empty, kind, identity), isDeterministic: true);
         connection.CreateFunction<string, string>("local_workspace_node_kind", NodeKind, isDeterministic: true);
         connection.CreateFunction<string?, string>("local_workspace_content_part", ContentPart, isDeterministic: true);
@@ -691,8 +1454,93 @@ internal static class LocalWorkspaceProjectionStore
     }
     private static bool TryCanonicalFuture(string value, DateTimeOffset now) => DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed) && parsed.Offset == TimeSpan.Zero && parsed > now;
     private static string Canonical(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
-    private static string[] ReadSessionIds(SqliteConnection connection, SqliteTransaction transaction) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT session_id FROM sessions ORDER BY session_id;"; SqliteCommandExecutionObserver.Executing(); using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray(); }
+    private static string[] ReadSessionIdBatch(SqliteConnection connection, SqliteTransaction transaction, string? after)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT session_id FROM sessions WHERE $after IS NULL OR session_id COLLATE BINARY>$after COLLATE BINARY ORDER BY session_id COLLATE BINARY LIMIT 200;";
+        command.Parameters.AddWithValue("$after", (object?)after ?? DBNull.Value);
+        SqliteCommandExecutionObserver.Executing();
+        using var reader = command.ExecuteReader();
+        var result = new List<string>(200);
+        while (reader.Read()) result.Add(reader.GetString(0));
+        return result.ToArray();
+    }
+
+    private sealed class PinnedSkillRegistryGenerationAuthority :
+        ISkillRegistryGenerationAuthority,
+        ISkillRegistryGenerationCapture,
+        IDisposable
+    {
+        private readonly ISkillRegistryGenerationAuthority inner;
+        private readonly ISkillRegistryGenerationCapture capture;
+        private readonly ISkillRegistryGenerationLease lease;
+        private readonly string canonicalIdentity;
+
+        private PinnedSkillRegistryGenerationAuthority(
+            ISkillRegistryGenerationAuthority inner,
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease,
+            string canonicalIdentity) =>
+            (this.inner, this.capture, this.lease, this.canonicalIdentity) = (inner, capture, lease, canonicalIdentity);
+
+        internal static PinnedSkillRegistryGenerationAuthority? TryCreate(ISkillRegistryGenerationAuthority authority)
+        {
+            var capture = authority.CaptureGeneration();
+            if (capture is null || !authority.TryAcquireGenerationReadLease(capture, out var lease))
+                return null;
+            if (!authority.VerifyGenerationIdentity(capture, lease))
+            {
+                lease.Dispose();
+                return null;
+            }
+            return new(authority, capture, lease, authority.GetCanonicalGenerationIdentity(capture, lease));
+        }
+
+        public ISkillRegistryGenerationCapture CaptureGeneration() => this;
+
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture candidate,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? generationLease)
+        {
+            if (!ReferenceEquals(candidate, this))
+            {
+                generationLease = null;
+                return false;
+            }
+            generationLease = new BorrowedGenerationLease(this);
+            return true;
+        }
+
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture candidate, ISkillRegistryGenerationLease generationLease) =>
+            ReferenceEquals(candidate, this)
+            && generationLease is BorrowedGenerationLease borrowed
+            && ReferenceEquals(borrowed.Owner, this);
+
+        public string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture candidate, ISkillRegistryGenerationLease generationLease)
+        {
+            if (!VerifyGenerationIdentity(candidate, generationLease))
+                throw new InvalidOperationException("skill_registry_generation_not_current");
+            return canonicalIdentity;
+        }
+
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease generationLease, SkillRegistryProducerTuple tuple)
+        {
+            if (generationLease is not BorrowedGenerationLease borrowed || !ReferenceEquals(borrowed.Owner, this))
+                return false;
+            return inner.IsProducerTupleAccepted(lease, tuple);
+        }
+
+        public void Dispose() => lease.Dispose();
+
+        private sealed class BorrowedGenerationLease(PinnedSkillRegistryGenerationAuthority owner) : ISkillRegistryGenerationLease
+        {
+            internal PinnedSkillRegistryGenerationAuthority Owner { get; } = owner;
+            public void Dispose() { }
+        }
+    }
     private static void ExecuteWithIds(SqliteConnection connection, SqliteTransaction transaction, string sql, string ids, string? now = null) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); if (now is not null) command.Parameters.AddWithValue("$now", now); SqliteCommandExecutionObserver.Executing(); command.ExecuteNonQuery(); }
+    private static bool TempTableExists(SqliteConnection connection, SqliteTransaction transaction, string name) { using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="SELECT EXISTS(SELECT 1 FROM sqlite_temp_schema WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name",name); return Convert.ToInt64(command.ExecuteScalar(),CultureInfo.InvariantCulture)!=0; }
     private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; SqliteCommandExecutionObserver.Executing(); command.ExecuteNonQuery(); }
     private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; foreach (var (name,value) in parameters) command.Parameters.AddWithValue(name,value ?? DBNull.Value); SqliteCommandExecutionObserver.Executing(); command.ExecuteNonQuery(); }
     private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name", name); SqliteCommandExecutionObserver.Executing(); return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0; }

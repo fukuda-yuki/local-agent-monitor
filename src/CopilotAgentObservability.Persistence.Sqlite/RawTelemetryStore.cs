@@ -720,13 +720,10 @@ internal sealed partial class RawTelemetryStore
             .Where(span => !string.IsNullOrWhiteSpace(span.TraceId))
             .ToList();
 
-        bool collectionFactsInstalled;
-        using (var collectionInstalled = connection.CreateCommand())
-        {
-            collectionInstalled.Transaction = transaction;
-            collectionInstalled.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=4);";
-            collectionFactsInstalled = Convert.ToInt64(collectionInstalled.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
-        }
+        var collectionState = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (collectionState == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        var collectionFactsInstalled = collectionState == LocalWorkspaceProjectionInstallationState.Current;
 
         // Insert spans — idempotent via UNIQUE(raw_record_id, span_ordinal).
         foreach (var span in validSpans)

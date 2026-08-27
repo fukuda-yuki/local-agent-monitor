@@ -422,15 +422,16 @@ v10-to-v11 migration owns the source-compatibility change described above.
 
 ### Session 14 component compatibility
 
-The current runtime-backup component vector pins `session:14` and includes the
-newly promoted `local_archive:1` and `skill_invocation_snapshot:1`; every other
-currently supported component entry is unchanged:
+The current runtime-backup component vector pins `session:14` and includes
+`local_archive:1`, `skill_invocation_snapshot:1`, and the separately released
+`local_workspace_projection:5`; every other currently supported component
+entry is unchanged:
 
 ```text
 alert_engine:2, alert_lifecycle:1, doctor:1, first_trace_navigation:1,
 historical_import:1, historical_instruction_analysis:1,
-local_archive:1, local_repository_catalog:1, monitor:11, pricing:1, retention:1,
-runtime_backup:1, sanitized_import:1, session:14,
+local_archive:1, local_repository_catalog:1, local_workspace_projection:5,
+monitor:11, pricing:1, retention:1, runtime_backup:1, sanitized_import:1, session:14,
 skill_invocation_snapshot:1, skill_projection:1
 ```
 
@@ -438,7 +439,8 @@ The registered migration order is now:
 
 ```text
 monitor -> session -> local_repository_catalog -> local_archive -> retention
--> skill_projection -> skill_invocation_snapshot -> doctor -> alert_engine
+-> skill_projection -> skill_invocation_snapshot -> local_workspace_projection
+-> doctor -> alert_engine
 -> alert_lifecycle -> first_trace_navigation
 -> historical_instruction_analysis -> historical_import -> sanitized_import
 -> runtime_backup -> pricing

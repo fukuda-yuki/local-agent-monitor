@@ -1537,13 +1537,13 @@ public sealed class SkillProjectionGenerationTests
             CREATE TABLE skill_projection_generations(generation_id INTEGER PRIMARY KEY,compatibility_revision INTEGER,lifecycle TEXT);
             CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
             CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
-            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
+            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT,skill_source TEXT,invocation_trigger TEXT);
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
             CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             INSERT INTO source_trace_compatibility_revisions(trace_id,current_revision,current_effective_state,current_exact_version) VALUES('trace-1',7,'resolved','1.0.0');
             INSERT INTO skill_projection_generations VALUES(1,7,'current');
             INSERT INTO skill_projection_trace_heads VALUES('trace-1',1);
-            INSERT INTO skill_projection_invocations VALUES(11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0');
+            INSERT INTO skill_projection_invocations VALUES(11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0',NULL,NULL);
             INSERT INTO raw_records VALUES(41);
             INSERT INTO retention_items VALUES('raw_record','41','retained_by_policy',NULL,NULL,NULL,'9999-12-31T23:59:59.9999999+00:00');
             """;
@@ -1574,15 +1574,15 @@ public sealed class SkillProjectionGenerationTests
             CREATE TABLE skill_projection_generations(generation_id INTEGER PRIMARY KEY,compatibility_revision INTEGER,lifecycle TEXT);
             CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
             CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
-            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
+            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT,skill_source TEXT,invocation_trigger TEXT);
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
             CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             INSERT INTO source_trace_compatibility_revisions VALUES('trace-1',7,'resolved','1.0.0');
             INSERT INTO skill_projection_generations VALUES(1,7,'current');
             INSERT INTO skill_projection_trace_heads VALUES('trace-1',1);
             INSERT INTO skill_projection_invocations VALUES
-              (11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0'),
-              (12,1,'otel_trace_span',42,4,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0');
+              (11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0',NULL,NULL),
+              (12,1,'otel_trace_span',42,4,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0',NULL,NULL);
             """;
         command.ExecuteNonQuery();
         using var transaction = connection.BeginTransaction(deferred: true);

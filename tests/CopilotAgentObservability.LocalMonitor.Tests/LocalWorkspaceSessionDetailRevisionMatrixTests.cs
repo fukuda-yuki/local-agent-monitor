@@ -50,6 +50,17 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
     }
 
     [Fact]
+    public void CanonicalRevisionFramingDistinguishesSqlTypeAndNullDomain()
+    {
+        Assert.NotEqual(
+            LocalWorkspaceSessionDetailSnapshotContributor.ComputeTypedRevisionValueDigestForTest(null),
+            LocalWorkspaceSessionDetailSnapshotContributor.ComputeTypedRevisionValueDigestForTest("<null>"));
+        Assert.NotEqual(
+            LocalWorkspaceSessionDetailSnapshotContributor.ComputeTypedRevisionValueDigestForTest("4142"u8.ToArray()),
+            LocalWorkspaceSessionDetailSnapshotContributor.ComputeTypedRevisionValueDigestForTest("4142"));
+    }
+
+    [Fact]
     public async Task SessionArchiveAuthorityChangesSummaryRevisionAndStateWhileNoOpAndRestoreAreStableAndFenced()
     {
         using var fixture = await RealFixture.CreateAsync();

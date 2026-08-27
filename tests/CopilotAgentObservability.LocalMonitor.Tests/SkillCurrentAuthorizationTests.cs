@@ -83,7 +83,8 @@ public sealed class SkillCurrentAuthorizationTests
         RefreshWorkspace(database, authority);
 
         Assert.Empty(SearchFacts(database));
-        Assert.Equal(0, authority.LeaseAttemptCount);
+        Assert.Equal(1, authority.LeaseAttemptCount);
+        Assert.Equal(0, authority.OutstandingLeaseCount);
     }
 
     [Fact]

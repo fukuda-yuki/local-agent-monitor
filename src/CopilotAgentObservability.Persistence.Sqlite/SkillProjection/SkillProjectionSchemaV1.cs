@@ -383,6 +383,13 @@ internal static class SkillProjectionSchemaV1
         SqliteTransaction? transaction) =>
         ReadObsoleteOwnedObjects(connection, transaction).Count != 0;
 
+    internal static bool HasExactOwnedSchema(
+        SqliteConnection connection,
+        SqliteTransaction? transaction) =>
+        SqliteOwnedSchemaAuthority.Equal(
+            ReadCurrentOwnedObjects(connection, transaction),
+            ExpectedCurrentObjects.Value);
+
     internal static void RejectObsoleteAuthority(
         SqliteConnection connection,
         SqliteTransaction? transaction)
@@ -398,9 +405,7 @@ internal static class SkillProjectionSchemaV1
         if (ReadDeclaredVersion(connection, transaction) != Version)
             throw new InvalidOperationException("Unsupported incomplete skill_projection schema version 1.");
         ValidateDependencies(connection, transaction);
-        if (!SqliteOwnedSchemaAuthority.Equal(
-                ReadCurrentOwnedObjects(connection, transaction),
-                ExpectedCurrentObjects.Value))
+        if (!HasExactOwnedSchema(connection, transaction))
         {
             throw new InvalidOperationException(
                 "Unsupported incomplete skill_projection schema version 1.");

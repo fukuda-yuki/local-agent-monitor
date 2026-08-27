@@ -58,7 +58,7 @@ public sealed class LocalWorkspacePublicationGateTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void RegistryPublishGenerationCommitsOrRollsBackPointerAndV4RowsTogether(bool injectFailure)
+    public void RegistryPublishGenerationCommitsOrRollsBackPointerAndV5RowsTogether(bool injectFailure)
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """

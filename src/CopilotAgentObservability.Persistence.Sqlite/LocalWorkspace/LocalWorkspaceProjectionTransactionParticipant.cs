@@ -2,6 +2,13 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
+internal enum LocalWorkspaceProjectionInstallationState
+{
+    Absent,
+    Current,
+    Unsupported
+}
+
 internal interface ILocalWorkspaceProjectionTransactionParticipant
 {
     void RefreshSessions(
@@ -29,22 +36,21 @@ internal sealed class UnconfiguredLocalWorkspaceProjectionTransactionParticipant
         IReadOnlyCollection<string> sessionIds,
         DateTimeOffset now)
     {
-        if (sessionIds.Count != 0 && IsInstalled(connection, transaction))
+        if (sessionIds.Count == 0) return;
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        if (state == LocalWorkspaceProjectionInstallationState.Current)
             throw new InvalidOperationException("local_workspace_projection_authority_unavailable");
     }
 
     public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now)
     {
-        if (IsInstalled(connection, transaction))
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        if (state == LocalWorkspaceProjectionInstallationState.Current)
             throw new InvalidOperationException("local_workspace_projection_authority_unavailable");
-    }
-
-    private static bool IsInstalled(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=4);";
-        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 1;
     }
 }
 
@@ -63,13 +69,20 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
         IReadOnlyCollection<string> sessionIds,
         DateTimeOffset now)
     {
-        if (sessionIds.Count == 0 || !IsInstalled(connection, transaction)) return;
+        if (sessionIds.Count == 0) return;
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Absent) return;
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
         LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, sessionIds, now, skillRegistryAuthority);
     }
 
     public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now)
     {
-        if (!IsInstalled(connection, transaction)) return;
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Absent) return;
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
         LocalWorkspaceProjectionStore.CompleteSessionEventContentDeletion(connection, transaction, sourceItemId, now);
         using var owner = connection.CreateCommand();
         owner.Transaction = transaction;
@@ -79,11 +92,4 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
             LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessionId], now, skillRegistryAuthority);
     }
 
-    private static bool IsInstalled(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=4);";
-        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 1;
-    }
 }

@@ -10,7 +10,9 @@ using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Telemetry.Repositories;
+using CopilotAgentObservability.LocalMonitor.Tests.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -26,6 +28,13 @@ public sealed class RuntimeBackupRestoreTests
         fixture.CreateSession(LocalRepositoryCatalogFixture.SessionId(3_702));
         using (var connection = temp.Open(source))
         {
+            using (var install = connection.BeginTransaction())
+            {
+                LocalArchiveSchemaV1.Ensure(connection, install);
+                SkillProjectionSchemaV1.Ensure(connection, install);
+                SkillInvocationSnapshotSchemaV1.Ensure(connection, install);
+                install.Commit();
+            }
             using (var run = connection.CreateCommand())
             {
                 run.CommandText = "INSERT INTO session_runs VALUES($run,$session,'copilot-sdk',NULL,NULL,NULL,'gpt-5',NULL,NULL,10,3,13,'completed');";
@@ -74,17 +83,17 @@ public sealed class RuntimeBackupRestoreTests
         var checkpoints = new List<string>();
         var service = new SqliteRuntimeBackupService(new FixedTimeProvider(DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At)), checkpoints.Add);
         var backup = service.CreateAndPublish(source, bundle);
-        Assert.True(backup.Success, backup.ErrorCode);
+        Assert.True(backup.Success, backup.ErrorCode + ":" + string.Join(',', checkpoints));
         var expected = temp.SnapshotOwnedRows(source, "local_workspace_");
         var restored = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
 
         Assert.True(restored.Success, restored.ErrorCode + ":" + string.Join(',', checkpoints));
         Assert.Equal(expected, temp.SnapshotOwnedRows(temp.Target, "local_workspace_"));
         using var verification = temp.Open(temp.Target);
-        Assert.Equal(13, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.Equal(18, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
         Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.Equal(1L,
             temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='{table}';")));
-        Assert.Equal(4L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(5L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         using var validation = verification.BeginTransaction(deferred: true);
         LocalWorkspaceProjectionBackupValidation.Validate(
             verification,
@@ -535,8 +544,13 @@ public sealed class RuntimeBackupRestoreTests
         new SqliteSessionStore(temp.Source).CreateSchema();
         using (var database = temp.Open(temp.Source))
         {
+            using (var retention = database.BeginTransaction())
+            {
+                RetentionSchemaMigrator.Apply(database, retention);
+                retention.Commit();
+            }
             LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
-            temp.Execute(database, "DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_node_content_refs; DROP TABLE local_workspace_content_tombstones; DROP TABLE local_workspace_node_edges; DROP TABLE local_workspace_nodes; DROP TABLE local_workspace_execution_headers; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_session_search_facts; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+            temp.Execute(database, "DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_subagent_lifecycle; DROP TABLE local_workspace_skill_metadata; DROP TABLE local_workspace_tool_metadata; DROP TABLE local_workspace_node_source_references; DROP TABLE local_workspace_semantic_receipts; DROP TABLE local_workspace_node_content_refs; DROP TABLE local_workspace_content_tombstones; DROP TABLE local_workspace_node_edges; DROP TABLE local_workspace_nodes; DROP TABLE local_workspace_execution_headers; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_session_search_facts; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
             foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV2SchemaSql) temp.Execute(database, sql);
             temp.Execute(database, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',2);");
         }
@@ -556,7 +570,7 @@ public sealed class RuntimeBackupRestoreTests
 
         Assert.True(completed.Success, completed.ErrorCode);
         using var verification = temp.Open(temp.Source);
-        Assert.Equal(4L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(5L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_session_search_facts';"));
     }
 
@@ -581,7 +595,7 @@ public sealed class RuntimeBackupRestoreTests
             temp.Execute(database, kind switch
             {
                 "missing_stamp" => "DELETE FROM schema_version WHERE component='local_workspace_projection';",
-                "future_version" => "UPDATE schema_version SET version=5 WHERE component='local_workspace_projection';",
+                "future_version" => "UPDATE schema_version SET version=6 WHERE component='local_workspace_projection';",
                 "v1_drift" => "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection'; ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
                 "v2_drift" => "ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
                 _ => throw new ArgumentOutOfRangeException(nameof(kind)),
@@ -758,6 +772,44 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal("deleted", temp.Scalar<string>(restored, "SELECT state FROM retention_items;"));
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM retention_tombstones;"));
         Assert.Equal("2026-04-02T00:00:00.0000000+00:00", temp.Scalar<string>(restored, "SELECT deleted_at FROM retention_items;"));
+    }
+
+    [Fact]
+    public async Task Restore_reconciles_terminal_session_content_through_canonical_workspace_tombstone_refresh()
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(refreshAfterQueue: true);
+        var bundle = Path.Combine(temp.Root, "session-content-before-deletion.zip");
+        SqliteConnection.ClearAllPools();
+        File.Copy(fixture.Path, temp.Source);
+        var service = new SqliteRuntimeBackupService(fixture.Time);
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        Assert.True(created.Success, created.ErrorCode);
+
+        Assert.Same(RetentionAdapterResult.Deleted, await fixture.Adapter.DeleteAsync(fixture.Context));
+        Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
+        SqliteConnection.ClearAllPools();
+        File.Copy(fixture.Path, temp.Target);
+
+        var preview = service.Preview(bundle, temp.Target);
+        var restored = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal(1, preview.TerminalReconciliationCount);
+        Assert.True(restored.Success, restored.ErrorCode);
+        using var database = temp.Open(temp.Target);
+        Assert.Equal(0L, temp.Scalar<long>(database, $"SELECT COUNT(*) FROM session_event_content WHERE event_id='{fixture.TargetEventId}';"));
+        Assert.Equal("deleted", temp.Scalar<string>(database, $"SELECT state FROM retention_items WHERE item_id='{fixture.Context.ItemId}';"));
+        Assert.Equal("deleted", temp.Scalar<string>(database, $"SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id='{fixture.TargetEventId}';"));
+        Assert.Equal(1L, temp.Scalar<long>(database, $"SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id='{fixture.TargetEventId}';"));
+        using var connection = new SqliteConnection($"Data Source={temp.Target};Pooling=False");
+        connection.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        LocalWorkspaceProjectionBackupValidation.Validate(
+            connection,
+            transaction,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                SkillInvocationV2ArtifactRegistry.CurrentWriterVersion));
     }
 
     [Fact]
@@ -3149,6 +3201,11 @@ public sealed class RuntimeBackupRestoreTests
                     + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
                     + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
                     + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
+                    + "DROP TABLE IF EXISTS local_workspace_subagent_lifecycle;"
+                    + "DROP TABLE IF EXISTS local_workspace_skill_metadata;"
+                    + "DROP TABLE IF EXISTS local_workspace_tool_metadata;"
+                    + "DROP TABLE IF EXISTS local_workspace_node_source_references;"
+                    + "DROP TABLE IF EXISTS local_workspace_semantic_receipts;"
                     + "DROP TABLE IF EXISTS local_workspace_node_content_refs;"
                     + "DROP TABLE IF EXISTS local_workspace_content_tombstones;"
                     + "DROP TABLE IF EXISTS local_workspace_node_edges;"

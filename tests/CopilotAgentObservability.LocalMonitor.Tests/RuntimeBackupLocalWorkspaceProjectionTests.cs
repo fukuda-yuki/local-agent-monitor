@@ -290,6 +290,170 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
             LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
     }
 
+    [Theory]
+    [MemberData(nameof(DurableUnavailableSemanticTamperCases))]
+    public void ValidationAuthenticatesDurableUnavailableSemanticReceiptGraph(string unavailableState, string mutation)
+    {
+        using var connection = LocalWorkspaceProjectionBackfillTests.OpenUnavailableSdkToolFixture(unavailableState);
+        using (var control = connection.BeginTransaction(deferred: true))
+        {
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, control);
+            control.Rollback();
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+    }
+
+    public static TheoryData<string, string> DurableUnavailableSemanticTamperCases
+    {
+        get
+        {
+            var mutations = new[]
+            {
+                "UPDATE local_workspace_semantic_receipts SET authority_receipt=authority_receipt||'|tampered';",
+                "UPDATE local_workspace_node_source_references SET revision_input=revision_input||'|tampered' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);",
+                "UPDATE local_workspace_tool_metadata SET started_state='not_observed' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);",
+                "UPDATE local_workspace_semantic_receipts SET source_family='claude_hook';",
+                "UPDATE local_workspace_semantic_receipts SET scope_kind='native_session';",
+                "UPDATE local_workspace_node_content_refs SET retention_revision=retention_revision+1 WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);",
+                "UPDATE session_events SET source_surface=NULL WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';",
+                "UPDATE session_events SET type='event' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'; UPDATE local_workspace_node_source_references SET revision_input='copilot-sdk-stream|sdk-source-start|event|event|1|2026-08-24T00:00:00.0000000+00:00|copilot-sdk-stream|exact_sdk_tool|v1' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);",
+                "UPDATE local_workspace_node_source_references SET source_kind='skill_claim' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);",
+            };
+            var data = new TheoryData<string, string>();
+            foreach (var state in new[] { "read_denied", "deleted" })
+                foreach (var mutation in mutations)
+                    data.Add(state, mutation);
+            return data;
+        }
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_workspace_node_source_references SET source_kind='session_event' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE local_workspace_node_source_references SET trace_id='ffffffffffffffffffffffffffffffff' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE local_workspace_node_source_references SET revision_input=revision_input||'|tampered' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE local_workspace_node_source_references SET revision_input=replace(revision_input,'otel.tool.started','otel.tool.fabricated') WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE local_workspace_semantic_receipts SET authority_receipt='otel-exact|tampered|v1';")]
+    [InlineData("UPDATE session_events SET trace_id='ffffffffffffffffffffffffffffffff' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE session_events SET source_adapter='otel-drift' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE session_events SET run_id='0198f5b8-0c00-7000-8000-000000000020' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('0198f5b8-0c00-7000-8000-000000000021','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','claude-code','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-drift','drift/event','event','2026-08-24T00:00:02.0000000+00:00','not_captured'); UPDATE local_workspace_node_source_references SET source_identity='0198f5b8-0c00-7000-8000-000000000021',event_id='0198f5b8-0c00-7000-8000-000000000021' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    public void ValidationAuthenticatesDurableUnavailableOtelToolGraph(string mutation)
+    {
+        using var connection = OpenUnavailableOtelToolFixture();
+        using (var control = connection.BeginTransaction(deferred: true))
+        {
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, control);
+            control.Rollback();
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+    }
+
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenUnavailableOtelToolFixture()
+    {
+        var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER,retention_owner_token BLOB);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,parent_span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,tool_type TEXT,mcp_tool_name TEXT,mcp_server_hash TEXT,agent_name TEXT,request_model TEXT,response_model TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER,status TEXT,error_type TEXT,finish_reasons TEXT,conversation_id TEXT,duration_ms REAL,start_time TEXT,end_time TEXT,projected_at TEXT);
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES
+              ('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','claude-code','native-run-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active'),
+              ('0198f5b8-0c00-7000-8000-000000000020','0198f5b8-0c00-7000-8000-000000000001','claude-code','native-run-b','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','claude-code','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
+            INSERT INTO raw_records VALUES(1,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00','{}','{}',1,NULL);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time)
+              VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,'execute_tool','tool_call','Read','ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, PublicationAt);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,
+            "DELETE FROM raw_records; DELETE FROM local_workspace_span_facts;");
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(
+                connection, transaction, PublicationAt, FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+        }
+        return connection;
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_workspace_node_source_references SET source_kind='skill_claim' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE session_events SET source_surface=NULL WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE session_events SET run_id='0198f5b8-0c00-7000-8000-000000000020' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE local_workspace_node_source_references SET source_identity='0198f5b8-0c00-7000-8000-000000000021',event_id='0198f5b8-0c00-7000-8000-000000000021',revision_input='copilot-sdk-stream|arbitrary-source|event|event|1|2026-08-24T00:00:02.0000000+00:00|copilot-sdk-stream|exact_sdk_tool|v1' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE session_events SET source_event_id='drifted-source' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'; UPDATE local_workspace_node_source_references SET revision_input='copilot-sdk-stream|drifted-source|tool.execution_start|tool.execution_start|1|2026-08-24T00:00:00.0000000+00:00|copilot-sdk-stream|exact_sdk_tool|v1' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE session_runs SET native_run_id='drifted-native-run' WHERE run_id='0198f5b8-0c00-7000-8000-000000000010';")]
+    [InlineData("UPDATE session_events SET type='tool.execution_complete' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'; UPDATE local_workspace_node_source_references SET revision_input='copilot-sdk-stream|sdk-source-start|tool.execution_complete|tool.execution_complete|1|2026-08-24T00:00:00.0000000+00:00|copilot-sdk-stream|exact_sdk_tool|v1' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts); UPDATE local_workspace_tool_metadata SET started_state='not_observed',completed_state='recorded' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    public void DurableSdkToolValidatorBindsExactEventRunCarrierAndLifecycle(string mutation)
+    {
+        using var connection = LocalWorkspaceProjectionBackfillTests.OpenUnavailableSdkToolFixture("deleted");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000020','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-run-2',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000021','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','copilot-sdk-stream','arbitrary-source','event','2026-08-24T00:00:02.0000000+00:00','not_captured');
+            """);
+        ValidateDurableSemanticGraphForTest(connection);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+
+        Assert.Throws<InvalidOperationException>(() => ValidateDurableSemanticGraphForTest(connection));
+    }
+
+    [Theory]
+    [InlineData("DELETE FROM session_native_ids;")]
+    [InlineData("UPDATE session_native_ids SET native_session_id='drifted-native-session';")]
+    [InlineData("UPDATE local_workspace_nodes SET source_kind='session_event' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE session_events SET type='event' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'; UPDATE local_workspace_node_source_references SET revision_input='copilot-sdk-stream|subagent-source|event|event|1|2026-08-24T00:00:00.0000000+00:00|copilot-sdk-stream|native_run|v1' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    [InlineData("UPDATE local_workspace_node_source_references SET source_kind='otel_span',trace_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',span_id='bbbbbbbbbbbbbbbb' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts);")]
+    public void DurableSdkSubagentValidatorBindsNativeSessionRunAndLifecycle(string mutation)
+    {
+        using var connection = OpenSdkSubagentFixture();
+        ValidateDurableSemanticGraphForTest(connection);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+
+        Assert.Throws<InvalidOperationException>(() => ValidateDurableSemanticGraphForTest(connection));
+    }
+
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenSdkSubagentFixture()
+    {
+        var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_native_ids VALUES('0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-session','native','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-child-run',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','copilot-sdk-stream','subagent-source','subagent.selected','2026-08-24T00:00:00.0000000+00:00','not_captured');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, PublicationAt);
+        return connection;
+    }
+
+    private static void ValidateDurableSemanticGraphForTest(Microsoft.Data.Sqlite.SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var method = typeof(LocalWorkspaceProjectionBackupValidation).GetMethod(
+            "ValidateDurableSemanticGraph", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        try
+        {
+            method.Invoke(null, [connection, transaction]);
+        }
+        catch (System.Reflection.TargetInvocationException exception) when (exception.InnerException is not null)
+        {
+            throw exception.InnerException;
+        }
+        finally
+        {
+            transaction.Rollback();
+        }
+    }
+
     [Fact]
     public void ValidationAcceptsExactComponentAndRejectsTamperedOwnedSchema()
     {
@@ -309,8 +473,8 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Theory]
-    [MemberData(nameof(EveryOwnedV4Table))]
-    public void ValidationRejectsSchemaTamperingForEveryOwnedV4Table(string table)
+    [MemberData(nameof(EveryOwnedV5Table))]
+    public void ValidationRejectsSchemaTamperingForEveryOwnedV5Table(string table)
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, PublicationAt);
@@ -321,7 +485,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
             LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
     }
 
-    public static TheoryData<string> EveryOwnedV4Table
+    public static TheoryData<string> EveryOwnedV5Table
     {
         get
         {
@@ -332,12 +496,12 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Fact]
-    public void CurrentBackupInventoryIncludesVersionAndAllTwelveRowCounts()
+    public void CurrentBackupInventoryIncludesVersionAndAllV5RowCounts()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
-        Assert.Equal(13, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.Equal(18, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
         Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table =>
             Assert.Equal([table], LocalWorkspaceProjectionSchemaTests.Strings(connection, $"SELECT name FROM sqlite_schema WHERE type='table' AND name='{table}';")));
     }
@@ -350,6 +514,45 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         var projection = Array.IndexOf(order, "local_workspace_projection");
         Assert.True(projection > Array.IndexOf(order, "skill_projection"));
         Assert.True(projection > Array.IndexOf(order, "skill_invocation_snapshot"));
+        Assert.True(projection > Array.IndexOf(order, "retention"));
+        Assert.True(projection > Array.IndexOf(order, "local_repository_catalog"));
+        Assert.True(projection > Array.IndexOf(order, "local_archive"));
+    }
+
+    [Theory]
+    [InlineData("retention")]
+    [InlineData("skill_projection")]
+    [InlineData("skill_invocation_snapshot")]
+    [InlineData("local_repository_catalog")]
+    [InlineData("local_archive")]
+    public void WorkspaceComponentParentGateRejectsEachMissingCurrentDependency(string missing)
+    {
+        var versions = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["session"] = 14,
+            ["retention"] = 1,
+            ["skill_projection"] = 1,
+            ["skill_invocation_snapshot"] = 1,
+            ["local_repository_catalog"] = 1,
+            ["local_archive"] = 1,
+            ["local_workspace_projection"] = 5,
+        };
+        versions.Remove(missing);
+        var method = typeof(SqliteRuntimeBackupService).GetMethod(
+            "HasValidLocalWorkspaceProjectionParents", BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        Assert.False(Assert.IsType<bool>(method.Invoke(null, [versions])));
+    }
+
+    [Fact]
+    public void DurableOtelToolCannotAuthenticateAfterItsNormalizedMonitorSpanCarrierIsRemoved()
+    {
+        using var connection = OpenUnavailableOtelToolFixture();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "DELETE FROM monitor_spans;");
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
     }
 
     [Fact]

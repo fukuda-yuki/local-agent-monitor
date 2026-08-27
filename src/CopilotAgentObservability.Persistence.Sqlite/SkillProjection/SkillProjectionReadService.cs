@@ -30,7 +30,12 @@ internal sealed record SkillProjectionCurrentSearchFact(
     string SessionId,
     string SourceIdentity,
     string SkillName,
-    string? ExpiresAt = null);
+    string? ExpiresAt = null,
+    string? EventId = null,
+    string? ExecutionSourceIdentity = null,
+    string? SkillSource = null,
+    string? InvocationTrigger = null,
+    string? HistoricalSnapshotReference = null);
 
 internal sealed record SkillProjectionCanonicalInvocation(
     string CanonicalIdentity,
@@ -47,7 +52,10 @@ internal sealed record SkillProjectionCanonicalInvocation(
     string? OtelCarrierEventId = null,
     string? SdkCarrierEventId = null,
     string? SdkSourceParentEventId = null,
-    string? SdkSourceAdapter = null)
+    string? SdkSourceAdapter = null,
+    string? SkillSource = null,
+    string? InvocationTrigger = null,
+    string? HistoricalSnapshotReference = null)
 {
     internal IEnumerable<SkillProjectionCurrentSearchFact> ProjectSearchFacts()
     {
@@ -569,7 +577,10 @@ internal sealed class SkillProjectionReadService
             }
             result[sessionId] = matched == sessionOtel.Length && matched == sessionSdk.Length
                 ? new("current", admitted)
-                : new("certification_pending", []);
+                : new("certification_pending", sessionOtel.Select(ToOtelOnlyCanonical)
+                    .Concat(sessionSdk.Select(ToSdkOnlyCanonical))
+                    .OrderBy(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal)
+                    .ToArray());
         }
         return result;
     }
@@ -603,7 +614,10 @@ internal sealed class SkillProjectionReadService
         string? ExecutionSourceIdentity,
         string? CarrierEventId,
         string? SourceParentEventId,
-        string? SourceAdapter);
+        string? SourceAdapter,
+        string? SkillSource,
+        string? InvocationTrigger,
+        string? HistoricalSnapshotReference);
 
     private static SkillProjectionCanonicalInvocation ToOtelOnlyCanonical(InvocationFact row) => new(
         row.TraceId is not null && row.SpanId is not null
@@ -622,7 +636,10 @@ internal sealed class SkillProjectionReadService
         row.CarrierEventId,
         null,
         null,
-        null);
+        null,
+        row.SkillSource,
+        row.InvocationTrigger,
+        row.HistoricalSnapshotReference);
 
     private static SkillProjectionCanonicalInvocation ToSdkOnlyCanonical(InvocationFact row) => new(
         row.Fact.SourceIdentity,
@@ -639,7 +656,10 @@ internal sealed class SkillProjectionReadService
         null,
         row.CarrierEventId,
         row.SourceParentEventId,
-        row.SourceAdapter);
+        row.SourceAdapter,
+        row.SkillSource,
+        row.InvocationTrigger,
+        row.HistoricalSnapshotReference);
 
     private static SkillProjectionCanonicalInvocation ToExactPairCanonical(InvocationFact otel, InvocationFact sdk) => new(
         "producer:" + otel.TraceId + ":" + otel.SpanId,
@@ -656,7 +676,10 @@ internal sealed class SkillProjectionReadService
         otel.CarrierEventId,
         sdk.CarrierEventId,
         sdk.SourceParentEventId,
-        sdk.SourceAdapter);
+        sdk.SourceAdapter,
+        sdk.SkillSource ?? otel.SkillSource,
+        sdk.InvocationTrigger ?? otel.InvocationTrigger,
+        sdk.HistoricalSnapshotReference ?? otel.HistoricalSnapshotReference);
 
     private static InvocationFact[] DeduplicateExactProducerPairs(IEnumerable<InvocationFact> facts) =>
         facts.GroupBy(static row =>
@@ -691,13 +714,16 @@ internal sealed class SkillProjectionReadService
         var carrierJoin = hasSessionEvents
             ? "LEFT JOIN admitted_carriers c ON c.session_id=invocation.session_id AND c.trace_id=invocation.trace_id AND c.span_id=invocation.span_id"
             : "";
+        if (!ColumnsInstalled(connection, transaction, "skill_projection_invocations", "skill_source", "invocation_trigger"))
+            throw new InvalidOperationException("skill_projection_schema_unsupported");
+        const string invocationMetadataColumns = "invocation.skill_source,invocation.invocation_trigger";
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"""
             WITH {carrierCte}
             admitted_invocations AS (SELECT 1 marker)
             SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,
-                   invocation.trace_id,invocation.span_id,{carrierColumns}
+                   invocation.trace_id,invocation.span_id,{carrierColumns},{invocationMetadataColumns}
             FROM skill_projection_invocations invocation
             JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id AND generation.lifecycle='current'
             JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id AND head.current_generation_id=invocation.generation_id
@@ -712,7 +738,8 @@ internal sealed class SkillProjectionReadService
         SqliteCommandExecutionObserver.Executing();
         using var reader = command.ExecuteReader();
         var result = new List<InvocationFact>();
-        while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), null, null));
+        while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), null, null,
+            reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), null));
         return result;
     }
 
@@ -742,7 +769,8 @@ internal sealed class SkillProjectionReadService
                     unavailable.Add(candidate.SessionId);
                 if (authorizationResult.Authorization is null) continue;
                 result.Add(new(new(candidate.SessionId, "sdk:" + candidate.ClaimId, candidate.SkillName, candidate.ExpiresAt),
-                    candidate.ProducerTraceId, candidate.ProducerSpanId, candidate.RunId, candidate.EventId, candidate.SourceParentEventId, candidate.SourceAdapter));
+                    candidate.ProducerTraceId, candidate.ProducerSpanId, candidate.RunId, candidate.EventId, candidate.SourceParentEventId, candidate.SourceAdapter,
+                    candidate.SkillSource, candidate.Trigger, candidate.SnapshotId));
             }
         }
         finally
@@ -763,10 +791,11 @@ internal sealed class SkillProjectionReadService
 
         return ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider)
             .Select(static candidate => new SkillProjectionCurrentSearchFact(candidate.SessionId, candidate.ClaimId,
-                candidate.SkillName, candidate.ExpiresAt)).ToArray();
+                candidate.SkillName, candidate.ExpiresAt, candidate.EventId, candidate.RunId, candidate.SkillSource,
+                candidate.Trigger, candidate.SnapshotId)).ToArray();
     }
 
-    private sealed record StructurallyValidSdkCandidate(string SessionId, string ClaimId, string EventId, string? RunId,
+    private sealed record StructurallyValidSdkCandidate(string SessionId, string SnapshotId, string ClaimId, string EventId, string? RunId,
         string? SourceParentEventId, string SourceApplicationVersion, string AdapterVersion, string NormalizationVersion,
         string PayloadSchema, string SchemaFingerprint, string SkillName, string? SkillSource,
         string? ProducerTraceId, string? ProducerSpanId, string? ExpiresAt, string ReceiptFingerprint,
@@ -790,7 +819,7 @@ internal sealed class SkillProjectionReadService
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT s.session_id,s.claim_id,s.event_id,s.run_id,s.source_parent_event_id,
+            SELECT s.session_id,s.snapshot_id,s.claim_id,s.event_id,s.run_id,s.source_parent_event_id,
                    s.source_application_version,s.adapter_version,s.normalization_version,s.payload_schema,s.schema_fingerprint,
                    s.name,s.source,s.trace_id,s.span_id,CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END,r.request_fingerprint_sha256,
                    e.source_adapter,e.source_event_id,e.source_surface,s.native_session_id,u.native_run_id,
@@ -843,17 +872,17 @@ internal sealed class SkillProjectionReadService
         var result = new List<StructurallyValidSdkCandidate>();
         while (reader.Read())
         {
-            var candidate = new StructurallyValidSdkCandidate(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(7),
-                reader.GetString(8), reader.GetString(9), reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetString(14),
-                reader.GetString(15), reader.GetString(16), reader.GetString(17), reader.GetString(18), reader.GetString(19),
-                reader.IsDBNull(20) ? null : reader.GetString(20), reader.GetInt64(21) == 1,
-                DateTimeOffset.Parse(reader.GetString(22), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-                reader.GetString(23), checked((ulong)reader.GetInt64(24)), reader.GetString(25), reader.GetString(26),
-                reader.IsDBNull(27) ? null : reader.GetString(27), reader.IsDBNull(28) ? null : reader.GetString(28),
-                reader.IsDBNull(29) ? null : checked((ulong)reader.GetInt64(29)), reader.IsDBNull(30) ? null : reader.GetString(30),
-                reader.IsDBNull(31) ? null : checked((ulong)reader.GetInt64(31)), reader.GetString(32));
+            var candidate = new StructurallyValidSdkCandidate(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetString(6), reader.GetString(7), reader.GetString(8),
+                reader.GetString(9), reader.GetString(10), reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.IsDBNull(13) ? null : reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetString(14), reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.GetString(16), reader.GetString(17), reader.GetString(18), reader.GetString(19), reader.GetString(20),
+                reader.IsDBNull(21) ? null : reader.GetString(21), reader.GetInt64(22) == 1,
+                DateTimeOffset.Parse(reader.GetString(23), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                reader.GetString(24), checked((ulong)reader.GetInt64(25)), reader.GetString(26), reader.GetString(27),
+                reader.IsDBNull(28) ? null : reader.GetString(28), reader.IsDBNull(29) ? null : reader.GetString(29),
+                reader.IsDBNull(30) ? null : checked((ulong)reader.GetInt64(30)), reader.IsDBNull(31) ? null : reader.GetString(31),
+                reader.IsDBNull(32) ? null : checked((ulong)reader.GetInt64(32)), reader.GetString(33));
             if (candidate.HasValidReceiptFingerprint()) result.Add(candidate);
         }
         return result;
@@ -876,6 +905,17 @@ internal sealed class SkillProjectionReadService
         command.Parameters.AddWithValue("$name", name);
         SqliteCommandExecutionObserver.Executing();
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static bool ColumnsInstalled(SqliteConnection connection, SqliteTransaction transaction, string table, params string[] names)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name IN (SELECT CAST(value AS TEXT) FROM json_each($names));";
+        command.Parameters.AddWithValue("$table", table);
+        command.Parameters.AddWithValue("$names", System.Text.Json.JsonSerializer.Serialize(names));
+        SqliteCommandExecutionObserver.Executing();
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == names.Length;
     }
 
     private sealed class InventoryAccumulator(

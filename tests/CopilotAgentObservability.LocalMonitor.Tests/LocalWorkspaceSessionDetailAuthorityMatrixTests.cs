@@ -61,6 +61,63 @@ public sealed class LocalWorkspaceSessionDetailAuthorityMatrixTests
         Assert.Equal("local_monitor_ui_unavailable", error.Error);
     }
 
+    [Fact]
+    public void CoordinatorAuthorityAcceptsExactClosedV5KindFacts()
+    {
+        var detail = SemanticDetail();
+
+        SqliteLocalRepositoryScopeSnapshotService.ValidateDetailForTest(SessionId,
+            new(LocalRepositorySessionDetailRequestKind.Summary, SessionId), detail);
+    }
+
+    [Fact]
+    public void CoordinatorSemanticMetadataCarriesTheSameExactReferencesAsItsNode()
+    {
+        Assert.NotNull(typeof(LocalWorkspaceToolMetadataDetail).GetProperty("SourceReferences"));
+        Assert.NotNull(typeof(LocalWorkspaceSubagentLifecycleDetail).GetProperty("SourceReferences"));
+    }
+
+    [Theory]
+    [InlineData("source_kind_kind")]
+    [InlineData("uppercase_carrier")]
+    [InlineData("missing_tool_metadata")]
+    [InlineData("extra_tool_metadata")]
+    [InlineData("invalid_tool_state_value")]
+    [InlineData("missing_subagent_metadata")]
+    [InlineData("invalid_subagent_lifecycle")]
+    [InlineData("invalid_skill_state_value")]
+    [InlineData("invalid_permission_state_value")]
+    [InlineData("missing_semantic_references")]
+    [InlineData("overflow_references")]
+    [InlineData("duplicate_references")]
+    [InlineData("unsorted_references")]
+    [InlineData("empty_reference_identity")]
+    [InlineData("malformed_trace_span")]
+    [InlineData("root_reference_kind")]
+    [InlineData("raw_reference_kind")]
+    [InlineData("raw_reference_identity")]
+    [InlineData("raw_reference_trace")]
+    [InlineData("skill_reference_kind")]
+    [InlineData("skill_reference_trace")]
+    [InlineData("subagent_reference_kind")]
+    [InlineData("mixed_tool_references")]
+    [InlineData("multiple_otel_tool_references")]
+    [InlineData("otel_tool_digest")]
+    [InlineData("tool_metadata_references")]
+    [InlineData("subagent_metadata_references")]
+    [InlineData("same_kind_foreign_reference")]
+    [InlineData("technical_reference_drift")]
+    public void CoordinatorAuthorityRejectsMalformedSemanticClosedFacts(string corruption)
+    {
+        var detail = CorruptSemantic(SemanticDetail(), corruption);
+
+        var error = Assert.Throws<LocalWorkspaceSessionDetailException>(() =>
+            SqliteLocalRepositoryScopeSnapshotService.ValidateDetailForTest(SessionId,
+                new(LocalRepositorySessionDetailRequestKind.Summary, SessionId), detail));
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
     private static LocalRepositorySessionDetailSnapshot Snapshot(string relation, int count)
     {
         var activity = Activity();
@@ -92,7 +149,166 @@ public sealed class LocalWorkspaceSessionDetailAuthorityMatrixTests
     private static LocalWorkspaceNodeDetail Node(string id, string sourceKind, string identity, string kind,
         string? parent, long ordinal, LocalWorkspaceTokenFacts tokens) =>
         new(id, SessionId, ExecutionId, sourceKind, identity, ordinal, parent, "exact", kind, "not_observed", null,
-            "completed", "completed", "missing", null, null, null, Activity(), tokens, null, null, null);
+            "completed", "completed", "missing", null, null, null, Activity(), tokens, null, null,
+            sourceKind == "session_event" ? identity : null,
+            SourceReferences: sourceKind switch
+            {
+                "execution_root" => [Ref("session_run", identity, null, null, null)],
+                "session_event" => [Ref("session_event", identity, null, null, identity)],
+                "unknown_relation_group" => [],
+                _ => null,
+            });
+
+    private static LocalWorkspaceSessionDetailContribution SemanticDetail()
+    {
+        var tokens = Tokens();
+        var execution = new LocalWorkspaceExecutionDetail(ExecutionId, SessionId, "session_run", "run-1", 0,
+            "completed", "completed", null, null, "missing", null, null, null, Activity(), tokens, "copilot-sdk", null);
+        var root = Node(RootNodeId, "execution_root", "run-1", "execution", null, 0, tokens);
+        var toolTrace = new string('c', 32);
+        var toolSpan = new string('d', 16);
+        var toolDigest = SemanticDigest("otel_tool", toolTrace, toolSpan);
+        var subagentDigest = SemanticDigest("session_sdk_subagent", "native-session", "native-child");
+        LocalWorkspaceNodeSourceReferenceDetail[] toolReferences = [Ref("otel_span", "tool-event", toolTrace, toolSpan, "tool-event")];
+        var tool = Node(LocalWorkspaceProjectionStore.StableNodeId("semantic_tool", toolDigest), "semantic_tool", toolDigest,
+            "tool", RootNodeId, 1, tokens) with
+        {
+            TraceId = toolTrace,
+            SpanId = toolSpan,
+            EventId = "tool-event",
+            SourceReferences = toolReferences,
+            ToolMetadata = ToolMetadata(toolReferences),
+        };
+        LocalWorkspaceNodeSourceReferenceDetail[] subagentReferences = [Ref("session_event", "subagent-event", null, null, "subagent-event")];
+        var subagent = Node(LocalWorkspaceProjectionStore.StableNodeId("semantic_subagent", subagentDigest), "semantic_subagent", subagentDigest,
+            "subagent", RootNodeId, 2, tokens) with
+        {
+            SourceReferences = subagentReferences,
+            SubagentLifecycle = new("not_observed", "recorded", "recorded", "not_observed", "not_observed", "source_unsupported", subagentReferences),
+        };
+        var skill = Node(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", "skill-identity"), "skill_invocation", "skill-identity",
+            "skill", RootNodeId, 3, tokens) with
+        {
+            TraceId = new string('e', 32),
+            SpanId = new string('f', 16),
+            SourceReferences =
+            [
+                Ref("skill_claim", "otel:skill-source", new string('e', 32), new string('f', 16), "otel-skill-source"),
+                Ref("skill_claim", "sdk:skill-source", null, null, "sdk-skill-source"),
+            ],
+            SkillMetadata = new("current", "recorded", "project", "not_observed", null, "unavailable", null, "not_observed", null),
+        };
+        var permission = Node(LocalWorkspaceProjectionStore.StableNodeId("session_event", "permission-event"), "session_event", "permission-event",
+            "permission", RootNodeId, 4, tokens) with
+        {
+            PermissionMetadata = new("not_observed", null, "not_observed", null),
+        };
+        return new([execution], [root, tool, subagent, skill, permission], [], [], [], [], null, null, "canonical", "registry");
+    }
+
+    private static LocalWorkspaceSessionDetailContribution CorruptSemantic(
+        LocalWorkspaceSessionDetailContribution detail,
+        string corruption)
+    {
+        var nodes = detail.Nodes.ToList();
+        var tool = nodes[1];
+        var subagent = nodes[2];
+        var skill = nodes[3];
+        var permission = nodes[4];
+        nodes[1] = corruption switch
+        {
+            "source_kind_kind" => tool with { Kind = "event" },
+            "uppercase_carrier" => tool with { SourceIdentity = new string('A', 64), NodeId = LocalWorkspaceProjectionStore.StableNodeId("semantic_tool", new string('A', 64)) },
+            "missing_tool_metadata" => tool with { ToolMetadata = null },
+            "extra_tool_metadata" => tool with { PermissionMetadata = new("not_observed", null, "not_observed", null) },
+            "invalid_tool_state_value" => tool with { ToolMetadata = ToolMetadata() with { ExitState = "recorded", ExitCode = null } },
+            "missing_semantic_references" => tool with { SourceReferences = [] },
+            "overflow_references" => tool with
+            {
+                SourceReferences = Enumerable.Range(0, 17)
+                    .Select(index => Ref("session_event", $"event-{index:D2}", null, null, $"event-{index:D2}"))
+                    .ToArray(),
+            },
+            "duplicate_references" => tool with
+            {
+                SourceReferences = [Ref("session_event", "event-a", null, null, "event-a"), Ref("session_event", "event-a", null, null, "event-a")],
+            },
+            "unsorted_references" => tool with
+            {
+                SourceReferences = [Ref("session_event", "event-z", null, null, "event-z"), Ref("session_event", "event-a", null, null, "event-a")],
+            },
+            "empty_reference_identity" => tool with { SourceReferences = [Ref("session_event", null, null, null, null)] },
+            "malformed_trace_span" => tool with { SourceReferences = [Ref("otel_span", "tool-event", "ABC", new string('d', 16), "tool-event")] },
+            "mixed_tool_references" => tool with { SourceReferences = [Ref("otel_span", "tool-event", tool.TraceId, tool.SpanId, "tool-event"), Ref("session_event", "sdk-tool-event", null, null, "sdk-tool-event")] },
+            "multiple_otel_tool_references" => tool with { SourceReferences = [Ref("otel_span", "tool-event", tool.TraceId, tool.SpanId, "tool-event"), Ref("otel_span", "tool-event-2", tool.TraceId, new string('e', 16), "tool-event-2")] },
+            "otel_tool_digest" => tool with { SourceIdentity = new string('a', 64), NodeId = LocalWorkspaceProjectionStore.StableNodeId("semantic_tool", new string('a', 64)) },
+            "tool_metadata_references" => tool with { ToolMetadata = tool.ToolMetadata! with { SourceReferences = [] } },
+            "same_kind_foreign_reference" => tool with { SourceReferences = [Ref("otel_span", "foreign-tool-event", tool.TraceId, tool.SpanId, "foreign-tool-event", authorityValidated: false)] },
+            "technical_reference_drift" => tool with { SourceReferences = [Ref("otel_span", "tool-event", tool.TraceId, tool.SpanId, "tool-event", revisionInput: "foreign-revision", authorityValidated: false)] },
+            _ => tool,
+        };
+        if (corruption != "tool_metadata_references" && nodes[1].ToolMetadata is { } toolMetadata)
+            nodes[1] = nodes[1] with { ToolMetadata = toolMetadata with { SourceReferences = nodes[1].SourceReferences } };
+        nodes[2] = corruption switch
+        {
+            "missing_subagent_metadata" => subagent with { SubagentLifecycle = null },
+            "invalid_subagent_lifecycle" => subagent with { SubagentLifecycle = subagent.SubagentLifecycle! with { FailedState = "completed" } },
+            "subagent_reference_kind" => subagent with { SourceReferences = [Ref("otel_span", "subagent-event", new string('c', 32), new string('d', 16), "subagent-event")] },
+            "subagent_metadata_references" => subagent with { SubagentLifecycle = subagent.SubagentLifecycle! with { SourceReferences = [] } },
+            _ => subagent,
+        };
+        if (corruption != "subagent_metadata_references" && nodes[2].SubagentLifecycle is { } subagentLifecycle)
+            nodes[2] = nodes[2] with { SubagentLifecycle = subagentLifecycle with { SourceReferences = nodes[2].SourceReferences } };
+        nodes[3] = corruption switch
+        {
+            "invalid_skill_state_value" => skill with { SkillMetadata = skill.SkillMetadata! with { SourceState = "recorded", Source = null } },
+            "skill_reference_kind" => skill with { SourceReferences = [Ref("session_event", "skill-source", null, null, "skill-source")] },
+            "skill_reference_trace" => skill with { SourceReferences = [Ref("skill_claim", "skill-source", new string('a', 32), new string('b', 16), "skill-source")] },
+            _ => skill,
+        };
+        nodes[4] = corruption switch
+        {
+            "invalid_permission_state_value" => permission with { PermissionMetadata = permission.PermissionMetadata! with { DecisionState = "recorded", Decision = null } },
+            "raw_reference_kind" => permission with { SourceReferences = [Ref("skill_claim", permission.SourceIdentity, null, null, permission.EventId)] },
+            "raw_reference_identity" => permission with { SourceReferences = [Ref("session_event", "other-event", null, null, "other-event")] },
+            "raw_reference_trace" => permission with { SourceReferences = [Ref("session_event", permission.SourceIdentity, new string('a', 32), new string('b', 16), permission.EventId)] },
+            _ => permission,
+        };
+        if (corruption == "root_reference_kind")
+            nodes[0] = nodes[0] with { SourceReferences = [Ref("session_event", nodes[0].SourceIdentity, null, null, nodes[0].SourceIdentity)] };
+        return detail with { Nodes = nodes };
+    }
+
+    private static LocalWorkspaceNodeSourceReferenceDetail Ref(
+        string sourceKind, string? sourceIdentity, string? traceId, string? spanId, string? eventId,
+        string revisionInput = "exact-reference", bool authorityValidated = true) =>
+        new(sourceKind, sourceIdentity, traceId, spanId, eventId, revisionInput, authorityValidated);
+
+    private static string SemanticDigest(string kind, string scope, string carrier)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-workspace-semantic-carrier\0v1\0"));
+        hash.AppendData(System.Text.Encoding.UTF8.GetBytes(kind));
+        hash.AppendData([0]);
+        Append(scope);
+        Append(carrier);
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+
+        void Append(string value)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+            Span<byte> length = stackalloc byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+            hash.AppendData(length);
+            hash.AppendData(bytes);
+        }
+    }
+
+    private static LocalWorkspaceToolMetadataDetail ToolMetadata(
+        IReadOnlyList<LocalWorkspaceNodeSourceReferenceDetail>? references = null) =>
+        new("not_observed", null, "recorded", "recorded", "not_observed",
+            "source_unsupported", null, "not_observed", null, "source_unsupported", null,
+            "recorded", "Read", "not_observed", "not_observed", "not_observed", null, references);
 
     private static LocalWorkspaceActivityFacts Activity()
     {

@@ -263,7 +263,9 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || execution.ChildCount is < 0 or > 4096
                 || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds)
                 || !ValidActivity(execution.Activity) || !ValidTokens(execution.Tokens))
+            {
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            }
         }
         var nodes = new Dictionary<string, LocalWorkspaceNodeDetail>(StringComparer.Ordinal);
         var roots = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -272,7 +274,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         {
             if (node.SessionId != sessionId || !executions.ContainsKey(node.ExecutionId) || !nodes.TryAdd(node.NodeId, node)
                 || node.NodeId != LocalWorkspaceProjectionStore.StableNodeId(node.SourceKind, node.SourceIdentity)
-                || node.SourceOrdinal < 0 || node.SourceKind is not ("execution_root" or "session_event" or "skill_invocation" or "unknown_relation_group") || string.IsNullOrWhiteSpace(node.SourceIdentity)
+                || node.SourceOrdinal < 0 || !ValidNodeSource(node) || string.IsNullOrWhiteSpace(node.SourceIdentity)
                 || node.RelationshipAuthority is not ("exact" or "explicit" or "unknown")
                 || node.Kind is not ("execution" or "agent" or "skill" or "tool" or "subagent" or "event" or "error" or "retry" or "permission" or "unknown_relation_group")
                 || node.NameState is not ("recorded" or "not_observed" or "invalid")
@@ -281,8 +283,11 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || node.Status is not ("active" or "completed" or "failed" or "unknown")
                 || node.ChildCount is < 0 or > 4096
                 || !ValidTime(node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds)
-                || !ValidActivity(node.Activity) || !ValidTokens(node.Tokens))
+                || !ValidActivity(node.Activity) || !ValidTokens(node.Tokens)
+                || !ValidKindMetadata(node) || !ValidReferences(node))
+            {
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            }
             if (node.SourceKind == "execution_root") roots[node.ExecutionId] = roots.GetValueOrDefault(node.ExecutionId) + 1;
             if (node.Kind == "unknown_relation_group") unknownGroups[node.ExecutionId] = unknownGroups.GetValueOrDefault(node.ExecutionId) + 1;
             if (node.SourceKind == "execution_root" && (node.Kind != "execution" || node.ParentNodeId is not null || node.RelationshipAuthority != "exact")
@@ -378,6 +383,165 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             && (value.NewInput.Value is null || value.Input.Value is not null && value.CacheRead.Value is not null
                 && value.NewInput.Value == value.Input.Value - value.CacheRead.Value)
             && (value.CacheReadRatioBasisPoints.Value is null || value.CacheReadRatioBasisPoints.Value is >= 0 and <= 10_000);
+        static bool ValidPermission(LocalWorkspacePermissionMetadataDetail value) =>
+            value.DecisionState is "recorded" or "not_observed" or "source_unsupported"
+            && (value.DecisionState == "recorded") == (value.Decision is not null)
+            && value.WaitState is "recorded" or "not_observed" or "source_unsupported"
+            && (value.WaitState == "recorded") == (value.WaitMilliseconds is not null)
+            && value.WaitMilliseconds is null or >= 0;
+        static bool ValidNodeSource(LocalWorkspaceNodeDetail node) => node.SourceKind switch
+        {
+            "execution_root" => node.Kind == "execution",
+            "session_event" => node.Kind is "agent" or "event" or "error" or "retry" or "permission",
+            "skill_invocation" => node.Kind == "skill",
+            "semantic_tool" => node.Kind == "tool" && LowerHex(node.SourceIdentity, 64),
+            "semantic_subagent" => node.Kind == "subagent" && LowerHex(node.SourceIdentity, 64),
+            "unknown_relation_group" => node.Kind == "unknown_relation_group",
+            _ => false,
+        };
+        static bool ValidKindMetadata(LocalWorkspaceNodeDetail node) =>
+            (node.Kind == "tool") == (node.ToolMetadata is not null)
+            && (node.Kind == "skill") == (node.SkillMetadata is not null)
+            && (node.Kind == "subagent") == (node.SubagentLifecycle is not null)
+            && (node.Kind == "permission") == (node.PermissionMetadata is not null)
+            && (node.ToolMetadata is null || ValidTool(node.ToolMetadata))
+            && (node.SkillMetadata is null || ValidSkill(node.SkillMetadata))
+            && (node.SubagentLifecycle is null || ValidSubagent(node.SubagentLifecycle))
+            && (node.PermissionMetadata is null || ValidPermission(node.PermissionMetadata))
+            && (node.ToolMetadata is null || SameReferences(node.SourceReferences, node.ToolMetadata.SourceReferences))
+            && (node.SubagentLifecycle is null || SameReferences(node.SourceReferences, node.SubagentLifecycle.SourceReferences));
+        static bool ValidTool(LocalWorkspaceToolMetadataDetail value) =>
+            StateValue(value.CallerState, value.CallerNodeId, "recorded", "not_observed", "source_unsupported", "projection_invalid")
+            && LifecycleState(value.StartedState) && LifecycleState(value.CompletedState) && LifecycleState(value.FailedState)
+            && StateValue(value.ExitState, value.ExitCode, "recorded", "not_observed", "source_unsupported")
+            && StateValue(value.McpServerIdentityState, value.McpServerIdentity, "recorded", "not_observed", "source_unsupported")
+            && (value.McpServerIdentityState != "recorded" || LowerHex(value.McpServerIdentity!, 64))
+            && StateValue(value.McpServerNameState, value.McpServerName, "recorded", "not_observed", "source_unsupported")
+            && StateValue(value.McpToolNameState, value.McpToolName, "recorded", "not_observed", "source_unsupported", "invalid")
+            && value.RetryState is "recorded" or "not_observed" or "source_unsupported"
+            && value.RecoveryState is "recorded" or "not_observed" or "source_unsupported"
+            && StateValue(value.ChildActivityState, value.ChildActivityCount, "recorded", "not_observed", "source_unsupported")
+            && value.ChildActivityCount is null or >= 0;
+        static bool ValidSkill(LocalWorkspaceSkillMetadataDetail value) =>
+            value.CurrentValidState is "current" or "stale" or "invalid" or "certification_pending" or "unavailable"
+            && StateValue(value.SourceState, value.Source, "recorded", "not_observed", "unavailable")
+            && StateValue(value.TriggerState, value.Trigger, "recorded", "not_observed", "unavailable")
+            && value.InventoryReferenceState == "unavailable" && value.InventoryReference is null
+            && StateValue(value.HistoricalSnapshotReferenceState, value.HistoricalSnapshotReference, "recorded", "not_observed", "unavailable");
+        static bool ValidSubagent(LocalWorkspaceSubagentLifecycleDetail value) =>
+            LifecycleState(value.SelectedState) && LifecycleState(value.StartedState)
+            && LifecycleState(value.CompletedState) && LifecycleState(value.FailedState)
+            && LifecycleState(value.DeselectedState)
+            && value.InputState is "available" or "not_captured" or "expired" or "deleted" or "read_denied" or "oversized" or "invalid" or "source_unsupported";
+        static bool LifecycleState(string value) => value is "recorded" or "not_observed" or "source_unsupported" or "inconsistent";
+        static bool StateValue<T>(string state, T? value, params string[] states)
+        {
+            if (!states.Contains(state, StringComparer.Ordinal)) return false;
+            if ((state == "recorded") != (value is not null)) return false;
+            return value is not string text || !string.IsNullOrWhiteSpace(text);
+        }
+        static bool ValidReferences(LocalWorkspaceNodeDetail node)
+        {
+            var references = node.SourceReferences;
+            if (references is null || references.Count > 16)
+                return false;
+            string? previous = null;
+            foreach (var reference in references)
+            {
+                if (reference is null || !ValidReference(reference)) return false;
+                var key = string.Join('\u001f', reference.SourceKind, reference.SourceIdentity ?? string.Empty,
+                    reference.TraceId ?? string.Empty, reference.SpanId ?? string.Empty, reference.EventId ?? string.Empty);
+                if (previous is not null && StringComparer.Ordinal.Compare(previous, key) >= 0) return false;
+                previous = key;
+            }
+            return node.SourceKind switch
+            {
+                "execution_root" => references.Count == 1
+                    && references[0].SourceKind == "session_run"
+                    && references[0].SourceIdentity == node.SourceIdentity
+                    && references[0].TraceId is null && references[0].SpanId is null && references[0].EventId is null,
+                "session_event" => references.Count == 1
+                    && references[0].SourceKind == "session_event"
+                    && references[0].SourceIdentity == node.SourceIdentity
+                    && references[0].EventId == node.EventId
+                    && node.EventId == node.SourceIdentity
+                    && references[0].TraceId == node.TraceId && references[0].SpanId == node.SpanId,
+                "skill_invocation" => ValidSkillReferences(node, references),
+                "semantic_tool" => ValidToolReferences(node, references),
+                "semantic_subagent" => references.Count is >= 1 and <= 16
+                    && references.All(static reference => reference.SourceKind == "session_event"),
+                "unknown_relation_group" => references.Count == 0,
+                _ => false,
+            };
+        }
+        static bool ValidSkillReferences(
+            LocalWorkspaceNodeDetail node,
+            IReadOnlyList<LocalWorkspaceNodeSourceReferenceDetail> references)
+        {
+            if (references.Count is < 1 or > 2 || references.Any(static reference => reference.SourceKind != "skill_claim"))
+                return false;
+            var otel = references.Where(static reference => reference.SourceIdentity!.StartsWith("otel:", StringComparison.Ordinal)).ToArray();
+            var sdk = references.Where(static reference => reference.SourceIdentity!.StartsWith("sdk:", StringComparison.Ordinal)).ToArray();
+            if (otel.Length + sdk.Length != references.Count || otel.Length > 1 || sdk.Length > 1)
+                return false;
+            return otel.All(reference => reference.TraceId is not null && reference.SpanId is not null
+                    && reference.EventId is not null && reference.TraceId == node.TraceId && reference.SpanId == node.SpanId)
+                && sdk.All(static reference => reference.TraceId is null && reference.SpanId is null && reference.EventId is not null);
+        }
+        static bool ValidToolReferences(
+            LocalWorkspaceNodeDetail node,
+            IReadOnlyList<LocalWorkspaceNodeSourceReferenceDetail> references)
+        {
+            if (references.Count is < 1 or > 16) return false;
+            if (references.All(static reference => reference.SourceKind == "session_event")) return true;
+            if (references.Count != 1 || references[0].SourceKind != "otel_span") return false;
+            var reference = references[0];
+            return reference.TraceId is not null && reference.SpanId is not null && reference.EventId is not null
+                && node.SourceIdentity == SemanticDigest("otel_tool", reference.TraceId, reference.SpanId);
+        }
+        static bool ValidReference(LocalWorkspaceNodeSourceReferenceDetail value)
+        {
+            if (!value.AuthorityValidated || string.IsNullOrEmpty(value.RevisionInput)
+                || value.SourceIdentity is not null && string.IsNullOrWhiteSpace(value.SourceIdentity)
+                || value.EventId is not null && string.IsNullOrWhiteSpace(value.EventId)
+                || (value.TraceId is null) != (value.SpanId is null)
+                || value.TraceId is not null && (!LowerHex(value.TraceId, 32) || !LowerHex(value.SpanId!, 16)))
+                return false;
+            return value.SourceKind switch
+            {
+                "session_run" => value.SourceIdentity is not null && value.TraceId is null && value.EventId is null,
+                "session_event" => value.SourceIdentity is not null && value.EventId == value.SourceIdentity,
+                "otel_span" => value.SourceIdentity is not null && value.TraceId is not null && value.EventId is not null,
+                "skill_claim" => value.SourceIdentity is not null,
+                _ => false,
+            };
+        }
+        static bool LowerHex(string value, int length) =>
+            value.Length == length && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+        static bool SameReferences(
+            IReadOnlyList<LocalWorkspaceNodeSourceReferenceDetail>? left,
+            IReadOnlyList<LocalWorkspaceNodeSourceReferenceDetail>? right) =>
+            left is not null && right is not null && left.SequenceEqual(right);
+        static string SemanticDigest(string kind, string scope, string carrier)
+        {
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+                System.Security.Cryptography.HashAlgorithmName.SHA256);
+            hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-workspace-semantic-carrier\0v1\0"));
+            hash.AppendData(System.Text.Encoding.UTF8.GetBytes(kind));
+            hash.AppendData([0]);
+            Append(scope);
+            Append(carrier);
+            return Convert.ToHexStringLower(hash.GetHashAndReset());
+
+            void Append(string value)
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+                Span<byte> length = stackalloc byte[4];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+                hash.AppendData(length);
+                hash.AppendData(bytes);
+            }
+        }
         static bool SortedUnique(IReadOnlyList<string>? values)
         {
             if (values is null) return false;
