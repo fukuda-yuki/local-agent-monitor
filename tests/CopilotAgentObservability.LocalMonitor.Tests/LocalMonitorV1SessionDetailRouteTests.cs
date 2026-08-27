@@ -5,6 +5,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
+using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -191,6 +192,127 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var completedProof = Open(temp);
         Assert.Equal("0", Scalar(completedProof,
             "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task PostSealExpiryCannotDeleteRealContentUntilResponseAndLeaseComplete(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new GenericRouteContentClock(new DateTimeOffset(2026, 8, 27, 1, 2, 3, TimeSpan.Zero));
+        temp.TimeProvider = clock;
+        const string marker = "post-seal-retention-race-marker";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using var sealedResponse = new ManualResetEventSlim();
+        using var releaseWrite = new ManualResetEventSlim();
+        var options = new MonitorHostTestOptions
+        {
+            StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
+            StartSessionOtelEnrichment = false, StartLocalRepositoryCatalogHostedService = false,
+            StartRetentionCleanupWorker = false, UseUserSecrets = false,
+            LocalMonitorNodeContentRouteCheckpoint = phase =>
+            {
+                if (phase != LocalMonitorNodeContentRoutePhase.AfterSuccessfulSealBeforeWrite) return;
+                sealedResponse.Set();
+                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(30)));
+            },
+        };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+
+        var responseTask = Task.Run(() => host.Client.SendAsync(new(new HttpMethod(method), path)));
+        var sealTask = Task.Run(() => sealedResponse.Wait(TimeSpan.FromSeconds(30)));
+        var first = await Task.WhenAny(sealTask, responseTask);
+        if (first == responseTask)
+        {
+            using var early = await responseTask;
+            Assert.Fail($"Response completed before post-seal checkpoint: {(int)early.StatusCode} {await early.Content.ReadAsStringAsync()}");
+        }
+        Assert.True(await sealTask);
+        var mutationError = TryExecuteDeleteNow(temp, 41);
+        Assert.Null(mutationError);
+        var worker = new RetentionCleanupWorker(new RetentionCleanupCoordinator(
+            host.Services.GetRequiredService<RetentionCatalogStore>(),
+            host.Services.GetRequiredService<RetentionAdapterRegistry>(), temp.TimeProvider), temp.TimeProvider);
+
+        using (var proof = Open(temp))
+        {
+            Assert.Equal("deletion_queued", Scalar(proof, "SELECT state FROM retention_items WHERE source_item_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"));
+            Assert.Equal("1", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM session_event_content WHERE event_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"));
+            Assert.Equal("1", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+        }
+
+        releaseWrite.Set();
+        using var response = await responseTask;
+        var expected = System.Text.Encoding.UTF8.GetBytes(marker);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(expected.Length, response.Content.Headers.ContentLength);
+        Assert.Equal(method == "HEAD" ? [] : expected, await response.Content.ReadAsByteArrayAsync());
+        Assert.True(SpinWait.SpinUntil(() =>
+        {
+            using var proof = Open(temp);
+            return Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId) == "0";
+        }, TimeSpan.FromSeconds(5)));
+        await worker.RunOnceAsync(CancellationToken.None);
+        RefreshContentProjection(temp);
+        using (var proof = Open(temp))
+        {
+            Assert.Equal("deleted", Scalar(proof, "SELECT state FROM retention_items WHERE source_item_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"));
+            Assert.Equal("0", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM session_event_content WHERE event_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"));
+            Assert.Equal("0", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+        }
+        var terminalPath = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+        await AssertContentErrorParity(host.Client, terminalPath, 410, "raw_content_deleted");
+    }
+
+    [Fact]
+    public async Task ClientCancellationAtFirstLargeBodyWriteReleasesLeaseAndWaitingDeleteCompletesWithoutPublishingRaw()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.TimeProvider = new GenericRouteContentClock(new DateTimeOffset(2026, 8, 27, 1, 2, 3, TimeSpan.Zero));
+        const string marker = "disconnect-write-raw-marker";
+        var selected = marker + new string('x', 1_048_576 - marker.Length);
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + selected + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp); EnsureProductionProjectionSchemas(temp); RefreshContentProjection(temp);
+        string nodeId; using (var connection = Open(temp)) nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using var cancellation = new CancellationTokenSource();
+        var writeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var options = new MonitorHostTestOptions
+        {
+            StartWriter=false,StartProjectionWorker=false,StartSessionWriter=false,StartSessionOtelEnrichment=false,
+            StartLocalRepositoryCatalogHostedService=false,StartRetentionCleanupWorker=false,UseUserSecrets=false,
+            LocalMonitorNodeContentRouteCheckpoint = phase =>
+            {
+                if (phase != LocalMonitorNodeContentRoutePhase.DuringResponseWrite) return;
+                writeEntered.TrySetResult(); cancellation.Cancel();
+            },
+        };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => host.Client.GetAsync(path, cancellation.Token));
+        await writeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(SpinWait.SpinUntil(() =>
+        {
+            using var proof = Open(temp);
+            return Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId) == "0";
+        }, TimeSpan.FromSeconds(5)));
+        Assert.Null(TryExecuteDeleteNow(temp, 51));
+        var worker = new RetentionCleanupWorker(new RetentionCleanupCoordinator(
+            host.Services.GetRequiredService<RetentionCatalogStore>(), host.Services.GetRequiredService<RetentionAdapterRegistry>(), temp.TimeProvider), temp.TimeProvider);
+        await worker.RunOnceAsync(CancellationToken.None);
+        using var proof = Open(temp);
+        Assert.Equal("deleted", Scalar(proof, "SELECT state FROM retention_items WHERE source_item_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"));
+        Assert.Equal("0", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM session_event_content WHERE event_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"));
     }
 
     [Theory]
@@ -1022,6 +1144,32 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             new DateTimeOffset(2026, 8, 26, 1, 2, 5, TimeSpan.Zero),
             FixedSkillRegistryGenerationAuthority.Load());
         transaction.Commit();
+    }
+
+    private static string? TryExecuteDeleteNow(MonitorTempDirectory temp, byte workflowByte)
+    {
+        string itemId;
+        using (var connection = Open(temp))
+            itemId = Scalar(connection, "SELECT item_id FROM retention_items WHERE source_item_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004");
+        var application = new RetentionMutationApplicationService(
+            new RetentionCatalogStore(temp.RetentionContext, temp.TimeProvider), temp.TimeProvider,
+            workspaceParticipant: new LocalWorkspaceProjectionTransactionParticipant(FixedSkillRegistryGenerationAuthority.Load()));
+        var key = RetentionMutationIdentifiers.CreateWorkflowKey(Enumerable.Repeat(workflowByte, 32).ToArray());
+        var previewResult = application.CreatePreview(
+            new(new(RetentionMutationTargetKind.Item, itemId), RetentionMutationOperation.DeleteNow,
+                RetentionMutationScope.SingleItem, RetentionMutationReasonCodes.ResearchNeeded, null),
+            key);
+        if (previewResult.Preview is null) return previewResult.ErrorCode;
+        var confirmationResult = application.IssueConfirmation(
+            new(previewResult.Preview.PreviewId, previewResult.Preview.PreviewDigest), key);
+        if (confirmationResult.Confirmation is null) return confirmationResult.ErrorCode;
+        var result = application.ExecuteMutation(
+            new(confirmationResult.Confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow, RetentionMutationScope.SingleItem,
+                RetentionMutationTargetKind.Item, itemId),
+            key);
+        if (result.ErrorCode is not null) return result.ErrorCode;
+        Assert.Equal(RetentionMutationCompletionCodes.DeleteQueued, result.Result?.ResultCode);
+        return null;
     }
 
     private static void SeedDeterministicNonrecordedSession(MonitorTempDirectory temp)
