@@ -21,10 +21,11 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     public async Task ProductionInstructionContentGetAndHeadReturnExactSelectedUtf8Bytes()
     {
         using var temp = new MonitorTempDirectory();
-        SeedDeterministicSession(temp, full: true);
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
         StabilizeDeterministicContentOwner(temp);
         await using var host = await MonitorTestHost.StartAsync(temp);
-        RefreshDeterministicFullProjection(temp);
+        RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
         string nodeId;
         using (var connection = Open(temp))
             nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
@@ -120,6 +121,66 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("not_captured", 404, "raw_content_not_captured")]
+    [InlineData("expired", 410, "raw_content_expired")]
+    [InlineData("deleted", 410, "raw_content_deleted")]
+    [InlineData("read_denied", 403, "raw_content_read_denied")]
+    [InlineData("owner_mismatch", 503, "local_monitor_ui_unavailable")]
+    [InlineData("store_mismatch", 503, "local_monitor_ui_unavailable")]
+    [InlineData("captured_mismatch", 503, "local_monitor_ui_unavailable")]
+    [InlineData("expiry_mismatch", 503, "local_monitor_ui_unavailable")]
+    [InlineData("receipt_mismatch", 503, "local_monitor_ui_unavailable")]
+    [InlineData("oversized", 413, "raw_content_too_large")]
+    public async Task ProductionContentStatesHaveExactGetAndHeadParity(
+        string state, int expectedStatus, string expectedError)
+    {
+        using var temp = new MonitorTempDirectory();
+        var captured = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
+        var json = state == "oversized" ? "{\"prompt\":\"" + new string('x', 1_048_577) + "\"}" : "{\"prompt\":\"retained\"}";
+        SeedDeterministicSession(temp, full: state != "not_captured", contentJson: json,
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        if (state != "not_captured") StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        if (state is not ("not_captured" or "oversized"))
+        {
+            using var connection = Open(temp);
+            using var command = connection.CreateCommand();
+            command.CommandText = state switch
+            {
+                "expired" => "UPDATE session_event_content SET expires_at=$at WHERE event_id=$event; UPDATE retention_items SET expires_at=$at WHERE source_item_id=$event;",
+                "deleted" => "UPDATE retention_items SET state='deleted',deleted_at=$at WHERE source_item_id=$event; INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) SELECT item_id,$at,$at FROM retention_items WHERE source_item_id=$event;",
+                "read_denied" => "UPDATE retention_items SET read_denied_at=$at WHERE source_item_id=$event;",
+                "owner_mismatch" => "DROP TRIGGER retention_session_event_content_token_immutable; UPDATE session_event_content SET retention_owner_token=zeroblob(32) WHERE event_id=$event;",
+                "store_mismatch" => "PRAGMA foreign_keys=OFF; UPDATE retention_items SET store_instance_id='wrong-store' WHERE source_item_id=$event; PRAGMA foreign_keys=ON;",
+                "captured_mismatch" => "UPDATE session_event_content SET captured_at='2026-08-26T01:02:04.0000000+00:00' WHERE event_id=$event;",
+                "expiry_mismatch" => "UPDATE session_event_content SET expires_at='2026-09-26T01:02:03.0000000+00:00' WHERE event_id=$event;",
+                "receipt_mismatch" => "UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE source_item_id=$event;",
+                _ => throw new ArgumentOutOfRangeException(nameof(state)),
+            };
+            command.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
+            command.Parameters.AddWithValue("$at", captured.ToString("O"));
+            command.ExecuteNonQuery();
+            if (state == "deleted")
+            {
+                using var deletion = connection.BeginTransaction();
+                LocalWorkspaceProjectionStore.CompleteSessionEventContentDeletion(connection, deletion,
+                    "018f0000-0000-7000-8000-000000000004", captured);
+                deletion.Commit();
+            }
+        }
+        if (state is not ("not_captured" or "oversized")) RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId);
+        var revision = await Revision(host.Client);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction";
+
+        await AssertContentErrorParity(host.Client, path, expectedStatus, expectedError);
     }
 
     [Fact]
@@ -412,6 +473,91 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     }
 
     [Fact]
+    public async Task ContentOuterHostGuardWinsBeforeMethodIdentifiersAndQuery()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var request = new HttpRequestMessage(HttpMethod.Post,
+            "/api/local-monitor/v1/sessions/not-an-id/nodes/not-a-node/content?bad=query");
+        request.Headers.Host = "example.com";
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_host\"}", await response.Content.ReadAsStringAsync());
+        Assert.Empty(response.Content.Headers.Allow);
+    }
+
+    [Theory]
+    [InlineData("/api/local-monitor/v1/sessions/not-an-id/nodes/not-a-node/content?bad=query", 405, "method_not_allowed")]
+    [InlineData("/api/local-monitor/v1/sessions/not-an-id/nodes/not-a-node/content?bad=query", 400, "invalid_request", "GET")]
+    public async Task ContentMethodAndIdentifierPrecedenceIsExact(string path, int status, string error, string method = "POST")
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method), path));
+        Assert.Equal(status, (int)response.StatusCode);
+        Assert.Equal($"{{\"error\":\"{error}\"}}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("part=instruction&workspace_revision={0}")]
+    [InlineData("workspace_revision={0}&part=instruction&part=instruction")]
+    [InlineData("workspace_revision={0}&unknown=x")]
+    [InlineData("workspace_revision={0}&part=Instruction")]
+    public async Task ContentClosedQueryRejectsOrderDuplicatesUnknownAndInvalidPart(string queryTemplate)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var query = string.Format(System.Globalization.CultureInfo.InvariantCulture, queryTemplate, new string('0', 64));
+        using var response = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-00000000000000000000000000000000/content?{query}");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_request\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task ContentSessionRevisionNodeAndPartPrecedenceIsExact()
+    {
+        const string secondSession = "018f0000-0000-7000-8000-000000000021";
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        var observed = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
+        var sessionStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider,
+            new LocalWorkspacePublicationGate(),
+            new LocalWorkspaceProjectionTransactionParticipant(FixedSkillRegistryGenerationAuthority.Load()));
+        sessionStore.Write(new SessionWriteBatch(new SessionDetail(
+            new ObservedSession(Guid.Parse(secondSession), ObservedSessionStatus.Active, SessionCompleteness.Partial,
+                null, null, null, null, observed, SessionRawRetentionState.NotCaptured, observed, observed),
+            [new SessionNativeId(Guid.Parse(secondSession), SessionSourceSurface.VisualStudioCode,
+                "native-second-content-session", SessionBindingKind.Native, observed)], [], []), []));
+        RefreshContentProjection(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId);
+        var revision = await Revision(host.Client);
+        var secondRevision = await Revision(host.Client, secondSession);
+        var basePath = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content";
+
+        await AssertContentErrorParity(host.Client,
+            $"/api/local-monitor/v1/sessions/018f0000-0000-7000-8000-000000000099/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction",
+            404, "session_not_found");
+        await AssertContentErrorParity(host.Client,
+            $"{basePath}?workspace_revision={new string('f', 64)}&part=instruction", 409, "workspace_snapshot_stale");
+        await AssertContentErrorParity(host.Client,
+            $"/api/local-monitor/v1/sessions/{secondSession}/nodes/{nodeId}/content?workspace_revision={secondRevision}&part=instruction",
+            404, "node_not_found");
+        await AssertContentErrorParity(host.Client,
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-00000000000000000000000000000000/content?workspace_revision={revision}&part=instruction",
+            404, "node_not_found");
+        await AssertContentErrorParity(host.Client,
+            $"{basePath}?workspace_revision={revision}&part=tool_input", 404, "raw_content_not_captured");
+    }
+
+    [Fact]
     public async Task TimelinePassesTheClosedRequestShapeIntoTheSharedCoordinator()
     {
         var service = new CapturingDetailService();
@@ -509,6 +655,31 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         command.Parameters.AddWithValue("$session", sessionId);
         command.Parameters.AddWithValue("$execution", (object?)executionId ?? DBNull.Value);
         return (string)command.ExecuteScalar()!;
+    }
+
+    private static async Task<string> Revision(HttpClient client, string sessionId = SessionId)
+    {
+        using var response = await client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary");
+        using var document = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        return document.RootElement.GetProperty("workspace_revision").GetString()!;
+    }
+
+    private static async Task AssertContentErrorParity(HttpClient client, string path, int status, string error)
+    {
+        var expected = System.Text.Encoding.UTF8.GetBytes($"{{\"error\":\"{error}\"}}");
+        using var get = await client.GetAsync(path);
+        using var head = await client.SendAsync(new(HttpMethod.Head, path));
+        foreach (var response in new[] { get, head })
+        {
+            Assert.Equal(status, (int)response.StatusCode);
+            Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+            Assert.Equal(expected.Length, response.Content.Headers.ContentLength);
+            Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+            foreach (var forbidden in new[] { "Access-Control-Allow-Origin", "ETag", "Location", "Set-Cookie", "X-Local-Monitor-Schema-Version" })
+                Assert.False(response.Headers.Contains(forbidden));
+        }
+        Assert.Equal(expected, await get.Content.ReadAsByteArrayAsync());
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
     }
 
     private static LocalRepositorySessionDetailSnapshot Snapshot(string sessionId, LocalWorkspaceSessionDetailContribution detail, string revision, string? label = null)

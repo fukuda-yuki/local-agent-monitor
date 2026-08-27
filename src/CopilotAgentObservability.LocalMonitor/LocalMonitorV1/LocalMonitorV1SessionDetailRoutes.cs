@@ -31,9 +31,10 @@ internal static class LocalMonitorV1SessionDetailRoutes
         {
             var snapshot=await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Content,sessionId!,NodeId:nodeId!,ContentPart:part),context.RequestAborted);
             if(!StringComparer.Ordinal.Equals(revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}
+            if(!snapshot.Detail.Nodes.Any(node=>node.NodeId==nodeId)){await Error(context,404,"node_not_found");return;}
             var locator=snapshot.Detail.Content.SingleOrDefault(c=>c.NodeId==nodeId&&c.Part==part);
             if(locator is null){await Error(context,404,"raw_content_not_captured");return;}
-            if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large",_=>"raw_content_not_captured"});return;}
+            if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
             var read=await store.ReadContentAsync(Guid.Parse(sessionId!),Guid.Parse(locator.SourceItemId!),context.RequestAborted);
             if(read.Disposition!=SessionContentReadDisposition.Granted){await Error(context,read.Disposition==SessionContentReadDisposition.Busy?503:410,read.Disposition==SessionContentReadDisposition.Busy?"persistence_busy":"raw_content_expired");return;}
             await using var lease=read.Lease!;byte[] bytes;SessionEventContent content;
@@ -74,6 +75,7 @@ internal static class LocalMonitorV1SessionDetailRoutes
     {
         revision=part=string.Empty;if(raw.Length<2||raw[0]!='?'||raw.Contains('%')||raw.Contains('+')||raw.Contains(' ')||raw.EndsWith('&'))return false;
         var pairs=raw[1..].Split('&');if(pairs.Length!=2)return false;var values=new Dictionary<string,string>(StringComparer.Ordinal);
+        if(!pairs[0].StartsWith("workspace_revision=",StringComparison.Ordinal)||!pairs[1].StartsWith("part=",StringComparison.Ordinal))return false;
         foreach(var pair in pairs){var split=pair.Split('=');if(split.Length!=2||split[1].Length==0||!values.TryAdd(split[0],split[1]))return false;}
         if(!values.TryGetValue("workspace_revision",out var parsedRevision)||parsedRevision.Length!=64||!parsedRevision.All(IsLowerHex)
             ||!values.TryGetValue("part",out var parsedPart)||parsedPart is not ("instruction" or "tool_input" or "tool_result" or "error_message" or "subagent_input" or "event_content"))return false;
