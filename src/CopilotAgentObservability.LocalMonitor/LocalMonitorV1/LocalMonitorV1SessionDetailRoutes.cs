@@ -59,7 +59,11 @@ internal static class LocalMonitorV1SessionDetailRoutes
     private static byte[] Select(string json,LocalWorkspaceContentAvailability locator)
     {
         if(locator.StoreKind!="session_event_content")throw new InvalidOperationException();
-        if(locator.LocatorKind=="whole_event"&&locator.JsonPointer is null)return Encoding.UTF8.GetBytes(json);
+        if(locator.LocatorKind=="whole_event"&&locator.JsonPointer is null)
+        {
+            using var wholeDocument=JsonDocument.Parse(json);
+            return Encoding.UTF8.GetBytes(json);
+        }
         if(locator.LocatorKind!="json_pointer"||locator.JsonPointer is null)throw new InvalidOperationException();
         using var document=JsonDocument.Parse(json);var name=locator.JsonPointer[1..];
         if(document.RootElement.ValueKind!=JsonValueKind.Object||!document.RootElement.TryGetProperty(name,out var value))throw new InvalidOperationException();

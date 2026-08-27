@@ -48,27 +48,41 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Empty(await head.Content.ReadAsByteArrayAsync());
     }
 
-    [Fact]
-    public async Task ProductionContentRouteReturnsJsonPointerObjectAsInertText()
+    [Theory]
+    [InlineData("instruction", "UserPromptSubmit", "{\"prompt\":\"こんにちは🌏\"}", "こんにちは🌏")]
+    [InlineData("tool_input", "PreToolUse", "{\"tool_input\":{\"task\":\"inspect\"}}", "{\"task\":\"inspect\"}")]
+    [InlineData("tool_result", "PostToolUse", "{\"tool_response\":[1,true,null]}", "[1,true,null]")]
+    [InlineData("error_message", "PostToolUseFailure", "{\"error\":\"failed\"}", "failed")]
+    [InlineData("subagent_input", "SubagentStart", "{\"agent_id\":\"agent-1\"}", "agent-1")]
+    [InlineData("event_content", "tool.completed", "{\"number\":1,\"boolean\":true,\"nil\":null}", "{\"number\":1,\"boolean\":true,\"nil\":null}")]
+    public async Task ProductionContentFixturePublishesAllSixPartsAsExactInertUtf8(
+        string part, string eventType, string contentJson, string expectedText)
     {
-        const string contentJson = "{\"prompt\":{\"task\":\"inspect\"}}"; const string part = "instruction"; const string expectedText = "{\"task\":\"inspect\"}";
-        using var temp = new MonitorTempDirectory(); SeedDeterministicSession(temp, full: true); StabilizeDeterministicContentOwner(temp);
-        using (var connection = Open(temp))
-        using (var command = connection.CreateCommand())
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, contentJson: contentJson, eventType: eventType,
+            sourceAdapter: part == "event_content" ? "github-copilot-vscode-otel" : "claude-code-hook",
+            schemaFingerprint: part == "event_content" ? null : new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        string nodeId; using (var connection = Open(temp))
         {
-            command.CommandText = "UPDATE session_event_content SET content_json=$json WHERE event_id='018f0000-0000-7000-8000-000000000004';";
-            command.Parameters.AddWithValue("$json", contentJson); command.ExecuteNonQuery();
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part=$execution AND source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId, part);
+            Assert.Equal("available", Scalar(connection, "SELECT availability_state FROM local_workspace_node_content_refs WHERE part=$execution AND source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId, part));
         }
-        await using var host = await MonitorTestHost.StartAsync(temp); RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
-        using (var connection = Open(temp)) using (var command = connection.CreateCommand())
-        { command.CommandText="UPDATE local_workspace_node_content_refs SET part=$part,locator_kind=$kind,json_pointer=$pointer,selected_utf8_bytes=$bytes,retention_owner_token=(SELECT retention_owner_token FROM session_event_content WHERE event_id=source_item_id),availability_state='available' WHERE source_item_id='018f0000-0000-7000-8000-000000000004';";command.Parameters.AddWithValue("$part",part);command.Parameters.AddWithValue("$kind",part=="event_content"?"whole_event":"json_pointer");command.Parameters.AddWithValue("$pointer",part=="event_content"?DBNull.Value:"/prompt");command.Parameters.AddWithValue("$bytes",System.Text.Encoding.UTF8.GetByteCount(expectedText));command.ExecuteNonQuery(); }
-        string nodeId; using (var connection = Open(temp)) nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part=$execution;", SessionId, part);
         using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
         using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync()); var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
 
         using var response = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part={part}");
 
-        var body = await response.Content.ReadAsStringAsync(); Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode}: {body}"); Assert.Equal(expectedText, body);
+        var expected = System.Text.Encoding.UTF8.GetBytes(expectedText);
+        var actual = await response.Content.ReadAsByteArrayAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode}: {System.Text.Encoding.UTF8.GetString(actual)}");
+        Assert.Equal(expected, actual);
+        using var verification = Open(temp);
+        Assert.Equal(expected.Length, long.Parse(Scalar(verification,
+            "SELECT CAST(selected_utf8_bytes AS TEXT) FROM local_workspace_node_content_refs WHERE part=$execution AND source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId, part), System.Globalization.CultureInfo.InvariantCulture));
     }
 
     [Theory]
@@ -76,16 +90,36 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     [InlineData(1_048_577, HttpStatusCode.RequestEntityTooLarge)]
     public async Task ProductionContentRouteEnforcesCompleteOneMiBBoundary(int size, HttpStatusCode expectedStatus)
     {
-        using var temp = new MonitorTempDirectory(); SeedDeterministicSession(temp, full: true); StabilizeDeterministicContentOwner(temp);
-        using (var connection = Open(temp)) using (var command = connection.CreateCommand())
-        { command.CommandText="UPDATE session_event_content SET content_json=$json WHERE event_id='018f0000-0000-7000-8000-000000000004';"; command.Parameters.AddWithValue("$json", "{\"prompt\":\""+new string('x',size)+"\"}"); command.ExecuteNonQuery(); }
+        using var temp = new MonitorTempDirectory(); SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\""+new string('x',size)+"\"}", eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0',64)); StabilizeDeterministicContentOwner(temp);
         await using var host = await MonitorTestHost.StartAsync(temp); RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
-        using(var connection=Open(temp))using(var command=connection.CreateCommand()){command.CommandText="UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=$size,retention_owner_token=CASE WHEN $size<=1048576 THEN (SELECT retention_owner_token FROM session_event_content WHERE event_id=source_item_id) END,availability_state=CASE WHEN $size<=1048576 THEN 'available' ELSE 'oversized' END WHERE source_item_id='018f0000-0000-7000-8000-000000000004';";command.Parameters.AddWithValue("$size",size);command.ExecuteNonQuery();}
         string nodeId;using(var connection=Open(temp))nodeId=Scalar(connection,"SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';",SessionId);
         using var summaryResponse=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");using var summary=JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());var revision=summary.RootElement.GetProperty("workspace_revision").GetString();
         using var response=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction");
         Assert.Equal(expectedStatus,response.StatusCode);
         if(expectedStatus==HttpStatusCode.OK)Assert.Equal(size,(await response.Content.ReadAsByteArrayAsync()).Length);else Assert.Equal("{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task ProductionWholeEventMalformedJsonFailsClosedWithoutPartialBytes()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, contentJson: "not-json", eventType: "tool.completed",
+            sourceAdapter: "github-copilot-vscode-otel");
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='event_content' AND source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId);
+        using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());
+        var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
+
+        using var response = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=event_content");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -427,6 +461,22 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
     private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(MonitorTempDirectory temp)
     {
+        EnsureProductionProjectionSchemas(temp);
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray());
+        await app.StartAsync();
+        return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
+    }
+
+    private static void EnsureProductionProjectionSchemas(MonitorTempDirectory temp)
+    {
         using (var connection = Open(temp))
         {
             using (var transaction = connection.BeginTransaction())
@@ -439,17 +489,6 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             }
             LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch, FixedSkillRegistryGenerationAuthority.Load());
         }
-        var service = new SqliteLocalRepositoryScopeSnapshotService(
-            temp.DatabasePath,
-            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
-            SqliteLocalArchiveFactSnapshotContributor.Instance,
-            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
-        var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseUrls("http://127.0.0.1:0");
-        var app = builder.Build();
-        LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray());
-        await app.StartAsync();
-        return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
 
     private sealed class RunningDetailRoute(WebApplication app, HttpClient client) : IDisposable
@@ -488,7 +527,9 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return connection;
     }
 
-    private static void SeedDeterministicSession(MonitorTempDirectory temp, bool full = false)
+    private static void SeedDeterministicSession(MonitorTempDirectory temp, bool full = false,
+        string contentJson = "{\"value\":\"Review the retained instruction\",\"prompt\":\"Review the retained instruction\"}",
+        string eventType = "user.message", string sourceAdapter = "github-copilot-vscode-otel", string? schemaFingerprint = null)
     {
         var observed = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
         var sessionId = Guid.Parse(SessionId);
@@ -520,10 +561,10 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
                 [new ObservedSessionEvent(
                     eventId, sessionId, runId, SessionSourceSurface.VisualStudioCode, ParentEventId: null,
                     TraceId: "00000000000000000000000000000001", Status: "completed",
-                    SourceAdapter: "github-copilot-vscode-otel", SourceEventId: "event-detail-golden",
-                    Type: "user.message", OccurredAt: observed, SessionContentState.Available,
+                    SourceAdapter: sourceAdapter, SourceEventId: "event-detail-golden",
+                    Type: eventType, OccurredAt: observed, SessionContentState.Available,
                     SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
-                    SchemaFingerprint: null, NormalizationVersion: "session-normalization-v1"),
+                    SchemaFingerprint: schemaFingerprint, NormalizationVersion: "session-normalization-v1"),
                  new ObservedSessionEvent(
                     secondEventId, sessionId, runId, SessionSourceSurface.VisualStudioCode, ParentEventId: null,
                     TraceId: "00000000000000000000000000000001", Status: "completed",
@@ -532,7 +573,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
                     SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
                     SchemaFingerprint: null, NormalizationVersion: "session-normalization-v1")]),
             full
-                ? [new SessionEventContent(eventId, "application/json", "{\"value\":\"Review the retained instruction\",\"prompt\":\"Review the retained instruction\"}", observed, observed.AddDays(30))]
+                ? [new SessionEventContent(eventId, "application/json", contentJson, observed, observed.AddDays(30))]
                 : []));
     }
 
@@ -562,7 +603,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         var receipt = RetentionOwnershipReceipt.CreateSession(new(storeId,
             "018f0000-0000-7000-8000-000000000004", "application/json", captured.ToString("O"), captured.UtcTicks,
             expires.ToString("O"), expires.UtcTicks, SessionId, "018f0000-0000-7000-8000-000000000003",
-            "github-copilot-vscode-otel", "event-detail-golden", token));
+            Scalar(connection, "SELECT source_adapter FROM session_events WHERE event_id=$execution;", SessionId, "018f0000-0000-7000-8000-000000000004"), "event-detail-golden", token));
         using var update = connection.CreateCommand();
         update.CommandText = """
             DROP TRIGGER retention_session_event_content_token_immutable;
@@ -606,6 +647,16 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             command.CommandText = "UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=31 WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND availability_state='available';";
             Assert.Equal(1, command.ExecuteNonQuery());
         }
+        transaction.Commit();
+    }
+
+    private static void RefreshContentProjection(MonitorTempDirectory temp)
+    {
+        using var connection = Open(temp);
+        using var transaction = connection.BeginTransaction();
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+            new DateTimeOffset(2026, 8, 26, 1, 2, 5, TimeSpan.Zero),
+            FixedSkillRegistryGenerationAuthority.Load());
         transaction.Commit();
     }
 
