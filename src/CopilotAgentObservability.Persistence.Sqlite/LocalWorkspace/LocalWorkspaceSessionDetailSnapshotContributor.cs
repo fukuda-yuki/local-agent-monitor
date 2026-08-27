@@ -52,7 +52,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var nodes = projectedNodes.Except(excludedSkillNodes).ToArray();
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
         var executions = ApplyCurrentSkillActivity(
-            await ReadExecutions(connection, transaction, request, executionIds, token), nodes, skillProjection);
+            await ReadExecutions(connection, transaction, request, executionIds, token), skillProjection);
         nodes = ApplyCurrentSkillActivity(nodes, executions, excludedSkillNodes);
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
@@ -72,13 +72,16 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
 
     private static LocalWorkspaceExecutionDetail[] ApplyCurrentSkillActivity(
         LocalWorkspaceExecutionDetail[] executions,
-        LocalWorkspaceNodeDetail[] nodes,
         SkillProjectionCurrentInvocationProjection? projection)
     {
         var current = projection?.State == "current";
         return executions.Select(execution =>
         {
-            var count = current ? nodes.LongCount(node => node.ExecutionId == execution.ExecutionId && node.SourceKind == "skill_invocation") : 0;
+            var count = current
+                ? projection!.Invocations.LongCount(invocation =>
+                    string.Equals(invocation.ExecutionSourceKind, execution.SourceKind, StringComparison.Ordinal)
+                    && string.Equals(invocation.ExecutionSourceIdentity, execution.SourceIdentity, StringComparison.Ordinal))
+                : 0;
             var skill = current && count > 0
                 ? new LocalWorkspaceFact<long>("recorded", count)
                 : projection is null

@@ -287,6 +287,31 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Empty(hasSkill.RootElement.GetProperty("items").EnumerateArray());
     }
 
+    [Fact]
+    public async Task PersistedSqliteMatrix_DetailRevisionAndExecutionFactsReevaluateSdkExpiryWithoutRefresh()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("crossing", "Needle-Skill");
+        fixture.RefreshWorkspace();
+
+        var before = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Summary);
+        var executionId = Assert.Single(before.Detail.Executions).ExecutionId;
+        var beforeTimeline = await fixture.ReadDetailAsync(
+            "crossing", LocalRepositorySessionDetailRequestKind.Timeline, executionId);
+        Assert.Equal(1, Assert.Single(before.Detail.Executions).Activity.Skill.Value);
+        Assert.Contains(beforeTimeline.Detail.Nodes, static node => node.SourceKind == "skill_invocation");
+
+        fixture.AdvancePastLatestSdkExpiry("crossing");
+
+        var after = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Summary);
+        var afterTimeline = await fixture.ReadDetailAsync(
+            "crossing", LocalRepositorySessionDetailRequestKind.Timeline, executionId);
+        Assert.Equal("not_observed", Assert.Single(after.Detail.Executions).Activity.Skill.State);
+        Assert.Null(Assert.Single(after.Detail.Executions).Activity.Skill.Value);
+        Assert.DoesNotContain(afterTimeline.Detail.Nodes, static node => node.SourceKind == "skill_invocation");
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+    }
+
     private static void AssertFilteredAdmittedSummary(CurrentInvocationProjectionFixture fixture, JsonDocument filtered)
     {
         var admitted = Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray());
@@ -534,6 +559,22 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         Assert.Equal(LocalMonitorV1SessionSearchParseStatus.Success,
             LocalMonitorV1SessionSearchRequestParser.Parse(Encoding.UTF8.GetBytes(requestJson), out var request));
         return LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request!, new byte[32]);
+    }
+
+    internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
+        string sessionKey,
+        LocalRepositorySessionDetailRequestKind kind,
+        string? executionId = null)
+    {
+        var clock = new FixedTimeProvider(readAt);
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
+                registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority);
+        return service.ReadDetailAsync(new(kind, sessions[sessionKey], ExecutionId: executionId), CancellationToken.None);
     }
 
     internal void AssertWorkspaceSkill(string sessionKey, string state, int? count, string[] searchFacts)
