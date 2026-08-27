@@ -119,9 +119,15 @@ internal static class LocalWorkspaceProjectionSchemaV1
             );
             """),
     ];
+    private static readonly SqliteOwnedSchemaDefinition V4Sessions = new("table", "local_workspace_sessions", "local_workspace_sessions",
+        V3Definitions[0].Sql.Replace(
+            "revision_seed TEXT NOT NULL,",
+            "revision_seed TEXT NOT NULL,\n                node_overflow INTEGER NOT NULL CHECK(node_overflow IN (0,1)),",
+            StringComparison.Ordinal));
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
     [
-        .. V3Definitions,
+        V4Sessions,
+        .. V3Definitions.Skip(1),
         new("table", "local_workspace_execution_headers", "local_workspace_execution_headers", """
             CREATE TABLE local_workspace_execution_headers (
                 execution_id TEXT PRIMARY KEY CHECK(length(execution_id)=36),
@@ -403,14 +409,16 @@ internal static class LocalWorkspaceProjectionSchemaV1
             foreach (var table in V2TableNames.Reverse()) Execute(connection, transaction, $"DROP TABLE {table};");
             foreach (var definition in V3Definitions) Execute(connection, transaction, definition.Sql);
             BackfillSpanFacts(connection, transaction);
-            RefreshProjection(connection, transaction, now, skillRegistryAuthority);
             Execute(connection, transaction, "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection' AND version=2;");
             version = 3;
             owned = ReadOwnedObjects(connection, transaction);
         }
         if (version == 3 && SqliteOwnedSchemaAuthority.Equal(owned, SqliteOwnedSchemaAuthority.Compile(V3Definitions)))
         {
-            foreach (var definition in Definitions.Skip(V3Definitions.Count)) Execute(connection, transaction, definition.Sql);
+            foreach (var table in V3Definitions.Where(static definition => definition.Type == "table").Select(static definition => definition.Name).Reverse())
+                Execute(connection, transaction, $"DROP TABLE {table};");
+            foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
+            BackfillSpanFacts(connection, transaction);
             RefreshProjection(connection, transaction, now, skillRegistryAuthority);
             ValidateSemanticRows(connection, transaction);
             beforeV4Stamp?.Invoke();
@@ -512,7 +520,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
               {retentionValidation}
               OR EXISTS(SELECT 1 FROM local_workspace_nodes WHERE source_kind='skill_invocation' AND otel_source_identity IS NULL AND sdk_source_identity IS NULL)
               OR EXISTS(SELECT 1 FROM local_workspace_execution_headers GROUP BY session_id HAVING COUNT(*)>257)
-              OR EXISTS(SELECT 1 FROM local_workspace_nodes GROUP BY session_id HAVING COUNT(*)>4097);
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes GROUP BY session_id HAVING COUNT(*)>4097)
+              OR EXISTS(SELECT 1 FROM local_workspace_sessions s WHERE s.node_overflow=0 AND (SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.session_id=s.session_id)>4096);
             """;
         if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidOperationException("local_workspace_projection_semantic_validation_failed");

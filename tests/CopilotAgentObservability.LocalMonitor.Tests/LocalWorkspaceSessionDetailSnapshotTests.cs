@@ -68,23 +68,52 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
-    public async Task NodeReadRejectsFourThousandNinetySevenSourceProjectedNodesAfterProjectionSucceeds()
+    public async Task DurableNodeOverflowMarkerRejectsEveryDetailReadAndClearsAfterSourceShrink()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown'); INSERT INTO session_runs VALUES('run-2','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown'); INSERT INTO session_events VALUES('event-zzzz','018f0000-0000-7000-8000-000000000001','run-2','copilot-sdk',NULL,NULL,NULL,'synthetic','source-parent','event','2026-08-26T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);");
         for (var index = 0; index < 4096; index++)
-            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"INSERT INTO session_events VALUES('event-{index:D4}','018f0000-0000-7000-8000-000000000001','run-1','copilot-sdk',NULL,NULL,NULL,'synthetic','source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);");
+        {
+            var parent = index == 0 ? "'event-zzzz'" : "NULL";
+            var relationship = index == 0 ? "'explicit_link'" : "NULL";
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"INSERT INTO session_events VALUES('event-{index:D4}','018f0000-0000-7000-8000-000000000001','run-1','copilot-sdk',{parent},NULL,NULL,'synthetic','source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,{relationship},NULL,NULL);");
+        }
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE source_kind='execution_root';").Single();
-        using var transaction = connection.BeginTransaction();
-        var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(
-            registryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE source_kind='execution_root' AND source_identity='run-1';").Single();
+        Assert.Equal("1", LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(node_overflow AS TEXT) FROM local_workspace_sessions;").Single());
+        var retainedCount = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_nodes;").Single();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal(retainedCount, LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_nodes;").Single());
+        Assert.Equal("1", LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(node_overflow AS TEXT) FROM local_workspace_sessions;").Single());
 
-        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
-            await contributor.ReadAsync(new DirectReadTransaction(connection, transaction),
-                new(LocalRepositorySessionDetailRequestKind.Node, SessionId, NodeId: rootId), CancellationToken.None));
+        foreach (var request in new[]
+        {
+            new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Summary, SessionId),
+            new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Timeline, SessionId),
+            new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Node, SessionId, NodeId: rootId),
+            new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Content, SessionId, NodeId: rootId, ContentPart: "event_content"),
+        })
+        {
+            using var transaction = connection.BeginTransaction();
+            var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+            var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+                await contributor.ReadAsync(new DirectReadTransaction(connection, transaction), request, CancellationToken.None));
+            Assert.Equal("workspace_too_large", error.Error);
+        }
 
-        Assert.Equal("workspace_too_large", error.Error);
+        using (var restored = new SqliteConnection("Data Source=:memory:"))
+        {
+            restored.Open();
+            connection.BackupDatabase(restored);
+            LocalWorkspaceProjectionSchemaV1.Validate(restored, null);
+            Assert.Equal("1", LocalWorkspaceProjectionSchemaTests.Strings(restored, "SELECT CAST(node_overflow AS TEXT) FROM local_workspace_sessions;").Single());
+        }
+
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "DELETE FROM session_events WHERE event_id NOT IN ('event-0000','event-zzzz');");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal("0", LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(node_overflow AS TEXT) FROM local_workspace_sessions;").Single());
+        Assert.Equal(["event-0000", "event-zzzz"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT source_identity FROM local_workspace_nodes WHERE source_kind='session_event' ORDER BY source_identity;"));
     }
 
     [Fact]

@@ -7,7 +7,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     internal const string BoundsSql = """
         SELECT
           EXISTS(SELECT 1 FROM local_workspace_execution_headers WHERE session_id=$session_id LIMIT 1 OFFSET 256),
-          EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id LIMIT 1 OFFSET 4096);
+          EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id LIMIT 1 OFFSET 4096)
+            OR COALESCE((SELECT node_overflow FROM local_workspace_sessions WHERE session_id=$session_id),0);
         """;
     private const int MaximumExecutions = 256;
     private const int MaximumNodes = 4096;
@@ -605,7 +606,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT r.id,r.source,r.trace_id,r.received_at,r.schema_version,r.retention_owner_token FROM raw_records r WHERE EXISTS(SELECT 1 FROM monitor_spans m JOIN session_runs s ON s.trace_id=m.trace_id WHERE s.session_id=$session_id AND m.raw_record_id=r.id) ORDER BY r.id",
             "SELECT f.* FROM local_workspace_span_facts f JOIN monitor_spans m ON m.raw_record_id=f.raw_record_id AND m.span_ordinal=f.span_ordinal WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY f.raw_record_id,f.span_ordinal",
             "SELECT c.event_id,c.content_kind,c.captured_at,c.expires_at,c.retention_owner_token FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id=$session_id ORDER BY c.event_id",
-            "SELECT * FROM local_workspace_sessions WHERE session_id=$session_id",
+            "SELECT session_id,sort_group,sort_epoch_ms,label_state,label_text,label_source_identity,label_expires_at,status,completeness,source_state,model_state,timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed FROM local_workspace_sessions WHERE session_id=$session_id",
             "SELECT * FROM local_workspace_execution_headers WHERE session_id=$session_id ORDER BY execution_id LIMIT 257",
             "SELECT * FROM local_workspace_nodes WHERE session_id=$session_id ORDER BY node_id LIMIT 4097",
             "SELECT e.* FROM local_workspace_node_edges e JOIN local_workspace_nodes n ON n.node_id=e.node_id WHERE n.session_id=$session_id ORDER BY e.node_id,e.related_node_id,e.relation_kind",
@@ -623,6 +624,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             while(await reader.ReadAsync(token)) for(var i=0;i<reader.FieldCount;i++) Append(reader.GetValue(i));
             hash.AppendData([0xff]);
         }
+        using (var overflow = Command(c, t, "SELECT node_overflow FROM local_workspace_sessions WHERE session_id=$session_id", sessionId))
+            if (Convert.ToInt64(await overflow.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) != 0)
+                Append("node_overflow");
         Append(skillProjection?.State ?? "not_observed");
         foreach (var invocation in skillProjection?.Invocations.OrderBy(static value => value.CanonicalIdentity, StringComparer.Ordinal)
             ?? Enumerable.Empty<SkillProjectionCanonicalInvocation>())
