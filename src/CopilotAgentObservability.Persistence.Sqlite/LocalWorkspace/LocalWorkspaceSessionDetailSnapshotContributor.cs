@@ -43,7 +43,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         await ValidateBounds(connection, transaction, sessionId, token);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
             await ValidateNodeAncestry(connection, transaction, request, token);
-        var projectedNodes = await ReadNodes(connection, transaction, request, token);
+        var projectedNodes = NormalizeCurrentSkillNodes(
+            await ReadNodes(connection, transaction, request, token), skillProjection);
         var admittedSkillIdentities = skillProjection?.State == "current"
             ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).ToHashSet(StringComparer.Ordinal)
             : [];
@@ -68,6 +69,27 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var registryIdentity = ReadRegistryIdentity();
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+    }
+
+    private static LocalWorkspaceNodeDetail[] NormalizeCurrentSkillNodes(
+        LocalWorkspaceNodeDetail[] nodes,
+        SkillProjectionCurrentInvocationProjection? projection)
+    {
+        if (projection?.State != "current") return nodes;
+        var current = projection.Invocations.ToDictionary(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal);
+        return nodes.Select(node =>
+        {
+            if (node.SourceKind != "skill_invocation" || !current.TryGetValue(node.SourceIdentity, out var invocation))
+                return node;
+            return node with
+            {
+                NameState = string.IsNullOrWhiteSpace(invocation.SdkSkillName ?? invocation.OtelSkillName) ? "invalid" : "recorded",
+                NameText = invocation.SdkSkillName ?? invocation.OtelSkillName,
+                TraceId = invocation.ProducerTraceId,
+                SpanId = invocation.ProducerSpanId,
+                EventId = invocation.SdkCarrierEventId ?? invocation.OtelCarrierEventId,
+            };
+        }).ToArray();
     }
 
     private static LocalWorkspaceExecutionDetail[] ApplyCurrentSkillActivity(

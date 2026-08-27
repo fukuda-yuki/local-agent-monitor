@@ -586,7 +586,9 @@ internal sealed class SkillProjectionReadService
         string? SourceAdapter);
 
     private static SkillProjectionCanonicalInvocation ToOtelOnlyCanonical(InvocationFact row) => new(
-        row.Fact.SourceIdentity,
+        row.TraceId is not null && row.SpanId is not null
+            ? "producer:" + row.TraceId + ":" + row.SpanId
+            : row.Fact.SourceIdentity,
         row.Fact.SessionId,
         row.TraceId,
         row.SpanId,
