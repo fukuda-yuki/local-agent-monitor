@@ -372,9 +372,9 @@ public sealed class RetentionWorkerRaceTests
         Exception? callbackException = null;
         var callbackThread = new Thread(() =>
         {
-            callbackStarted.Set();
             try
             {
+                callbackStarted.Set();
                 time.Timers[1].Fire();
             }
             catch (Exception exception)
@@ -383,25 +383,43 @@ public sealed class RetentionWorkerRaceTests
             }
             finally
             {
-                callbackReturned.Set();
+                try
+                {
+                    callbackReturned.Set();
+                }
+                catch (Exception exception)
+                {
+                    callbackException ??= exception;
+                }
             }
         })
         {
             IsBackground = true,
         };
-        callbackThread.Start();
+        var callbackStartedInTime = false;
+        var callbackReturnedInTime = false;
+        var releaseEnteredInTime = false;
+        var callbackThreadStarted = false;
+        var callbackJoined = false;
         try
         {
-            Assert.True(callbackStarted.Wait(TimeSpan.FromSeconds(5)));
-            Assert.True(callbackReturned.Wait(TimeSpan.FromSeconds(5)));
-            Assert.Null(callbackException);
-            Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
+            callbackThread.Start();
+            callbackThreadStarted = true;
+            callbackStartedInTime = callbackStarted.Wait(TimeSpan.FromSeconds(5));
+            callbackReturnedInTime = callbackReturned.Wait(TimeSpan.FromSeconds(5));
+            releaseEnteredInTime = releaseEntered.Wait(TimeSpan.FromSeconds(5));
         }
         finally
         {
             allowRelease.Set();
+            callbackJoined = !callbackThreadStarted || callbackThread.Join(TimeSpan.FromSeconds(5));
+            await handle.DisposeAsync();
         }
-        await handle.DisposeAsync();
+        Assert.True(callbackStartedInTime);
+        Assert.True(callbackReturnedInTime);
+        Assert.Null(callbackException);
+        Assert.True(releaseEnteredInTime);
+        Assert.True(callbackJoined);
     }
 
     [Fact]
