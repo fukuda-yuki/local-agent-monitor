@@ -518,7 +518,7 @@ internal sealed class SkillProjectionReadService
         if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction))
             return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
 
-        var sdkAuthorityInstalled = SkillInvocationSnapshotSchemaV1Validator.IsValid(connection, transaction);
+        var sdkAuthorityInstalled = IsSdkAuthorityReadable(connection, transaction);
         var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
         IReadOnlySet<string> unavailableSdkSessions = registryAuthority is null && sdkAuthorityInstalled
             ? ReadSdkSessionIds(connection, transaction, sessionIds)
@@ -592,6 +592,9 @@ internal sealed class SkillProjectionReadService
         while (reader.Read()) result.Add(reader.GetString(0));
         return result;
     }
+
+    private static bool IsSdkAuthorityReadable(SqliteConnection connection, SqliteTransaction transaction) =>
+        SkillInvocationSnapshotSchemaV1.ReadDeclaredVersion(connection, transaction) == SkillInvocationSnapshotSchemaV1.Version;
 
     private sealed record InvocationFact(
         SkillProjectionCurrentSearchFact Fact,
@@ -720,7 +723,7 @@ internal sealed class SkillProjectionReadService
     {
         var unavailable = new HashSet<string>(StringComparer.Ordinal);
         unavailableSessions = unavailable;
-        if (!SkillInvocationSnapshotSchemaV1Validator.IsValid(connection, transaction)) return [];
+        if (!IsSdkAuthorityReadable(connection, transaction)) return [];
         var candidates = ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider);
         var result = new List<InvocationFact>();
         var authorizations = new Dictionary<SkillRegistryProducerTuple, SkillProjectionCurrentSdkClaimAuthorizationResult>();

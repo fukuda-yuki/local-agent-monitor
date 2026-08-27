@@ -599,12 +599,15 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         {
             this.temp = temp;
             this.projection = projection;
+            var registryAuthority = FixedSkillRegistryGenerationAuthority.Load();
             service = new SqliteLocalRepositoryScopeSnapshotService(
                 temp.DatabasePath,
                 new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider,
-                    registryAuthority: FixedSkillRegistryGenerationAuthority.Load()),
+                    registryAuthority: registryAuthority),
                 SqliteLocalArchiveFactSnapshotContributor.Instance,
-                skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+                detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
+                    registryAuthority: registryAuthority, timeProvider: temp.TimeProvider),
+                skillRegistryAuthority: registryAuthority);
         }
 
         internal static async Task<SkillRevisionFixture> CreateAsync(string arm)
