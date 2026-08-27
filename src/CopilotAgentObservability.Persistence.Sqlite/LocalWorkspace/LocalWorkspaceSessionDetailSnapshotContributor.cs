@@ -47,7 +47,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             await ValidateNodeAncestry(connection, transaction, request, token);
         var projectedNodes = NormalizeCurrentSkillNodes(
             await ReadNodes(connection, transaction, request, token), skillProjection);
-        var persistedNodeIds = projectedNodes.Select(static node => node.NodeId).ToHashSet(StringComparer.Ordinal);
+        var persistedNodeIds = await ReadPersistedCurrentSkillNodeIds(connection, transaction, sessionId, skillProjection, token);
         projectedNodes = await AddMissingCurrentSkillNodes(
             connection, transaction, request, projectedNodes, skillProjection, token);
         var synthesizedSkillNodes = projectedNodes.Where(node => node.SourceKind == "skill_invocation" && !persistedNodeIds.Contains(node.NodeId)).ToArray();
@@ -86,6 +86,23 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private static bool IsCurrentSkillNode(string? nodeId, SkillProjectionCurrentInvocationProjection? projection) =>
         nodeId is not null && projection?.State == "current" && projection.Invocations.Any(invocation =>
             string.Equals(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity), nodeId, StringComparison.Ordinal));
+
+    private static async Task<HashSet<string>> ReadPersistedCurrentSkillNodeIds(
+        SqliteConnection connection, SqliteTransaction transaction, string sessionId,
+        SkillProjectionCurrentInvocationProjection? projection, CancellationToken token)
+    {
+        var ids = projection?.State == "current"
+            ? projection.Invocations.Select(static invocation => LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)).ToArray()
+            : [];
+        if (ids.Length == 0) return new(StringComparer.Ordinal);
+        using var command = Command(connection, transaction,
+            "SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));", sessionId);
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(ids));
+        using var reader = await command.ExecuteReaderAsync(token);
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(token)) result.Add(reader.GetString(0));
+        return result;
+    }
 
     private static async Task<LocalWorkspaceNodeDetail[]> AddMissingCurrentSkillNodes(
         SqliteConnection connection,
@@ -136,7 +153,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
                 && request.ExecutionId is not null && !string.Equals(request.ExecutionId, executionId, StringComparison.Ordinal)) continue;
             if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ParentNodeId is not null
-                && !string.Equals(request.ParentNodeId, reader.GetString(2), StringComparison.Ordinal)) continue;
+                && !string.Equals(request.ParentNodeId, reader.GetString(2), StringComparison.Ordinal)
+                && !string.Equals(request.ParentNodeId, nodeId, StringComparison.Ordinal)) continue;
             var ticks = reader.IsDBNull(3) || !DateTimeOffset.TryParse(reader.GetString(3), System.Globalization.CultureInfo.InvariantCulture,
                 System.Globalization.DateTimeStyles.RoundtripKind, out var occurredAt)
                 ? (long?)null
@@ -298,7 +316,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                           SELECT 1 FROM local_workspace_nodes n WHERE n.session_id=$session_id AND n.node_id=CAST(j.value AS TEXT)));
                 """, sessionId);
             effective.Parameters.AddWithValue("$identities", System.Text.Json.JsonSerializer.Serialize(identities));
-            nodeOverflow |= Convert.ToInt64(await effective.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) > MaximumNodes ? 1 : 0;
+            if (Convert.ToInt64(await effective.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) > MaximumNodes)
+                nodeOverflow = 1;
         }
         if (executionOverflow != 0 || nodeOverflow != 0)
             throw new LocalWorkspaceSessionDetailException("workspace_too_large");
@@ -386,6 +405,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LocalRepositorySessionDetailRequestKind.Node => 4097,
             _ => request.Limit + 1
         };
+        var orderPrefix = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ExecutionId is null
+            ? ""
+            : "execution_id,";
         using var command = Command(c, t, $"""
             SELECT node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,
               skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
@@ -394,7 +416,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             FROM local_workspace_nodes
             LEFT JOIN (SELECT parent_node_id child_parent_id,COUNT(*) child_count FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id IS NOT NULL GROUP BY parent_node_id) children
               ON children.child_parent_id=local_workspace_nodes.node_id
-            WHERE {predicate} ORDER BY execution_id,
+            WHERE {predicate} ORDER BY {orderPrefix}
               CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,
               CASE WHEN time_authority='recorded' THEN start_utc_ticks END,source_ordinal,node_id LIMIT {limit};
             """, request.SessionId);
