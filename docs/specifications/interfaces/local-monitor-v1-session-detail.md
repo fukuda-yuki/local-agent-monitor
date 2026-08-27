@@ -35,12 +35,21 @@ JSON error representation. `OPTIONS` is not a CORS preflight response.
 Each complete JSON success entity is bounded to 8,388,608 UTF-8 bytes; overflow
 is `workspace_too_large` and no partial JSON is returned.
 
-After the common Host guard, precedence is:
+For the raw-content route only, the same-origin guard rejects a browser
+`Sec-Fetch-Site` value other than `same-origin` or `none`, and rejects a
+nonempty `Origin` other than the request's exact scheme/host/port
+(case-insensitive). Absence of either header is allowed. Its GET and HEAD
+response is exact `403` with `{"error":"csrf_rejected"}`;
+HEAD keeps the GET representation length and emits no entity bytes. No CORS
+header is emitted.
+
+Precedence is:
 
 ```text
 method
 -> path identifier grammar
 -> complete closed query grammar
+-> same-origin guard (content only)
 -> exact Session existence
 -> workspace revision recomputation/equality
 -> exact execution/node membership
@@ -61,6 +70,7 @@ All errors are exact compact JSON `{"error":"<fixed_code>"}`.
 | Invalid Host | `400 invalid_host` |
 | Wrong method | `405 method_not_allowed` |
 | Malformed path ID, unknown/duplicate/missing query, invalid value | `400 invalid_request` |
+| Cross-site content request | `403 csrf_rejected` |
 | Invalid/tampered/restarted/filter-mismatched timeline cursor | `400 invalid_cursor` |
 | Valid absent Session | `404 session_not_found` |
 | Valid absent/mismatched execution | `404 execution_not_found` |

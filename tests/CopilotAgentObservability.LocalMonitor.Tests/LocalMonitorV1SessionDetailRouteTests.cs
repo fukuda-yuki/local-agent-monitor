@@ -4,6 +4,7 @@ using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -189,9 +190,12 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(observedPublicationLease);
-        using var completedProof = Open(temp);
-        Assert.Equal("0", Scalar(completedProof,
-            "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+        Assert.True(SpinWait.SpinUntil(() =>
+        {
+            using var completedProof = Open(temp);
+            return Scalar(completedProof,
+                "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId) == "0";
+        }, TimeSpan.FromSeconds(5)));
     }
 
     [Theory]
@@ -781,6 +785,183 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Equal(HttpStatusCode.BadRequest,response.StatusCode);Assert.Equal(27,response.Content.Headers.ContentLength);Assert.Empty(await response.Content.ReadAsByteArrayAsync());
     }
 
+    [Theory]
+    [InlineData("GET", "Origin", "https://example.test")]
+    [InlineData("HEAD", "Origin", "https://example.test")]
+    [InlineData("GET", "Sec-Fetch-Site", "cross-site")]
+    [InlineData("HEAD", "Sec-Fetch-Site", "same-site")]
+    public async Task ContentCrossSiteGetAndHeadReturnExactCsrfRejectionWithoutCors(
+        string method,
+        string headerName,
+        string headerValue)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var request = new HttpRequestMessage(new HttpMethod(method),
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-00000000000000000000000000000000/content?workspace_revision={new string('0', 64)}&part=instruction");
+        request.Headers.TryAddWithoutValidation(headerName, headerValue);
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.Equal(25, response.Content.Headers.ContentLength);
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+        Assert.Equal(method == "HEAD" ? [] : "{\"error\":\"csrf_rejected\"}"u8.ToArray(),
+            await response.Content.ReadAsByteArrayAsync());
+        Assert.DoesNotContain("Access-Control-Allow-Origin", response.Headers.Select(header => header.Key));
+        Assert.DoesNotContain("ETag", response.Headers.Select(header => header.Key));
+        Assert.DoesNotContain("Location", response.Headers.Select(header => header.Key));
+        Assert.DoesNotContain("Set-Cookie", response.Headers.Select(header => header.Key));
+    }
+
+    [Fact]
+    public async Task SanitizedOnlyProductionCompositionDoesNotRegisterDetailOrContentEndpoints()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true);
+        var patterns = host.Services.GetServices<Microsoft.AspNetCore.Routing.EndpointDataSource>()
+            .SelectMany(source => source.Endpoints)
+            .OfType<Microsoft.AspNetCore.Routing.RouteEndpoint>()
+            .Select(endpoint => endpoint.RoutePattern.RawText)
+            .Where(pattern => pattern?.StartsWith("/api/local-monitor/v1/sessions/", StringComparison.Ordinal) == true)
+            .ToArray();
+
+        using var summary = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var content = await host.Client.GetAsync(
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-00000000000000000000000000000000/content?workspace_revision={new string('0', 64)}&part=instruction");
+
+        Assert.Empty(patterns);
+        Assert.Equal(HttpStatusCode.NotFound, summary.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, content.StatusCode);
+        Assert.Empty(await summary.Content.ReadAsByteArrayAsync());
+        Assert.Empty(await content.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task RetainedRawBackupRestoreServesActualContentGetAndHead()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "restored-retained-content-marker";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        RestoreRuntimeBackupOverSource(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+
+        using var get = await host.Client.GetAsync(path);
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal(marker, await get.Content.ReadAsStringAsync());
+        Assert.Equal(marker.Length, get.Content.Headers.ContentLength);
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(marker.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task DeletedTombstoneBackupRestoreReturnsExactGoneWithoutResurrectionOrRaw()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "deleted-restored-raw-must-not-publish";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        Assert.Null(TryExecuteDeleteNow(temp, 61));
+        await using (var deletionHost = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
+            StartSessionOtelEnrichment = false, StartLocalRepositoryCatalogHostedService = false,
+            StartRetentionCleanupWorker = false, UseUserSecrets = false,
+        }))
+        {
+            var worker = new RetentionCleanupWorker(new RetentionCleanupCoordinator(
+                deletionHost.Services.GetRequiredService<RetentionCatalogStore>(),
+                deletionHost.Services.GetRequiredService<RetentionAdapterRegistry>(), temp.TimeProvider), temp.TimeProvider);
+            await worker.RunOnceAsync(CancellationToken.None);
+        }
+        RestoreRuntimeBackupOverSource(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+        {
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+            Assert.Equal("0", Scalar(connection, "SELECT CAST(COUNT(*) AS TEXT) FROM session_event_content WHERE event_id=$execution;", SessionId,
+                "018f0000-0000-7000-8000-000000000004"));
+        }
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+
+        using var get = await host.Client.GetAsync(path);
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+        var getBytes = await get.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.Gone, get.StatusCode);
+        Assert.Equal("{\"error\":\"raw_content_deleted\"}"u8.ToArray(), getBytes);
+        Assert.DoesNotContain(marker, System.Text.Encoding.UTF8.GetString(getBytes), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.Gone, head.StatusCode);
+        Assert.Equal(getBytes.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task RawMarkerAndInjectedExceptionContentNeverEnterLogsOrActivityTelemetry()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "raw-log-telemetry-secret-marker";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        var logs = new List<string>();
+        var activities = new List<string>();
+        using var listener = new System.Diagnostics.ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref System.Diagnostics.ActivityCreationOptions<System.Diagnostics.ActivityContext> _) =>
+                System.Diagnostics.ActivitySamplingResult.AllData,
+            ActivityStopped = activity => activities.Add(string.Join('|',
+                new[] { activity.DisplayName, activity.OperationName }
+                    .Concat(activity.TagObjects.Select(tag => $"{tag.Key}={tag.Value}")))),
+        };
+        System.Diagnostics.ActivitySource.AddActivityListener(listener);
+        var options = new MonitorHostTestOptions
+        {
+            StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
+            StartSessionOtelEnrichment = false, StartLocalRepositoryCatalogHostedService = false,
+            UseUserSecrets = false,
+            LocalMonitorNodeContentRouteCheckpoint = phase =>
+            {
+                if (phase == LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant)
+                    throw new InvalidOperationException("injected-exception-" + marker);
+            },
+            AdditionalServices = services => services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(
+                new CollectingLoggerProvider(logs)),
+        };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+
+        using var response = await host.Client.GetAsync(path);
+        var error = await response.Content.ReadAsStringAsync();
+
+        Assert.True(response.StatusCode == HttpStatusCode.ServiceUnavailable, $"{response.StatusCode}: {error}");
+        Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}", error);
+        Assert.DoesNotContain(marker, string.Join('\n', logs), StringComparison.Ordinal);
+        Assert.DoesNotContain(marker, string.Join('\n', activities), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ContentOuterHostGuardWinsBeforeMethodIdentifiersAndQuery()
     {
@@ -930,6 +1111,40 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Equal("node-00000000000000000000000000000001", request.ParentNodeId);
         Assert.Equal(17, request.Limit);
         Assert.Null(request.After);
+    }
+
+    private static void RestoreRuntimeBackupOverSource(MonitorTempDirectory temp)
+    {
+        var bundle = Path.Combine(temp.Path, "session-detail-backup.zip");
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+        var initialization = service.InitializeForMonitor(temp.DatabasePath);
+        initialization.Lease?.Dispose();
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        var created = service.CreateAndPublish(temp.DatabasePath, bundle);
+        Assert.True(created.Success, created.ErrorCode);
+        File.Delete(temp.DatabasePath);
+        File.Delete(temp.DatabasePath + "-wal");
+        File.Delete(temp.DatabasePath + "-shm");
+        var restored = service.Restore(bundle, temp.DatabasePath, new RuntimeRestoreOptions());
+        Assert.True(restored.Success, restored.ErrorCode);
+    }
+
+    private sealed class CollectingLoggerProvider(List<string> entries) : Microsoft.Extensions.Logging.ILoggerProvider
+    {
+        public Microsoft.Extensions.Logging.ILogger CreateLogger(string categoryName) => new CollectingLogger(categoryName, entries);
+        public void Dispose() { }
+
+        private sealed class CollectingLogger(string category, List<string> entries) : Microsoft.Extensions.Logging.ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+            public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+                TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                lock (entries)
+                    entries.Add($"{category}|{logLevel}|{eventId.Id}|{formatter(state, exception)}|{exception?.GetType().Name}");
+            }
+        }
     }
 
     private sealed class CapturingDetailService : ILocalRepositorySessionDetailSnapshotService
@@ -1378,6 +1593,69 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         var bytes = await response.Content.ReadAsByteArrayAsync();
         Assert.Equal(method == "HEAD" ? [] : System.Text.Encoding.UTF8.GetBytes("{\"error\":\"workspace_snapshot_stale\"}"), bytes);
         Assert.DoesNotContain("replaced", System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("retention_item_id")]
+    [InlineData("source_item_id")]
+    [InlineData("retention_revision")]
+    [InlineData("revision_input")]
+    [InlineData("locator")]
+    [InlineData("selected_utf8_bytes")]
+    [InlineData("store_kind")]
+    [InlineData("retention_store_instance_id")]
+    [InlineData("source_captured_at")]
+    [InlineData("source_expires_at")]
+    [InlineData("retention_ownership_receipt")]
+    [InlineData("retention_owner_token")]
+    public async Task PersistedLocatorTupleDriftAfterSnapshotReturnsFixedStaleWithoutRaw(string field)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "locator-drift-raw-marker";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        var mutated = false;
+        using var host = await StartProductionDetailRouteAsync(temp, phase =>
+        {
+            if (phase != LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant || mutated) return;
+            mutated = true;
+            using var connection = Open(temp);
+            using var command = connection.CreateCommand();
+            command.CommandText = field switch
+            {
+                "retention_item_id" => "UPDATE local_workspace_node_content_refs SET retention_item_id='missing-item' WHERE node_id=$node AND part='instruction';",
+                "source_item_id" => "UPDATE local_workspace_node_content_refs SET source_item_id='018f0000-0000-7000-8000-000000000099' WHERE node_id=$node AND part='instruction';",
+                "retention_revision" => "UPDATE local_workspace_node_content_refs SET retention_revision=retention_revision+1 WHERE node_id=$node AND part='instruction';",
+                "revision_input" => "UPDATE local_workspace_node_content_refs SET revision_input='drifted' WHERE node_id=$node AND part='instruction';",
+                "locator" => "UPDATE local_workspace_node_content_refs SET json_pointer='/error' WHERE node_id=$node AND part='instruction';",
+                "selected_utf8_bytes" => "UPDATE local_workspace_node_content_refs SET selected_utf8_bytes=selected_utf8_bytes+1 WHERE node_id=$node AND part='instruction';",
+                "store_kind" => "UPDATE local_workspace_node_content_refs SET store_kind='wrong_store' WHERE node_id=$node AND part='instruction';",
+                "retention_store_instance_id" => "UPDATE local_workspace_node_content_refs SET retention_store_instance_id='wrong-store' WHERE node_id=$node AND part='instruction';",
+                "source_captured_at" => "UPDATE local_workspace_node_content_refs SET source_captured_at='2026-08-26T01:02:04.0000000+00:00' WHERE node_id=$node AND part='instruction';",
+                "source_expires_at" => "UPDATE local_workspace_node_content_refs SET source_expires_at='2026-09-26T01:02:04.0000000+00:00' WHERE node_id=$node AND part='instruction';",
+                "retention_ownership_receipt" => "UPDATE local_workspace_node_content_refs SET retention_ownership_receipt=zeroblob(32) WHERE node_id=$node AND part='instruction';",
+                "retention_owner_token" => "UPDATE local_workspace_node_content_refs SET retention_owner_token=zeroblob(32) WHERE node_id=$node AND part='instruction';",
+                _ => throw new ArgumentOutOfRangeException(nameof(field)),
+            };
+            command.Parameters.AddWithValue("$node", nodeId);
+            command.ExecuteNonQuery();
+        });
+        var revision = await Revision(host.Client);
+
+        using var response = await host.Client.GetAsync(
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction");
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+
+        Assert.True(mutated);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("{\"error\":\"workspace_snapshot_stale\"}"u8.ToArray(), bytes);
+        Assert.DoesNotContain(marker, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
     }
 
     [Theory]

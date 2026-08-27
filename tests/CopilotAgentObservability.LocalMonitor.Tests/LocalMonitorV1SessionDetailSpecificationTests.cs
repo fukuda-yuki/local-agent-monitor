@@ -241,7 +241,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     {
         using var contract = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "transport-contract.json")));
         var root = contract.RootElement;
-        AssertProperties(root, "schema_version", "routes", "query_fields", "error_precedence", "errors", "success_headers", "error_headers", "forbidden_headers", "json_max_bytes", "raw_max_bytes", "content_parts");
+        AssertProperties(root, "schema_version", "routes", "query_fields", "same_origin", "error_precedence", "errors", "success_headers", "error_headers", "forbidden_headers", "json_max_bytes", "raw_max_bytes", "content_parts");
         Assert.Equal("local-monitor-session-detail.transport.v1", root.GetProperty("schema_version").GetString());
         Assert.Equal(4, root.GetProperty("routes").GetArrayLength());
         var expectedRoutes = new Dictionary<string, (string Path, string MediaType, string SchemaToken, (string Name, string Value)[] Headers)>(StringComparer.Ordinal)
@@ -281,11 +281,20 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertQueryField(queries["after"], "after", [], null, "^[A-Za-z0-9_-]{158}[AEIMQUYcgkosw048]$", null, null, null, null);
         AssertQueryField(queries["limit"], "limit", [], null, "^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$", 1, 200, 100, null);
         AssertQueryField(queries["part"], "part", ["content"], null, null, null, null, null, ContentParts);
-        Assert.Equal(new[] { "host", "method", "path_identifier", "closed_query", "session", "workspace_revision", "execution_or_node_membership", "cursor", "retention_lease" }, root.GetProperty("error_precedence").EnumerateArray().Select(value => value.GetString()));
+        var sameOrigin = root.GetProperty("same_origin");
+        AssertProperties(sameOrigin, "applies_to", "status", "code", "bytes", "allowed_sec_fetch_site", "allowed_origin");
+        Assert.Equal(new[] { "content" }, sameOrigin.GetProperty("applies_to").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(403, sameOrigin.GetProperty("status").GetInt32());
+        Assert.Equal("csrf_rejected", sameOrigin.GetProperty("code").GetString());
+        Assert.Equal("{\"error\":\"csrf_rejected\"}", sameOrigin.GetProperty("bytes").GetString());
+        Assert.Equal(new[] { "absent", "same-origin", "none" }, sameOrigin.GetProperty("allowed_sec_fetch_site").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(new[] { "absent", "exact_request_origin_case_insensitive" }, sameOrigin.GetProperty("allowed_origin").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(new[] { "host", "method", "path_identifier", "closed_query", "same_origin_content_only", "session", "workspace_revision", "execution_or_node_membership", "cursor", "retention_lease" }, root.GetProperty("error_precedence").EnumerateArray().Select(value => value.GetString()));
 
         var expectedErrors = new (int Status, string Code, string Bytes)[]
         {
-            (400, "invalid_host", "{\"error\":\"invalid_host\"}"), (405, "method_not_allowed", "{\"error\":\"method_not_allowed\"}"),
+            (400, "invalid_host", "{\"error\":\"invalid_host\"}"), (403, "csrf_rejected", "{\"error\":\"csrf_rejected\"}"),
+            (405, "method_not_allowed", "{\"error\":\"method_not_allowed\"}"),
             (400, "invalid_request", "{\"error\":\"invalid_request\"}"), (400, "invalid_cursor", "{\"error\":\"invalid_cursor\"}"),
             (404, "session_not_found", "{\"error\":\"session_not_found\"}"), (404, "execution_not_found", "{\"error\":\"execution_not_found\"}"),
             (404, "node_not_found", "{\"error\":\"node_not_found\"}"), (409, "workspace_snapshot_stale", "{\"error\":\"workspace_snapshot_stale\"}"),
