@@ -216,7 +216,9 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             || request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
             && request.NodeId is not null
             || request.Kind == LocalRepositorySessionDetailRequestKind.Node
-            && (request.NodeId is null || request.ExecutionId is not null || request.ParentNodeId is not null || request.After is not null))
+            && (request.NodeId is null || request.ExecutionId is not null || request.ParentNodeId is not null || request.After is not null || request.ContentPart is not null)
+            || request.Kind == LocalRepositorySessionDetailRequestKind.Content
+            && (request.NodeId is null || request.ContentPart is null || request.ExecutionId is not null || request.ParentNodeId is not null || request.After is not null))
             throw new ArgumentException("invalid_detail_request", nameof(request));
         if (request.ParentNodeId is not null && request.ExecutionId is null)
             throw new ArgumentException("invalid_detail_request", nameof(request));
@@ -331,7 +333,15 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                         && content.Part == "instruction" && content.SourceItemId == detail.InstructionSourceIdentity))
                 || !contentKeys.Add((content.NodeId, content.Part))
                 || content.Part is not ("instruction" or "tool_input" or "tool_result" or "error_message" or "subagent_input" or "event_content")
-                || content.State is not ("available" or "not_captured" or "expired" or "deleted" or "read_denied" or "oversized" or "invalid"))
+                || content.State is not ("available" or "not_captured" or "expired" or "deleted" or "read_denied" or "oversized" or "invalid")
+                || content.StoreKind != "session_event_content"
+                || content.LocatorKind is not ("whole_event" or "json_pointer")
+                || content.LocatorKind == "whole_event" && (content.Part != "event_content" || content.JsonPointer is not null)
+                || content.LocatorKind == "json_pointer" && (content.Part == "event_content" || content.JsonPointer is null)
+                || content.State == "available" && (content.SelectedUtf8Bytes is null or < 0 or > 1_048_576
+                    || content.RetentionItemId is null || content.RetentionStoreInstanceId is null
+                    || content.SourceCapturedAt is null || content.SourceExpiresAt is null || content.RetentionRevision is null or <= 0
+                    || content.RetentionOwnershipReceipt is not { Length: 32 } || content.RetentionOwnerToken is not { Length: 32 }))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
 
         static bool ValidTime(string authority, long? start, long? end, long? duration) => authority switch

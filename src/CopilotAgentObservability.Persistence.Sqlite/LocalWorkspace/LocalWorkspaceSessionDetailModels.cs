@@ -29,4 +29,9 @@ internal sealed record LocalWorkspaceNodeDetail(
 internal sealed record LocalWorkspaceNodeEdgeDetail(
     string NodeId, string RelatedNodeId, string RelationKind, string RelationshipAuthority, long SourceOrdinal);
 
-internal sealed record LocalWorkspaceContentAvailability(string NodeId, string Part, string State, string? SourceItemId = null, string? RevisionInput = null);
+internal sealed record LocalWorkspaceContentAvailability(
+    string NodeId, string Part, string State, string? SourceItemId = null, string? RevisionInput = null,
+    string? StoreKind = null, string? LocatorKind = null, string? JsonPointer = null, long? SelectedUtf8Bytes = null,
+    string? RetentionItemId = null, string? RetentionStoreInstanceId = null, string? SourceCapturedAt = null,
+    string? SourceExpiresAt = null, long? RetentionRevision = null, byte[]? RetentionOwnershipReceipt = null,
+    byte[]? RetentionOwnerToken = null);

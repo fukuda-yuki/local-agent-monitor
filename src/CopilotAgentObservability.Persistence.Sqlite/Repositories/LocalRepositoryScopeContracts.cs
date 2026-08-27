@@ -62,6 +62,7 @@ internal enum LocalRepositorySessionDetailRequestKind
     Summary,
     Timeline,
     Node,
+    Content,
 }
 
 internal sealed record LocalRepositoryTimelinePosition(
@@ -77,7 +78,8 @@ internal sealed record LocalRepositorySessionDetailRequest(
     string? ParentNodeId = null,
     LocalRepositoryTimelinePosition? After = null,
     int Limit = 100,
-    string? NodeId = null);
+    string? NodeId = null,
+    string? ContentPart = null);
 
 internal interface ILocalRepositorySessionSnapshotRow
 {

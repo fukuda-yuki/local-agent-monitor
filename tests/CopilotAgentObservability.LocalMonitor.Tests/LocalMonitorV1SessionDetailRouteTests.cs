@@ -18,6 +18,77 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     private const string SessionId="018f0000-0000-7000-8000-000000000001";
 
     [Fact]
+    public async Task ProductionInstructionContentGetAndHeadReturnExactSelectedUtf8Bytes()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true);
+        StabilizeDeterministicContentOwner(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        RefreshDeterministicFullProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());
+        var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction";
+
+        using var get = await host.Client.GetAsync(path);
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+
+        var expected = System.Text.Encoding.UTF8.GetBytes("Review the retained instruction");
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal(expected, await get.Content.ReadAsByteArrayAsync());
+        Assert.Equal("text/plain; charset=utf-8", get.Content.Headers.ContentType?.ToString());
+        Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
+        Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
+        Assert.Equal("local-monitor-node-content.response.v1", get.Headers.GetValues("X-Local-Monitor-Schema-Version").Single());
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(expected.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task ProductionContentRouteReturnsJsonPointerObjectAsInertText()
+    {
+        const string contentJson = "{\"prompt\":{\"task\":\"inspect\"}}"; const string part = "instruction"; const string expectedText = "{\"task\":\"inspect\"}";
+        using var temp = new MonitorTempDirectory(); SeedDeterministicSession(temp, full: true); StabilizeDeterministicContentOwner(temp);
+        using (var connection = Open(temp))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE session_event_content SET content_json=$json WHERE event_id='018f0000-0000-7000-8000-000000000004';";
+            command.Parameters.AddWithValue("$json", contentJson); command.ExecuteNonQuery();
+        }
+        await using var host = await MonitorTestHost.StartAsync(temp); RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
+        using (var connection = Open(temp)) using (var command = connection.CreateCommand())
+        { command.CommandText="UPDATE local_workspace_node_content_refs SET part=$part,locator_kind=$kind,json_pointer=$pointer,selected_utf8_bytes=$bytes,retention_owner_token=(SELECT retention_owner_token FROM session_event_content WHERE event_id=source_item_id),availability_state='available' WHERE source_item_id='018f0000-0000-7000-8000-000000000004';";command.Parameters.AddWithValue("$part",part);command.Parameters.AddWithValue("$kind",part=="event_content"?"whole_event":"json_pointer");command.Parameters.AddWithValue("$pointer",part=="event_content"?DBNull.Value:"/prompt");command.Parameters.AddWithValue("$bytes",System.Text.Encoding.UTF8.GetByteCount(expectedText));command.ExecuteNonQuery(); }
+        string nodeId; using (var connection = Open(temp)) nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part=$execution;", SessionId, part);
+        using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync()); var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
+
+        using var response = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part={part}");
+
+        var body = await response.Content.ReadAsStringAsync(); Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode}: {body}"); Assert.Equal(expectedText, body);
+    }
+
+    [Theory]
+    [InlineData(1_048_576, HttpStatusCode.OK)]
+    [InlineData(1_048_577, HttpStatusCode.RequestEntityTooLarge)]
+    public async Task ProductionContentRouteEnforcesCompleteOneMiBBoundary(int size, HttpStatusCode expectedStatus)
+    {
+        using var temp = new MonitorTempDirectory(); SeedDeterministicSession(temp, full: true); StabilizeDeterministicContentOwner(temp);
+        using (var connection = Open(temp)) using (var command = connection.CreateCommand())
+        { command.CommandText="UPDATE session_event_content SET content_json=$json WHERE event_id='018f0000-0000-7000-8000-000000000004';"; command.Parameters.AddWithValue("$json", "{\"prompt\":\""+new string('x',size)+"\"}"); command.ExecuteNonQuery(); }
+        await using var host = await MonitorTestHost.StartAsync(temp); RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
+        using(var connection=Open(temp))using(var command=connection.CreateCommand()){command.CommandText="UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=$size,retention_owner_token=CASE WHEN $size<=1048576 THEN (SELECT retention_owner_token FROM session_event_content WHERE event_id=source_item_id) END,availability_state=CASE WHEN $size<=1048576 THEN 'available' ELSE 'oversized' END WHERE source_item_id='018f0000-0000-7000-8000-000000000004';";command.Parameters.AddWithValue("$size",size);command.ExecuteNonQuery();}
+        string nodeId;using(var connection=Open(temp))nodeId=Scalar(connection,"SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';",SessionId);
+        using var summaryResponse=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");using var summary=JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());var revision=summary.RootElement.GetProperty("workspace_revision").GetString();
+        using var response=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction");
+        Assert.Equal(expectedStatus,response.StatusCode);
+        if(expectedStatus==HttpStatusCode.OK)Assert.Equal(size,(await response.Content.ReadAsByteArrayAsync()).Length);else Assert.Equal("{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task ProductionSummaryGetAndHeadMatchTheNonemptyGoldenExactly()
     {
         using var temp = new MonitorTempDirectory();
@@ -510,7 +581,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         update.ExecuteNonQuery();
     }
 
-    private static void RefreshDeterministicFullProjection(MonitorTempDirectory temp)
+    private static void RefreshDeterministicFullProjection(MonitorTempDirectory temp, bool stabilizeGolden = true)
     {
         using var connection = Open(temp);
         using var transaction = connection.BeginTransaction();
@@ -530,8 +601,11 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.True(command.ExecuteNonQuery() > 0);
         LocalWorkspaceProjectionStore.Refresh(connection, transaction, new DateTimeOffset(2026, 8, 26, 1, 2, 5, TimeSpan.Zero),
             FixedSkillRegistryGenerationAuthority.Load());
-        command.CommandText = "UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=31 WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND availability_state='available';";
-        Assert.Equal(1, command.ExecuteNonQuery());
+        if (stabilizeGolden)
+        {
+            command.CommandText = "UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=31 WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND availability_state='available';";
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
         transaction.Commit();
     }
 

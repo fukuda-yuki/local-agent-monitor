@@ -32,7 +32,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         var sessionId = request.SessionId;
         await ValidateBounds(connection, transaction, sessionId, token);
-        if (request.Kind == LocalRepositorySessionDetailRequestKind.Node)
+        if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
             await ValidateNodeAncestry(connection, transaction, request, token);
         var nodes = await ReadNodes(connection, transaction, request, token);
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
@@ -284,16 +284,16 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         if(ids.Length==0)return [];
         statementObserver?.Invoke("detail-content"); using var command=c.CreateCommand();command.Transaction=t;
-        command.CommandText="SELECT node_id,part,availability_state,source_item_id,revision_input FROM local_workspace_node_content_refs WHERE node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY node_id,part;";
+        command.CommandText="SELECT node_id,part,availability_state,source_item_id,revision_input,store_kind,locator_kind,json_pointer,selected_utf8_bytes,retention_item_id,retention_store_instance_id,source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token FROM local_workspace_node_content_refs WHERE node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY node_id,part;";
         command.Parameters.AddWithValue("$ids",System.Text.Json.JsonSerializer.Serialize(ids));var rows=new List<LocalWorkspaceContentAvailability>();using var reader=await command.ExecuteReaderAsync(token);
-        while(await reader.ReadAsync(token))rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4)));return rows.ToArray();
+        while(await reader.ReadAsync(token))rows.Add(Content(reader));return rows.ToArray();
     }
 
     private async Task<LocalWorkspaceContentAvailability[]> ReadSummaryContent(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
     {
         statementObserver?.Invoke("detail-summary-content");
         using var command = Command(c, t, """
-            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input
+            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
             FROM local_workspace_node_content_refs c
             JOIN local_workspace_nodes n ON n.node_id=c.node_id
             JOIN local_workspace_sessions s ON s.session_id=n.session_id
@@ -302,10 +302,16 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             """, sessionId);
         var rows = new List<LocalWorkspaceContentAvailability>();
         using var reader = await command.ExecuteReaderAsync(token);
-        while (await reader.ReadAsync(token)) rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4)));
+        while (await reader.ReadAsync(token)) rows.Add(Content(reader));
         if (rows.Count > 1) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         return rows.ToArray();
     }
+
+    private static LocalWorkspaceContentAvailability Content(SqliteDataReader reader) => new(
+        reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
+        reader.GetString(5), reader.GetString(6), S(reader, 7), L(reader, 8), S(reader, 9), S(reader, 10),
+        S(reader, 11), S(reader, 12), L(reader, 13), reader.IsDBNull(14) ? null : (byte[])reader.GetValue(14),
+        reader.IsDBNull(15) ? null : (byte[])reader.GetValue(15));
 
     private static async Task<Metadata> ReadMetadata(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
     {
