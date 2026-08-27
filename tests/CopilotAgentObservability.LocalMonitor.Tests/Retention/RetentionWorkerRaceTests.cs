@@ -367,10 +367,34 @@ public sealed class RetentionWorkerRaceTests
         time.Advance(TimeSpan.FromMinutes(2));
         time.Timers[0].Fire();
 
-        var callback = Task.Run(time.Timers[1].Fire);
+        using var callbackStarted = new ManualResetEventSlim();
+        using var callbackReturned = new ManualResetEventSlim();
+        Exception? callbackException = null;
+        var callbackThread = new Thread(() =>
+        {
+            callbackStarted.Set();
+            try
+            {
+                time.Timers[1].Fire();
+            }
+            catch (Exception exception)
+            {
+                callbackException = exception;
+            }
+            finally
+            {
+                callbackReturned.Set();
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        callbackThread.Start();
         try
         {
-            await callback.WaitAsync(TimeSpan.FromMilliseconds(250));
+            Assert.True(callbackStarted.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(callbackReturned.Wait(TimeSpan.FromSeconds(5)));
+            Assert.Null(callbackException);
             Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
         }
         finally
