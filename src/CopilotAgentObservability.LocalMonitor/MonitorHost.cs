@@ -857,7 +857,9 @@ internal static class MonitorHost
         if (!options.SanitizedOnly)
         {
             LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);
-            LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(), sessionStore: sessionStore, contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
+            LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(),
+                contentReader: new LocalWorkspaceNodeContentReader(retentionContext, timeProvider),
+                contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(

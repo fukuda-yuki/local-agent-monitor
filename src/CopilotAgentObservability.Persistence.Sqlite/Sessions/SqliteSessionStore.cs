@@ -1382,7 +1382,7 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
                 return postGrantDisposition == RetentionReadDisposition.Busy
                         || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
                     ? new(SessionContentReadDisposition.Busy, null)
-                    : new(ContentDenialDisposition(eventId), null);
+                    : new(SessionContentReadDisposition.Denied, null);
             }
         }
         if (result.Lease is { } grantedLease)
@@ -1399,22 +1399,7 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         }
         return result.Disposition == RetentionReadDisposition.Busy
             ? new(SessionContentReadDisposition.Busy, null)
-            : new(ContentDenialDisposition(eventId), null);
-    }
-
-    private SessionContentReadDisposition ContentDenialDisposition(Guid eventId)
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT state FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$event;";
-        Add(command, "$event", Id(eventId));
-        return (command.ExecuteScalar() as string) switch
-        {
-            "deleted" => SessionContentReadDisposition.Deleted,
-            "expired_pending_deletion" => SessionContentReadDisposition.Expired,
-            "deletion_queued" or "deleting" or "deletion_failed" => SessionContentReadDisposition.ReadDenied,
-            _ => SessionContentReadDisposition.Denied,
-        };
+            : new(SessionContentReadDisposition.Denied, null);
     }
 
     private static SessionContentTerminalResult MapTerminal(RetentionRawTerminalResult result) => result switch

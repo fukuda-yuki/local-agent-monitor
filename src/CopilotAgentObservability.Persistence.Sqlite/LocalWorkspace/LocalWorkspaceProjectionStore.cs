@@ -400,7 +400,8 @@ internal static class LocalWorkspaceProjectionStore
                   LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
                     AND ((c.event_id IS NOT NULL AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at)
                       OR i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))
-                  WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                  WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                    AND e.type<>'skill.invoked';
                   """
                 : """
                   INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,retention_owner_token,availability_state)
@@ -412,7 +413,8 @@ internal static class LocalWorkspaceProjectionStore
                     CASE WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' WHEN e.content_state='expired_pending_deletion' THEN 'expired' ELSE 'invalid' END
                   FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
                   LEFT JOIN session_event_content c ON c.event_id=e.event_id
-                  WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                  WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                    AND e.type<>'skill.invoked';
                   """;
             Execute(connection, transaction, contentSql, ("$ids", idsJson), ("$now", Canonical(now)));
         }

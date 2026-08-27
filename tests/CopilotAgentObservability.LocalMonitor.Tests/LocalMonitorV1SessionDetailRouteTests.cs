@@ -982,7 +982,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray(),
-            sessionStore ?? new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider), contentCheckpoint);
+            new LocalWorkspaceNodeContentReader(temp.RetentionContext, temp.TimeProvider), contentCheckpoint);
         await app.StartAsync();
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
@@ -1301,5 +1301,138 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         }
         transaction.Commit();
         return parentId;
+    }
+
+    [Fact]
+    public void ProjectionDoesNotPublishNodeContentReferencesForSkillInvokedEvents()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, eventType: "skill.invoked",
+            sourceAdapter: "copilot-sdk-stream", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+
+        RefreshContentProjection(temp);
+
+        using var connection = Open(temp);
+        Assert.Equal("1", Scalar(connection,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_nodes WHERE session_id=$session AND event_id='018f0000-0000-7000-8000-000000000004';", SessionId));
+        Assert.Equal("0", Scalar(connection,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.session_id=$session AND c.source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId));
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task SkillInvokedNodeContentIsNotCapturedWithoutRetentionAdmission(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, eventType: "skill.invoked",
+            sourceAdapter: "copilot-sdk-stream", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND event_id='018f0000-0000-7000-8000-000000000004' ORDER BY source_kind LIMIT 1;", SessionId);
+        using var host = await StartProductionDetailRouteAsync(temp, null, null, ensureSchemas: false);
+        var revision = await Revision(host.Client);
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method),
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=event_content"));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(method == "HEAD" ? [] : System.Text.Encoding.UTF8.GetBytes("{\"error\":\"raw_content_not_captured\"}"), await response.Content.ReadAsByteArrayAsync());
+        using var proof = Open(temp);
+        Assert.Equal("0", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task EqualLengthRawAndOwnerReplacementAfterSnapshotIsRejectedAsStale(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"original\"}", eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using var host = await StartProductionDetailRouteAsync(temp, phase =>
+        {
+            if (phase != LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant) return;
+            using var connection = Open(temp);
+            using var command = connection.CreateCommand();
+            command.CommandText = "DROP TRIGGER retention_session_event_content_token_immutable; UPDATE session_event_content SET content_json='{\"prompt\":\"replaced\"}',retention_owner_token=randomblob(32) WHERE event_id='018f0000-0000-7000-8000-000000000004';";
+            command.ExecuteNonQuery();
+        });
+        var revision = await Revision(host.Client);
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method),
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction"));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(method == "HEAD" ? [] : System.Text.Encoding.UTF8.GetBytes("{\"error\":\"workspace_snapshot_stale\"}"), bytes);
+        Assert.DoesNotContain("replaced", System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task InvalidUtf8AfterSnapshotFailsClosedWithoutRawEcho(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using var host = await StartProductionDetailRouteAsync(temp, phase =>
+        {
+            if (phase != LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant) return;
+            using var connection = Open(temp);
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE session_event_content SET content_json=CAST(X'7B2270726F6D7074223AFF7D' AS TEXT) WHERE event_id='018f0000-0000-7000-8000-000000000004';";
+            command.ExecuteNonQuery();
+        });
+        var revision = await Revision(host.Client);
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method),
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction"));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(method == "HEAD" ? [] : System.Text.Encoding.UTF8.GetBytes("{\"error\":\"local_monitor_ui_unavailable\"}"), await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task SmallSelectedPartSucceedsWithoutPublishingHugeSibling()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string selected = "bounded-selection";
+        var json = "{\"unused\":\"" + new string('x', 2_097_152) + "\",\"prompt\":\"" + selected + "\"}";
+        SeedDeterministicSession(temp, full: true, contentJson: json, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using var host = await StartProductionDetailRouteAsync(temp, null, null, ensureSchemas: false);
+        var revision = await Revision(host.Client);
+
+        using var response = await host.Client.GetAsync(
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(selected, await response.Content.ReadAsStringAsync());
+        Assert.Equal(selected.Length, response.Content.Headers.ContentLength);
     }
 }

@@ -393,7 +393,7 @@ internal static class SessionTerminalPolicyV1
     }
 }
 
-public enum SessionContentReadDisposition { Granted, NotFound, Denied, Busy, Expired, Deleted, ReadDenied }
+public enum SessionContentReadDisposition { Granted, NotFound, Denied, Busy }
 
 public sealed class SessionContentReadLease : IAsyncDisposable
 {

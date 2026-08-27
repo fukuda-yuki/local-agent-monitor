@@ -11,16 +11,16 @@ internal static class LocalMonitorV1SessionDetailRoutes
     private const string Prefix="/api/local-monitor/v1/sessions/";
     internal static bool IsPath(PathString path)=>path.Value?.StartsWith(Prefix,StringComparison.Ordinal)==true&&(path.Value.EndsWith("/summary",StringComparison.Ordinal)||path.Value.EndsWith("/timeline",StringComparison.Ordinal)||path.Value.Contains("/nodes/",StringComparison.Ordinal));
 
-    internal static void Map(WebApplication app,ILocalRepositorySessionDetailSnapshotService service,byte[]? cursorKeyOverride=null,ISessionStore? sessionStore=null,Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint=null)
+    internal static void Map(WebApplication app,ILocalRepositorySessionDetailSnapshotService service,byte[]? cursorKeyOverride=null,ILocalWorkspaceNodeContentReader? contentReader=null,Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint=null)
     {
         var key=cursorKeyOverride?.ToArray()??RandomNumberGenerator.GetBytes(32);
         app.Map("/api/local-monitor/v1/sessions/{sessionId}/summary",context=>Handle(context,service,key,Kind.Summary));
         app.Map("/api/local-monitor/v1/sessions/{sessionId}/timeline",context=>Handle(context,service,key,Kind.Timeline));
-        if(sessionStore is not null) app.Map("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content",context=>HandleContent(context,service,sessionStore,contentCheckpoint));
+        if(contentReader is not null) app.Map("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content",context=>HandleContent(context,service,contentReader,contentCheckpoint));
         app.Map("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}",context=>Handle(context,service,key,Kind.Node));
     }
 
-    private static async Task HandleContent(HttpContext context,ILocalRepositorySessionDetailSnapshotService service,ISessionStore store,Action<LocalMonitorNodeContentRoutePhase>? checkpoint)
+    private static async Task HandleContent(HttpContext context,ILocalRepositorySessionDetailSnapshotService service,ILocalWorkspaceNodeContentReader reader,Action<LocalMonitorNodeContentRoutePhase>? checkpoint)
     {
         if(!HttpMethods.IsGet(context.Request.Method)&&!HttpMethods.IsHead(context.Request.Method)){context.Response.Headers.Allow="GET, HEAD";await Error(context,405,"method_not_allowed");return;}
         var sessionId=context.Request.RouteValues["sessionId"] as string;var nodeId=context.Request.RouteValues["nodeId"] as string;
@@ -36,23 +36,17 @@ internal static class LocalMonitorV1SessionDetailRoutes
             if(locator is null){await Error(context,404,"raw_content_not_captured");return;}
             if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant);
-            var read=await store.ReadContentAsync(Guid.Parse(sessionId!),Guid.Parse(locator.SourceItemId!),context.RequestAborted);
-            if(read.Disposition!=SessionContentReadDisposition.Granted){var mapped=read.Disposition switch{SessionContentReadDisposition.Busy=>(503,"persistence_busy"),SessionContentReadDisposition.Deleted=>(410,"raw_content_deleted"),SessionContentReadDisposition.ReadDenied=>(403,"raw_content_read_denied"),_=>(410,"raw_content_expired")};await Error(context,mapped.Item1,mapped.Item2);return;}
-            await using var lease=read.Lease!;checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterCommittedGrantBeforeReference);byte[] bytes;SessionEventContent content;
-            using(var reference=lease.AcquireContentReference())
+            var read=await reader.ReadAsync(sessionId!,nodeId!,locator,context.RequestAborted);
+            if(read.Disposition!=LocalWorkspaceNodeContentReadDisposition.Granted){var mapped=read.Disposition switch{LocalWorkspaceNodeContentReadDisposition.Busy=>(503,"persistence_busy"),LocalWorkspaceNodeContentReadDisposition.Stale=>(409,"workspace_snapshot_stale"),LocalWorkspaceNodeContentReadDisposition.Expired=>(410,"raw_content_expired"),LocalWorkspaceNodeContentReadDisposition.Deleted=>(410,"raw_content_deleted"),LocalWorkspaceNodeContentReadDisposition.ReadDenied=>(403,"raw_content_read_denied"),_=>(503,"local_monitor_ui_unavailable")};await Error(context,mapped.Item1,mapped.Item2);return;}
+            await using var lease=read.Lease!;checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterCommittedGrantBeforeReference);byte[] bytes;
+            using(var reference=lease.AcquireBytesReference())
             {
                 checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.WhileContentReferenceHeld);
-                content=reference.Content;
-                bytes=Select(content.ContentJson,locator);
+                bytes=reference.Value;
             }
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterBytesSelectedBeforeSeal);
-            if(content.EventId.ToString("D")!=locator.SourceItemId
-                || content.CapturedAt.ToUniversalTime().ToString("O")!=locator.SourceCapturedAt
-                || content.ExpiresAt.ToUniversalTime().ToString("O")!=locator.SourceExpiresAt)
-            {lease.TryCompleteWithoutRaw();await Error(context,409,"workspace_snapshot_stale");return;}
-            if(bytes.Length>1_048_576||bytes.Length!=locator.SelectedUtf8Bytes){lease.TryCompleteWithoutRaw();await Error(context,bytes.Length>1_048_576?413:503,bytes.Length>1_048_576?"raw_content_too_large":"local_monitor_ui_unavailable");return;}
             var terminal=lease.TrySealRawResponse();
-            if(terminal!=SessionContentTerminalResult.Sealed){await Error(context,terminal==SessionContentTerminalResult.Lost?409:503,terminal==SessionContentTerminalResult.Lost?"raw_content_lease_lost":"persistence_busy");return;}
+            if(terminal!=LocalWorkspaceNodeContentTerminalResult.Sealed){await Error(context,terminal==LocalWorkspaceNodeContentTerminalResult.Lost?409:503,terminal==LocalWorkspaceNodeContentTerminalResult.Lost?"raw_content_lease_lost":"persistence_busy");return;}
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterSuccessfulSealBeforeWrite);
             context.Response.StatusCode=200;context.Response.ContentType="text/plain; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.Headers["X-Local-Monitor-Schema-Version"]="local-monitor-node-content.response.v1";context.Response.ContentLength=bytes.Length;
             if(!HttpMethods.IsHead(context.Request.Method)){checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.DuringResponseWrite);await context.Response.Body.WriteAsync(bytes,context.RequestAborted);}
@@ -60,20 +54,6 @@ internal static class LocalMonitorV1SessionDetailRoutes
         catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error=="session_not_found"?404:503,e.Error);}
         catch(LocalRepositoryScopeSnapshotException){await Error(context,503,"persistence_busy");}
         catch(Exception e) when(e is InvalidOperationException or JsonException){await Error(context,503,"local_monitor_ui_unavailable");}
-    }
-
-    private static byte[] Select(string json,LocalWorkspaceContentAvailability locator)
-    {
-        if(locator.StoreKind!="session_event_content")throw new InvalidOperationException();
-        if(locator.LocatorKind=="whole_event"&&locator.JsonPointer is null)
-        {
-            using var wholeDocument=JsonDocument.Parse(json);
-            return Encoding.UTF8.GetBytes(json);
-        }
-        if(locator.LocatorKind!="json_pointer"||locator.JsonPointer is null)throw new InvalidOperationException();
-        using var document=JsonDocument.Parse(json);var name=locator.JsonPointer[1..];
-        if(document.RootElement.ValueKind!=JsonValueKind.Object||!document.RootElement.TryGetProperty(name,out var value))throw new InvalidOperationException();
-        return Encoding.UTF8.GetBytes(value.ValueKind==JsonValueKind.String?value.GetString()!:value.GetRawText());
     }
 
     private static bool TryParseContent(string raw,out string revision,out string part)
