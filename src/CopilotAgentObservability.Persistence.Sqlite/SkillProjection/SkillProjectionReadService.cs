@@ -519,13 +519,10 @@ internal sealed class SkillProjectionReadService
             return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
 
         var sdkAuthorityInstalled = SkillInvocationSnapshotSchemaV1Validator.IsValid(connection, transaction);
-        if (registryAuthority is null && sdkAuthorityInstalled)
-            return sessionIds.Distinct(StringComparer.Ordinal).ToDictionary(
-                static sessionId => sessionId,
-                static _ => new SkillProjectionCurrentInvocationProjection("unavailable", []),
-                StringComparer.Ordinal);
         var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
-        IReadOnlySet<string> unavailableSdkSessions = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlySet<string> unavailableSdkSessions = registryAuthority is null && sdkAuthorityInstalled
+            ? ReadSdkSessionIds(connection, transaction, sessionIds)
+            : new HashSet<string>(StringComparer.Ordinal);
         var sdk = registryAuthority is null || !sdkAuthorityInstalled
             ? []
             : ReadCurrentSdkInvocationFacts(connection, transaction, sessionIds, registryAuthority,
@@ -574,6 +571,25 @@ internal sealed class SkillProjectionReadService
                 ? new("current", admitted)
                 : new("certification_pending", []);
         }
+        return result;
+    }
+
+    private static IReadOnlySet<string> ReadSdkSessionIds(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT DISTINCT session_id FROM skill_invocation_snapshots
+            WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            """;
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        SqliteCommandExecutionObserver.Executing();
+        using var reader = command.ExecuteReader();
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read()) result.Add(reader.GetString(0));
         return result;
     }
 
