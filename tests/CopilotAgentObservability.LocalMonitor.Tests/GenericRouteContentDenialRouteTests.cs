@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.LocalMonitor.Sessions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Data.Sqlite;
 
@@ -74,6 +75,61 @@ public sealed class GenericRouteContentDenialRouteTests
             $$"""{"event_id":"{{identity.EventId:D}}","content_kind":"user_prompt","content":"{\u0022message\u0022:\u0022synthetic\u0022}","captured_at":"2026-01-01T00:00:00+00:00","expires_at":"2026-04-01T00:00:00+00:00"}""");
     }
 
+    [Fact]
+    public async Task ARealCommittedLeaseExpiredAfterBufferingReturnsExact409WithoutRaw()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new GenericRouteContentClock(WriteAt);
+        temp.TimeProvider = clock;
+        var options = new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            StartSessionWriter = false,
+            StartSessionOtelEnrichment = false,
+            StartLocalRepositoryCatalogHostedService = false,
+            UseUserSecrets = false,
+            SessionRawContentRouteCheckpoint = phase =>
+            {
+                if (phase != SessionRawContentRoutePhase.BeforeSeal) return;
+                clock.UtcNow = WriteAt + RetentionV1Constants.LeaseDuration;
+            },
+        };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
+        var identity = GenericRouteContentDenialTests.InsertNonSkillEvent(
+            temp.DatabasePath, "native-route-expired-before-seal");
+
+        using var response = await host.Client.GetAsync(
+            $"/sessions/{identity.SessionId:D}/events/{identity.EventId:D}/content");
+
+        await AssertExactEntityAsync(
+            response,
+            HttpStatusCode.Conflict,
+            "{\"error\":\"raw_content_lease_lost\"}");
+        Assert.DoesNotContain("synthetic", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HeadUsesTheSameAuthorizedEntityLengthWithoutPublishingRawBytes()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new GenericRouteContentClock(WriteAt);
+        temp.TimeProvider = clock;
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
+        var identity = GenericRouteContentDenialTests.InsertNonSkillEvent(
+            temp.DatabasePath, "native-route-head");
+        var path = $"/sessions/{identity.SessionId:D}/events/{identity.EventId:D}/content";
+
+        using var get = await host.Client.GetAsync(path);
+        using var head = await host.Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, path));
+
+        Assert.Equal(get.StatusCode, head.StatusCode);
+        Assert.Equal(get.Content.Headers.ContentLength, head.Content.Headers.ContentLength);
+        Assert.Equal("application/json", head.Content.Headers.ContentType?.ToString());
+        Assert.Equal("no-store", head.Headers.CacheControl?.ToString());
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
     // The store hands the route a lost grant when the expiry notification comes due while the
     // committed handle is still hidden, and the route's frozen v1 410 bytes must be exact there too.
     [Fact]
@@ -125,6 +181,7 @@ public sealed class GenericRouteContentDenialRouteTests
         Assert.Equal("application/json", response.Content.Headers.ContentType?.ToString());
         Assert.Null(response.Content.Headers.ContentType?.CharSet);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal(System.Text.Encoding.UTF8.GetByteCount(entity), response.Content.Headers.ContentLength);
         Assert.Empty(response.Content.Headers.Allow);
 
         var bytes = await response.Content.ReadAsByteArrayAsync();

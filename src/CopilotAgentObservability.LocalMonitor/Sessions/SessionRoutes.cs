@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Text;
 using CopilotAgentObservability.Telemetry.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
@@ -387,9 +388,15 @@ internal static class SessionRoutes
         });
     }
 
-    public static void MapRawContentRoute(WebApplication app, ISessionStore store)
+    public static void MapRawContentRoute(
+        WebApplication app,
+        ISessionStore store,
+        Action<SessionRawContentRoutePhase>? checkpoint = null)
     {
-        app.MapGet("/sessions/{sessionId}/events/{eventId}/content", async (string sessionId, string eventId, HttpContext context) =>
+        app.MapMethods(
+            "/sessions/{sessionId}/events/{eventId}/content",
+            [HttpMethods.Get, HttpMethods.Head],
+            async (string sessionId, string eventId, HttpContext context) =>
         {
             if (MonitorHost.IsCrossSiteRequest(context))
             {
@@ -429,10 +436,12 @@ internal static class SessionRoutes
                 return;
             }
             await using var lease = read.Lease!;
+            checkpoint?.Invoke(SessionRawContentRoutePhase.AfterCommittedGrant);
             string entity;
             using (var reference = lease.AcquireContentReference())
             {
                 var content = reference.Content;
+                checkpoint?.Invoke(SessionRawContentRoutePhase.WhileContentReferenceHeld);
                 entity = JsonSerializer.Serialize(new
                 {
                     event_id = content.EventId,
@@ -442,23 +451,44 @@ internal static class SessionRoutes
                     expires_at = content.ExpiresAt,
                 });
             }
-            if (lease.TrySealRawResponse() != SessionContentTerminalResult.Sealed)
+            checkpoint?.Invoke(SessionRawContentRoutePhase.BeforeSeal);
+            var terminal = lease.TrySealRawResponse();
+            if (terminal != SessionContentTerminalResult.Sealed)
             {
                 entity = string.Empty;
-                RawResponsePublication.Abort(context);
+                if (context.Response.HasStarted)
+                {
+                    RawResponsePublication.Abort(context);
+                    return;
+                }
+                await RawContentFailure(
+                    context,
+                    terminal == SessionContentTerminalResult.Lost
+                        ? StatusCodes.Status409Conflict
+                        : StatusCodes.Status503ServiceUnavailable,
+                    terminal == SessionContentTerminalResult.Lost
+                        ? "raw_content_lease_lost"
+                        : "persistence_busy");
                 return;
             }
+            checkpoint?.Invoke(SessionRawContentRoutePhase.AfterSuccessfulSealBeforeWrite);
             context.Response.Headers.CacheControl = "no-store";
             context.Response.StatusCode = StatusCodes.Status200OK;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync(entity);
+            context.Response.ContentLength = Encoding.UTF8.GetByteCount(entity);
+            if (!HttpMethods.IsHead(context.Request.Method))
+                await context.Response.WriteAsync(entity);
         });
     }
 
     private static Task RawContentFailure(HttpContext context, int status, string error)
     {
         context.Response.Headers.CacheControl = "no-store";
-        return Failure(context, status, error);
+        context.Response.StatusCode = status;
+        context.Response.ContentType = "application/json";
+        var entity = JsonSerializer.Serialize(new { error });
+        context.Response.ContentLength = Encoding.UTF8.GetByteCount(entity);
+        return context.Response.WriteAsync(entity);
     }
 
     internal static bool IsRawContentPath(PathString path)
@@ -881,4 +911,12 @@ internal static class SessionRoutes
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsync(JsonSerializer.Serialize(value));
     }
+}
+
+internal enum SessionRawContentRoutePhase
+{
+    AfterCommittedGrant,
+    WhileContentReferenceHeld,
+    BeforeSeal,
+    AfterSuccessfulSealBeforeWrite,
 }

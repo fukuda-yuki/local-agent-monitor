@@ -3828,8 +3828,11 @@ selection, base64 decode, or materialization. Missing/type policy and the
 existing non-Skill Retention admission/selector execute in one Session-owned
 `BEGIN IMMEDIATE` transaction with no nested transaction or intervening
 commit. The raw route buffers a non-Skill response and uses the shared
-store-backed terminal seal before response start; terminal loss/busy discards
-it and aborts without a status/header/entity.
+store-backed terminal seal before response start. Terminal loss/busy discards
+the buffered entity and, while the response is unstarted, returns respectively
+the fixed no-store JSON `409 raw_content_lease_lost` or `503 persistence_busy`;
+only a genuinely started response is aborted. A successful seal keeps the
+lease through response write completion and publishes the exact buffered bytes.
 
 Raw HTTP authorization has two independent total orders. Retention owns the
 live-lease/clock-backed `TryCompleteWithoutRaw` and `TrySealRawResponse` result;

@@ -892,7 +892,10 @@ internal static class MonitorHost
             DoctorUiRoutes.Map(app, doctorUiApplication);
             DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
             RuntimeBackupRoutes.Map(app, options.DatabasePath, runtimeBackupService);
-            SessionRoutes.MapRawContentRoute(app, sessionStore);
+            SessionRoutes.MapRawContentRoute(
+                app,
+                sessionStore,
+                testOptions?.SessionRawContentRouteCheckpoint);
             MapSkillInvocationSnapshotRoutes(
                 app,
                 options,
@@ -2626,6 +2629,8 @@ internal sealed record LocalRepositoryCatalogCompositionSnapshot(
 
 internal sealed class MonitorHostTestOptions
 {
+    public Action<SessionRawContentRoutePhase>? SessionRawContentRouteCheckpoint { get; init; }
+
     public IPricingCatalogProvider? PricingCatalogProvider { get; init; }
 
     public IHistoricalEvidenceSnapshotSourceV1? HistoricalEvidenceSource { get; init; }

@@ -64,7 +64,7 @@ public sealed class RawHttpTerminalMigrationTests
             foreach (var owner in new[]
                      {
                          "analysis-run", "raw-record", "span-detail", "prompt-label",
-                         "session-content", "overview-page", "trace-list-page", "trace-detail-page",
+                         "overview-page", "trace-list-page", "trace-detail-page",
                      })
             {
                 data.Add(owner, (int)RetentionRawTerminalResult.Lost);
@@ -146,6 +146,41 @@ public sealed class RawHttpTerminalMigrationTests
         AssertZeroResponse(responseFeature);
         Assert.Equal(1, terminalCount);
         Assert.Equal(1, releaseCount);
+    }
+
+    [Theory]
+    [InlineData((int)RetentionRawTerminalResult.Lost, StatusCodes.Status409Conflict, "raw_content_lease_lost")]
+    [InlineData((int)RetentionRawTerminalResult.Busy, StatusCodes.Status503ServiceUnavailable, "persistence_busy")]
+    public async Task SessionContentRoute_TerminalFailurePublishesFixedSafeJsonWithoutRaw(
+        int terminalValue,
+        int expectedStatus,
+        string expectedError)
+    {
+        const string sensitiveMarker = "task5b2-sensitive-content-marker";
+        var responseFeature = new RecordingResponseFeature();
+        var abortFeature = new RecordingLifetimeFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        features.Set<IHttpRequestLifetimeFeature>(abortFeature);
+
+        await ExecuteHttpOwnerAsync(
+            "session-content",
+            features,
+            (RetentionRawTerminalResult)terminalValue,
+            () => AssertZeroResponse(responseFeature),
+            () => { },
+            sessionContentJson: sensitiveMarker);
+
+        var body = Encoding.UTF8.GetString(((MemoryStream)responseFeature.Body).ToArray());
+        Assert.Equal(0, abortFeature.AbortCount);
+        Assert.Equal(expectedStatus, responseFeature.StatusCode);
+        Assert.Equal("application/json", responseFeature.Headers.ContentType.ToString());
+        Assert.Equal("no-store", responseFeature.Headers.CacheControl.ToString());
+        Assert.Equal($"{{\"error\":\"{expectedError}\"}}", body);
+        Assert.Equal(Encoding.UTF8.GetByteCount(body), responseFeature.Headers.ContentLength);
+        Assert.DoesNotContain(sensitiveMarker, body, StringComparison.Ordinal);
+        Assert.DoesNotContain(sensitiveMarker, responseFeature.Headers.ToString(), StringComparison.Ordinal);
     }
 
     [Theory]
