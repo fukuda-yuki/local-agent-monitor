@@ -172,7 +172,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
             root => root["session"]!["assignment"]!["repository_id"] = "not-a-uuid",
             root => root["session"]!["assignment"]!["candidate_repository_ids"] = new JsonArray(Enumerable.Range(0, 129).Select(index => JsonValue.Create($"018f0000-0000-7000-8000-{index:000000000000}")).ToArray()),
             root => root["session"]!["archive"]!["effectively_eligible"] = false,
-            root => root["session"]!["instruction"]!["state"] = "recorded",
+            root => root["session"]!["instruction"]!["state"] = "not_observed",
             root => root["session"]!["tokens"]!["input"]!["state"] = "not_observed",
             root => root["session"]!["activity"]!["skill"]!["state"] = "recorded",
             root => { root["session"]!["timing"]!["state"] = "recorded"; root["session"]!["timing"]!["started_at"] = null; },
@@ -200,7 +200,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     [Fact]
     public void TimelineCursorHasFrozen119ByteFrameAndLiteralFixtureBinding()
     {
-        const string Golden = "AfuEzJkJsG4UwJEhS4gSoWXoBco3Yp1ktuIeLpliMnnoAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2sNQxzSz5hydOvIUgXLq3Lb8OCL9CkdxLT-KUQYhrjU0";
+        const string Golden = "AThDbBnpXDzcvCqTC6-u3JXj-5XK6nhqA5jx6sWinHFzAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2dhSEDeed5dEYD7kvVTt4whdWVnRmxB4E-m337HOPC6s";
         using var fixture = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "timeline-page.json")));
         Assert.Equal(Golden, fixture.RootElement.GetProperty("next_cursor").GetString());
         var bytes = DecodeBase64Url(Golden);
@@ -216,7 +216,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
         var filterFrame = TimelineFilterFrame(
             "018f0000-0000-7000-8000-000000000001",
-            "334bb00f10ac3c7527db3cbfaed6f89c7a33a92a749ecad70c7708f3bb08d24a",
+            "629472fd66f28ad97a11c609eb9c0d70531031579eca95d350f5cf5f72c52c0b",
             "9a5590c8-46e3-7069-af48-3844d2bf17a4",
             null,
             1);

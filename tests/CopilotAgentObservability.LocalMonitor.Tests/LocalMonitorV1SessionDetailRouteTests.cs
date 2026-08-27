@@ -3,6 +3,7 @@ using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Builder;
@@ -20,8 +21,11 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     public async Task ProductionSummaryGetAndHeadMatchTheNonemptyGoldenExactly()
     {
         using var temp = new MonitorTempDirectory();
-        SeedDeterministicSession(temp);
+        SeedDeterministicSession(temp, full: true);
+        StabilizeDeterministicContentOwner(temp);
         using var host = await StartProductionDetailRouteAsync(temp);
+        RefreshDeterministicFullProjection(temp);
+        SeedDeterministicRepositoryAssignment(temp);
         var expected = File.ReadAllBytes(Path.Combine(
             FindRepositoryRoot(), "tests", "CopilotAgentObservability.LocalMonitor.Tests", "TestData",
             "LocalMonitorV1SessionDetail", "summary-full.json"));
@@ -33,6 +37,18 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Equal(HttpStatusCode.OK, get.StatusCode);
         var actual = await get.Content.ReadAsByteArrayAsync();
         Assert.True(expected.AsSpan().SequenceEqual(actual), System.Text.Encoding.UTF8.GetString(actual));
+        using (var summary = JsonDocument.Parse(actual))
+        {
+            var session = summary.RootElement.GetProperty("session");
+            Assert.Equal("completed", session.GetProperty("status").GetString());
+            Assert.Equal("full", session.GetProperty("completeness").GetString());
+            Assert.Equal("manual", session.GetProperty("assignment").GetProperty("authority").GetString());
+            Assert.Equal("recorded", session.GetProperty("instruction").GetProperty("state").GetString());
+            Assert.True(session.GetProperty("instruction").GetProperty("content_available").GetBoolean());
+            Assert.Equal("complete", session.GetProperty("capture").GetProperty("state").GetString());
+            foreach (var fact in new[] { "tool", "subagent", "error", "retry" })
+                Assert.Equal("recorded", session.GetProperty("activity").GetProperty(fact).GetProperty("state").GetString());
+        }
         Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
         Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
         Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
@@ -401,7 +417,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return connection;
     }
 
-    private static void SeedDeterministicSession(MonitorTempDirectory temp)
+    private static void SeedDeterministicSession(MonitorTempDirectory temp, bool full = false)
     {
         var observed = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
         var sessionId = Guid.Parse(SessionId);
@@ -410,13 +426,20 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         var secondEventId = Guid.Parse("018f0000-0000-7000-8000-000000000005");
         var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
         store.CreateSchema();
+        if (full)
+        {
+            using var connection = Open(temp);
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE retention_store_instances SET store_instance_id='000102030405060708090a0b0c0d0e0f' WHERE id=1;";
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
         store.Write(new SessionWriteBatch(
             new SessionDetail(
                 new ObservedSession(
-                    sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Rich,
+                    sessionId, ObservedSessionStatus.Completed, full ? SessionCompleteness.Full : SessionCompleteness.Rich,
                     Repository: null, Workspace: null, StartedAt: observed,
                     EndedAt: observed.AddSeconds(1), LastSeenAt: observed.AddSeconds(1),
-                    SessionRawRetentionState.NotCaptured, CreatedAt: observed, UpdatedAt: observed.AddSeconds(1)),
+                    full ? SessionRawRetentionState.Expiring : SessionRawRetentionState.NotCaptured, CreatedAt: observed, UpdatedAt: observed.AddSeconds(1)),
                 [new SessionNativeId(sessionId, SessionSourceSurface.VisualStudioCode, "native-session-detail-golden", SessionBindingKind.Native, observed)],
                 [new ObservedSessionRun(
                     runId, sessionId, SessionSourceSurface.VisualStudioCode, NativeRunId: "run-detail-golden",
@@ -427,7 +450,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
                     eventId, sessionId, runId, SessionSourceSurface.VisualStudioCode, ParentEventId: null,
                     TraceId: "00000000000000000000000000000001", Status: "completed",
                     SourceAdapter: "github-copilot-vscode-otel", SourceEventId: "event-detail-golden",
-                    Type: "user.message", OccurredAt: observed, SessionContentState.NotCaptured,
+                    Type: "user.message", OccurredAt: observed, SessionContentState.Available,
                     SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
                     SchemaFingerprint: null, NormalizationVersion: "session-normalization-v1"),
                  new ObservedSessionEvent(
@@ -437,7 +460,79 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
                     Type: "tool.completed", OccurredAt: observed.AddMilliseconds(500), SessionContentState.NotCaptured,
                     SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
                     SchemaFingerprint: null, NormalizationVersion: "session-normalization-v1")]),
-            []));
+            full
+                ? [new SessionEventContent(eventId, "application/json", "{\"value\":\"Review the retained instruction\",\"prompt\":\"Review the retained instruction\"}", observed, observed.AddDays(30))]
+                : []));
+    }
+
+    private static void SeedDeterministicRepositoryAssignment(MonitorTempDirectory temp)
+    {
+        using var connection = Open(temp);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('018f0000-0000-7000-8000-000000000002','Golden repository',1,$at,$at);
+            INSERT INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,1,$at);
+            INSERT INTO session_repository_manual_overrides(session_id,state,repository_id,revision,updated_at) VALUES($session,'assigned','018f0000-0000-7000-8000-000000000002',1,$at);
+            """;
+        command.Parameters.AddWithValue("$session", SessionId);
+        command.Parameters.AddWithValue("$at", "2026-08-26T01:02:05.0000000+00:00");
+        command.ExecuteNonQuery();
+    }
+
+    private static void StabilizeDeterministicContentOwner(MonitorTempDirectory temp)
+    {
+        using var connection = Open(temp);
+        var token = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
+        using var store = connection.CreateCommand();
+        store.CommandText = "SELECT store_instance_id FROM retention_store_instances WHERE id=1;";
+        var storeId = (string)store.ExecuteScalar()!;
+        var captured = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
+        var expires = captured.AddDays(30);
+        var receipt = RetentionOwnershipReceipt.CreateSession(new(storeId,
+            "018f0000-0000-7000-8000-000000000004", "application/json", captured.ToString("O"), captured.UtcTicks,
+            expires.ToString("O"), expires.UtcTicks, SessionId, "018f0000-0000-7000-8000-000000000003",
+            "github-copilot-vscode-otel", "event-detail-golden", token));
+        using var update = connection.CreateCommand();
+        update.CommandText = """
+            DROP TRIGGER retention_session_event_content_token_immutable;
+            UPDATE session_event_content SET retention_owner_token=$token WHERE event_id=$event;
+            CREATE TRIGGER retention_session_event_content_token_immutable
+            BEFORE UPDATE OF retention_owner_token ON session_event_content
+            WHEN NEW.retention_owner_token IS NOT OLD.retention_owner_token
+            BEGIN SELECT RAISE(ABORT,'retention_owner_token_immutable'); END;
+            UPDATE retention_items
+            SET item_id='018f0000-0000-7000-8000-000000000006',ownership_receipt=$receipt
+            WHERE store_kind='session_event_content' AND source_item_id=$event;
+            """;
+        update.Parameters.AddWithValue("$token", token);
+        update.Parameters.AddWithValue("$receipt", receipt);
+        update.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
+        update.ExecuteNonQuery();
+    }
+
+    private static void RefreshDeterministicFullProjection(MonitorTempDirectory temp)
+    {
+        using var connection = Open(temp);
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE sessions SET status='completed',completeness='full',ended_at='2026-08-26T01:02:04.0000000+00:00' WHERE session_id=$session;
+            UPDATE session_events SET source_adapter='otel-exact',source_event_id='00000000000000000000000000000001/0000000000000001' WHERE session_id=$session AND type='tool.completed';
+            INSERT INTO raw_records(source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token)
+            VALUES('raw-otlp','00000000000000000000000000000001','2026-08-26T01:02:03.0000000+00:00',NULL,'{}',1,zeroblob(32));
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens,status,projected_at)
+            VALUES(last_insert_rowid(),'00000000000000000000000000000001','0000000000000001',0,'chat','llm_call',10,5,15,2,4,1,'OK','2026-08-26T01:02:04.0000000+00:00');
+            INSERT INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT raw_record_id,span_ordinal,0,15 FROM monitor_spans WHERE trace_id='00000000000000000000000000000001' AND span_id='0000000000000001';
+            """;
+        command.Parameters.AddWithValue("$session", SessionId);
+        Assert.True(command.ExecuteNonQuery() > 0);
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, new DateTimeOffset(2026, 8, 26, 1, 2, 5, TimeSpan.Zero),
+            FixedSkillRegistryGenerationAuthority.Load());
+        command.CommandText = "UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=31 WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND availability_state='available';";
+        Assert.Equal(1, command.ExecuteNonQuery());
+        transaction.Commit();
     }
 
     private static void SeedDeterministicNonrecordedSession(MonitorTempDirectory temp)

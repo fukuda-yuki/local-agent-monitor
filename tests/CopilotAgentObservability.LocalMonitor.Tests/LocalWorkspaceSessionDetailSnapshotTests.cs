@@ -29,6 +29,26 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal(one.ReadTransactionCount, tenThousand.ReadTransactionCount);
     }
 
+    [Theory]
+    [InlineData("Summary")]
+    [InlineData("Timeline")]
+    [InlineData("Node")]
+    public async Task SanitizedDetailReadsDoNotSelectRawCarrierValuesOrAcquireRetentionAccessLeases(string kindName)
+    {
+        var observed = await ObserveDetailRead(kindName, 1, inflateRawCarriers: true);
+
+        Assert.DoesNotContain(observed.Sql, statement => statement.Contains("payload_json", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(observed.Sql, statement => statement.Contains("resource_attributes_json", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(observed.Sql, statement => statement.Contains("content_json", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(observed.Sql, statement => statement.Contains("SELECT *", StringComparison.OrdinalIgnoreCase)
+            && (statement.Contains("raw_records", StringComparison.OrdinalIgnoreCase)
+                || statement.Contains("session_event_content", StringComparison.OrdinalIgnoreCase)));
+        Assert.DoesNotContain(observed.Sql, statement =>
+            statement.Contains("retention_leases", StringComparison.OrdinalIgnoreCase)
+            && (statement.StartsWith("INSERT", StringComparison.OrdinalIgnoreCase)
+                || statement.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase)));
+    }
+
     [Fact]
     public async Task NodeReadRejectsAProjectionWithFourThousandNinetySevenTotalNodes()
     {
@@ -212,7 +232,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         transaction.Commit();
     }
 
-    private static async Task<ObservedRead> ObserveDetailRead(string kindName, int sessionCount)
+    private static async Task<ObservedRead> ObserveDetailRead(string kindName, int sessionCount, bool inflateRawCarriers = false)
     {
         using var temp = new MonitorTempDirectory();
         var targetSession = AlertCenterRouteTests.SeedPersistedTraceAndSession(
@@ -241,6 +261,12 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
             }
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.UnixEpoch,
                 FixedSkillRegistryGenerationAuthority.Load());
+            if (inflateRawCarriers)
+            {
+                command.CommandText = "UPDATE raw_records SET payload_json=$large,resource_attributes_json=$large WHERE id IN (SELECT raw_record_id FROM monitor_spans WHERE trace_id='00000000000000000000000000000001'); UPDATE session_event_content SET content_json=$large WHERE event_id IN (SELECT event_id FROM session_events WHERE session_id=$target);";
+                command.Parameters.AddWithValue("$large", new string('x', 1_048_577));
+                command.ExecuteNonQuery();
+            }
             transaction.Commit();
         }
         using var rootCommand = connection.CreateCommand();

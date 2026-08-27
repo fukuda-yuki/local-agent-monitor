@@ -332,9 +332,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT * FROM session_runs WHERE session_id=$session_id ORDER BY run_id",
             "SELECT * FROM session_events WHERE session_id=$session_id ORDER BY event_id",
             "SELECT m.* FROM monitor_spans m WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY m.raw_record_id,m.span_ordinal",
-            "SELECT r.* FROM raw_records r WHERE EXISTS(SELECT 1 FROM monitor_spans m JOIN session_runs s ON s.trace_id=m.trace_id WHERE s.session_id=$session_id AND m.raw_record_id=r.id) ORDER BY r.id",
+            "SELECT r.id,r.source,r.trace_id,r.received_at,r.schema_version,r.retention_owner_token FROM raw_records r WHERE EXISTS(SELECT 1 FROM monitor_spans m JOIN session_runs s ON s.trace_id=m.trace_id WHERE s.session_id=$session_id AND m.raw_record_id=r.id) ORDER BY r.id",
             "SELECT f.* FROM local_workspace_span_facts f JOIN monitor_spans m ON m.raw_record_id=f.raw_record_id AND m.span_ordinal=f.span_ordinal WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY f.raw_record_id,f.span_ordinal",
-            "SELECT c.* FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id=$session_id ORDER BY c.event_id",
+            "SELECT c.event_id,c.content_kind,c.captured_at,c.expires_at,c.retention_owner_token FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id=$session_id ORDER BY c.event_id",
             "SELECT * FROM local_workspace_sessions WHERE session_id=$session_id",
             "SELECT * FROM local_workspace_execution_headers WHERE session_id=$session_id ORDER BY execution_id LIMIT 257",
             "SELECT * FROM local_workspace_nodes WHERE session_id=$session_id ORDER BY node_id LIMIT 4097",
@@ -345,7 +345,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT s.* FROM skill_invocation_snapshots s WHERE s.session_id=$session_id ORDER BY s.snapshot_id",
             "SELECT r.* FROM skill_invocation_snapshot_receipts r JOIN skill_invocation_snapshots s ON s.snapshot_id=r.snapshot_id WHERE s.session_id=$session_id ORDER BY r.snapshot_id",
             "SELECT h.* FROM skill_projection_trace_heads h WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=h.trace_id) ORDER BY h.trace_id",
-            "SELECT i.*,t.deleted_at FROM retention_items i LEFT JOIN retention_tombstones t ON t.item_id=i.item_id WHERE EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.session_id=$session_id AND c.retention_item_id=i.item_id) ORDER BY i.item_id"
+            "SELECT i.store_instance_id,i.store_kind,i.source_item_id,i.receipt_version,i.captured_at,i.expires_at,i.state,i.revision,t.receipt_at,t.deleted_at FROM retention_items i LEFT JOIN retention_tombstones t ON t.item_id=i.item_id WHERE EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.session_id=$session_id AND c.retention_item_id=i.item_id) ORDER BY i.item_id"
         };
         foreach(var sql in statements)
         {

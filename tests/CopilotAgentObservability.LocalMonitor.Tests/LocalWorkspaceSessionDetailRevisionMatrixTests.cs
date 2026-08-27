@@ -94,14 +94,13 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
     [Theory]
     [InlineData("raw_records.payload_json", "UPDATE raw_records SET payload_json=json_set(payload_json,'$.revision_matrix',1) WHERE id=(SELECT m.raw_record_id FROM monitor_spans m JOIN session_runs r ON r.trace_id=m.trace_id WHERE r.session_id=$session ORDER BY m.raw_record_id LIMIT 1);")]
     [InlineData("session_event_content.content_json", "UPDATE session_event_content SET content_json=json_set(content_json,'$.revision_matrix',1) WHERE event_id=(SELECT c.event_id FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id=$session ORDER BY c.event_id LIMIT 1);")]
-    public async Task LinkedRawCarrierMutationChangesSourceRevisionAndFencesOldSnapshot(string source,string sql)
+    public async Task LinkedRawCarrierMutationDoesNotChangeSanitizedRevision(string source,string sql)
     {
         using var fixture=await RealFixture.CreateAsync();
         var before=await fixture.ReadSummaryAsync();
         Assert.True(fixture.Execute(sql,false)==1,$"{source} did not mutate its linked carrier row");
         var after=await fixture.ReadSummaryAsync();
-        Assert.NotEqual(before.WorkspaceRevision,after.WorkspaceRevision);
-        await fixture.AssertStaleRoutesAsync(before);
+        Assert.Equal(before.WorkspaceRevision,after.WorkspaceRevision);
     }
 
     [Fact]
