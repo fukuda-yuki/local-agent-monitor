@@ -87,17 +87,110 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     }
 
     [Theory]
-    [InlineData(1_048_576, HttpStatusCode.OK)]
-    [InlineData(1_048_577, HttpStatusCode.RequestEntityTooLarge)]
-    public async Task ProductionContentRouteEnforcesCompleteOneMiBBoundary(int size, HttpStatusCode expectedStatus)
+    [InlineData("GET", "whole_event", 1_048_576, HttpStatusCode.OK)]
+    [InlineData("HEAD", "whole_event", 1_048_576, HttpStatusCode.OK)]
+    [InlineData("GET", "whole_event", 1_048_577, HttpStatusCode.RequestEntityTooLarge)]
+    [InlineData("HEAD", "whole_event", 1_048_577, HttpStatusCode.RequestEntityTooLarge)]
+    [InlineData("GET", "json_pointer", 1_048_576, HttpStatusCode.OK)]
+    [InlineData("HEAD", "json_pointer", 1_048_576, HttpStatusCode.OK)]
+    [InlineData("GET", "json_pointer", 1_048_577, HttpStatusCode.RequestEntityTooLarge)]
+    [InlineData("HEAD", "json_pointer", 1_048_577, HttpStatusCode.RequestEntityTooLarge)]
+    public async Task ProductionContentRouteEnforcesCompleteOneMiBBoundary(
+        string method, string locatorKind, int size, HttpStatusCode expectedStatus)
     {
-        using var temp = new MonitorTempDirectory(); SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\""+new string('x',size)+"\"}", eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0',64)); StabilizeDeterministicContentOwner(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp); RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
-        string nodeId;using(var connection=Open(temp))nodeId=Scalar(connection,"SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';",SessionId);
+        using var temp = new MonitorTempDirectory();
+        var wholeEvent = locatorKind == "whole_event";
+        var contentJson = wholeEvent
+            ? "\"" + new string('x', size - 2) + "\""
+            : "{\"prompt\":\"" + new string('x', size) + "\"}";
+        Assert.Equal(wholeEvent ? size : size + 13, System.Text.Encoding.UTF8.GetByteCount(contentJson));
+        SeedDeterministicSession(temp, full: true, contentJson: contentJson,
+            eventType: wholeEvent ? "tool.completed" : "UserPromptSubmit",
+            sourceAdapter: wholeEvent ? "github-copilot-vscode-otel" : "claude-code-hook",
+            schemaFingerprint: wholeEvent ? null : new string('0',64));
+        StabilizeDeterministicContentOwner(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
+        var part = wholeEvent ? "event_content" : "instruction";
+        string nodeId;using(var connection=Open(temp))nodeId=Scalar(connection,"SELECT node_id FROM local_workspace_node_content_refs WHERE part=$execution AND source_item_id='018f0000-0000-7000-8000-000000000004';",SessionId,part);
         using var summaryResponse=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");using var summary=JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());var revision=summary.RootElement.GetProperty("workspace_revision").GetString();
-        using var response=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction");
+        using var response=await host.Client.SendAsync(new(new HttpMethod(method), $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part={part}"));
         Assert.Equal(expectedStatus,response.StatusCode);
-        if(expectedStatus==HttpStatusCode.OK)Assert.Equal(size,(await response.Content.ReadAsByteArrayAsync()).Length);else Assert.Equal("{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
+        Assert.Equal(expectedStatus == HttpStatusCode.OK ? size : 33, response.Content.Headers.ContentLength);
+        if(expectedStatus==HttpStatusCode.OK)Assert.Equal(method == "HEAD" ? 0 : size,(await response.Content.ReadAsByteArrayAsync()).Length);else Assert.Equal(method == "HEAD" ? "" : "{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task RealCatalogBusyBeforeGrantReturnsExactPersistenceBusyWithoutLeaseOrRaw(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "catalog-busy-raw-must-not-publish";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        using var host = await StartProductionDetailRouteAsync(temp);
+        RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+        using var blocker = Open(temp);
+        using var blockingTransaction = blocker.BeginTransaction(deferred: false);
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.Equal(28, response.Content.Headers.ContentLength);
+        Assert.Equal(method == "HEAD" ? [] : "{\"error\":\"persistence_busy\"}"u8.ToArray(), await response.Content.ReadAsByteArrayAsync());
+        Assert.DoesNotContain(marker, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal("0", Scalar(blocker, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+    }
+
+    [Theory]
+    [InlineData("GET", (int)LocalMonitorNodeContentRoutePhase.DuringResponseWrite)]
+    [InlineData("HEAD", (int)LocalMonitorNodeContentRoutePhase.AfterSuccessfulSealBeforeWrite)]
+    public async Task SuccessfulResponseHoldsAccessLeaseThroughPublicationAndReleasesAtCompletion(
+        string method, int publicationPhaseValue)
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.TimeProvider = new GenericRouteContentClock(new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero));
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        var observedPublicationLease = false;
+        var options = new MonitorHostTestOptions
+        {
+            StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
+            StartSessionOtelEnrichment = false, StartLocalRepositoryCatalogHostedService = false,
+            UseUserSecrets = false,
+            LocalMonitorNodeContentRouteCheckpoint = phase =>
+            {
+                if (phase != (LocalMonitorNodeContentRoutePhase)publicationPhaseValue) return;
+                using var proof = Open(temp);
+                observedPublicationLease = Scalar(proof,
+                    "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId) == "1";
+            },
+        };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
+        var revision = await Revision(host.Client);
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method),
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction"));
+        _ = await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(observedPublicationLease);
+        using var completedProof = Open(temp);
+        Assert.Equal("0", Scalar(completedProof,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
     }
 
     [Theory]
@@ -901,7 +994,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         command.Transaction = transaction;
         command.CommandText = """
             UPDATE sessions SET status='completed',completeness='full',ended_at='2026-08-26T01:02:04.0000000+00:00' WHERE session_id=$session;
-            UPDATE session_events SET source_adapter='otel-exact',source_event_id='00000000000000000000000000000001/0000000000000001' WHERE session_id=$session AND type='tool.completed';
+            UPDATE session_events SET source_adapter='otel-exact',source_event_id='00000000000000000000000000000001/0000000000000001' WHERE event_id='018f0000-0000-7000-8000-000000000005';
             INSERT INTO raw_records(source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token)
             VALUES('raw-otlp','00000000000000000000000000000001','2026-08-26T01:02:03.0000000+00:00',NULL,'{}',1,zeroblob(32));
             INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens,status,projected_at)
