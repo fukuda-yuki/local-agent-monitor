@@ -166,10 +166,8 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                     ? new("recorded", projection.InvocationCount)
                     : new(projection.State, null);
                 if (projection.State == "current")
-                    row.SearchTexts.AddRange(projection.Invocations
-                        .Select(static invocation => invocation.SdkSkillName ?? invocation.OtelSkillName)
-                        .Where(static name => !string.IsNullOrWhiteSpace(name))
-                        .Select(static name => name!.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant()));
+                    row.SearchTexts.AddRange(projection.SearchFacts
+                        .Select(static fact => fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant()));
             }
             else
                 row.Activity["skill"] = new("not_observed", null);

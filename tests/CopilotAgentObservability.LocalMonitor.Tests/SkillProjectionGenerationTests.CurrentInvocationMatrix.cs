@@ -335,13 +335,46 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Equal(1, execution.Activity.Skill.Value);
         var timeline = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Timeline, execution.ExecutionId);
         var node = Assert.Single(timeline.Detail.Nodes, static value => value.SourceKind == "skill_invocation");
+        var root = Assert.Single(timeline.Detail.Nodes, static value => value.SourceKind == "execution_root");
+        Assert.Equal(execution.ChildCount, root.ChildCount);
         Assert.Equal(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", node.SourceIdentity), node.NodeId);
         Assert.Equal("Needle-Skill", node.NameText);
         Assert.NotNull(node.TraceId);
         Assert.NotNull(node.SpanId);
         var inspected = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Node, nodeId: node.NodeId);
         Assert.Contains(inspected.Detail.Nodes, value => value.NodeId == node.NodeId && value.ParentNodeId is not null);
+        var children = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Timeline,
+            execution.ExecutionId, parentNodeId: node.NodeId);
+        Assert.DoesNotContain(children.Detail.Nodes, value => value.ParentNodeId == node.NodeId);
         Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+    }
+
+    [Fact]
+    public async Task PersistedSqliteMatrix_TimeAdmittedNodeParticipatesInNodeBound()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedMismatchedPair("crossing", "Needle-Skill", "71", "81", "72", "82");
+        fixture.RefreshWorkspace();
+        fixture.AddGenericEvents("crossing", 4096 - fixture.DetailNodeCount("crossing"));
+        fixture.RefreshWorkspaceProjection("crossing");
+        fixture.AdvancePastLatestSdkExpiry("crossing");
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Summary));
+        Assert.Equal("workspace_too_large", error.Error);
+    }
+
+    [Fact]
+    public async Task PersistedSqliteMatrix_ExactPairSearchUsesBothCanonicalAuthorityNames()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedExactPairWithNames("pair", "otel-name", "sdk-name", "51", "61");
+
+        using var otel = JsonDocument.Parse(await fixture.SerializeCollectionAsync("otel-name", null));
+        using var sdk = JsonDocument.Parse(await fixture.SerializeCollectionAsync("sdk-name", null, refresh: false));
+        Assert.Single(otel.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Single(sdk.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(1, otel.RootElement.GetProperty("items")[0].GetProperty("summary").GetProperty("skill").GetProperty("count").GetInt32());
     }
 
     private static void AssertFilteredAdmittedSummary(CurrentInvocationProjectionFixture fixture, JsonDocument filtered)
@@ -496,6 +529,15 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         SeedOtel(sessionKey, skillName, traceSeed.PadRight(32, traceSeed[0]), spanSeed.PadRight(16, spanSeed[0]));
     }
 
+    internal void SeedExactPairWithNames(string sessionKey, string otelName, string sdkName, string traceSeed, string spanSeed)
+    {
+        SeedSdkOnly(sessionKey, sdkName);
+        var traceId = traceSeed.PadRight(32, traceSeed[0]);
+        var spanId = spanSeed.PadRight(16, spanSeed[0]);
+        BindLatestSdkProducer(sessionKey, traceId, spanId);
+        SeedOtel(sessionKey, otelName, traceId, spanId);
+    }
+
     internal IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> ReadAll()
     {
         using var connection = Open();
@@ -597,7 +639,8 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         string sessionKey,
         LocalRepositorySessionDetailRequestKind kind,
         string? executionId = null,
-        string? nodeId = null)
+        string? nodeId = null,
+        string? parentNodeId = null)
     {
         var clock = new FixedTimeProvider(readAt);
         var service = new SqliteLocalRepositoryScopeSnapshotService(
@@ -607,7 +650,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
             detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
                 registryAuthority: authority, timeProvider: clock),
             skillRegistryAuthority: authority);
-        return service.ReadDetailAsync(new(kind, sessions[sessionKey], ExecutionId: executionId, NodeId: nodeId), CancellationToken.None);
+        return service.ReadDetailAsync(new(kind, sessions[sessionKey], ExecutionId: executionId, NodeId: nodeId, ParentNodeId: parentNodeId), CancellationToken.None);
     }
 
     internal void AssertWorkspaceSkill(string sessionKey, string state, int? count, string[] searchFacts)

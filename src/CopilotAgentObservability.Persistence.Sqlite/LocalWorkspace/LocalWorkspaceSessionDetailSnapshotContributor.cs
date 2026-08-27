@@ -40,15 +40,17 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
             connection, transaction, [sessionId], acceptedAt, registryAuthority);
         currentSkills.TryGetValue(sessionId, out var skillProjection);
-        await ValidateBounds(connection, transaction, sessionId, token);
+        await ValidateBounds(connection, transaction, sessionId, skillProjection, token);
         var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
             && !syntheticSkillTarget)
             await ValidateNodeAncestry(connection, transaction, request, token);
         var projectedNodes = NormalizeCurrentSkillNodes(
             await ReadNodes(connection, transaction, request, token), skillProjection);
+        var persistedNodeIds = projectedNodes.Select(static node => node.NodeId).ToHashSet(StringComparer.Ordinal);
         projectedNodes = await AddMissingCurrentSkillNodes(
             connection, transaction, request, projectedNodes, skillProjection, token);
+        var synthesizedSkillNodes = projectedNodes.Where(node => node.SourceKind == "skill_invocation" && !persistedNodeIds.Contains(node.NodeId)).ToArray();
         var admittedSkillIdentities = skillProjection?.State == "current"
             ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).ToHashSet(StringComparer.Ordinal)
             : [];
@@ -57,8 +59,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var nodes = projectedNodes.Except(excludedSkillNodes).ToArray();
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
         var executions = ApplyCurrentSkillActivity(
-            await ReadExecutions(connection, transaction, request, executionIds, token), skillProjection);
-        nodes = ApplyCurrentSkillActivity(nodes, executions, excludedSkillNodes);
+            await ReadExecutions(connection, transaction, request, executionIds, token), skillProjection, synthesizedSkillNodes);
+        nodes = ApplyCurrentSkillActivity(nodes, executions, excludedSkillNodes, synthesizedSkillNodes);
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
             ? await ReadEdges(connection, transaction, [request.NodeId!], token)
@@ -189,7 +191,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
 
     private static LocalWorkspaceExecutionDetail[] ApplyCurrentSkillActivity(
         LocalWorkspaceExecutionDetail[] executions,
-        SkillProjectionCurrentInvocationProjection? projection)
+        SkillProjectionCurrentInvocationProjection? projection,
+        LocalWorkspaceNodeDetail[] synthesized)
     {
         var current = projection?.State == "current";
         return executions.Select(execution =>
@@ -204,16 +207,24 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 : projection is null
                     ? new LocalWorkspaceFact<long>("not_observed", null)
                     : new LocalWorkspaceFact<long>(projection.State == "current" ? "not_observed" : projection.State, null);
-            return execution with { Activity = execution.Activity with { Skill = skill } };
+            return execution with
+            {
+                Activity = execution.Activity with { Skill = skill },
+                ChildCount = execution.ChildCount + synthesized.LongCount(node => node.ExecutionId == execution.ExecutionId),
+            };
         }).ToArray();
     }
 
     private static LocalWorkspaceNodeDetail[] ApplyCurrentSkillActivity(
         LocalWorkspaceNodeDetail[] nodes,
         LocalWorkspaceExecutionDetail[] executions,
-        LocalWorkspaceNodeDetail[] excluded)
+        LocalWorkspaceNodeDetail[] excluded,
+        LocalWorkspaceNodeDetail[] synthesized)
     {
         var excludedByParent = excluded.Where(static node => node.ParentNodeId is not null)
+            .GroupBy(static node => node.ParentNodeId!, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.LongCount(), StringComparer.Ordinal);
+        var synthesizedByParent = synthesized.Where(static node => node.ParentNodeId is not null)
             .GroupBy(static node => node.ParentNodeId!, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.LongCount(), StringComparer.Ordinal);
         var byExecution = executions.ToDictionary(static execution => execution.ExecutionId, StringComparer.Ordinal);
@@ -226,6 +237,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             var childCount = excludedByParent.TryGetValue(node.NodeId, out var removed)
                 ? Math.Max(0, node.ChildCount - removed)
                 : node.ChildCount;
+            if (synthesizedByParent.TryGetValue(node.NodeId, out var added)) childCount += added;
             return node with { Activity = activity, ChildCount = childCount };
         }).ToArray();
     }
@@ -263,13 +275,32 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SqliteConnection connection,
         SqliteTransaction transaction,
         string sessionId,
+        SkillProjectionCurrentInvocationProjection? projection,
         CancellationToken token)
     {
         using var command = Command(connection, transaction, BoundsSql, sessionId);
-        using var reader = await command.ExecuteReaderAsync(token);
-        if (!await reader.ReadAsync(token)
-            || reader.GetInt64(0) != 0
-            || reader.GetInt64(1) != 0)
+        long executionOverflow;
+        long nodeOverflow;
+        using (var reader = await command.ExecuteReaderAsync(token))
+        {
+            if (!await reader.ReadAsync(token)) throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+            executionOverflow = reader.GetInt64(0);
+            nodeOverflow = reader.GetInt64(1);
+        }
+        var identities = projection?.State == "current"
+            ? projection.Invocations.Select(static invocation => LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)).Distinct(StringComparer.Ordinal).ToArray()
+            : [];
+        if (identities.Length != 0)
+        {
+            using var effective = Command(connection, transaction, """
+                SELECT (SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session_id)+
+                       (SELECT COUNT(*) FROM json_each($identities) j WHERE NOT EXISTS(
+                          SELECT 1 FROM local_workspace_nodes n WHERE n.session_id=$session_id AND n.node_id=CAST(j.value AS TEXT)));
+                """, sessionId);
+            effective.Parameters.AddWithValue("$identities", System.Text.Json.JsonSerializer.Serialize(identities));
+            nodeOverflow |= Convert.ToInt64(await effective.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) > MaximumNodes ? 1 : 0;
+        }
+        if (executionOverflow != 0 || nodeOverflow != 0)
             throw new LocalWorkspaceSessionDetailException("workspace_too_large");
     }
 
