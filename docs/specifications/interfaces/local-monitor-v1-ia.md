@@ -250,7 +250,40 @@ Columns are fixed:
 - every metric drills down to included and unavailable Sessions and exact evidence;
 - provider-ready users may ask AI to interpret the accepted deterministic receipt, but AI does not recalculate it.
 
+### Deterministic scalar and selection rules
+
+For every scalar metric, sort available per-Session values in ascending numeric
+order. Odd cardinality uses the central value. Even cardinality uses the exact
+decimal arithmetic mean of the two central values. Calculation remains in
+base-10 decimal and never converts through binary floating point. `minimum`,
+`maximum`, and supplementary `total` use the same available values; unavailable
+states never enter the numeric sequence and never become zero.
+
+The absolute difference is `B median - A median`. Relative difference is
+`((B median - A median) / A median) * 100` only when A median is greater than
+zero and both medians are available. It is otherwise null. The percentage is
+calculated in decimal and rounded to one fractional decimal digit with
+midpoint-away-from-zero rounding. Median, minimum, maximum, total, and absolute
+difference are not rounded by this presentation rule.
+
+Canonical decimal text is `0` for numeric zero. Every nonzero value is an
+optional `-`, an integer part with no leading zero, and an optional fractional
+part whose last digit is nonzero. A plus sign, exponent, integer leading zero,
+fractional trailing zero, locale separator, whitespace, and negative zero are
+forbidden. This canonical text is receipt state, not a new public Compare DTO.
+
+Canonical selected-Session bytes begin with the strict UTF-8 domain
+`copilot-agent-observability/local-comparison-selection/v1`, then encode cohort
+`a` followed by cohort `b`. Within each cohort, exact canonical lowercase UUIDv7
+Session IDs are distinct and ordinal-sorted. Each domain, cohort token,
+invariant-decimal member count, and Session ID is framed by a four-byte unsigned
+big-endian UTF-8 byte length followed by those bytes. SHA-256 covers the complete
+framed sequence. Input order, display alias, current time, repository/name/time
+proximity, and mutable Session state are not inputs and cannot repair selection.
+
 The complete formula/snapshot contract is #165; implementation is #166.
+This IA freezes no Compare preview/create API path, success DTO, bound, or
+error graph. Those remain absent until #165 supplies the owner wire.
 Comparison IDs are canonical local UUIDv7. A live snapshot expires after 24
 hours; #166 retains only the append-only, non-sensitive expiry tombstone in the
 route/transport contract so a known expired URL deterministically returns

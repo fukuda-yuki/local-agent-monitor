@@ -21,7 +21,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Repository Session Compare | #165 plus the identity/expiry amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
 | Session collection success response | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md), composing #133 semantics and [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) request/transport/cursor rules | #134 |
 | Other Repository/Session Workspace reads | #133 semantic requirements and the execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #134 |
-| Session summary/timeline/node/content exact response and coherent snapshot | [`local-monitor-v1-session-detail.md`](local-monitor-v1-session-detail.md) | #134 |
+| Session summary/timeline/node/content v2 exact response and coherent snapshot | [`local-monitor-v1-session-detail.md`](local-monitor-v1-session-detail.md) | #134 |
 | Japanese sentence-level copy | #169 | #169 and UI owners |
 | Cross-cutting validation | #147 | #147 |
 | User documentation | accepted canonical docs | #148 |
@@ -102,12 +102,16 @@ is permitted.
   process-keyed HMAC filter binding.
 - Canonical Repository/Session/execution/AI/comparison route IDs are local
   lowercase UUIDv7; timeline node IDs are `node-` plus 32 lowercase hex.
+- The four Session-detail success schemas are sole-current v2 and share one
+  same-origin guard. `local_workspace_projection:5` is the sole detail reader;
+  v4 `SubagentStart.agent_id` content mapping is removed because `agent_id` is
+  technical/native Run identity only.
 - Known comparison expiry is a fixed 410 backed only by #165/#166's minimal
   append-only runtime-database tombstone. Unknown or Repository-mismatched
-  comparison IDs are fixed 404. Runtime backup transactionally drops the exact
-  tombstone table from its staging copy before inventory/hash/archive, never
-  from source; manifest/restore omit it and restore startup creates it empty.
-  Future #166 operational tables require their own exact backup amendment.
+  comparison IDs are fixed 404. Runtime backup excludes the complete closed
+  24-hour Compare operational namespace by the staging categories in
+  `runtime-backup-restore.md`, never by mutating source; manifest/restore omit
+  them and restore startup rematerializes only owner-required empty schema.
 - #156, #161 and #134 use one `ILocalRepositoryScopeSnapshotService`; #161
   supplies complete direct Session/Repository archive facts, #156 validates
   those facts and alone composes assignment-dependent effective archive
@@ -138,6 +142,8 @@ is permitted.
 - Missing values are not zero.
 - Exact-v10 `deleted_before_digest_v10` is tagged predecessor evidence, never a fabricated payload digest; its OTel Skill projection outcome is fail-closed `input_unavailable` under the dedicated contract above.
 - Compare values are deterministic and AI-independent.
+- Compare contract proof does not create preview/create API paths, DTOs,
+  bounds, or errors while #165 has not supplied that owner wire.
 - AI can interpret accepted snapshots but cannot recalculate Compare facts or explore outside scope.
 - Archive is not deletion, retention or pin.
 - Historical Skill snapshot is not the current file.

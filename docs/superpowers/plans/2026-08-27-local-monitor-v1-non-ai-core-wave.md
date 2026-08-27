@@ -119,6 +119,47 @@ detail contract. `/historical-analysis` remains #164-owned and is unchanged.
 - Modify: `tests/CopilotAgentObservability.LocalMonitor.Tests/LocalMonitorV1SessionDetailSpecificationTests.cs`
 - Create: `tests/CopilotAgentObservability.LocalMonitor.Tests/LocalMonitorV1CompareSpecificationTests.cs`
 
+**Exact contract delta to freeze:**
+
+- Keep the four existing detail route paths, bounds, cursor binding, coherent
+  revision, raw Retention lease, strict UTF-8, and no-partial-oversize behavior.
+  Change only the sole-current success graphs/tokens and the newly common
+  same-origin guard.
+- Schema tokens are exactly
+  `local-monitor-session-summary.response.v2`,
+  `local-monitor-session-timeline.response.v2`,
+  `local-monitor-session-node.response.v2`, and
+  `local-monitor-node-content.response.v2`. No v1 token remains in the active
+  spec/schema/golden transport and no version selector exists.
+- Summary adds an explicit Boolean `latest` to every execution and a closed
+  signal-family capture-coverage collection sufficient for the UI to present
+  recorded, complete explicit zero, not observed, source unsupported, capture
+  gap, certification pending, inconsistent, and projection invalid without
+  inferring from other facts.
+- Timeline items add exact source references, `has_more_children`, and one
+  closed collapsed-child summary while retaining stable hierarchy/time
+  authority. Missing time never creates a duration.
+- Node adds a single closed kind-specific metadata object. Tool covers caller,
+  lifecycle/status/exit, exact MCP server/tool identity, input/result/error
+  availability, retry/recovery, child activity, and exact source references.
+  Skill covers current-valid state, source, trigger, inventory reference, and
+  historical snapshot reference only. Sub-agent covers selected/started/
+  completed/failed/deselected, exact input availability, activity/tokens/
+  children, and exact source references. Error/Permission/Event/Retry receive
+  closed metadata appropriate to their exact source facts; no open bag exists.
+- Content success changes from `text/plain` to a closed JSON entity containing
+  schema token, workspace revision, Session ID, node ID, part, state, exact
+  source item/revision reference, inert text, UTF-8 byte length, Unicode scalar
+  length, and `truncation:false`. Raw text remains byte-for-byte decoded strict
+  UTF-8 inside the JSON string value; no normalization or partial response.
+- `local_workspace_projection:5` is sole-current. The contract explicitly
+  removes the v4 `SubagentStart.agent_id` → `subagent_input` mapping: `agent_id`
+  is technical/native Run identity only.
+- Compare specification proof freezes only the user/#165 fixed section order,
+  deterministic scalar rules, named-row reachability, 24-hour exclusion from
+  backup, and forbidden labels. It must not invent preview/create API paths,
+  success DTOs, bounds, or errors while that owner wire is absent.
+
 - [ ] Write failing specification tests for the four v2 schema tokens, closed
   kind metadata, content JSON, exact property order, v5-only projection text,
   fixed Compare section order, and forbidden Compare labels.

@@ -35,7 +35,7 @@ JSON error representation. `OPTIONS` is not a CORS preflight response.
 Each complete JSON success entity is bounded to 8,388,608 UTF-8 bytes; overflow
 is `workspace_too_large` and no partial JSON is returned.
 
-For the raw-content route only, the same-origin guard rejects a browser
+For all four routes, the common same-origin guard rejects a browser
 `Sec-Fetch-Site` value other than `same-origin` or `none`, and rejects a
 nonempty `Origin` other than the request's exact scheme/host/port
 (case-insensitive). Absence of either header is allowed. Its GET and HEAD
@@ -49,7 +49,7 @@ Precedence is:
 method
 -> path identifier grammar
 -> complete closed query grammar
--> same-origin guard (content only)
+-> same-origin guard
 -> exact Session existence
 -> workspace revision recomputation/equality
 -> exact execution/node membership
@@ -70,7 +70,7 @@ All errors are exact compact JSON `{"error":"<fixed_code>"}`.
 | Invalid Host | `400 invalid_host` |
 | Wrong method | `405 method_not_allowed` |
 | Malformed path ID, unknown/duplicate/missing query, invalid value | `400 invalid_request` |
-| Cross-site content request | `403 csrf_rejected` |
+| Cross-site detail request | `403 csrf_rejected` |
 | Invalid/tampered/restarted/filter-mismatched timeline cursor | `400 invalid_cursor` |
 | Valid absent Session | `404 session_not_found` |
 | Valid absent/mismatched execution | `404 execution_not_found` |
@@ -108,7 +108,8 @@ accepts only `workspace_revision` then `part`. Timeline generated query order is
 
 ## Exact Summary response
 
-Schema token: `local-monitor-session-summary.response.v1`.
+Schema token: `local-monitor-session-summary.response.v2`. It is sole-current;
+there is no v1 selector, negotiation path, or fallback.
 
 Top-level property order is `schema_version, workspace_revision, session,
 executions, technical_references`.
@@ -130,14 +131,26 @@ reference is currently Retention-admissible. `timing` is exactly
 `recorded`, `started_at` and `last_seen_at` are non-null. An active recorded
 Session has both `ended_at` and `duration_ms` null; a completed recorded Session
 has both non-null and duration is at least zero. `capture` is exactly
-`{state,notes}` with state `complete|partial|not_observed|invalid` and an
-ordinal-sorted distinct closed note array.
+`{state,notes,coverage}` with state `complete|partial|not_observed|invalid` and
+an ordinal-sorted distinct closed note array. `coverage` contains exactly one
+entry, in this order, for `instruction`, `source`, `model`, `version`, `timing`,
+`tokens`, `cache`, `skill`, `tool`, `subagent`, `error`, and `retry`. Each entry
+is exactly `{signal_family,state}` and state is
+`recorded|complete_zero|not_observed|source_unsupported|capture_gap|certification_pending|inconsistent|projection_invalid`.
+`complete_zero` requires complete owner proof of an explicit zero. The UI uses
+these facts directly and never infers coverage from counts, nulls, neighboring
+events, Session completeness, or another signal family.
 
 `executions` contains `0..256` objects ordered by recorded start descending,
 then source ordinal ascending, then execution ID ascending. Missing time sorts
 after recorded; invalid time sorts after missing. Each object property order is
-`execution_id, node_id, source, model, lifecycle, status, timing, tokens,
+`execution_id, node_id, latest, source, model, lifecycle, status, timing, tokens,
 activity, child_count`.
+
+`latest` is an explicit Boolean on every execution. An empty array has no
+latest execution. A nonempty array has exactly one `latest:true`, selected by
+the canonical order above. Clients consume the Boolean and never infer latest
+from array position, time, lifecycle, ID, or another fact.
 
 `node_id` is the execution-root node. `source` and `model` are explicit nullable
 strings. `lifecycle` is `selected|started|completed|failed|deselected|unknown`.
@@ -157,7 +170,7 @@ content, prompt, response, Tool payload, Skill body, or locator appears.
 
 ## Exact Timeline response
 
-Schema token: `local-monitor-session-timeline.response.v1`.
+Schema token: `local-monitor-session-timeline.response.v2`. It is sole-current.
 
 Property order is `schema_version, workspace_revision, session_id,
 execution_id, parent_node_id, items, next_cursor`.
@@ -171,7 +184,8 @@ re-parented to a nearby or same-name node.
 
 Each item property order is `node_id, execution_id, parent_node_id,
 relationship_authority, kind, name, lifecycle, status, timing, activity,
-tokens, child_count, content_parts`.
+tokens, child_count, has_more_children, collapsed_children, content_parts,
+source_references`.
 
 `relationship_authority` is `exact|explicit|unknown`. `kind` is one of
 `execution|agent|skill|tool|subagent|event|error|retry|permission|unknown_relation_group`.
@@ -179,6 +193,16 @@ tokens, child_count, content_parts`.
 `lifecycle`, `status`, `timing`, `activity`, and `tokens` use the Summary closed
 shapes. `content_parts` is an ordinal-sorted subset of the six accepted part
 tokens and is availability metadata, not raw content.
+`has_more_children` is explicit and is never inferred by comparing the page
+with `child_count`. `collapsed_children` is exactly `{state,count}` with state
+`complete|partial|unavailable`; unavailable has a null count and the other
+states have an exact nonnegative count. `source_references` is exactly
+`{state,references}`. Recorded contains `1..16` exact closed
+`{source_kind,source_identity,trace_id,span_id,event_id}` rows; every
+recorded row has at least one non-null exact identity among `source_identity`,
+`trace_id`, `span_id`, and `event_id`; `source_kind` alone is not identity.
+Every non-recorded state carries an empty array. Capture/observation time is
+not promoted to source time.
 
 Children are ordered by time authority group (`recorded`, `missing`, `invalid`),
 then exact start instant ascending for recorded values, source ordinal
@@ -213,17 +237,57 @@ invalidates it. Changing this layout requires a new schema version.
 
 ## Exact Node response
 
-Schema token: `local-monitor-session-node.response.v1`.
+Schema token: `local-monitor-session-node.response.v2`. It is sole-current.
 
 Property order is `schema_version, workspace_revision, session_id, execution,
 node, parent_path, related, content`.
 
 `execution` is the exact Summary execution-header object. `node` is the exact
-Timeline item plus `technical_references`, where technical references is
+Timeline item plus `technical_references` and one `metadata` object, where
+technical references is
 `{source_kind,source_identity,trace_id,span_id,event_id}` and every unavailable
 value is explicit null. `parent_path` is an ordered root-to-parent array of
 exact Timeline items. Cycles or cross-Session/cross-execution edges make the
 authority unavailable rather than being repaired.
+
+`metadata.kind` equals `node.kind`; every variant is closed and there is no
+dictionary, extension bag, inferred value, or alternate metadata object.
+Execution, agent, and unknown-relation-group metadata contain only their exact
+kind. The remaining variants are:
+
+- Tool: `kind,caller,lifecycle,status,exit,mcp_server_identity,mcp_server_name,
+  mcp_tool_name,input,result,error,retry,recovery,child_activity,
+  source_references`. Caller/lifecycle/status, the three content availabilities,
+  retry/recovery node sets, child activity, and sources are state-bearing facts.
+  `exit` is a closed availability/state fact and never fabricates a numeric exit
+  code. Outcome/status is admitted only within exact OTel status or Hook
+  lifecycle authority. The client-supplied 64-lowercase-hex MCP server hash is
+  the only exact server identity currently available; a literal MCP server name
+  is explicitly unavailable. Tool name is admitted only from an exact source.
+  Per-Tool retry/recovery remains non-recorded or source-unsupported unless its
+  exact edge exists.
+- Skill: `kind,current_valid_state,source,trigger,inventory_reference,
+  historical_snapshot_reference` only. Current-valid state is
+  `current|stale|invalid|certification_pending|unavailable`; each other member
+  is a state-bearing exact fact. Per-invocation inventory reference remains
+  explicitly unavailable until its owner supplies it. Current file/body/path is
+  not added.
+- Sub-agent: `kind,lifecycle,input,activity,tokens,children,source_references`.
+  Lifecycle is a closed object with separate state-bearing
+  `selected,started,completed,failed,deselected` facts. Input availability,
+  activity, token components, child count, and
+  sources remain independently explicit; `SubagentStart.agent_id` is not input,
+  and SDK token facts are not inferred.
+- Error: `kind,error_code,message,status,source_references`.
+- Permission: `kind,decision,wait,source_references`. Decision and wait remain
+  explicit unavailable/not-observed/source-unsupported facts when absent.
+- Event: `kind,event_name,source_time,content,source_references`. Hook capture
+  time is never source time.
+- Retry: `kind,attempt,target,recovered,source_references`.
+
+Every non-recorded scalar/reference fact has a null value or empty reference
+array as defined by the schema. Proximity, names, lifecycle correlation, and
+other families never fill it.
 
 `related` property order is `retry,recovery,children`. Each value is an
 ordinal-stable array of exact Timeline items, bounded to 200; a larger relation
@@ -238,31 +302,82 @@ represented here and remain exclusively on the #158 routes.
 
 ## Exact raw content response
 
-Schema token: `local-monitor-node-content.response.v1`, carried in the exact
-response header `X-Local-Monitor-Schema-Version`. A successful response is
-`200`, `Content-Type: text/plain; charset=utf-8`, no-store, and the entity is
-the exact decoded UTF-8 string value with no wrapper, BOM, added newline, or
-normalization. It is rendered only as inert text by consumers.
+Schema token: `local-monitor-node-content.response.v2`, carried in both the
+closed JSON entity and exact response header `X-Local-Monitor-Schema-Version`.
+It is sole-current. A successful response is `200`, `Content-Type:
+application/json; charset=utf-8`, no-store, and property order is
+`schema_version,workspace_revision,session_id,node_id,part,state,
+source_reference,text,utf8_byte_length,unicode_scalar_length,truncation`.
+`state` is exactly `available`; `source_reference` is exactly
+`{store_kind,source_item_id,revision}`; and `truncation` is exactly false.
+`text` is the complete strict-UTF-8-decoded raw value represented as one inert
+JSON string with no normalization or added newline. `utf8_byte_length` is the
+selected text's exact pre-JSON UTF-8 byte length and
+`unicode_scalar_length` is its Unicode scalar count. Consumers render only the
+decoded string as inert text.
 
 The route binds Session, workspace revision, node, part, carrier store kind,
 source item identity, and immutable Retention owner identity. It acquires the
-existing access lease, reads the complete value, rejects invalid UTF-8 or more
-than 1,048,576 bytes, re-proves the committed lease through response
+existing access lease, reads the complete value, rejects invalid UTF-8 or
+selected text greater than 1,048,576 UTF-8 bytes, re-proves the committed lease through response
 completion, and only then completes success. It never streams a partial value.
+The complete JSON representation remains under the common 8,388,608-byte
+success-entity ceiling.
 Expiry, deletion, read denial, malformed carrier, lease loss, or binding drift
 fails closed. Raw values never enter URL, error, log, telemetry, diagnostics,
 repository artifact, or exception text.
 
-## `local_workspace_projection` v4
+## `local_workspace_projection` v5
 
-V4 is the sole runtime reader shape. Exact v1 migrates to v2, exact v2 to v3,
-and exact v3 to v4. There is no v3 reader, dual reader, compatibility fallback,
+V5 is the sole runtime reader shape. Exact v1 migrates to v2, exact v2 to v3,
+exact v3 to v4, and exact v4 to v5. There is no v4 reader, dual reader, compatibility fallback,
 or read-time migration.
 
 V4 adds owned tables for execution headers, nodes, node edges, and node content
 references. The projection persists only sanitized facts and raw availability
 references; raw content remains in its owner store. Exact table definitions and
-indexes are frozen by `local_workspace_projection:4` schema tests.
+indexes are frozen by `local_workspace_projection:5` schema tests.
+
+V5 removes the v4 `SubagentStart.agent_id` to `subagent_input` content mapping
+and its `/agent_id` selector. `agent_id` is technical/native Run identity only;
+it is never raw Sub-agent input, a label, prompt, source time, or relationship
+proof. Exact v4 migration drops affected content-reference and content-
+tombstone projection rows rather than reclassifying or retaining them. It does
+not delete the source Event or Retention owner.
+
+### Exact semantic aggregation source matrix
+
+A lifecycle record becomes part of a semantic Tool or Sub-agent object only
+through the following source/version-authorized carriers. Merely accepting an
+event type does not authorize aggregation.
+
+| Source family | Semantic object | Exact object carrier | Accepted lifecycle facts |
+| --- | --- | --- | --- |
+| Claude Hook | Tool | Claude Hook `tool_use_id`, preserved ordinally under an approved Hook version/fingerprint | `PreToolUse` starts the object; `PostToolUse` completes it; `PostToolUseFailure` fails it. All records must carry the same exact ID and native Session. |
+| Claude Hook | Sub-agent | Claude Hook `agent_id`, preserved as technical/native Run identity under an approved Hook version/fingerprint | `SubagentStart` records `started`; matching `SubagentStop` records `completed`. It does not supply input, selected, failed, or deselected. |
+| Session App/SDK | Tool | a start event's exact `source_event_id` plus a completion event's source-authored `parent_event_id` pointing to that start | Exact `tool.execution_start` and `tool.execution_complete` only. Same Run, name, or execution is insufficient without the authored edge. |
+| Session App/SDK | Sub-agent | the adapter-declared event-specific native child `run_native_id`, identical across the lifecycle records | Exact `subagent.selected`, `subagent.started`, `subagent.completed`, `subagent.failed`, and `subagent.deselected` map independently to their same-named facts. The ID is not input. |
+| OTel | Tool | exact OTel `trace_id` plus `span_id` on a span already authorized as a semantic Tool by the source adapter | Start/end and OTel status apply only to that span; an event name or `tool_name` alone is insufficient. |
+| OTel | Sub-agent | exact trace/span or native identity only when the source adapter explicitly declares that span kind as a semantic Sub-agent | No current Claude OTel span mapping is authorized; unsupported spans remain ordinary nodes. |
+
+The carrier selector itself is versioned source authority. A same-shaped field
+from an unsupported source/version is not an identity. Two same-name or
+concurrent objects with different carriers remain distinct. Name, time,
+proximity, count, and execution membership are never join keys. A carrier is
+scoped only by the source-authorized native Session/Run fields named in the
+matrix; execution membership is neither added to nor substituted for it. A
+carrier that crosses its source-native scope fails closed. Unmatched lifecycle
+records remain individual Event or Error nodes; they do not create a partial
+semantic object or attach to the nearest object. Exact Error/Retry/Permission
+records retain their existing kind when that is the source-authored meaning.
+
+Sub-agent metadata exposes the five lifecycle facts separately as
+`lifecycle:{selected,started,completed,failed,deselected}`. Each member is a
+closed state-only fact. `recorded` means that exact lifecycle fact was observed;
+every other state remains explicit and cannot be inferred from another member.
+In particular, completion does not imply selection or deselection, failure does
+not imply completion, and a terminal Session or parent Tool state changes none
+of the five facts.
 
 Execution identity is SHA-256 over
 `ASCII("local-workspace-execution-id\0v1\0")` plus a length-framed exact source
@@ -282,13 +397,14 @@ Only an exact source FK/trace parent is exact; only a source-authored link is
 explicit. All other cases are unknown. Time authority is exactly
 `recorded|missing|invalid`, with canonical UTC ticks only for recorded values.
 
-The v3-to-v4 migration is one SQLite transaction: exact v3 validation, create
-v4 objects, deterministic bounded backfill, semantic validation, component
+The v4-to-v5 migration is one SQLite transaction: exact v4 validation, remove
+only the obsolete mapping rows and selector allowance, deterministic bounded
+refresh, semantic validation, component
 stamp update last, and commit. Failure rolls back objects, rows, and stamp.
 Rerun is idempotent. Partial/future shapes fail closed. Startup, Retention
 cleanup, Skill registry publication, online backup, restore staging, and
 restore publication use the existing Workspace transaction participant and
-publication gate and refresh v4 before publish.
+publication gate and refresh v5 before publish.
 
 ## One coherent detail snapshot and revision
 
@@ -338,7 +454,7 @@ never become current by inference.
 
 ## Contract artifacts and regression gates
 
-Draft 2020-12 schemas freeze the three JSON responses. Golden fixtures freeze
+Draft 2020-12 schemas freeze all four JSON responses. Golden fixtures freeze
 empty/minimal/full JSON bytes, error bytes, HEAD lengths, content headers, and
 timeline cursor bytes. Tests assert property order in addition to schema
 validity. `TestData/LocalMonitorV1SessionDetail/transport-contract.json` is the
@@ -349,6 +465,10 @@ The sibling literal `query-grammar.json` freezes rejection classes and the
 canonical generated query order independently of the route implementation.
 Existing Repository/Session collection schemas, fixtures, cursors, and exact
 bytes are immutable regression inputs.
+`content-full.json` is the independent literal JSON success representation;
+its 504-byte GET representation length is also the HEAD `Content-Length`, while
+HEAD emits zero entity bytes. Expected bytes and length are not derived from a
+production serializer.
 
 The nonempty production fixture index is fixed as follows. `summary-full.json`
 is the deterministic Session/Run/Event projection example;

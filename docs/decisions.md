@@ -3680,7 +3680,7 @@ archive -> Retention -> Skill. #134 begins only after the D081 seam and D082
 contributor are integrated, consumes one completed #156 snapshot, and adds no
 placeholder fact, direct SQL, second reader or fallback projection.
 
-## D084: Session detail uses one v4 projection and one coherent host snapshot
+## D084: Session detail uses sole-current v2 graphs, one v5 projection and one coherent host snapshot
 
 Status: Accepted (2026-08-26)
 
@@ -3693,14 +3693,19 @@ read transaction compose Session, assignment, archive, Skill, execution/node,
 Retention and raw availability facts. A second catalog/archive/Skill reader or
 a post-collection detail read is rejected.
 
-`local_workspace_projection` migrates exactly v1 -> v2 -> v3 -> v4 and v4 is
+`local_workspace_projection` migrates exactly v1 -> v2 -> v3 -> v4 -> v5 and v5 is
 the only runtime reader. Execution and node identities use domain-separated
 exact source identities; relationship and time authority remain explicit.
 Summary issues one revision over all detail inputs and every child/content read
 recomputes it before child resolution. The #154 read service becomes the single
 cross-arm current-valid Skill aggregate/search/fact authority. Raw content is
-plain inert UTF-8 under the existing Retention access lease and the fixed 1 MiB
-bound; Skill body/path/current-file remain on #158 routes.
+one closed inert JSON v2 entity under the existing Retention access lease; its
+selected text has the fixed 1 MiB UTF-8 bound and the complete entity retains
+the common 8 MiB bound. Summary, Timeline, Node and Content are sole-current v2
+with no selector/fallback and share one same-origin guard. V5 removes the v4
+`SubagentStart.agent_id` to `subagent_input` mapping because `agent_id` is
+technical/native Run identity only. Skill body/path/current-file remain on
+#158 routes.
 
 ## D083: Skill invocation v2 uses one capability-bound transport and fresh semantic responses
 

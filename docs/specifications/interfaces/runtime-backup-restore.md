@@ -185,7 +185,7 @@ The sole `files` row is
 The manifest does not contain its own checksum. The command/result separately
 returns the SHA-256 of the complete ZIP.
 
-For a current `local_workspace_projection:3` archive,
+For a current `local_workspace_projection:5` archive,
 `source_application_version` is also the immutable writer-provenance key for
 offline structural validation. The embedded Skill invocation registry owns a
 closed exact mapping from each supported writer version to one embedded
@@ -220,9 +220,9 @@ inspection itself never replays current disposition.
 from the database checksum. `component_versions` records every row from the
 standard `schema_version` table plus `retention_component_versions`, with
 component names unique after merge. `row_counts` records every non-SQLite table
-present in the canonical bundle projection, ordered by table name. The exact
-`local_comparison_expiry_tombstones` table is removed from that projection
-before inventory and therefore has no row-count entry. `projection_cursors`
+present in the canonical bundle projection, ordered by table name. Every
+installed table in the closed Compare staging categories below is removed from
+that projection before inventory and therefore has no row-count entry. `projection_cursors`
 records only bounded sanitized cursor/high-water integers or null; it never
 records raw IDs.
 
@@ -287,7 +287,29 @@ locking and change detection, including while restore owns its lease. SQLite
 whose sidecars are absent; it is never selected merely because a live path
 happens to have no sidecar at one instant.
 
-### Comparison expiry-tombstone staging projection
+### Comparison staging projection
+
+The complete 24-hour Compare operational namespace is non-backed-up. Every
+installed #165/#166 table belongs to exactly one of these closed staging
+categories, in owner dependency order:
+
+```text
+comparison_snapshot
+comparison_cohort_membership
+comparison_result
+comparison_evidence
+comparison_expiry_tombstone
+```
+
+The #165/#166 component registry supplies the exact table/object inventory for
+every installed category before any such table can ship. Runtime backup validates
+that complete inventory and uses its foreign-key-safe staging drop order after
+`BackupDatabase` and before read-only validation, inventory, hash, manifest, or
+archive publication. The live source is never mutated. The manifest/database member and restore omit every category;
+restore/startup creates only the exact
+empty owner schema required for readiness and never reconstructs operational
+rows. A missing category mapping, unowned Compare object, incomplete validator,
+or drop residue fails closed. These categories create no Compare HTTP wire.
 
 When the #165/#166 comparison-expiry owner is first installed, its canonical
 migration creates the exact `local_comparison_expiry_tombstones` table and
@@ -307,17 +329,21 @@ runtime-backup owner performs this exact operation:
    completed backup destination and are not the canonical source path. Pooling
    remains disabled; no SQL from this operation is issued to the source
    connection.
-2. Open only that staging database read/write, start one SQLite transaction and
-   run the #166-owned exact schema/row/immutable-guard validator. Validation is
-   streaming and does not materialize the lifetime tombstone set.
-3. Execute the fixed statement
-   `DROP TABLE "local_comparison_expiry_tombstones"` against the staging
-   connection. SQLite removes only that table and its table-owned automatic
-   index/triggers. No dynamic object name, row copy or best-effort delete is
-   permitted.
-4. In the same transaction, query `sqlite_schema` and require zero table,
-   index or trigger rows whose `name` or `tbl_name` is the exact tombstone table
-   name. Commit only after that proof.
+2. Open only that staging database read/write, start one SQLite transaction,
+   load the immutable component-version registry, and require every installed
+   `local_comparison_*` table, index, and trigger to map to exactly one of the
+   five categories. Run every registered exact schema/row/immutable-guard
+   validator before the first drop. Validation is streaming and does not
+   materialize the lifetime tombstone set or another operational table.
+3. Drop every registered exact table across all five categories in the
+   registry's fixed reverse owner dependency order. Each statement uses only
+   its registry literal, quoted table name; prefix discovery, caller-supplied
+   names, row copy, best-effort delete, and source SQL are forbidden. Table-owned
+   automatic indexes and triggers leave with their table; separately registered
+   owned objects are removed in their declared order.
+4. In the same transaction, query `sqlite_schema` and require no registered
+   table, index, or trigger residue and zero unregistered `local_comparison_*` objects.
+   Commit only after that complete proof.
 
 Any validation, DROP, residue check or commit failure rolls back and fails the
 backup; normal owned-staging cleanup then removes the private destination and no
@@ -327,23 +353,24 @@ read-only and perform the existing quick check, foreign-key check, inventory,
 hash and archive sequence.
 
 The resulting canonical `local-runtime-backup.v1` database member contains no
-tombstone table or row, and its manifest contains no corresponding row-count,
-cursor, retention or external-state carrier. Inspection rejects a bundle that
-contains that table. Restore preview and restore accept this one profile-owned
-schema omission without relaxing any other exact-object check. After atomic
+installed object or row from any Compare staging category, and its manifest
+contains no corresponding row-count, cursor, retention or external-state
+carrier. Inspection rejects a bundle that contains any such object. Restore
+preview and restore accept these profile-owned schema omissions without
+relaxing any other exact-object check. After atomic
 restore installation, and under the existing restore/startup lease, the #166
-owner creates and validates an empty table before any comparison read or HTTP
-readiness. Failure blocks readiness; no old tombstone is reconstructed. A
+owner recreates and validates the exact empty schema registered for every
+installed category before any comparison read or HTTP readiness. Failure blocks
+readiness; no operational row or old tombstone is reconstructed. A
 missing table in an ordinary live source with no accepted restore projection is
 still corruption and is not silently repaired.
 
-This rule excludes only `local_comparison_expiry_tombstones`. It does not
-authorize exclusion of future #166 comparison snapshot, result or evidence
-tables. Before any such operational table ships, #166 must amend this contract
-with its exact object names, validation, foreign-key-safe staging drop order,
-manifest absence and restore rematerialization/absence behavior. Without that
-amendment the new table is not backup-excluded and #166 integration remains
-blocked.
+The exact tombstone table is the currently named object in the
+`comparison_expiry_tombstone` category. Before another Compare operational
+table ships, #165/#166 must register its exact object names and validator in one
+of the other four categories and prove the common staging, manifest-absence,
+and restore-absence behavior above. No unregistered or future category is
+implicitly excluded.
 
 The destination is closed and reopened read-only. `PRAGMA quick_check` must be
 the single row `ok`; `PRAGMA foreign_key_check` must be empty. Version, count,
@@ -466,27 +493,29 @@ rules are
 and [Skill Projection](../layers/skill-projection.md).
 
 `skill_invocation_snapshot:1` is likewise independent, is not a Retention kind,
-and is registered immediately after `skill_projection:1` and before the future
-`local_workspace_projection:3`. Restore staging accepts exact v1 through its supported
-v1-to-v2 step and exact v2 through the direct v2-to-v3 step for their atomic
-v2-to-v3 migration; runtime readers accept only v3. Its complete contract is owned by
+and is registered immediately after `skill_projection:1` and before the
+separate `local_workspace_projection:5`. The snapshot component remains exact
+v1 and has no migration, adoption, backfill, or runtime version ladder. Its
+complete contract is owned by
 [Skill Invocation Snapshot](skill-invocation-snapshot.md). It owns invocation
 index/metadata and equality receipts only. Session Event content remains the
 sole raw owner and carries the historical payload document exactly once;
 snapshot backup adds no body/path copy, raw column, ZIP member, sanitized
 carrier, or empty sanitized marker. OTel-only `not_captured` observations have
-no snapshot row to back up.
+no snapshot row to back up. `local_workspace_projection:5` is a separate
+component whose restore staging accepts exact v1 through each supported
+adjacent migration through v5; runtime readers accept only v5.
 
 Runtime backup uses three deliberately distinct Workspace validation contexts.
 Live publication (`create`, including online publication) loads the canonical
 embedded #154 registry history, acquires the host/private publication gate, and
 refreshes with that immutable current-generation authority before validating or
 copying the database. Archive `inspect` is structural only: it proves the exact
-v3 objects, normalized facts, source identities, and Retention graph/lifetimes,
+v5 objects, normalized facts, source identities, and Retention graph/lifetimes,
 but does not reinterpret a historical SDK tuple against the executable's current
 registry or claim that the tuple is currently authorized. Preview and restore
 staging load the same canonical registry implementation used by Local Monitor
-and rerun v1/v2-to-v3 or current-v3 Workspace projection with one fixed authority
+and rerun supported older-to-v5 or current-v5 Workspace projection with one fixed authority
 before comparison or atomic swap. A missing, incomplete, or invalid registry
 history is `restore_incompatible` before the first database mutation; it is never
 treated as an empty generation. Revoked SDK claims remain stored but cannot

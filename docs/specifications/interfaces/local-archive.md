@@ -934,7 +934,7 @@ local_archive:1
 retention:1
 skill_projection:1
 skill_invocation_snapshot:1       # only when separately released
-local_workspace_projection:2      # only when separately released
+local_workspace_projection:5      # only when separately released
 ```
 
 `SqliteRuntimeBackupService.SupportedComponents` adds

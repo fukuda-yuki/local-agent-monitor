@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.local/copilot-agent-observability/local-monitor-v1/node-content.response.schema.json",
+  "title": "local-monitor-node-content.response.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_revision", "session_id", "node_id", "part", "state", "source_reference", "text", "utf8_byte_length", "unicode_scalar_length", "truncation"],
+  "properties": {
+    "schema_version": {"const": "local-monitor-node-content.response.v2"},
+    "workspace_revision": {"$ref": "#/$defs/revision"},
+    "session_id": {"$ref": "#/$defs/uuidv7"},
+    "node_id": {"$ref": "#/$defs/nodeId"},
+    "part": {"$ref": "#/$defs/contentPart"},
+    "state": {"const": "available"},
+    "source_reference": {"$ref": "#/$defs/sourceReference"},
+    "text": {"type": "string", "maxLength": 1048576},
+    "utf8_byte_length": {"type": "integer", "minimum": 0, "maximum": 1048576},
+    "unicode_scalar_length": {"type": "integer", "minimum": 0, "maximum": 1048576},
+    "truncation": {"const": false}
+  },
+  "$defs": {
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "uuidv7": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "nodeId": {"type": "string", "pattern": "^node-[0-9a-f]{32}$"},
+    "contentPart": {"enum": ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"]},
+    "sourceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_kind", "source_item_id", "revision"],
+      "properties": {
+        "store_kind": {"enum": ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"]},
+        "source_item_id": {"type": "string", "minLength": 1},
+        "revision": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

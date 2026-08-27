@@ -20,8 +20,7 @@ composes with this transport, so #134 mapping may proceed.
 The Repository success/cursor authority in
 [`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md)
 also composes with the exact GET transport below.
-Optional AI storage remains #162/#163/#164-owned. Comparison formulas and
-snapshots remain #165/#166-owned.
+Optional AI storage remains #162/#163/#164-owned. Comparison formulas and snapshots remain #165/#166-owned.
 
 ## 1. Decision and non-negotiable boundary
 
@@ -185,6 +184,9 @@ settings
 
 Comparison metric/row drill-down state is not added to the URL in v1. Exact
 evidence links navigate to owner-issued Session/node routes.
+No Compare preview/create API path, success DTO, bound, error graph, or
+transport is defined here; those remain absent until #165 supplies the owner
+wire. The human comparison route is not such a machine API.
 
 ### Session detail
 
@@ -619,6 +621,8 @@ The exact machine response graphs, headers, bytes, bounds, cursor binding and
 error precedence for the four #134 Session-detail APIs are owned by
 [`local-monitor-v1-session-detail.md`](local-monitor-v1-session-detail.md).
 This document continues to own the shared identifier and human-route grammar.
+All four detail APIs use that contract's common same-origin guard after closed
+query validation and before Session resolution; it is not content-only.
 
 For raw-default human requests, Host validation runs first. Raw-path template
 classification then distinguishes a primary template from the near paths in
@@ -751,10 +755,12 @@ local_comparison_expiry_tombstones
   not pruned or reconstructed.
 
 This exclusion is executable only through the exact staging projection in
-[Runtime Backup and Restore](runtime-backup-restore.md). It grants no exclusion
-to future #166 snapshot/result/evidence tables. #166 must add each such table's
-exact validated staging removal, dependency order and empty/absent restore
-behavior to that owning contract before an operational table can ship.
+[Runtime Backup and Restore](runtime-backup-restore.md). It covers all five
+registered Compare staging categories, including installed snapshot,
+cohort-membership, result, evidence, and expiry-tombstone objects. #166 must
+register each exact object name, validator, dependency-safe removal order, and
+empty/absent restore behavior before that object can ship; an unregistered
+object is corruption, not implicitly excluded.
 
 The retained fixed row is the smallest state that preserves deterministic
 `410`. Its database-lifetime growth is an accepted tradeoff; adding pruning
