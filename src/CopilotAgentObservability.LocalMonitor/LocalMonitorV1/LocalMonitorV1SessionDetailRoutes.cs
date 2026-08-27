@@ -37,7 +37,7 @@ internal static class LocalMonitorV1SessionDetailRoutes
             if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant);
             var read=await store.ReadContentAsync(Guid.Parse(sessionId!),Guid.Parse(locator.SourceItemId!),context.RequestAborted);
-            if(read.Disposition!=SessionContentReadDisposition.Granted){await Error(context,read.Disposition==SessionContentReadDisposition.Busy?503:410,read.Disposition==SessionContentReadDisposition.Busy?"persistence_busy":"raw_content_expired");return;}
+            if(read.Disposition!=SessionContentReadDisposition.Granted){var mapped=read.Disposition switch{SessionContentReadDisposition.Busy=>(503,"persistence_busy"),SessionContentReadDisposition.Deleted=>(410,"raw_content_deleted"),SessionContentReadDisposition.ReadDenied=>(403,"raw_content_read_denied"),_=>(410,"raw_content_expired")};await Error(context,mapped.Item1,mapped.Item2);return;}
             await using var lease=read.Lease!;checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterCommittedGrantBeforeReference);byte[] bytes;SessionEventContent content;
             using(var reference=lease.AcquireContentReference())
             {

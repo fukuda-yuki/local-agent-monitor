@@ -144,6 +144,56 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.DoesNotContain(marker, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("GET", "expired_pending_deletion", 410, "raw_content_expired")]
+    [InlineData("HEAD", "expired_pending_deletion", 410, "raw_content_expired")]
+    [InlineData("GET", "deletion_queued", 403, "raw_content_read_denied")]
+    [InlineData("HEAD", "deletion_queued", 403, "raw_content_read_denied")]
+    [InlineData("GET", "deleted", 410, "raw_content_deleted")]
+    [InlineData("HEAD", "deleted", 410, "raw_content_deleted")]
+    public async Task RealPreGrantRetentionWinnerReturnsItsExactFixedResponseWithoutLeaseOrRaw(
+        string method, string state, int status, string error)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "pre-grant-raw-must-not-publish";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        string revision;
+        using (var revisionHost = await StartProductionDetailRouteAsync(temp))
+            revision = await Revision(revisionHost.Client);
+        var checkpointCalls = 0;
+        using var host = await StartProductionDetailRouteAsync(temp, phase =>
+        {
+            if (phase != LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant) return;
+            Interlocked.Increment(ref checkpointCalls);
+            using var connection = Open(temp);
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE retention_items SET state=$state,read_denied_at=$at,queued_at=$at,deleted_at=CASE WHEN $state='deleted' THEN $at ELSE deleted_at END,revision=revision+1 WHERE store_kind='session_event_content' AND source_item_id=$event;";
+            command.Parameters.AddWithValue("$state", state);
+            command.Parameters.AddWithValue("$at", "2026-08-26T01:02:06.0000000+00:00");
+            command.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
+            Assert.Equal(1, command.ExecuteNonQuery());
+        });
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction";
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method), path));
+        var expected = System.Text.Encoding.UTF8.GetBytes($"{{\"error\":\"{error}\"}}");
+        Assert.Equal(status, (int)response.StatusCode);
+        Assert.Equal(expected.Length, response.Content.Headers.ContentLength);
+        Assert.Equal(method == "HEAD" ? [] : expected, await response.Content.ReadAsByteArrayAsync());
+        Assert.DoesNotContain(marker, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        Assert.Equal(1, checkpointCalls);
+        using var proof = Open(temp);
+        Assert.Equal("0", Scalar(proof, "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+    }
+
     [Fact]
     public async Task ProductionWholeEventMalformedJsonFailsClosedWithoutPartialBytes()
     {
@@ -650,6 +700,11 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     }
 
     private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(MonitorTempDirectory temp)
+        => await StartProductionDetailRouteAsync(temp, null);
+
+    private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(
+        MonitorTempDirectory temp,
+        Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint)
     {
         EnsureProductionProjectionSchemas(temp);
         var service = new SqliteLocalRepositoryScopeSnapshotService(
@@ -660,7 +715,8 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
-        LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray());
+        LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray(),
+            new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider), contentCheckpoint);
         await app.StartAsync();
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
