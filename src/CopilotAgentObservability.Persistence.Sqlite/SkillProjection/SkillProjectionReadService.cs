@@ -518,14 +518,15 @@ internal sealed class SkillProjectionReadService
         if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction))
             return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
 
-        if (registryAuthority is null && TableInstalled(connection, transaction, "skill_invocation_snapshots"))
+        var sdkAuthorityInstalled = SkillInvocationSnapshotSchemaV1Validator.IsValid(connection, transaction);
+        if (registryAuthority is null && sdkAuthorityInstalled)
             return sessionIds.Distinct(StringComparer.Ordinal).ToDictionary(
                 static sessionId => sessionId,
                 static _ => new SkillProjectionCurrentInvocationProjection("unavailable", []),
                 StringComparer.Ordinal);
         var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
         IReadOnlySet<string> unavailableSdkSessions = new HashSet<string>(StringComparer.Ordinal);
-        var sdk = registryAuthority is null
+        var sdk = registryAuthority is null || !sdkAuthorityInstalled
             ? []
             : ReadCurrentSdkInvocationFacts(connection, transaction, sessionIds, registryAuthority,
                 new FixedProjectionTimeProvider(acceptedAt), out unavailableSdkSessions);
@@ -703,7 +704,7 @@ internal sealed class SkillProjectionReadService
     {
         var unavailable = new HashSet<string>(StringComparer.Ordinal);
         unavailableSessions = unavailable;
-        if (!TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
+        if (!SkillInvocationSnapshotSchemaV1Validator.IsValid(connection, transaction)) return [];
         var candidates = ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider);
         var result = new List<InvocationFact>();
         var authorizations = new Dictionary<SkillRegistryProducerTuple, SkillProjectionCurrentSdkClaimAuthorizationResult>();
@@ -739,7 +740,7 @@ internal sealed class SkillProjectionReadService
         TimeProvider timeProvider)
     {
         if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
-            || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
+            || !SkillInvocationSnapshotSchemaV1Validator.IsValid(connection, transaction)) return [];
 
         return ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider)
             .Select(static candidate => new SkillProjectionCurrentSearchFact(candidate.SessionId, candidate.ClaimId,
