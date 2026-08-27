@@ -866,6 +866,50 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             $"{basePath}?workspace_revision={revision}&part=tool_input", 404, "raw_content_not_captured");
     }
 
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task StaleContentRevisionIsRejectedBeforeRealStoreReadOrLease(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        using (var connection = Open(temp))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE local_workspace_node_content_refs SET part='instruction',locator_kind='json_pointer',json_pointer='/prompt',selected_utf8_bytes=31 WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND availability_state='available';";
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+        string staleRevision;
+        using (var initial = await StartProductionDetailRouteAsync(temp))
+            staleRevision = await Revision(initial.Client);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        using (var connection = Open(temp))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE local_workspace_node_content_refs SET availability_state='deleted',retention_owner_token=NULL WHERE node_id=$node AND part='instruction';";
+            command.Parameters.AddWithValue("$node", nodeId);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+        var realStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        var countingStore = System.Reflection.DispatchProxy.Create<ISessionStore, CountingSessionStoreProxy>();
+        var proxy = (CountingSessionStoreProxy)(object)countingStore;
+        proxy.Inner = realStore;
+        using var host = await StartProductionDetailRouteAsync(temp, null, countingStore, ensureSchemas: false);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={staleRevision}&part=instruction";
+
+        using var response = await host.Client.SendAsync(new(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(method == "HEAD" ? [] : System.Text.Encoding.UTF8.GetBytes("{\"error\":\"workspace_snapshot_stale\"}"), await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal(0, proxy.ReadContentCount);
+    }
+
     [Fact]
     public async Task TimelinePassesTheClosedRequestShapeIntoTheSharedCoordinator()
     {
@@ -920,8 +964,15 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(
         MonitorTempDirectory temp,
         Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint)
+        => await StartProductionDetailRouteAsync(temp, contentCheckpoint, null);
+
+    private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(
+        MonitorTempDirectory temp,
+        Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint,
+        ISessionStore? sessionStore,
+        bool ensureSchemas = true)
     {
-        EnsureProductionProjectionSchemas(temp);
+        if (ensureSchemas) EnsureProductionProjectionSchemas(temp);
         var service = new SqliteLocalRepositoryScopeSnapshotService(
             temp.DatabasePath,
             new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
@@ -931,9 +982,22 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray(),
-            new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider), contentCheckpoint);
+            sessionStore ?? new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider), contentCheckpoint);
         await app.StartAsync();
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
+    }
+
+    public class CountingSessionStoreProxy : System.Reflection.DispatchProxy
+    {
+        internal ISessionStore Inner { get; set; } = null!;
+        internal int ReadContentCount { get; private set; }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(ISessionStore.ReadContentAsync)) ReadContentCount++;
+            try { return targetMethod!.Invoke(Inner, args); }
+            catch (System.Reflection.TargetInvocationException exception) { throw exception.InnerException!; }
+        }
     }
 
     private static void EnsureProductionProjectionSchemas(MonitorTempDirectory temp)
