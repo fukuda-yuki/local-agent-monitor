@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Data;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -60,6 +61,7 @@ internal sealed class LocalWorkspaceNodeContentReader(
     TimeProvider? timeProvider = null) : ILocalWorkspaceNodeContentReader
 {
     private const int MaximumBytes = 1_048_576;
+    private const int MaximumEncodedStringBytes = MaximumBytes * 6 + 2;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -269,13 +271,10 @@ internal sealed class LocalWorkspaceNodeContentReader(
         LocalWorkspaceContentAvailability locator,
         CancellationToken cancellationToken)
     {
-        var expression = locator.LocatorKind == "whole_event"
-            ? "CAST(c.content_json AS BLOB)"
-            : "CASE json_type(c.content_json,$json_path) WHEN 'text' THEN CAST(json_extract(c.content_json,$json_path) AS BLOB) WHEN 'null' THEN CAST('null' AS BLOB) WHEN 'true' THEN CAST('true' AS BLOB) WHEN 'false' THEN CAST('false' AS BLOB) WHEN 'object' THEN CAST(json(json_extract(c.content_json,$json_path)) AS BLOB) WHEN 'array' THEN CAST(json(json_extract(c.content_json,$json_path)) AS BLOB) ELSE CAST(json_extract(c.content_json,$json_path) AS BLOB) END";
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"""
-            SELECT substr({expression},1,{MaximumBytes + 1}),length({expression})
+        command.CommandText = """
+            SELECT c.rowid,c.content_json
             FROM session_event_content c
             JOIN session_events e ON e.event_id=c.event_id
             JOIN retention_items i ON i.item_id=$retention_read_item_id
@@ -290,18 +289,184 @@ internal sealed class LocalWorkspaceNodeContentReader(
             """;
         Add(command, "$session_id", sessionId);
         Add(command, "$event_id", locator.SourceItemId!);
-        Add(command, "$json_path", locator.JsonPointer is null ? null : "$." + locator.JsonPointer[1..]);
         Add(command, "$retention_store_instance_id", locator.RetentionStoreInstanceId!);
         grant.BindAdmissionSelectorCapability(command);
-        using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || reader.IsDBNull(0) || reader.IsDBNull(1)) return null;
-        if (reader.GetInt64(1) != locator.SelectedUtf8Bytes || reader.GetInt64(1) > MaximumBytes) return null;
-        var bytes = reader.GetFieldValue<byte[]>(0);
-        if (bytes.Length != reader.GetInt64(1)) return null;
-        _ = StrictUtf8.GetString(bytes);
-        if (locator.LocatorKind == "whole_event") using (JsonDocument.Parse(bytes)) { }
+        using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || reader.IsDBNull(1)) return null;
+        await using var stream = reader.GetStream(1);
+        var bytes = locator.LocatorKind == "whole_event"
+            ? ReadWholeEvent(stream)
+            : TopLevelJsonValueExtractor.Read(stream, locator.JsonPointer![1..]);
+        if (bytes is null || bytes.LongLength != locator.SelectedUtf8Bytes || bytes.Length > MaximumBytes) return null;
         if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
         return bytes;
+    }
+
+    private static byte[]? ReadWholeEvent(Stream stream)
+    {
+        using var result = new MemoryStream(MaximumBytes + 1);
+        var buffer = new byte[8192];
+        while (true)
+        {
+            var read = stream.Read(buffer, 0, Math.Min(buffer.Length, MaximumBytes + 1 - (int)result.Length));
+            if (read == 0) break;
+            result.Write(buffer, 0, read);
+            if (result.Length > MaximumBytes) return null;
+        }
+        var bytes = result.ToArray();
+        _ = StrictUtf8.GetString(bytes);
+        using (JsonDocument.Parse(bytes)) { }
+        return bytes;
+    }
+
+    private sealed class TopLevelJsonValueExtractor(Stream stream)
+    {
+        private readonly Decoder decoder = StrictUtf8.GetDecoder();
+        private int pending = -1;
+
+        internal static byte[]? Read(Stream stream, string property) => new TopLevelJsonValueExtractor(stream).ReadObject(property);
+
+        private byte[]? ReadObject(string property)
+        {
+            if (NextNonWhitespace() != (byte)'{') throw new JsonException();
+            byte[]? selected = null;
+            var next = NextNonWhitespace();
+            if (next == (byte)'}') { Finish(); return null; }
+            PutBack(next);
+            while (true)
+            {
+                var keyToken = ReadString(true, 256)!;
+                var key = JsonSerializer.Deserialize<string>(keyToken) ?? throw new JsonException();
+                if (NextNonWhitespace() != (byte)':') throw new JsonException();
+                var value = ReadValue(StringComparer.Ordinal.Equals(key, property));
+                if (StringComparer.Ordinal.Equals(key, property)) selected = value;
+                next = NextNonWhitespace();
+                if (next == (byte)'}') break;
+                if (next != (byte)',') throw new JsonException();
+            }
+            if (NextNonWhitespaceOrEnd() is not null) throw new JsonException();
+            Finish();
+            return selected;
+        }
+
+        private byte[]? ReadValue(bool capture)
+        {
+            var first = NextNonWhitespace();
+            if (first == (byte)'"')
+            {
+                PutBack(first);
+                var raw = ReadString(capture, MaximumEncodedStringBytes);
+                if (!capture) return null;
+                var text = JsonSerializer.Deserialize<string>(raw!) ?? throw new JsonException();
+                return StrictUtf8.GetBytes(text);
+            }
+            using var output = capture ? new MemoryStream(MaximumBytes + 1) : null;
+            Write(output, first);
+            if (first is (byte)'{' or (byte)'[')
+            {
+                var depth = 1;
+                var inString = false;
+                var escaped = false;
+                while (depth > 0)
+                {
+                    var value = Next();
+                    Write(output, value);
+                    if (inString)
+                    {
+                        if (escaped) escaped = false;
+                        else if (value == (byte)'\\') escaped = true;
+                        else if (value == (byte)'"') inString = false;
+                    }
+                    else if (value == (byte)'"') inString = true;
+                    else if (value is (byte)'{' or (byte)'[') depth++;
+                    else if (value is (byte)'}' or (byte)']') depth--;
+                }
+            }
+            else
+            {
+                while (true)
+                {
+                    var value = Next();
+                    if (value is (byte)',' or (byte)'}' || IsWhitespace(value)) { PutBack(value); break; }
+                    Write(output, value);
+                }
+            }
+            if (!capture) return null;
+            if (output!.Length > MaximumBytes) return null;
+            var bytes = output.ToArray();
+            using (JsonDocument.Parse(bytes)) { }
+            return bytes;
+        }
+
+        private byte[]? ReadString(bool capture, int maximumBytes)
+        {
+            if (Next() != (byte)'"') throw new JsonException();
+            using var output = capture ? new MemoryStream(Math.Min(maximumBytes + 1, 4096)) : null;
+            Write(output, (byte)'"', maximumBytes);
+            var escaped = false;
+            while (true)
+            {
+                var value = Next();
+                Write(output, value, maximumBytes);
+                if (escaped) escaped = false;
+                else if (value == (byte)'\\') escaped = true;
+                else if (value == (byte)'"') break;
+                else if (value < 0x20) throw new JsonException();
+            }
+            if (!capture) return null;
+            if (output!.Length > maximumBytes) throw new JsonException();
+            return output.ToArray();
+        }
+
+        private byte NextNonWhitespace()
+        {
+            byte value;
+            do value = Next(); while (IsWhitespace(value));
+            return value;
+        }
+
+        private byte? NextNonWhitespaceOrEnd()
+        {
+            while (true)
+            {
+                var value = NextOrEnd();
+                if (value is null || !IsWhitespace(value.Value)) return value;
+            }
+        }
+
+        private byte Next() => NextOrEnd() ?? throw new JsonException();
+
+        private byte? NextOrEnd()
+        {
+            if (pending >= 0) { var value = (byte)pending; pending = -1; return value; }
+            var valueRead = stream.ReadByte();
+            if (valueRead < 0) return null;
+            Span<byte> input = stackalloc byte[1] { (byte)valueRead };
+            Span<char> chars = stackalloc char[2];
+            decoder.Convert(input, chars, false, out _, out _, out _);
+            return (byte)valueRead;
+        }
+
+        private void Finish()
+        {
+            Span<byte> input = [];
+            Span<char> chars = stackalloc char[2];
+            decoder.Convert(input, chars, true, out _, out _, out _);
+        }
+
+        private void PutBack(byte value)
+        {
+            if (pending >= 0) throw new InvalidOperationException();
+            pending = value;
+        }
+
+        private static bool IsWhitespace(byte value) => value is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n';
+
+        private static void Write(MemoryStream? output, byte value, int maximumBytes = MaximumBytes)
+        {
+            if (output is null || output.Length > maximumBytes) return;
+            output.WriteByte(value);
+        }
     }
 
     private static void Add(SqliteCommand command, string name, object? value) =>

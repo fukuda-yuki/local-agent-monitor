@@ -389,8 +389,11 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         internal HttpClient Client => host.Client;
         internal static async Task<RealFixture> CreateAsync()
         {
-            var temp=new MonitorTempDirectory();var id=AlertCenterRouteTests.SeedPersistedTraceAndSession(temp,"00000000000000000000000000000001",true).ToString("D");var host=await MonitorTestHost.StartAsync(temp);
-            using var c=Open(temp.DatabasePath);LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR IGNORE INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token) SELECT event_id,'json','{}','2026-08-26T00:00:00.0000000+00:00','2030-08-27T00:00:00.0000000+00:00',randomblob(32) FROM session_events WHERE session_id=$session ORDER BY event_id LIMIT 1; INSERT OR IGNORE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT MIN(node_id),MAX(node_id),'retry','explicit',0 FROM local_workspace_nodes WHERE session_id=$session HAVING COUNT(*)>1;";q.Parameters.AddWithValue("$session",id);q.ExecuteNonQuery();t.Commit();return new(temp,host,id);
+            var temp=new MonitorTempDirectory();var id=AlertCenterRouteTests.SeedPersistedTraceAndSession(temp,"00000000000000000000000000000001",true).ToString("D");
+            var options=new MonitorHostTestOptions{StartWriter=false,StartProjectionWorker=false,StartSessionWriter=false,StartSessionOtelEnrichment=false,StartLocalRepositoryCatalogHostedService=false,StartRetentionCleanupWorker=false,UseUserSecrets=false};
+            var host=await MonitorTestHost.StartAsync(temp,testOptions:options);
+            using(var c=Open(temp.DatabasePath)){LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR IGNORE INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token) SELECT event_id,'json','{}','2026-08-26T00:00:00.0000000+00:00','2030-08-27T00:00:00.0000000+00:00',randomblob(32) FROM session_events WHERE session_id=$session ORDER BY event_id LIMIT 1; INSERT OR IGNORE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT MIN(node_id),MAX(node_id),'retry','explicit',0 FROM local_workspace_nodes WHERE session_id=$session HAVING COUNT(*)>1;";q.Parameters.AddWithValue("$session",id);q.ExecuteNonQuery();t.Commit();}
+            return new(temp,host,id);
         }
         internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadSummaryAsync()=>service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary,SessionId),CancellationToken.None);
         internal string Archive(LocalArchiveTargetKind kind,string id,long revision,LocalArchiveAction action)
@@ -598,7 +601,8 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
             this.projection = projection;
             service = new SqliteLocalRepositoryScopeSnapshotService(
                 temp.DatabasePath,
-                new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
+                new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider,
+                    registryAuthority: FixedSkillRegistryGenerationAuthority.Load()),
                 SqliteLocalArchiveFactSnapshotContributor.Instance,
                 skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
         }

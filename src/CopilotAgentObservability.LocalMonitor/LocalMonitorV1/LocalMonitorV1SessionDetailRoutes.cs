@@ -51,7 +51,7 @@ internal static class LocalMonitorV1SessionDetailRoutes
             context.Response.StatusCode=200;context.Response.ContentType="text/plain; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.Headers["X-Local-Monitor-Schema-Version"]="local-monitor-node-content.response.v1";context.Response.ContentLength=bytes.Length;
             if(!HttpMethods.IsHead(context.Request.Method)){checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.DuringResponseWrite);await context.Response.Body.WriteAsync(bytes,context.RequestAborted);}
         }
-        catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error=="session_not_found"?404:503,e.Error);}
+        catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error switch{"session_not_found"=>404,"workspace_too_large"=>409,_=>503},e.Error);}
         catch(LocalRepositoryScopeSnapshotException){await Error(context,503,"persistence_busy");}
         catch(Exception e) when(e is InvalidOperationException or JsonException){await Error(context,503,"local_monitor_ui_unavailable");}
     }
