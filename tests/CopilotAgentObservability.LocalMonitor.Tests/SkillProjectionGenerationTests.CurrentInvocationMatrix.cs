@@ -312,6 +312,38 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
     }
 
+    [Fact]
+    public async Task PersistedSqliteMatrix_MismatchedPairAdmitsExactOtelFactsWhenSdkExpiresWithoutRefresh()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedMismatchedPair("crossing", "Needle-Skill", "31", "41", "32", "42");
+        fixture.RefreshWorkspace();
+
+        var before = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Summary);
+        Assert.Equal("certification_pending", Assert.IsType<LocalWorkspaceProjectionRow>(before.Session.Session).Activity.Skill.State);
+        using (var beforeQ = JsonDocument.Parse(await fixture.SerializeCollectionAsync("needle-skill", null, refresh: false)))
+            Assert.Empty(beforeQ.RootElement.GetProperty("items").EnumerateArray());
+
+        fixture.AdvancePastLatestSdkExpiry("crossing");
+
+        using (var afterQ = JsonDocument.Parse(await fixture.SerializeCollectionAsync("needle-skill", null, refresh: false)))
+            Assert.Single(afterQ.RootElement.GetProperty("items").EnumerateArray());
+        using (var afterHasSkill = JsonDocument.Parse(await fixture.SerializeCollectionAsync(null, true, refresh: false)))
+            Assert.Single(afterHasSkill.RootElement.GetProperty("items").EnumerateArray());
+        var after = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Summary);
+        var execution = Assert.Single(after.Detail.Executions);
+        Assert.Equal(1, execution.Activity.Skill.Value);
+        var timeline = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Timeline, execution.ExecutionId);
+        var node = Assert.Single(timeline.Detail.Nodes, static value => value.SourceKind == "skill_invocation");
+        Assert.Equal(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", node.SourceIdentity), node.NodeId);
+        Assert.Equal("Needle-Skill", node.NameText);
+        Assert.NotNull(node.TraceId);
+        Assert.NotNull(node.SpanId);
+        var inspected = await fixture.ReadDetailAsync("crossing", LocalRepositorySessionDetailRequestKind.Node, nodeId: node.NodeId);
+        Assert.Contains(inspected.Detail.Nodes, value => value.NodeId == node.NodeId && value.ParentNodeId is not null);
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+    }
+
     private static void AssertFilteredAdmittedSummary(CurrentInvocationProjectionFixture fixture, JsonDocument filtered)
     {
         var admitted = Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray());
@@ -564,7 +596,8 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
         string sessionKey,
         LocalRepositorySessionDetailRequestKind kind,
-        string? executionId = null)
+        string? executionId = null,
+        string? nodeId = null)
     {
         var clock = new FixedTimeProvider(readAt);
         var service = new SqliteLocalRepositoryScopeSnapshotService(
@@ -574,7 +607,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
             detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
                 registryAuthority: authority, timeProvider: clock),
             skillRegistryAuthority: authority);
-        return service.ReadDetailAsync(new(kind, sessions[sessionKey], ExecutionId: executionId), CancellationToken.None);
+        return service.ReadDetailAsync(new(kind, sessions[sessionKey], ExecutionId: executionId, NodeId: nodeId), CancellationToken.None);
     }
 
     internal void AssertWorkspaceSkill(string sessionKey, string state, int? count, string[] searchFacts)

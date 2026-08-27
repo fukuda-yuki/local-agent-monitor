@@ -141,7 +141,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             SELECT f.session_id,f.normalized_text FROM local_workspace_session_search_facts f
             WHERE f.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
               AND (f.expires_at IS NULL OR f.expires_at COLLATE BINARY > $now COLLATE BINARY)
-              AND (f.kind='skill' OR (f.kind='label' AND EXISTS(
+              AND ((f.kind='label' AND EXISTS(
                 {labelAuthority}))
                 OR f.kind='tool')
             GROUP BY f.session_id,f.normalized_text ORDER BY f.session_id,f.normalized_text COLLATE BINARY;
@@ -161,11 +161,19 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         foreach (var row in rows)
         {
             if (currentSkills.TryGetValue(row.SessionId, out var projection))
+            {
                 row.Activity["skill"] = projection.State == "current"
                     ? new("recorded", projection.InvocationCount)
                     : new(projection.State, null);
+                if (projection.State == "current")
+                    row.SearchTexts.AddRange(projection.Invocations
+                        .Select(static invocation => invocation.SdkSkillName ?? invocation.OtelSkillName)
+                        .Where(static name => !string.IsNullOrWhiteSpace(name))
+                        .Select(static name => name!.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant()));
+            }
             else
                 row.Activity["skill"] = new("not_observed", null);
+            row.SearchTexts.Sort(StringComparer.Ordinal);
         }
         using (var command = connection.CreateCommand())
         {

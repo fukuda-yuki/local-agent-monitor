@@ -41,10 +41,14 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             connection, transaction, [sessionId], acceptedAt, registryAuthority);
         currentSkills.TryGetValue(sessionId, out var skillProjection);
         await ValidateBounds(connection, transaction, sessionId, token);
-        if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
+        var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
+        if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
+            && !syntheticSkillTarget)
             await ValidateNodeAncestry(connection, transaction, request, token);
         var projectedNodes = NormalizeCurrentSkillNodes(
             await ReadNodes(connection, transaction, request, token), skillProjection);
+        projectedNodes = await AddMissingCurrentSkillNodes(
+            connection, transaction, request, projectedNodes, skillProjection, token);
         var admittedSkillIdentities = skillProjection?.State == "current"
             ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).ToHashSet(StringComparer.Ordinal)
             : [];
@@ -59,6 +63,12 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
             ? await ReadEdges(connection, transaction, [request.NodeId!], token)
             : [];
+        if (request.Kind == LocalRepositorySessionDetailRequestKind.Node && syntheticSkillTarget)
+        {
+            var selected = nodes.Single(node => node.NodeId == request.NodeId);
+            if (selected.ParentNodeId is not null)
+                edges = [.. edges, new(selected.NodeId, selected.ParentNodeId, "parent", "exact", selected.SourceOrdinal)];
+        }
         var metadata = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
             ? await ReadMetadata(connection, transaction, sessionId, token)
             : new Metadata([], [], null, null);
@@ -69,6 +79,91 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var registryIdentity = ReadRegistryIdentity();
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+    }
+
+    private static bool IsCurrentSkillNode(string? nodeId, SkillProjectionCurrentInvocationProjection? projection) =>
+        nodeId is not null && projection?.State == "current" && projection.Invocations.Any(invocation =>
+            string.Equals(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity), nodeId, StringComparison.Ordinal));
+
+    private static async Task<LocalWorkspaceNodeDetail[]> AddMissingCurrentSkillNodes(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        LocalRepositorySessionDetailRequest request,
+        LocalWorkspaceNodeDetail[] nodes,
+        SkillProjectionCurrentInvocationProjection? projection,
+        CancellationToken token)
+    {
+        if (projection?.State != "current") return nodes;
+        var existing = nodes.Select(static node => node.NodeId).ToHashSet(StringComparer.Ordinal);
+        var additions = new List<LocalWorkspaceNodeDetail>();
+        var candidates = projection.Invocations
+            .Where(invocation => invocation.ExecutionSourceKind is not null && invocation.ExecutionSourceIdentity is not null)
+            .Where(invocation => !existing.Contains(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)))
+            .Where(invocation => request.Kind is not (LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
+                || string.Equals(request.NodeId, LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity), StringComparison.Ordinal))
+            .OrderBy(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal).ToArray();
+        var byIdentity = candidates.ToDictionary(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal);
+        using (var command = Command(connection, transaction, """
+            WITH canonical AS (
+              SELECT value->>'identity' identity,value->>'execution_kind' execution_kind,
+                     value->>'execution_identity' execution_identity,value->>'event_id' event_id
+              FROM json_each($skills))
+            SELECT c.identity,h.execution_id,r.node_id,e.occurred_at,
+                   COALESCE((SELECT MAX(n.source_ordinal) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id),0)+
+                     row_number() OVER(PARTITION BY h.execution_id ORDER BY c.identity COLLATE BINARY)
+            FROM canonical c
+            JOIN local_workspace_execution_headers h ON h.session_id=$session_id AND h.source_kind=c.execution_kind AND h.source_identity=c.execution_identity
+            JOIN local_workspace_nodes r ON r.execution_id=h.execution_id AND r.source_kind='execution_root'
+            LEFT JOIN session_events e ON e.session_id=$session_id AND e.event_id=c.event_id
+            ORDER BY h.execution_id,c.identity COLLATE BINARY;
+            """, request.SessionId))
+        {
+            command.Parameters.AddWithValue("$skills", System.Text.Json.JsonSerializer.Serialize(candidates.Select(invocation => new
+            {
+                identity = invocation.CanonicalIdentity,
+                execution_kind = invocation.ExecutionSourceKind,
+                execution_identity = invocation.ExecutionSourceIdentity,
+                event_id = invocation.OtelCarrierEventId ?? invocation.SdkCarrierEventId,
+            })));
+            using var reader = await command.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token))
+            {
+            var invocation = byIdentity[reader.GetString(0)];
+            var nodeId = LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity);
+            var executionId = reader.GetString(1);
+            if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
+                && request.ExecutionId is not null && !string.Equals(request.ExecutionId, executionId, StringComparison.Ordinal)) continue;
+            if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ParentNodeId is not null
+                && !string.Equals(request.ParentNodeId, reader.GetString(2), StringComparison.Ordinal)) continue;
+            var ticks = reader.IsDBNull(3) || !DateTimeOffset.TryParse(reader.GetString(3), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var occurredAt)
+                ? (long?)null
+                : occurredAt.UtcTicks;
+            var ordinal = reader.GetInt64(4);
+            var none = new LocalWorkspaceFact<long>("not_observed", null);
+            var activity = new LocalWorkspaceActivityFacts(new("recorded", 1), none, none, none, none);
+            var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, none, none, none, none, none, none, none, none);
+            additions.Add(new(nodeId, request.SessionId, executionId, "skill_invocation", invocation.CanonicalIdentity, ordinal,
+                reader.GetString(2), "exact", "skill", "recorded", invocation.SdkSkillName ?? invocation.OtelSkillName,
+                "completed", "completed", ticks is null ? "missing" : "recorded", ticks, ticks, ticks is null ? null : 0,
+                activity, tokens, invocation.ProducerTraceId, invocation.ProducerSpanId,
+                invocation.SdkCarrierEventId ?? invocation.OtelCarrierEventId));
+            }
+        }
+        if (additions.Count == 0) return nodes;
+        if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
+        {
+            var parentIds = additions.Select(static node => node.ParentNodeId).Where(static id => id is not null).ToHashSet(StringComparer.Ordinal);
+            using var command = Command(connection, transaction, "SELECT node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,trace_id,span_id,event_id,0 FROM local_workspace_nodes WHERE session_id=$session_id AND node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));", request.SessionId);
+            command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(parentIds));
+            using var reader = await command.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token))
+            {
+                if (!existing.Contains(reader.GetString(0)))
+                    nodes = [.. nodes, new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49),0)];
+            }
+        }
+        return [.. nodes, .. additions];
     }
 
     private static LocalWorkspaceNodeDetail[] NormalizeCurrentSkillNodes(
