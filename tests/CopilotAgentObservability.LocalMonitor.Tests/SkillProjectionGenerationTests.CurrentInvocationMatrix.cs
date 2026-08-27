@@ -156,7 +156,7 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     }
 
     [Fact]
-    public void PersistedSqliteMatrix_DetailNodesUseOnlyCanonicalExecutionProof()
+    public async Task PersistedSqliteMatrix_DetailNodesUseOnlyCanonicalExecutionProof()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
         fixture.SeedOtelOnly("otel", "otel-skill", "21", "31");
@@ -171,6 +171,12 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Equal(0, fixture.CountDetailSkillNodes("pending"));
         Assert.Equal(1, fixture.ExecutionSkillCount("sdk"));
         Assert.Equal(["event"], fixture.RawSkillEventKinds("sdk"));
+        var pairSummary = await fixture.ReadDetailAsync("pair", LocalRepositorySessionDetailRequestKind.Summary);
+        var pairExecution = Assert.Single(pairSummary.Detail.Executions);
+        var pairTimeline = await fixture.ReadDetailAsync("pair", LocalRepositorySessionDetailRequestKind.Timeline, pairExecution.ExecutionId);
+        var pairRoot = Assert.Single(pairTimeline.Detail.Nodes, static node => node.SourceKind == "execution_root");
+        Assert.Equal(pairExecution.ChildCount, pairRoot.ChildCount);
+        Assert.Equal(fixture.PersistedRootChildCount("pair"), pairRoot.ChildCount);
     }
 
     [Fact]
@@ -687,6 +693,15 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.CommandText = "SELECT skill_activity_count FROM local_workspace_execution_headers WHERE session_id=$session;";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal long PersistedRootChildCount(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND source_kind='execution_root' LIMIT 1);";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
     internal string[] RawSkillEventKinds(string sessionKey)

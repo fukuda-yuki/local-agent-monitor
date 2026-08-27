@@ -40,7 +40,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
             connection, transaction, [sessionId], acceptedAt, registryAuthority);
         currentSkills.TryGetValue(sessionId, out var skillProjection);
-        await ValidateBounds(connection, transaction, sessionId, skillProjection, token);
+        var materializableSkillNodeIds = await ReadMaterializableCurrentSkillNodeIds(
+            connection, transaction, sessionId, skillProjection, token);
+        await ValidateBounds(connection, transaction, sessionId, materializableSkillNodeIds, token);
         var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
             && !syntheticSkillTarget)
@@ -49,7 +51,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             await ReadNodes(connection, transaction, request, token), skillProjection);
         var persistedNodeIds = await ReadPersistedCurrentSkillNodeIds(connection, transaction, sessionId, skillProjection, token);
         projectedNodes = await AddMissingCurrentSkillNodes(
-            connection, transaction, request, projectedNodes, skillProjection, token);
+            connection, transaction, request, projectedNodes, skillProjection, materializableSkillNodeIds, token);
         var synthesizedSkillNodes = projectedNodes.Where(node => node.SourceKind == "skill_invocation" && !persistedNodeIds.Contains(node.NodeId)).ToArray();
         var admittedSkillIdentities = skillProjection?.State == "current"
             ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).ToHashSet(StringComparer.Ordinal)
@@ -104,12 +106,39 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         return result;
     }
 
+    private static async Task<HashSet<string>> ReadMaterializableCurrentSkillNodeIds(
+        SqliteConnection connection, SqliteTransaction transaction, string sessionId,
+        SkillProjectionCurrentInvocationProjection? projection, CancellationToken token)
+    {
+        var candidates = projection?.State == "current"
+            ? projection.Invocations.Where(static invocation => invocation.ExecutionSourceKind is not null && invocation.ExecutionSourceIdentity is not null)
+                .Select(invocation => new
+                {
+                    node_id = LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity),
+                    execution_kind = invocation.ExecutionSourceKind,
+                    execution_identity = invocation.ExecutionSourceIdentity,
+                }).ToArray()
+            : [];
+        if (candidates.Length == 0) return new(StringComparer.Ordinal);
+        using var command = Command(connection, transaction, """
+            SELECT DISTINCT value->>'node_id' FROM json_each($candidates)
+            JOIN local_workspace_execution_headers h ON h.session_id=$session_id
+              AND h.source_kind=value->>'execution_kind' AND h.source_identity=value->>'execution_identity';
+            """, sessionId);
+        command.Parameters.AddWithValue("$candidates", System.Text.Json.JsonSerializer.Serialize(candidates));
+        using var reader = await command.ExecuteReaderAsync(token);
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(token)) result.Add(reader.GetString(0));
+        return result;
+    }
+
     private static async Task<LocalWorkspaceNodeDetail[]> AddMissingCurrentSkillNodes(
         SqliteConnection connection,
         SqliteTransaction transaction,
         LocalRepositorySessionDetailRequest request,
         LocalWorkspaceNodeDetail[] nodes,
         SkillProjectionCurrentInvocationProjection? projection,
+        IReadOnlySet<string> materializableSkillNodeIds,
         CancellationToken token)
     {
         if (projection?.State != "current") return nodes;
@@ -117,6 +146,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var additions = new List<LocalWorkspaceNodeDetail>();
         var candidates = projection.Invocations
             .Where(invocation => invocation.ExecutionSourceKind is not null && invocation.ExecutionSourceIdentity is not null)
+            .Where(invocation => materializableSkillNodeIds.Contains(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)))
             .Where(invocation => !existing.Contains(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)))
             .Where(invocation => request.Kind is not (LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
                 || string.Equals(request.NodeId, LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity), StringComparison.Ordinal))
@@ -293,7 +323,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SqliteConnection connection,
         SqliteTransaction transaction,
         string sessionId,
-        SkillProjectionCurrentInvocationProjection? projection,
+        IReadOnlySet<string> materializableSkillNodeIds,
         CancellationToken token)
     {
         using var command = Command(connection, transaction, BoundsSql, sessionId);
@@ -305,9 +335,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             executionOverflow = reader.GetInt64(0);
             nodeOverflow = reader.GetInt64(1);
         }
-        var identities = projection?.State == "current"
-            ? projection.Invocations.Select(static invocation => LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)).Distinct(StringComparer.Ordinal).ToArray()
-            : [];
+        var identities = materializableSkillNodeIds.ToArray();
         if (identities.Length != 0)
         {
             using var effective = Command(connection, transaction, """
