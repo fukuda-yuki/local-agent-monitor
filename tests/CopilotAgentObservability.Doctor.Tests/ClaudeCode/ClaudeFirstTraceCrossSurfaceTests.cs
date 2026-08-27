@@ -376,6 +376,38 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     }
 
     [Fact]
+    public async Task RunningMonitorDrainProcessesEveryAcceptedSpanBeyondOneEnrichmentBatch()
+    {
+        var directory = CreateDirectory("claude-first-trace-drain-all");
+        var databasePath = Path.Combine(directory, "monitor.db");
+        var time = new DoctorTestTimeProvider(Now);
+        try
+        {
+            PrepareBaselineDatabase(databasePath, time);
+            await using var monitor = await RunningMonitor.StartAsync(databasePath, time);
+            const int traceCount = 35;
+            for (var index = 0; index < traceCount; index++)
+            {
+                var sessionId = $"SYNTHETIC_DRAIN_SESSION_{index:D2}";
+                var traceId = index.ToString("x32");
+                await monitor.PostSessionStartAsync(sessionId);
+                await monitor.PostOtlpAsync(Payload(traceId, sessionId));
+            }
+
+            await monitor.DrainAsync();
+
+            using var lastTrace = await ReadMonitorTraceAsync(
+                monitor,
+                (traceCount - 1).ToString("x32"));
+            Assert.Equal("exact_linked", lastTrace.RootElement.GetProperty("binding_state").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SetupBeginRealMonitorStatusAndCompleteProveClaudeFirstTraceAcrossSurfaces()
     {
         var directory = CreateDirectory("claude-first-trace-positive");
@@ -929,6 +961,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         private readonly IngestionWriterWorker ingestionWorker;
         private readonly SessionEventWriterWorker sessionWorker;
         private readonly ProjectionWorker projectionWorker;
+        private readonly IMonitorProjectionStore projectionStore;
         private readonly SqliteSessionOtelEnricher enricher;
         private readonly TimeProvider timeProvider;
 
@@ -939,6 +972,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             IngestionWriterWorker ingestionWorker,
             SessionEventWriterWorker sessionWorker,
             ProjectionWorker projectionWorker,
+            IMonitorProjectionStore projectionStore,
             SqliteSessionOtelEnricher enricher,
             TimeProvider timeProvider,
             ISessionStore sessionStore)
@@ -949,6 +983,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             this.ingestionWorker = ingestionWorker;
             this.sessionWorker = sessionWorker;
             this.projectionWorker = projectionWorker;
+            this.projectionStore = projectionStore;
             this.enricher = enricher;
             this.timeProvider = timeProvider;
             SessionStore = sessionStore;
@@ -1009,8 +1044,9 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 var normalizer = new SessionEventNormalizer(sessionStore, time);
                 var sessionWorker = new SessionEventWriterWorker(sessionQueue, normalizer);
                 await sessionWorker.StartAsync(CancellationToken.None);
+                var projectionStore = app.Services.GetRequiredService<IMonitorProjectionStore>();
                 var projectionWorker = new ProjectionWorker(
-                    app.Services.GetRequiredService<IMonitorProjectionStore>(),
+                    projectionStore,
                     health,
                     compatibility,
                     time);
@@ -1035,6 +1071,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     ingestionWorker,
                     sessionWorker,
                     projectionWorker,
+                    projectionStore,
                     enricher,
                     time,
                     sessionStore);
@@ -1107,8 +1144,41 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
         public async Task DrainAsync()
         {
-            await projectionWorker.RunProjectionPassAsync();
-            enricher.ProcessNextBatch();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            while (true)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                await projectionWorker.RunProjectionPassAsync(timeout.Token);
+                try
+                {
+                    if (projectionStore.GetProjectionStatus().Backlog == 0
+                        && projectionStore.GetSpanProjectionStatus().Backlog == 0)
+                    {
+                        break;
+                    }
+                }
+                catch (PersistenceBusyException)
+                {
+                }
+                await Task.Yield();
+            }
+
+            while (true)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                try
+                {
+                    if (enricher.CountBacklog() == 0)
+                    {
+                        break;
+                    }
+                    _ = enricher.ProcessNextBatch();
+                }
+                catch (Microsoft.Data.Sqlite.SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+                {
+                }
+                await Task.Yield();
+            }
         }
 
         public Task ProjectOnlyAsync() => projectionWorker.RunProjectionPassAsync();
