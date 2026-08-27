@@ -542,7 +542,7 @@ internal static class MonitorHost
             builder.Services.AddSingleton<ILocalRepositoryTargetExistenceAuthority>(repositoryExistenceAuthority);
             builder.Services.AddSingleton(localArchiveStore);
             builder.Services.AddSingleton<ILocalRepositorySessionSnapshotContributor>(
-                new LocalWorkspaceSessionSnapshotContributor(timeProvider));
+                new LocalWorkspaceSessionSnapshotContributor(timeProvider, registryAuthority: skillRegistryAuthority));
             builder.Services.AddSingleton<ILocalArchiveFactSnapshotContributor>(SqliteLocalArchiveFactSnapshotContributor.Instance);
             builder.Services.AddSingleton(services =>
                 testOptions?.LocalRepositoryScopeSnapshotService as SqliteLocalRepositoryScopeSnapshotService
@@ -550,6 +550,9 @@ internal static class MonitorHost
                     options.DatabasePath,
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
                     services.GetRequiredService<ILocalArchiveFactSnapshotContributor>(),
+                    detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
+                        registryAuthority: skillRegistryAuthority,
+                        timeProvider: timeProvider),
                     publicationGate: publicationGate,
                     skillRegistryAuthority: skillRegistryAuthority));
             builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>

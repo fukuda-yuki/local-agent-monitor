@@ -267,6 +267,26 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Equal(JsonValueKind.Null, pendingSkill.GetProperty("count").ValueKind);
     }
 
+    [Fact]
+    public async Task PersistedSqliteMatrix_ProductionCollectionReevaluatesSdkExpiryWithoutProjectionRefresh()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("crossing", "Needle-Skill");
+        fixture.RefreshWorkspace();
+
+        fixture.AdvancePastLatestSdkExpiry("crossing");
+
+        using var unfiltered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: null, refresh: false));
+        var item = Assert.Single(unfiltered.RootElement.GetProperty("items").EnumerateArray());
+        var skill = item.GetProperty("summary").GetProperty("skill");
+        Assert.Equal("not_observed", skill.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, skill.GetProperty("count").ValueKind);
+        using var q = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: "needle-skill", hasSkill: null, refresh: false));
+        Assert.Empty(q.RootElement.GetProperty("items").EnumerateArray());
+        using var hasSkill = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: true, refresh: false));
+        Assert.Empty(hasSkill.RootElement.GetProperty("items").EnumerateArray());
+    }
+
     private static void AssertFilteredAdmittedSummary(CurrentInvocationProjectionFixture fixture, JsonDocument filtered)
     {
         var admitted = Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray());
@@ -281,7 +301,8 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 internal sealed class CurrentInvocationProjectionFixture : IDisposable
 {
     private static readonly DateTimeOffset WrittenAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-    private static readonly DateTimeOffset ReadAt = WrittenAt.AddHours(1);
+    private static readonly DateTimeOffset InitialReadAt = WrittenAt.AddHours(1);
+    private DateTimeOffset readAt = InitialReadAt;
     private const string Fingerprint = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private readonly string directory;
     private readonly bool ownsDirectory;
@@ -422,7 +443,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: true);
-        return SkillProjectionReadService.ReadCurrentInvocationProjection(connection, transaction, sessions.Values, ReadAt, authority);
+        return SkillProjectionReadService.ReadCurrentInvocationProjection(connection, transaction, sessions.Values, readAt, authority);
     }
 
     internal (IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> Result, int CommandExecutions) ReadAllObserved()
@@ -432,7 +453,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         using var transaction = connection.BeginTransaction(deferred: true);
         using var observer = new LocalWorkspaceProjectionSchemaTests.NativeStatementExecutionObserver(connection);
         var result = SkillProjectionReadService.ReadCurrentInvocationProjection(
-            connection, transaction, sessions.Values, ReadAt, authority);
+            connection, transaction, sessions.Values, readAt, authority);
         return (result, observer.ExecutionCount);
     }
 
@@ -451,13 +472,13 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         var gate = new LocalWorkspacePublicationGate();
         var provider = new CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.SkillInvocationV2RegistryProviderV1(rejected, gate);
         using var connection = Open();
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ReadAt, provider);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, readAt, provider);
         var before = CountSkillRows(connection, sessions[sessionKey]);
         var old = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(provider.CaptureGeneration());
         provider.CurrentGenerationChanging += proposed =>
         {
             using var transaction = connection.BeginTransaction();
-            LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessions[sessionKey]], ReadAt, proposed);
+            LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessions[sessionKey]], readAt, proposed);
             if (injectFailure) throw new InvalidOperationException("injected_generation_sensitive_refresh_failure");
             transaction.Commit();
         };
@@ -491,19 +512,23 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     internal void RefreshWorkspace()
     {
         using var connection = Open();
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ReadAt);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, readAt);
         using var transaction = connection.BeginTransaction();
-        LocalWorkspaceProjectionStore.Refresh(connection, transaction, ReadAt, authority);
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, readAt, authority);
         transaction.Commit();
     }
 
-    internal async Task<byte[]> SerializeCollectionAsync(string? q, bool? hasSkill)
+    internal void AdvancePastLatestSdkExpiry(string sessionKey) =>
+        readAt = latestWrites[sessionKey].ExpiresAt.AddTicks(1);
+
+    internal async Task<byte[]> SerializeCollectionAsync(string? q, bool? hasSkill, bool refresh = true)
     {
-        RefreshWorkspace();
+        if (refresh) RefreshWorkspace();
         var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(
                 DatabasePath,
-                new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(ReadAt)),
-                SqliteLocalArchiveFactSnapshotContributor.Instance)
+                new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(readAt), registryAuthority: authority),
+                SqliteLocalArchiveFactSnapshotContributor.Instance,
+                skillRegistryAuthority: authority)
             .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
         var requestJson = $$"""{"schema_version":"local-monitor-session-search.request.v1","scope":"all","repository_id":null,"archive_scope":"active_only","from":null,"to":null,"source":[],"model":[],"status":[],"has_skill":{{(hasSkill is null ? "null" : hasSkill.Value ? "true" : "false")}},"has_subagent":null,"has_error":null,"has_retry":null,"q":{{(q is null ? "null" : JsonSerializer.Serialize(q))}},"cursor":null,"limit":null}""";
         Assert.Equal(LocalMonitorV1SessionSearchParseStatus.Success,
@@ -619,7 +644,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     internal void RefreshWorkspaceProjection(string sessionKey)
     {
         using var connection = Open(); using var transaction = connection.BeginTransaction();
-        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessions[sessionKey]], ReadAt, authority);
+        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessions[sessionKey]], readAt, authority);
         transaction.Commit();
     }
 
@@ -641,7 +666,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     {
         var write = latestWrites[sessionKey];
         var result = new SkillProjectionReadService(DatabasePath, authority)
-            .TryAcquireCurrentSdkClaimAuthorization(Guid.Parse(sessions[sessionKey]), write.SnapshotId, new FixedTimeProvider(ReadAt));
+            .TryAcquireCurrentSdkClaimAuthorization(Guid.Parse(sessions[sessionKey]), write.SnapshotId, new FixedTimeProvider(readAt));
         Assert.Equal(SkillRegistryCurrentAuthorizationOutcome.Acquired, result.Outcome);
         result.Authorization?.Dispose();
     }

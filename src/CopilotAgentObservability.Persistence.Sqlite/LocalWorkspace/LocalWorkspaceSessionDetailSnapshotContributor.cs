@@ -13,11 +13,16 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private const int MaximumNodes = 4096;
     private readonly Action<string>? statementObserver;
     private readonly ISkillRegistryGenerationAuthority? registryAuthority;
+    private readonly TimeProvider timeProvider;
 
-    internal LocalWorkspaceSessionDetailSnapshotContributor(Action<string>? statementObserver = null, ISkillRegistryGenerationAuthority? registryAuthority = null)
+    internal LocalWorkspaceSessionDetailSnapshotContributor(
+        Action<string>? statementObserver = null,
+        ISkillRegistryGenerationAuthority? registryAuthority = null,
+        TimeProvider? timeProvider = null)
     {
         this.statementObserver = statementObserver;
         this.registryAuthority = registryAuthority;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
@@ -31,12 +36,24 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SqliteConnection connection, SqliteTransaction transaction, LocalRepositorySessionDetailRequest request, CancellationToken token)
     {
         var sessionId = request.SessionId;
+        var acceptedAt = timeProvider.GetUtcNow();
+        var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, [sessionId], acceptedAt, registryAuthority);
+        currentSkills.TryGetValue(sessionId, out var skillProjection);
         await ValidateBounds(connection, transaction, sessionId, token);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
             await ValidateNodeAncestry(connection, transaction, request, token);
-        var nodes = await ReadNodes(connection, transaction, request, token);
+        var projectedNodes = await ReadNodes(connection, transaction, request, token);
+        var admittedSkillIdentities = skillProjection?.State == "current"
+            ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).ToHashSet(StringComparer.Ordinal)
+            : [];
+        var excludedSkillNodes = projectedNodes.Where(node => node.SourceKind == "skill_invocation"
+            && !admittedSkillIdentities.Contains(node.SourceIdentity)).ToArray();
+        var nodes = projectedNodes.Except(excludedSkillNodes).ToArray();
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
-        var executions = await ReadExecutions(connection, transaction, request, executionIds, token);
+        var executions = ApplyCurrentSkillActivity(
+            await ReadExecutions(connection, transaction, request, executionIds, token), nodes, skillProjection);
+        nodes = ApplyCurrentSkillActivity(nodes, executions, excludedSkillNodes);
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
             ? await ReadEdges(connection, transaction, [request.NodeId!], token)
@@ -45,12 +62,52 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             ? await ReadMetadata(connection, transaction, sessionId, token)
             : new Metadata([], [], null, null);
         var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
-            ? await ReadSummaryContent(connection, transaction, sessionId, token)
-            : await ReadContent(connection, transaction, nodeIds, token);
-        var revision = await ReadCanonicalRevisionInput(connection, transaction, sessionId, token);
+            ? await ReadSummaryContent(connection, transaction, sessionId, acceptedAt, token)
+            : await ReadContent(connection, transaction, nodeIds, acceptedAt, token);
+        var revision = await ReadCanonicalRevisionInput(connection, transaction, sessionId, acceptedAt, skillProjection, token);
         var registryIdentity = ReadRegistryIdentity();
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+    }
+
+    private static LocalWorkspaceExecutionDetail[] ApplyCurrentSkillActivity(
+        LocalWorkspaceExecutionDetail[] executions,
+        LocalWorkspaceNodeDetail[] nodes,
+        SkillProjectionCurrentInvocationProjection? projection)
+    {
+        var current = projection?.State == "current";
+        return executions.Select(execution =>
+        {
+            var count = current ? nodes.LongCount(node => node.ExecutionId == execution.ExecutionId && node.SourceKind == "skill_invocation") : 0;
+            var skill = current && count > 0
+                ? new LocalWorkspaceFact<long>("recorded", count)
+                : projection is null
+                    ? new LocalWorkspaceFact<long>("not_observed", null)
+                    : new LocalWorkspaceFact<long>(projection.State == "current" ? "not_observed" : projection.State, null);
+            return execution with { Activity = execution.Activity with { Skill = skill } };
+        }).ToArray();
+    }
+
+    private static LocalWorkspaceNodeDetail[] ApplyCurrentSkillActivity(
+        LocalWorkspaceNodeDetail[] nodes,
+        LocalWorkspaceExecutionDetail[] executions,
+        LocalWorkspaceNodeDetail[] excluded)
+    {
+        var excludedByParent = excluded.Where(static node => node.ParentNodeId is not null)
+            .GroupBy(static node => node.ParentNodeId!, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.LongCount(), StringComparer.Ordinal);
+        var byExecution = executions.ToDictionary(static execution => execution.ExecutionId, StringComparer.Ordinal);
+        return nodes.Select(node =>
+        {
+            var activity = byExecution.TryGetValue(node.ExecutionId, out var execution)
+                && node.SourceKind == "execution_root"
+                    ? node.Activity with { Skill = execution.Activity.Skill }
+                    : node.Activity;
+            var childCount = excludedByParent.TryGetValue(node.NodeId, out var removed)
+                ? Math.Max(0, node.ChildCount - removed)
+                : node.ChildCount;
+            return node with { Activity = activity, ChildCount = childCount };
+        }).ToArray();
     }
 
     private static async Task ValidateNodeAncestry(
@@ -280,26 +337,30 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         return rows.ToArray();
     }
 
-    private async Task<LocalWorkspaceContentAvailability[]> ReadContent(SqliteConnection c, SqliteTransaction t, string[] ids, CancellationToken token)
+    private async Task<LocalWorkspaceContentAvailability[]> ReadContent(SqliteConnection c, SqliteTransaction t, string[] ids, DateTimeOffset acceptedAt, CancellationToken token)
     {
         if(ids.Length==0)return [];
         statementObserver?.Invoke("detail-content"); using var command=c.CreateCommand();command.Transaction=t;
-        command.CommandText="SELECT node_id,part,availability_state,source_item_id,revision_input,store_kind,locator_kind,json_pointer,selected_utf8_bytes,retention_item_id,retention_store_instance_id,source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token FROM local_workspace_node_content_refs WHERE node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY node_id,part;";
+        command.CommandText=$"SELECT c.node_id,c.part,{EffectiveContentAvailabilitySql},c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token FROM local_workspace_node_content_refs c LEFT JOIN retention_items i ON i.item_id=c.retention_item_id LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id WHERE c.node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY c.node_id,c.part;";
+        command.Parameters.AddWithValue("$now", Canonical(acceptedAt));
         command.Parameters.AddWithValue("$ids",System.Text.Json.JsonSerializer.Serialize(ids));var rows=new List<LocalWorkspaceContentAvailability>();using var reader=await command.ExecuteReaderAsync(token);
         while(await reader.ReadAsync(token))rows.Add(Content(reader));return rows.ToArray();
     }
 
-    private async Task<LocalWorkspaceContentAvailability[]> ReadSummaryContent(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
+    private async Task<LocalWorkspaceContentAvailability[]> ReadSummaryContent(SqliteConnection c, SqliteTransaction t, string sessionId, DateTimeOffset acceptedAt, CancellationToken token)
     {
         statementObserver?.Invoke("detail-summary-content");
-        using var command = Command(c, t, """
-            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
+        using var command = Command(c, t, $$"""
+            SELECT c.node_id,c.part,{{EffectiveContentAvailabilitySql}},c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
             FROM local_workspace_node_content_refs c
             JOIN local_workspace_nodes n ON n.node_id=c.node_id
             JOIN local_workspace_sessions s ON s.session_id=n.session_id
+            LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+            LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id
             WHERE n.session_id=$session_id AND c.part='instruction' AND c.source_item_id=s.label_source_identity
             ORDER BY c.node_id LIMIT 2;
             """, sessionId);
+        command.Parameters.AddWithValue("$now", Canonical(acceptedAt));
         var rows = new List<LocalWorkspaceContentAvailability>();
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token)) rows.Add(Content(reader));
@@ -327,7 +388,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         return new(Array.AsReadOnly(nativeIds.ToArray()),Array.AsReadOnly(versions.ToArray()),source,additional);
     }
 
-    private static async Task<string> ReadCanonicalRevisionInput(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
+    private static async Task<string> ReadCanonicalRevisionInput(
+        SqliteConnection c, SqliteTransaction t, string sessionId, DateTimeOffset acceptedAt,
+        SkillProjectionCurrentInvocationProjection? skillProjection, CancellationToken token)
     {
         using var hash=System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-monitor-session-revision-input\0v1\0"));
@@ -359,9 +422,46 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             while(await reader.ReadAsync(token)) for(var i=0;i<reader.FieldCount;i++) Append(reader.GetValue(i));
             hash.AppendData([0xff]);
         }
+        Append(skillProjection?.State ?? "not_observed");
+        foreach (var invocation in skillProjection?.Invocations.OrderBy(static value => value.CanonicalIdentity, StringComparer.Ordinal)
+            ?? Enumerable.Empty<SkillProjectionCanonicalInvocation>())
+            Append(invocation.CanonicalIdentity);
+        using (var command = Command(c, t, $$"""
+            SELECT c.node_id,c.part,{{EffectiveContentAvailabilitySql}}
+            FROM local_workspace_node_content_refs c
+            JOIN local_workspace_nodes n ON n.node_id=c.node_id
+            LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+            LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id
+            WHERE n.session_id=$session_id ORDER BY c.node_id,c.part;
+            """, sessionId))
+        {
+            command.Parameters.AddWithValue("$now", Canonical(acceptedAt));
+            using var reader = await command.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token))
+            {
+                Append(reader.GetString(0));
+                Append(reader.GetString(1));
+                Append(reader.GetString(2));
+            }
+        }
         return Convert.ToHexStringLower(hash.GetHashAndReset());
         void Append(object value){var text=value is DBNull?"<null>":value is byte[] bytes?Convert.ToHexString(bytes):Convert.ToString(value,System.Globalization.CultureInfo.InvariantCulture)!;var data=System.Text.Encoding.UTF8.GetBytes(text);Span<byte> length=stackalloc byte[4];System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length,data.Length);hash.AppendData(length);hash.AppendData(data);}
     }
+
+    private const string EffectiveContentAvailabilitySql = """
+        CASE
+          WHEN c.availability_state<>'available' THEN c.availability_state
+          WHEN i.item_id IS NULL OR tmb.item_id IS NOT NULL OR i.deleted_at IS NOT NULL THEN 'deleted'
+          WHEN i.read_denied_at IS NOT NULL OR i.error_code IS NOT NULL THEN 'read_denied'
+          WHEN i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed')
+            OR (i.state='expiring' AND i.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired'
+          WHEN i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY) THEN 'available'
+          ELSE 'invalid'
+        END
+        """;
+
+    private static string Canonical(DateTimeOffset value) =>
+        value.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
 
     private static SqliteCommand Command(SqliteConnection c,SqliteTransaction t,string sql,string sessionId){var command=c.CreateCommand();command.Transaction=t;command.CommandText=sql;command.Parameters.AddWithValue("$session_id",sessionId);return command;}
     private static string? S(SqliteDataReader r,int i)=>r.IsDBNull(i)?null:r.GetString(i);

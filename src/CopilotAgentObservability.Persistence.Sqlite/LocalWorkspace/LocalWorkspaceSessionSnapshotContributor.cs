@@ -8,11 +8,16 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
     private const int MaximumSessions = 10_000;
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? statementObserver;
+    private readonly ISkillRegistryGenerationAuthority? registryAuthority;
 
-    internal LocalWorkspaceSessionSnapshotContributor(TimeProvider? timeProvider = null, Action<string>? statementObserver = null)
+    internal LocalWorkspaceSessionSnapshotContributor(
+        TimeProvider? timeProvider = null,
+        Action<string>? statementObserver = null,
+        ISkillRegistryGenerationAuthority? registryAuthority = null)
     {
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.statementObserver = statementObserver;
+        this.registryAuthority = registryAuthority;
     }
 
     public ValueTask<LocalRepositorySessionContribution> ReadAsync(
@@ -20,17 +25,20 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken)
     {
-        var now = timeProvider.GetUtcNow().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        var acceptedAt = timeProvider.GetUtcNow();
+        var now = acceptedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
         return transaction.ReadAsync((connection, sqliteTransaction, token) =>
-            ReadRowsAsync(connection, sqliteTransaction, now, request.TargetSessionId, statementObserver, token), cancellationToken);
+            ReadRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.TargetSessionId, statementObserver, registryAuthority, token), cancellationToken);
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
+        DateTimeOffset acceptedAt,
         string now,
         string? targetSessionId,
         Action<string>? statementObserver,
+        ISkillRegistryGenerationAuthority? registryAuthority,
         CancellationToken cancellationToken)
     {
         var rows = new List<MutableRow>();
@@ -147,6 +155,17 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 if (byId.TryGetValue(reader.GetString(0), out var row)) row.Activity[reader.GetString(1)] = new(reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetInt64(3));
+        }
+        var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, byId.Keys.ToArray(), acceptedAt, registryAuthority);
+        foreach (var row in rows)
+        {
+            if (currentSkills.TryGetValue(row.SessionId, out var projection))
+                row.Activity["skill"] = projection.State == "current"
+                    ? new("recorded", projection.InvocationCount)
+                    : new(projection.State, null);
+            else
+                row.Activity["skill"] = new("not_observed", null);
         }
         using (var command = connection.CreateCommand())
         {
