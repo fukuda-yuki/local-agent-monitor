@@ -815,6 +815,89 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Equal(301, seen.Distinct(StringComparer.Ordinal).Count());
     }
 
+    [Fact]
+    public async Task ProductionTimelineSyntheticSkillParentGetAndHeadReturnExactEmptyPage()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 1, 1, 1, 0, 0, TimeSpan.Zero));
+        temp.TimeProvider = clock;
+        _ = temp.RetentionContext;
+        using var fixture = new CurrentInvocationProjectionFixture(databasePath: temp.DatabasePath);
+        fixture.SeedMismatchedPair("route-crossing", "Needle-Skill", "91", "a1", "92", "a2");
+        fixture.RefreshWorkspace();
+        using var host = await StartProductionDetailRouteAsync(temp, null, null, ensureSchemas: false);
+
+        clock.Advance(TimeSpan.FromDays(91));
+        var sessionId = fixture.SessionId("route-crossing");
+        using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary");
+        using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());
+        var revision = summary.RootElement.GetProperty("workspace_revision").GetString()!;
+        var executionId = summary.RootElement.GetProperty("executions")[0].GetProperty("execution_id").GetString()!;
+        using var timelineResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/timeline?workspace_revision={revision}&execution_id={executionId}&limit=100");
+        using var timeline = JsonDocument.Parse(await timelineResponse.Content.ReadAsByteArrayAsync());
+        var synthetic = timeline.RootElement.GetProperty("items").EnumerateArray()
+            .Single(static item => item.GetProperty("kind").GetString() == "skill").GetProperty("node_id").GetString()!;
+        var path = $"/api/local-monitor/v1/sessions/{sessionId}/timeline?workspace_revision={revision}&execution_id={executionId}&parent_node_id={synthetic}&limit=100";
+
+        using var get = await host.Client.GetAsync(path);
+        var bytes = await get.Content.ReadAsByteArrayAsync();
+        using var repeat = await host.Client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal(bytes, await repeat.Content.ReadAsByteArrayAsync());
+        using (var page = JsonDocument.Parse(bytes))
+        {
+            Assert.Empty(page.RootElement.GetProperty("items").EnumerateArray());
+            Assert.Equal(JsonValueKind.Null, page.RootElement.GetProperty("next_cursor").ValueKind);
+        }
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(get.Content.Headers.ContentType?.ToString(), head.Content.Headers.ContentType?.ToString());
+        Assert.Equal(bytes.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task ProductionRootTimelinePaginatesAntiCorrelatedExecutionsByFrozenTuple()
+    {
+        using var temp = new MonitorTempDirectory();
+        var session = AlertCenterRouteTests.SeedPersistedTraceAndSession(temp, "00000000000000000000000000000001", authoritativeToolStatus: true);
+        EnsureProductionProjectionSchemas(temp);
+        using (var connection = Open(temp))
+        {
+            SeedAntiCorrelatedExecutionRoots(connection, session.ToString("D"), 201);
+        }
+        var revision = new string('1', 64);
+        using var host = await StartDetailRouteAsync(new SqliteContributorDetailService(temp.DatabasePath, session.ToString("D"), revision));
+        var seen = new List<(string NodeId, DateTimeOffset Start)>();
+        string? after = null;
+        do
+        {
+            var firstPage = after is null;
+            var path = $"/api/local-monitor/v1/sessions/{session:D}/timeline?workspace_revision={revision}&limit=100" +
+                (after is null ? "" : $"&after={Uri.EscapeDataString(after)}");
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var pageBytes = await response.Content.ReadAsByteArrayAsync();
+            if (firstPage)
+            {
+                using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+                Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+                Assert.Equal(pageBytes.Length, head.Content.Headers.ContentLength);
+                Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+            }
+            using var page = JsonDocument.Parse(pageBytes);
+            seen.AddRange(page.RootElement.GetProperty("items").EnumerateArray().Select(item => (
+                item.GetProperty("node_id").GetString()!,
+                item.GetProperty("timing").GetProperty("started_at").GetDateTimeOffset())));
+            after = page.RootElement.GetProperty("next_cursor").GetString();
+        }
+        while (after is not null);
+
+        Assert.Equal(201, seen.Count);
+        Assert.Equal(201, seen.Select(static item => item.NodeId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(seen.OrderBy(static item => item.Start).ThenBy(static item => item.NodeId, StringComparer.Ordinal), seen);
+    }
+
     [Theory]
     [InlineData("PUT")]
     [InlineData("POST")]
@@ -1231,6 +1314,22 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             ValueTask.FromResult(snapshot);
     }
 
+    private sealed class SqliteContributorDetailService(string databasePath, string sessionId, string revision)
+        : ILocalRepositorySessionDetailSnapshotService
+    {
+        public async ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
+            LocalRepositorySessionDetailRequest request, CancellationToken cancellationToken)
+        {
+            using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync(cancellationToken);
+            using var transaction = connection.BeginTransaction(deferred: true);
+            var detail = await new LocalWorkspaceSessionDetailSnapshotContributor(
+                registryAuthority: FixedSkillRegistryGenerationAuthority.Load()).ReadAsync(
+                    new DirectReadTransaction(connection, transaction), request, cancellationToken);
+            return Snapshot(sessionId, detail, revision);
+        }
+    }
+
     private static async Task<RunningDetailRoute> StartDetailRouteAsync(ILocalRepositorySessionDetailSnapshotService service)
     {
         var builder = WebApplication.CreateBuilder();
@@ -1346,6 +1445,44 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             nodeId.Value = LocalWorkspaceProjectionStore.StableNodeId("session_event", identity);
             sourceIdentity.Value = identity;
             sourceOrdinal.Value = index;
+            command.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    private static void SeedAntiCorrelatedExecutionRoots(SqliteConnection connection, string sessionId, int total)
+    {
+        var baseExecution = Scalar(connection, "SELECT execution_id FROM local_workspace_execution_headers WHERE session_id=$session LIMIT 1;", sessionId);
+        var baseRoot = Scalar(connection, "SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND execution_id=$execution LIMIT 1;", sessionId, baseExecution);
+        using var transaction = connection.BeginTransaction();
+        for (var index = 1; index < total; index++)
+        {
+            var reverse = total - index;
+            var executionId = $"00000000-0000-7000-8000-{reverse:D12}";
+            var sourceIdentity = $"anti-{reverse:D4}";
+            var nodeId = LocalWorkspaceProjectionStore.StableNodeId("execution_root", sourceIdentity);
+            var ticks = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(index).UtcTicks;
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO local_workspace_execution_headers
+                SELECT $execution,session_id,source_kind,$source,$ordinal,lifecycle,status,model,trace_id,'recorded',$ticks,$ticks,0,
+                       skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
+                       token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points
+                FROM local_workspace_execution_headers WHERE execution_id=$base_execution;
+                INSERT INTO local_workspace_nodes
+                SELECT $node,session_id,$execution,source_kind,$source,$ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,'recorded',$ticks,$ticks,0,
+                       skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
+                       token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,retry_relation_state,recovery_relation_state,trace_id,span_id,event_id,otel_source_identity,sdk_source_identity
+                FROM local_workspace_nodes WHERE node_id=$base_root;
+                """;
+            command.Parameters.AddWithValue("$execution", executionId);
+            command.Parameters.AddWithValue("$source", sourceIdentity);
+            command.Parameters.AddWithValue("$ordinal", index);
+            command.Parameters.AddWithValue("$ticks", ticks);
+            command.Parameters.AddWithValue("$node", nodeId);
+            command.Parameters.AddWithValue("$base_execution", baseExecution);
+            command.Parameters.AddWithValue("$base_root", baseRoot);
             command.ExecuteNonQuery();
         }
         transaction.Commit();
