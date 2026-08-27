@@ -100,6 +100,50 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         if(expectedStatus==HttpStatusCode.OK)Assert.Equal(size,(await response.Content.ReadAsByteArrayAsync()).Length);else Assert.Equal("{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
     }
 
+    [Theory]
+    [InlineData("GET", (int)LocalMonitorNodeContentRoutePhase.AfterCommittedGrantBeforeReference)]
+    [InlineData("HEAD", (int)LocalMonitorNodeContentRoutePhase.AfterCommittedGrantBeforeReference)]
+    [InlineData("GET", (int)LocalMonitorNodeContentRoutePhase.WhileContentReferenceHeld)]
+    [InlineData("HEAD", (int)LocalMonitorNodeContentRoutePhase.WhileContentReferenceHeld)]
+    [InlineData("GET", (int)LocalMonitorNodeContentRoutePhase.AfterBytesSelectedBeforeSeal)]
+    [InlineData("HEAD", (int)LocalMonitorNodeContentRoutePhase.AfterBytesSelectedBeforeSeal)]
+    public async Task RealCommittedLeaseExpiryBeforeSealReturnsExactLostWithoutRaw(string method, int phaseValue)
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new GenericRouteContentClock(new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero));
+        temp.TimeProvider = clock;
+        const string marker = "task5c-live-retention-marker";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        var options = new MonitorHostTestOptions
+        {
+            StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
+            StartSessionOtelEnrichment = false, StartLocalRepositoryCatalogHostedService = false,
+            UseUserSecrets = false,
+            LocalMonitorNodeContentRouteCheckpoint = phase =>
+            {
+                if (phase == (LocalMonitorNodeContentRoutePhase)phaseValue)
+                    clock.UtcNow += RetentionV1Constants.LeaseDuration;
+            },
+        };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
+        RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
+        string nodeId; using (var connection = Open(temp))
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=instruction";
+
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.Equal(34, response.Content.Headers.ContentLength);
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(method == "HEAD" ? [] : "{\"error\":\"raw_content_lease_lost\"}"u8.ToArray(), bytes);
+        Assert.DoesNotContain(marker, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ProductionWholeEventMalformedJsonFailsClosedWithoutPartialBytes()
     {

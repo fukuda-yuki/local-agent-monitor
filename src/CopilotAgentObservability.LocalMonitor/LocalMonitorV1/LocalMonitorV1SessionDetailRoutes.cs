@@ -11,16 +11,16 @@ internal static class LocalMonitorV1SessionDetailRoutes
     private const string Prefix="/api/local-monitor/v1/sessions/";
     internal static bool IsPath(PathString path)=>path.Value?.StartsWith(Prefix,StringComparison.Ordinal)==true&&(path.Value.EndsWith("/summary",StringComparison.Ordinal)||path.Value.EndsWith("/timeline",StringComparison.Ordinal)||path.Value.Contains("/nodes/",StringComparison.Ordinal));
 
-    internal static void Map(WebApplication app,ILocalRepositorySessionDetailSnapshotService service,byte[]? cursorKeyOverride=null,ISessionStore? sessionStore=null)
+    internal static void Map(WebApplication app,ILocalRepositorySessionDetailSnapshotService service,byte[]? cursorKeyOverride=null,ISessionStore? sessionStore=null,Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint=null)
     {
         var key=cursorKeyOverride?.ToArray()??RandomNumberGenerator.GetBytes(32);
         app.Map("/api/local-monitor/v1/sessions/{sessionId}/summary",context=>Handle(context,service,key,Kind.Summary));
         app.Map("/api/local-monitor/v1/sessions/{sessionId}/timeline",context=>Handle(context,service,key,Kind.Timeline));
-        if(sessionStore is not null) app.Map("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content",context=>HandleContent(context,service,sessionStore));
+        if(sessionStore is not null) app.Map("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content",context=>HandleContent(context,service,sessionStore,contentCheckpoint));
         app.Map("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}",context=>Handle(context,service,key,Kind.Node));
     }
 
-    private static async Task HandleContent(HttpContext context,ILocalRepositorySessionDetailSnapshotService service,ISessionStore store)
+    private static async Task HandleContent(HttpContext context,ILocalRepositorySessionDetailSnapshotService service,ISessionStore store,Action<LocalMonitorNodeContentRoutePhase>? checkpoint)
     {
         if(!HttpMethods.IsGet(context.Request.Method)&&!HttpMethods.IsHead(context.Request.Method)){context.Response.Headers.Allow="GET, HEAD";await Error(context,405,"method_not_allowed");return;}
         var sessionId=context.Request.RouteValues["sessionId"] as string;var nodeId=context.Request.RouteValues["nodeId"] as string;
@@ -35,22 +35,27 @@ internal static class LocalMonitorV1SessionDetailRoutes
             var locator=snapshot.Detail.Content.SingleOrDefault(c=>c.NodeId==nodeId&&c.Part==part);
             if(locator is null){await Error(context,404,"raw_content_not_captured");return;}
             if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
+            checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant);
             var read=await store.ReadContentAsync(Guid.Parse(sessionId!),Guid.Parse(locator.SourceItemId!),context.RequestAborted);
             if(read.Disposition!=SessionContentReadDisposition.Granted){await Error(context,read.Disposition==SessionContentReadDisposition.Busy?503:410,read.Disposition==SessionContentReadDisposition.Busy?"persistence_busy":"raw_content_expired");return;}
-            await using var lease=read.Lease!;byte[] bytes;SessionEventContent content;
+            await using var lease=read.Lease!;checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterCommittedGrantBeforeReference);byte[] bytes;SessionEventContent content;
             using(var reference=lease.AcquireContentReference())
             {
+                checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.WhileContentReferenceHeld);
                 content=reference.Content;
                 bytes=Select(content.ContentJson,locator);
             }
+            checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterBytesSelectedBeforeSeal);
             if(content.EventId.ToString("D")!=locator.SourceItemId
                 || content.CapturedAt.ToUniversalTime().ToString("O")!=locator.SourceCapturedAt
                 || content.ExpiresAt.ToUniversalTime().ToString("O")!=locator.SourceExpiresAt)
             {lease.TryCompleteWithoutRaw();await Error(context,409,"workspace_snapshot_stale");return;}
             if(bytes.Length>1_048_576||bytes.Length!=locator.SelectedUtf8Bytes){lease.TryCompleteWithoutRaw();await Error(context,bytes.Length>1_048_576?413:503,bytes.Length>1_048_576?"raw_content_too_large":"local_monitor_ui_unavailable");return;}
-            if(lease.TrySealRawResponse()!=SessionContentTerminalResult.Sealed){RawResponsePublication.Abort(context);return;}
+            var terminal=lease.TrySealRawResponse();
+            if(terminal!=SessionContentTerminalResult.Sealed){await Error(context,terminal==SessionContentTerminalResult.Lost?409:503,terminal==SessionContentTerminalResult.Lost?"raw_content_lease_lost":"persistence_busy");return;}
+            checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterSuccessfulSealBeforeWrite);
             context.Response.StatusCode=200;context.Response.ContentType="text/plain; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.Headers["X-Local-Monitor-Schema-Version"]="local-monitor-node-content.response.v1";context.Response.ContentLength=bytes.Length;
-            if(!HttpMethods.IsHead(context.Request.Method))await context.Response.Body.WriteAsync(bytes,context.RequestAborted);
+            if(!HttpMethods.IsHead(context.Request.Method)){checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.DuringResponseWrite);await context.Response.Body.WriteAsync(bytes,context.RequestAborted);}
         }
         catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error=="session_not_found"?404:503,e.Error);}
         catch(LocalRepositoryScopeSnapshotException){await Error(context,503,"persistence_busy");}
@@ -133,4 +138,14 @@ internal static class LocalMonitorV1SessionDetailRoutes
     internal static async Task Error(HttpContext context,int status,string code){var bytes=Encoding.UTF8.GetBytes($"{{\"error\":\"{code}\"}}");context.Response.StatusCode=status;context.Response.ContentType="application/json; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.ContentLength=bytes.Length;if(!HttpMethods.IsHead(context.Request.Method))await context.Response.Body.WriteAsync(bytes,context.RequestAborted);}
     private enum Kind{Summary,Timeline,Node}
     private sealed record Query(string? Revision,string? ExecutionId,string? ParentNodeId,string? After,int Limit);
+}
+
+internal enum LocalMonitorNodeContentRoutePhase
+{
+    BeforeRetentionGrant,
+    AfterCommittedGrantBeforeReference,
+    WhileContentReferenceHeld,
+    AfterBytesSelectedBeforeSeal,
+    AfterSuccessfulSealBeforeWrite,
+    DuringResponseWrite,
 }

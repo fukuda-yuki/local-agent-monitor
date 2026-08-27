@@ -857,7 +857,7 @@ internal static class MonitorHost
         if (!options.SanitizedOnly)
         {
             LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);
-            LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(), sessionStore: sessionStore);
+            LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(), sessionStore: sessionStore, contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
@@ -2630,6 +2630,7 @@ internal sealed record LocalRepositoryCatalogCompositionSnapshot(
 internal sealed class MonitorHostTestOptions
 {
     public Action<SessionRawContentRoutePhase>? SessionRawContentRouteCheckpoint { get; init; }
+    public Action<LocalMonitorNodeContentRoutePhase>? LocalMonitorNodeContentRouteCheckpoint { get; init; }
 
     public IPricingCatalogProvider? PricingCatalogProvider { get; init; }
 
