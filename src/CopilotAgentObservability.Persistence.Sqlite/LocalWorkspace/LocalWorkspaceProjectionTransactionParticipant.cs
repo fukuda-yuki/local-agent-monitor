@@ -11,11 +11,23 @@ internal enum LocalWorkspaceProjectionInstallationState
 
 internal interface ILocalWorkspaceProjectionTransactionParticipant
 {
+    void ValidateInstallationState(SqliteConnection connection, SqliteTransaction transaction) { }
+
     void RefreshSessions(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
         DateTimeOffset now);
+
+    void RefreshSessionBatches(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IEnumerable<IReadOnlyCollection<string>> sessionIdBatches,
+        DateTimeOffset now)
+    {
+        foreach (var sessionIds in sessionIdBatches)
+            RefreshSessions(connection, transaction, sessionIds, now);
+    }
 
     void CompleteSessionEventContentDeletion(
         SqliteConnection connection,
@@ -30,18 +42,22 @@ internal sealed class UnconfiguredLocalWorkspaceProjectionTransactionParticipant
 
     private UnconfiguredLocalWorkspaceProjectionTransactionParticipant() { }
 
+    public void ValidateInstallationState(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        if (state == LocalWorkspaceProjectionInstallationState.Current)
+            throw new InvalidOperationException("local_workspace_projection_authority_unavailable");
+    }
+
     public void RefreshSessions(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
         DateTimeOffset now)
     {
-        if (sessionIds.Count == 0) return;
-        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
-        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
-            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
-        if (state == LocalWorkspaceProjectionInstallationState.Current)
-            throw new InvalidOperationException("local_workspace_projection_authority_unavailable");
+        ValidateInstallationState(connection, transaction);
     }
 
     public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now)
@@ -63,18 +79,37 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
         this.skillRegistryAuthority = skillRegistryAuthority ?? throw new ArgumentNullException(nameof(skillRegistryAuthority));
     }
 
+    public void ValidateInstallationState(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        if (LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction) == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+    }
+
     public void RefreshSessions(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
         DateTimeOffset now)
     {
-        if (sessionIds.Count == 0) return;
         var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
         if (state == LocalWorkspaceProjectionInstallationState.Absent) return;
         if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
             throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        if (sessionIds.Count == 0) return;
         LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, sessionIds, now, skillRegistryAuthority);
+    }
+
+    public void RefreshSessionBatches(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IEnumerable<IReadOnlyCollection<string>> sessionIdBatches,
+        DateTimeOffset now)
+    {
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Absent) return;
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        LocalWorkspaceProjectionStore.RefreshSessionBatches(connection, transaction, sessionIdBatches, now, skillRegistryAuthority);
     }
 
     public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now)
