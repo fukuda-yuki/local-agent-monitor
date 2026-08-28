@@ -10,15 +10,24 @@ using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.FileProviders;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 
 internal static class LocalMonitorV1HumanRoutes
 {
     private const string HtmlContentType = "text/html; charset=utf-8";
+    private const string SharedAsset = "/local-monitor-v1-shared.js";
+    private static readonly HashSet<string> PrimaryExtensionAssets = new(StringComparer.Ordinal)
+    {
+        "/local-monitor-repositories.js",
+        "/local-monitor-explorer.js",
+        "/local-monitor-compare.js",
+        "/local-monitor-workspace.js",
+    };
     private static readonly HashSet<string> PrimaryAssets = new(StringComparer.Ordinal)
     {
-        "/local-monitor-v1-shared.js",
+        SharedAsset,
         "/local-monitor-repositories.js",
         "/local-monitor-explorer.js",
         "/local-monitor-compare.js",
@@ -28,15 +37,70 @@ internal static class LocalMonitorV1HumanRoutes
     internal static bool IsPrimaryAsset(PathString path) =>
         path.Value is { } value && PrimaryAssets.Contains(value);
 
-    internal static Task<bool> TryDispatchUnavailableAssetAsync(HttpContext context)
+    internal static Task<bool> TryDispatchUnavailableAssetAsync(HttpContext context, IFileProvider webRootFileProvider)
     {
-        if (!IsPrimaryAsset(context.Request.Path)
-            || context.Request.Path == "/local-monitor-v1-shared.js") return Task.FromResult(false);
+        if (context.Request.Path == SharedAsset) return Task.FromResult(false);
+
+        var rawPath = RawPath(context);
+        if (!PrimaryExtensionAssets.Any(asset => IsRawAssetCandidate(rawPath, asset))) return Task.FromResult(false);
+
+        if (PrimaryExtensionAssets.Contains(rawPath) && IsAvailablePrimaryAsset(webRootFileProvider, rawPath[1..]))
+            return Task.FromResult(false);
+
         context.Response.StatusCode = StatusCodes.Status404NotFound;
         context.Response.Headers.CacheControl = "no-store";
         context.Response.ContentLength = 0;
         return Task.FromResult(true);
     }
+
+    private static bool IsAvailablePrimaryAsset(IFileProvider fileProvider, string leaf)
+    {
+        try
+        {
+            var file = fileProvider.GetFileInfo(leaf);
+            if (file is not { Exists: true, IsDirectory: false }) return false;
+            return file.PhysicalPath is not { } path
+                || (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0;
+        }
+        catch (Exception exception) when (IsNonFatalFileLookupFailure(exception))
+        {
+            return false;
+        }
+    }
+
+    private static bool IsRawAssetCandidate(string rawPath, string asset)
+    {
+        var rawIndex = 0;
+        var assetIndex = 0;
+        while (rawIndex < rawPath.Length && assetIndex < asset.Length)
+        {
+            var value = rawPath[rawIndex++];
+            if (value == '%')
+            {
+                if (rawIndex + 1 >= rawPath.Length
+                    || !TryHex(rawPath[rawIndex], out var high)
+                    || !TryHex(rawPath[rawIndex + 1], out var low)) return false;
+                value = (char)((high << 4) | low);
+                rawIndex += 2;
+            }
+            if (char.ToLowerInvariant(value) != asset[assetIndex++]) return false;
+        }
+
+        if (assetIndex != asset.Length) return false;
+        if (rawIndex == rawPath.Length) return true;
+        if (rawPath[rawIndex] is '/' or '\\') return true;
+        return rawPath[rawIndex] == '%'
+            && rawIndex + 2 < rawPath.Length
+            && TryHex(rawPath[rawIndex + 1], out var separatorHigh)
+            && TryHex(rawPath[rawIndex + 2], out var separatorLow)
+            && ((separatorHigh << 4) | separatorLow) is '/' or '\\';
+    }
+
+    private static bool IsNonFatalFileLookupFailure(Exception exception) =>
+        exception is not OperationCanceledException
+            and not OutOfMemoryException
+            and not StackOverflowException
+            and not AccessViolationException;
 
     internal static bool IsCandidate(HttpContext context)
     {

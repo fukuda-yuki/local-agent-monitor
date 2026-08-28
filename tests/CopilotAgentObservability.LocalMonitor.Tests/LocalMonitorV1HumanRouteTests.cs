@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Primitives;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -453,6 +455,124 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     [Fact]
+    public async Task RawDefault_ExactPhysicalPrimaryAssetsUseTheExistingStaticMiddlewareForGetAndHead()
+    {
+        using var temp = new MonitorTempDirectory();
+        var webRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "primary-assets"));
+        var assets = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            ["local-monitor-repositories.js"] = "window.repositories = true;"u8.ToArray(),
+            ["local-monitor-explorer.js"] = "window.explorer = true;"u8.ToArray(),
+            ["local-monitor-compare.js"] = "window.compare = true;"u8.ToArray(),
+            ["local-monitor-workspace.js"] = "window.workspace = true;"u8.ToArray(),
+        };
+        foreach (var (name, body) in assets) await File.WriteAllBytesAsync(Path.Combine(webRoot.FullName, name), body);
+        using var provider = new PhysicalFileProvider(webRoot.FullName);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: AssetOptions(provider));
+
+        foreach (var (name, body) in assets)
+        {
+            using var get = await host.Client.GetAsync('/' + name);
+            using var head = await host.Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, '/' + name));
+
+            Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+            Assert.Equal(get.StatusCode, head.StatusCode);
+            Assert.Equal("no-store", get.Headers.CacheControl?.ToString());
+            Assert.Equal(get.Headers.CacheControl?.ToString(), head.Headers.CacheControl?.ToString());
+            Assert.NotNull(get.Content.Headers.ContentType);
+            Assert.Equal(get.Content.Headers.ContentType?.ToString(), head.Content.Headers.ContentType?.ToString());
+            Assert.Equal(body.Length, get.Content.Headers.ContentLength);
+            Assert.Equal(get.Content.Headers.ContentLength, head.Content.Headers.ContentLength);
+            Assert.Equal(body, await get.Content.ReadAsByteArrayAsync());
+            Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+        }
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("null")]
+    [InlineData("throw")]
+    [InlineData("directory")]
+    public async Task RawDefault_UnavailablePrimaryAssetProviderRemainsClosedEmpty404(string outcome)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: AssetOptions(new ControlledPrimaryAssetProvider(outcome)));
+
+        foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
+        {
+            using var response = await host.Client.SendAsync(
+                new HttpRequestMessage(method, "/local-monitor-repositories.js"));
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+            Assert.Equal(0, response.Content.Headers.ContentLength);
+            Assert.Null(response.Content.Headers.ContentType);
+            Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        }
+    }
+
+    [Fact]
+    public async Task PrimaryAssetAvailabilityCannotActivateAnotherAssetOrNonExactPath()
+    {
+        using var temp = new MonitorTempDirectory();
+        var webRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "isolated-primary-asset"));
+        await File.WriteAllTextAsync(
+            Path.Combine(webRoot.FullName, "local-monitor-repositories.js"),
+            "window.repositories = true;");
+        using var provider = new PhysicalFileProvider(webRoot.FullName);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: AssetOptions(provider));
+
+        foreach (var path in new[]
+                 {
+                     "/local-monitor-explorer.js",
+                     "/LOCAL-MONITOR-REPOSITORIES.JS",
+                     "/local-monitor-repositories.js/child",
+                 })
+        {
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+            Assert.Equal(0, response.Content.Headers.ContentLength);
+            Assert.Null(response.Content.Headers.ContentType);
+            Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        }
+
+        var encoded = await SendRawAsync(host.Url, "GET", "/local-monitor-%72epositories.js");
+        Assert.StartsWith("HTTP/1.1 404", encoded.StatusLine, StringComparison.Ordinal);
+        Assert.Equal("no-store", encoded.Headers["Cache-Control"]);
+        Assert.Equal("0", encoded.Headers["Content-Length"]);
+        Assert.DoesNotContain("Content-Type", encoded.Headers.Keys, StringComparer.OrdinalIgnoreCase);
+        Assert.Empty(encoded.Body);
+    }
+
+    [Fact]
+    public async Task SanitizedOnly_NeverServesAPhysicalPrimaryAsset()
+    {
+        using var temp = new MonitorTempDirectory();
+        var webRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "sanitized-primary-asset"));
+        await File.WriteAllTextAsync(
+            Path.Combine(webRoot.FullName, "local-monitor-repositories.js"),
+            "window.repositories = true;");
+        using var provider = new PhysicalFileProvider(webRoot.FullName);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            sanitizedOnly: true,
+            testOptions: AssetOptions(provider));
+
+        foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
+        {
+            using var response = await host.Client.SendAsync(
+                new HttpRequestMessage(method, "/local-monitor-repositories.js"));
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+            Assert.Equal(0, response.Content.Headers.ContentLength);
+            Assert.Null(response.Content.Headers.ContentType);
+            Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        }
+    }
+
+    [Fact]
     public async Task InvalidHostPrecedesHumanDispatchWithTheStrictJsonContract()
     {
         using var temp = new MonitorTempDirectory();
@@ -522,6 +642,16 @@ public sealed class LocalMonitorV1HumanRouteTests
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
             services.AddSingleton(detailService ?? new ReadyDetailService());
         },
+    };
+
+    private static MonitorHostTestOptions AssetOptions(IFileProvider provider) => new()
+    {
+        PrimaryAssetFileProvider = provider,
+        StartWriter = false,
+        StartProjectionWorker = false,
+        StartSessionWriter = false,
+        StartSessionOtelEnrichment = false,
+        StartLocalRepositoryCatalogHostedService = false,
     };
 
     private static MonitorHostTestOptions RendererOptions(
@@ -649,6 +779,33 @@ public sealed class LocalMonitorV1HumanRouteTests
         public string Path { get; } = path;
 
         public Task RenderAsync(ViewContext context) => context.Writer.WriteAsync("<main data-controlled-view></main>");
+    }
+
+    private sealed class ControlledPrimaryAssetProvider(string outcome) : IFileProvider
+    {
+        public IFileInfo GetFileInfo(string subpath) => outcome switch
+        {
+            "missing" => new NotFoundFileInfo(subpath),
+            "null" => null!,
+            "throw" => throw new ArgumentException("controlled_primary_asset_failure"),
+            "directory" => new ControlledDirectoryInfo(subpath),
+            _ => throw new InvalidOperationException("unexpected controlled provider outcome"),
+        };
+
+        public IDirectoryContents GetDirectoryContents(string subpath) => NotFoundDirectoryContents.Singleton;
+
+        public IChangeToken Watch(string filter) => NullChangeToken.Singleton;
+    }
+
+    private sealed class ControlledDirectoryInfo(string name) : IFileInfo
+    {
+        public bool Exists => true;
+        public long Length => -1;
+        public string? PhysicalPath => null;
+        public string Name { get; } = name;
+        public DateTimeOffset LastModified => DateTimeOffset.UnixEpoch;
+        public bool IsDirectory => true;
+        public Stream CreateReadStream() => throw new InvalidOperationException("directory has no stream");
     }
 
     private static async Task<RawResponse> SendRawAsync(string hostUrl, string method, string rawTarget)
