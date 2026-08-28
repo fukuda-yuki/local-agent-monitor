@@ -140,6 +140,8 @@ public class MonitorShellPlaywrightTests
         page.Console += (_, message) => consoleMessages.Add(message.Text);
 
         await page.GotoAsync($"{host.Url}/sessions?source=vscode&status=failed", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.WaitForFunctionAsync(
+            "() => typeof window.LocalMonitorV1History?.push === 'function' && typeof window.LocalMonitorV1FactState?.render === 'function'");
         await page.EvaluateAsync(
             """
             () => window.LocalMonitorV1History.push({
