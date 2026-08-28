@@ -514,7 +514,7 @@ internal static class LocalWorkspaceProjectionStore
                 source = invocation.SkillSource,
                 trigger = invocation.InvocationTrigger,
                 historical = invocation.HistoricalSnapshotReference,
-                state = pair.Value.State,
+                state = invocation.CurrentValidState,
             })));
         const string pendingSkillAdmission = "1=1";
         Execute(connection, transaction, $"""
@@ -579,11 +579,30 @@ internal static class LocalWorkspaceProjectionStore
             INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
             SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes
             WHERE source_kind='skill_invocation' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND relationship_authority IN ('exact','explicit');
-            UPDATE local_workspace_execution_headers AS h SET skill_activity_count=(SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id AND n.source_kind='skill_invocation')
-            WHERE h.skill_activity_state='recorded' AND h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-            UPDATE local_workspace_nodes AS n SET skill_activity_count=h.skill_activity_count
-            FROM local_workspace_execution_headers h WHERE n.source_kind='execution_root' AND n.execution_id=h.execution_id AND h.skill_activity_state='recorded'
-              AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            WITH canonical AS (
+              SELECT value->>'session' session_id,value->>'executionKind' execution_source_kind,
+                     value->>'execution' execution_source_identity,value->>'state' projection_state
+              FROM json_each($skills)),
+            projected_sessions AS (SELECT DISTINCT session_id FROM canonical),
+            execution_facts AS (
+              SELECT session_id,execution_source_kind,execution_source_identity,
+                     CASE WHEN SUM(CASE WHEN projection_state='certification_pending' THEN 1 ELSE 0 END)>0
+                       THEN 'certification_pending' ELSE 'recorded' END state,
+                     CASE WHEN SUM(CASE WHEN projection_state='certification_pending' THEN 1 ELSE 0 END)>0
+                       THEN NULL ELSE COUNT(*) END count
+              FROM canonical GROUP BY session_id,execution_source_kind,execution_source_identity)
+            UPDATE local_workspace_execution_headers AS h SET
+              skill_activity_state=COALESCE((SELECT f.state FROM execution_facts f
+                WHERE f.session_id=h.session_id AND f.execution_source_kind=h.source_kind
+                  AND f.execution_source_identity=h.source_identity),'not_observed'),
+              skill_activity_count=(SELECT f.count FROM execution_facts f
+                WHERE f.session_id=h.session_id AND f.execution_source_kind=h.source_kind
+                  AND f.execution_source_identity=h.source_identity)
+            WHERE h.session_id IN (SELECT session_id FROM projected_sessions);
+            UPDATE local_workspace_nodes AS n SET
+              skill_activity_state=h.skill_activity_state,skill_activity_count=h.skill_activity_count
+            FROM local_workspace_execution_headers h WHERE n.source_kind='execution_root' AND n.execution_id=h.execution_id
+              AND h.session_id IN (SELECT DISTINCT value->>'session' FROM json_each($skills));
             """, ("$ids", idsJson), ("$skills", canonicalSkillsJson));
 
         if (semanticTablesInstalled)

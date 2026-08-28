@@ -46,6 +46,9 @@ internal sealed record LocalWorkspaceProjectionRow(
     IReadOnlyList<string> SearchTexts,
     string RevisionSeed) : ILocalRepositorySessionSnapshotRow
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal LocalWorkspaceFact<long>? CurrentSkillFilter { get; init; }
+
     internal LocalWorkspaceProjectionRow(
         string sessionId, long sortGroup, long sortEpochMilliseconds, string labelState, string? labelText,
         string status, string completeness, LocalWorkspaceSetFact sources, LocalWorkspaceSetFact models,

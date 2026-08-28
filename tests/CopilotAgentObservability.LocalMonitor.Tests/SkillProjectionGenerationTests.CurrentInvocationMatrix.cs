@@ -330,6 +330,33 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     }
 
     [Fact]
+    public async Task PersistedSqliteMatrix_ProductionCollectionKeepsCurrentPairFilterableWhenOnlyThirdArmIsPending()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedExactPairWithNames("mixed", "paired-otel", "paired-sdk", "7b", "8b");
+        fixture.SeedUnmatchedThirdArm("mixed", "sdk", "pending-third");
+
+        using var unfiltered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: null));
+        var mixed = Assert.Single(unfiltered.RootElement.GetProperty("items").EnumerateArray());
+        var skill = mixed.GetProperty("summary").GetProperty("skill");
+        Assert.Equal("certification_pending", skill.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, skill.GetProperty("count").ValueKind);
+
+        foreach (var currentName in new[] { "paired-otel", "paired-sdk" })
+        {
+            using var filtered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(currentName, hasSkill: null, refresh: false));
+            Assert.Equal(fixture.SessionId("mixed"),
+                Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray()).GetProperty("session_id").GetString());
+        }
+
+        using var pending = JsonDocument.Parse(await fixture.SerializeCollectionAsync("pending-third", hasSkill: null, refresh: false));
+        Assert.Empty(pending.RootElement.GetProperty("items").EnumerateArray());
+        using var hasSkill = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: true, refresh: false));
+        Assert.Equal(fixture.SessionId("mixed"),
+            Assert.Single(hasSkill.RootElement.GetProperty("items").EnumerateArray()).GetProperty("session_id").GetString());
+    }
+
+    [Fact]
     public async Task PersistedSqliteMatrix_ProductionCollectionReevaluatesSdkExpiryWithoutProjectionRefresh()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
@@ -634,7 +661,8 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     {
         using var fixture = new CurrentInvocationProjectionFixture();
         fixture.SeedExactPairWithNames("three-arms", "paired-otel", "paired-sdk", "1b", "2b");
-        fixture.SeedUnmatchedThirdArm("three-arms", unmatchedArm, "pending-third");
+        var pendingExecutionSourceIdentity = fixture.SeedUnmatchedThirdArmInNewExecution(
+            "three-arms", unmatchedArm, "pending-third");
 
         var projection = fixture.Read("three-arms");
 
@@ -649,15 +677,68 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Contains(projection.SearchFacts, static fact => fact.SkillName == "paired-sdk");
 
         fixture.RefreshWorkspace();
+        fixture.AssertWorkspaceSkill("three-arms", "certification_pending", null,
+            ["paired-otel", "paired-sdk"]);
+        var persistedSkills = fixture.PersistedSkillFacts("three-arms");
+        var persistedCurrent = Assert.Single(persistedSkills, static skill => skill.CurrentValidState == "current");
+        Assert.Equal("recorded", persistedCurrent.ActivityState);
+        Assert.Equal(1, persistedCurrent.ActivityCount);
+        Assert.Equal(2, persistedCurrent.SourceReferenceCount);
+        var persistedPending = Assert.Single(persistedSkills, static skill => skill.CurrentValidState == "certification_pending");
+        Assert.Equal("certification_pending", persistedPending.ActivityState);
+        Assert.Null(persistedPending.ActivityCount);
+        Assert.Equal(1, persistedPending.SourceReferenceCount);
+        Assert.NotEqual(persistedCurrent.ExecutionId, persistedPending.ExecutionId);
+
+        var persistedExecutions = fixture.PersistedExecutionSkillFacts("three-arms");
+        var currentExecution = Assert.Single(persistedExecutions,
+            execution => execution.ExecutionId == persistedCurrent.ExecutionId);
+        Assert.Equal("recorded", currentExecution.State);
+        Assert.Equal(1, currentExecution.Count);
+        var pendingExecution = Assert.Single(persistedExecutions,
+            execution => execution.SourceIdentity == pendingExecutionSourceIdentity);
+        Assert.Equal(persistedPending.ExecutionId, pendingExecution.ExecutionId);
+        Assert.Equal("certification_pending", pendingExecution.State);
+        Assert.Null(pendingExecution.Count);
+        fixture.ValidateWorkspaceBackup();
+
         var summary = await fixture.ReadDetailAsync("three-arms", LocalRepositorySessionDetailRequestKind.Summary);
-        var execution = Assert.Single(summary.Detail.Executions);
-        Assert.Equal("certification_pending", execution.Activity.Skill.State);
+        Assert.Equal(2, summary.Detail.Executions.Count);
+        Assert.Single(summary.Detail.Executions, static execution =>
+            execution.Activity.Skill.State == "recorded" && execution.Activity.Skill.Value == 1);
+        Assert.Single(summary.Detail.Executions, static execution =>
+            execution.Activity.Skill.State == "certification_pending" && execution.Activity.Skill.Value is null);
         var timeline = await fixture.ReadDetailAsync(
-            "three-arms", LocalRepositorySessionDetailRequestKind.Timeline, execution.ExecutionId);
+            "three-arms", LocalRepositorySessionDetailRequestKind.Timeline, persistedCurrent.ExecutionId);
         var skills = timeline.Detail.Nodes.Where(static node => node.SourceKind == "skill_invocation").ToArray();
-        Assert.Equal(2, skills.Length);
-        Assert.Single(skills, static node => Assert.IsType<LocalWorkspaceSkillMetadataDetail>(node.SkillMetadata).CurrentValidState == "current");
-        Assert.Single(skills, static node => Assert.IsType<LocalWorkspaceSkillMetadataDetail>(node.SkillMetadata).CurrentValidState == "certification_pending");
+        var currentSkill = Assert.Single(skills);
+        Assert.Equal("current", Assert.IsType<LocalWorkspaceSkillMetadataDetail>(currentSkill.SkillMetadata).CurrentValidState);
+
+        if (unmatchedArm == "sdk")
+            fixture.AdvancePastLatestSdkExpiry("three-arms");
+        else
+            fixture.MakePendingOtelArmStale();
+        fixture.RefreshWorkspaceProjection("three-arms");
+
+        var afterSkill = Assert.Single(fixture.PersistedSkillFacts("three-arms"));
+        Assert.Equal(persistedCurrent.NodeId, afterSkill.NodeId);
+        Assert.Equal(persistedCurrent.SourceIdentity, afterSkill.SourceIdentity);
+        Assert.Equal(persistedCurrent.ExecutionId, afterSkill.ExecutionId);
+        Assert.Equal(persistedCurrent.ParentNodeId, afterSkill.ParentNodeId);
+        Assert.Equal("current", afterSkill.CurrentValidState);
+        Assert.Equal("recorded", afterSkill.ActivityState);
+        Assert.Equal(1, afterSkill.ActivityCount);
+        Assert.Equal(2, afterSkill.SourceReferenceCount);
+        var afterExecutions = fixture.PersistedExecutionSkillFacts("three-arms");
+        Assert.Contains(afterExecutions, execution => execution.ExecutionId == persistedCurrent.ExecutionId
+            && execution.State == "recorded" && execution.Count == 1
+            && execution.RootChildCount == currentExecution.RootChildCount);
+        Assert.Contains(afterExecutions, execution => execution.SourceIdentity == pendingExecutionSourceIdentity
+            && execution.State == "not_observed" && execution.Count is null
+            && execution.RootChildCount == pendingExecution.RootChildCount - 1);
+        fixture.AssertWorkspaceSkill("three-arms", "recorded", 1, ["paired-otel", "paired-sdk"]);
+        fixture.AssertPersistedSdkSearchFactsMatchStructuralOwners();
+        fixture.ValidateWorkspaceBackup();
     }
 
     [Fact]
@@ -1280,15 +1361,17 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     internal void AdvancePastLatestSdkExpiry(string sessionKey) =>
         readAt = latestWrites[sessionKey].ExpiresAt.AddTicks(1);
 
-    internal void AddUnrelatedExecution(string sessionKey)
+    internal string AddUnrelatedExecution(string sessionKey)
     {
+        var runId = Guid.CreateVersion7().ToString("D");
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,status) VALUES($run,$session,'copilot-sdk',$native,'active');";
-        command.Parameters.AddWithValue("$run", Guid.CreateVersion7().ToString("D"));
+        command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$native", "unrelated-" + Guid.NewGuid().ToString("N"));
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         Assert.Equal(1, command.ExecuteNonQuery());
+        return runId;
     }
 
     internal void DeleteLatestSdkArm(string sessionKey)
@@ -1395,6 +1478,31 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         throw new ArgumentOutOfRangeException(nameof(arm));
     }
 
+    internal string SeedUnmatchedThirdArmInNewExecution(string sessionKey, string arm, string skillName)
+    {
+        if (arm == "otel")
+        {
+            var runId = AddUnrelatedExecution(sessionKey);
+            SeedOtel(sessionKey, skillName, "3b".PadRight(32, '3'), "4b".PadRight(16, '4'), runId);
+            return runId;
+        }
+        if (arm == "sdk")
+        {
+            var nativeRunId = sessionKey + "-pending-run";
+            var write = NewWrite(sessionKey, skillName, "1.0.65", "available", "none", expired: false,
+                runNativeId: nativeRunId, expiresAt: WrittenAt.AddHours(2));
+            Commit(write);
+            latestWrites[sessionKey] = write;
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT run_id FROM session_runs WHERE session_id=$session AND native_run_id=$native;";
+            command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+            command.Parameters.AddWithValue("$native", nativeRunId);
+            return Assert.IsType<string>(command.ExecuteScalar());
+        }
+        throw new ArgumentOutOfRangeException(nameof(arm));
+    }
+
     internal void MakeOtelArmStale(string sessionKey)
     {
         using var connection = Open();
@@ -1402,6 +1510,23 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.CommandText = "UPDATE skill_projection_generations SET lifecycle='superseded' WHERE generation_id IN (SELECT generation_id FROM skill_projection_invocations WHERE session_id=$session);";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         Assert.True(command.ExecuteNonQuery() > 0);
+    }
+
+    internal void MakePendingOtelArmStale()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE skill_projection_generations SET lifecycle='superseded'
+            WHERE generation_id IN (
+              SELECT invocation.generation_id
+              FROM skill_projection_invocations invocation
+              WHERE 'otel:'||invocation.raw_record_id||':'||invocation.span_ordinal=(
+                SELECT node.otel_source_identity FROM local_workspace_nodes node
+                WHERE node.source_kind='skill_invocation' AND node.otel_source_identity IS NOT NULL
+                  AND node.sdk_source_identity IS NULL LIMIT 1));
+            """;
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     internal async Task<byte[]> SerializeCollectionAsync(string? q, bool? hasSkill, bool refresh = true)
@@ -1454,7 +1579,6 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         var actual = new List<string>();
         while (facts.Read()) actual.Add(facts.GetString(0));
         Assert.Equal(searchFacts, actual);
-        Assert.Equal(searchFacts.Length != 0, state == "recorded" && count > 0);
     }
 
     internal int CountDetailSkillNodes(string sessionKey)
@@ -1464,6 +1588,83 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND source_kind='skill_invocation' AND kind='skill';";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal IReadOnlyList<PersistedSkillFact> PersistedSkillFacts(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT n.node_id,n.source_identity,n.execution_id,n.parent_node_id,
+                   m.current_valid_state,n.skill_activity_state,n.skill_activity_count,
+                   COUNT(r.node_id)
+            FROM local_workspace_nodes n
+            JOIN local_workspace_skill_metadata m ON m.node_id=n.node_id
+            LEFT JOIN local_workspace_node_source_references r ON r.node_id=n.node_id
+            WHERE n.session_id=$session AND n.source_kind='skill_invocation'
+            GROUP BY n.node_id,n.source_identity,n.execution_id,n.parent_node_id,
+                     m.current_valid_state,n.skill_activity_state,n.skill_activity_count
+            ORDER BY n.source_identity COLLATE BINARY;
+            """;
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        using var reader = command.ExecuteReader();
+        var result = new List<PersistedSkillFact>();
+        while (reader.Read())
+            result.Add(new(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.GetInt32(7)));
+        return result;
+    }
+
+    internal IReadOnlyList<PersistedExecutionSkillFact> PersistedExecutionSkillFacts(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT h.execution_id,h.source_identity,h.skill_activity_state,h.skill_activity_count,
+                   (SELECT COUNT(*) FROM local_workspace_nodes child
+                    JOIN local_workspace_nodes root ON root.session_id=h.session_id
+                      AND root.execution_id=h.execution_id AND root.source_kind='execution_root'
+                      AND child.parent_node_id=root.node_id)
+            FROM local_workspace_execution_headers h
+            WHERE h.session_id=$session
+            ORDER BY h.source_identity COLLATE BINARY;
+            """;
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        using var reader = command.ExecuteReader();
+        var result = new List<PersistedExecutionSkillFact>();
+        while (reader.Read())
+            result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3), reader.GetInt64(4)));
+        return result;
+    }
+
+    internal void AssertPersistedSdkSearchFactsMatchStructuralOwners()
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var structural = SkillProjectionReadService.ReadStructurallyValidSdkFactsForBackupValidation(
+            connection, transaction, sessions.Values, new FixedTimeProvider(readAt));
+        var expected = structural
+            .Select(static fact => string.Join('|', fact.SessionId, "sdk:" + fact.SourceIdentity,
+                fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant(), fact.ExpiresAt))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT session_id,source_identity,normalized_text,expires_at
+            FROM local_workspace_session_search_facts
+            WHERE kind='skill' AND source_identity LIKE 'sdk:%'
+            ORDER BY session_id COLLATE BINARY,source_identity COLLATE BINARY,normalized_text COLLATE BINARY;
+            """;
+        using var reader = command.ExecuteReader();
+        var actual = new List<string>();
+        while (reader.Read())
+            actual.Add(string.Join('|', reader.GetString(0), reader.GetString(1), reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
+        Assert.Equal(expected, actual);
     }
 
     internal void ValidateWorkspaceBackup()
@@ -1900,17 +2101,27 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         foreach (var key in keys) Assert.False(results.ContainsKey(sessions[key]), key);
     }
 
-    private SessionSkillInvocationWrite NewWrite(string sessionKey, string name, string sourceVersion, string state, string reason, bool expired, string? sourceParentEventId = null)
+    private SessionSkillInvocationWrite NewWrite(
+        string sessionKey,
+        string name,
+        string sourceVersion,
+        string state,
+        string reason,
+        bool expired,
+        string? sourceParentEventId = null,
+        string? runNativeId = null,
+        DateTimeOffset? expiresAt = null)
     {
         var available = state == "available";
         return new(
-            "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), sourceParentEventId, sessionKey, sessionKey + "-run", false,
+            "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), sourceParentEventId, sessionKey, runNativeId ?? sessionKey + "-run", false,
             WrittenAt, sourceVersion, "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", "github-copilot-sdk.skill-invoked.normalize.v2", "github-copilot-sdk.skill-invoked.v1",
             Fingerprint, "{\"skill\":\"demo\"}"u8.ToArray(), state, reason, available ? name : null,
             available ? "project" : null, available ? "user-invoked" : null, available ? new string('b', 64) : null,
             available ? 7 : null, available ? new string('c', 64) : null, available ? 12 : null,
             Guid.CreateVersion7(), Guid.CreateVersion7(), available ? Guid.CreateVersion7() : null,
-            Guid.CreateVersion7(), Guid.CreateVersion7(), WrittenAt, expired ? WrittenAt.AddMinutes(30) : WrittenAt.AddDays(90));
+            Guid.CreateVersion7(), Guid.CreateVersion7(), WrittenAt,
+            expiresAt ?? (expired ? WrittenAt.AddMinutes(30) : WrittenAt.AddDays(90)));
     }
 
     private void Commit(SessionSkillInvocationWrite write)
@@ -1945,7 +2156,12 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         return Assert.IsType<string>(command.ExecuteScalar());
     }
 
-    private void SeedOtel(string sessionKey, string skillName, string traceId, string spanId)
+    private void SeedOtel(
+        string sessionKey,
+        string skillName,
+        string traceId,
+        string spanId,
+        string? executionRunId = null)
     {
         var ordinal = Interlocked.Increment(ref otelOrdinal);
         var fallbackRunId = Guid.CreateVersion7().ToString("D");
@@ -1953,7 +2169,13 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         using var connection = Open();
         using (var foreignKeys = connection.CreateCommand()) { foreignKeys.CommandText = "PRAGMA foreign_keys=OFF;"; foreignKeys.ExecuteNonQuery(); }
         using var command = connection.CreateCommand();
-        var sessionOwnerSql = sdkAuthorityInstalled
+        var sessionOwnerSql = executionRunId is not null
+            ? """
+              INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              SELECT $event,$session,r.run_id,r.source_surface,$trace,'otel-exact',$trace||'/'||$span,'otel.span',$at,'not_captured'
+              FROM session_runs r WHERE r.run_id=$execution_run AND r.session_id=$session;
+              """
+            : sdkAuthorityInstalled
             ? """
               INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status)
               SELECT $fallback_run,$session,'copilot-cli',$trace,'completed'
@@ -1992,6 +2214,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.Parameters.AddWithValue("$at", WrittenAt.ToString("O"));
         command.Parameters.AddWithValue("$fallback_run", fallbackRunId);
         command.Parameters.AddWithValue("$event", eventId);
+        command.Parameters.AddWithValue("$execution_run", (object?)executionRunId ?? DBNull.Value);
         command.ExecuteNonQuery();
         using var restoreForeignKeys = connection.CreateCommand(); restoreForeignKeys.CommandText = "PRAGMA foreign_keys=ON;"; restoreForeignKeys.ExecuteNonQuery();
     }
@@ -2069,6 +2292,23 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         if (ownsDirectory)
             Directory.Delete(directory, recursive: true);
     }
+
+    internal sealed record PersistedSkillFact(
+        string NodeId,
+        string SourceIdentity,
+        string ExecutionId,
+        string ParentNodeId,
+        string CurrentValidState,
+        string ActivityState,
+        long? ActivityCount,
+        int SourceReferenceCount);
+
+    internal sealed record PersistedExecutionSkillFact(
+        string ExecutionId,
+        string SourceIdentity,
+        string State,
+        long? Count,
+        long RootChildCount);
 
     private sealed class MatrixRegistryAuthority(bool available) : ISkillRegistryGenerationAuthority
     {

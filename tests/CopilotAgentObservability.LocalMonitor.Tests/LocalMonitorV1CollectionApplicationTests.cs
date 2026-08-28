@@ -163,6 +163,50 @@ public sealed class LocalMonitorV1CollectionApplicationTests
         Assert.Equal([rows[0].SessionId, rows[1].SessionId, rows[2].SessionId], json.RootElement.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("session_id").GetString()).Order().ToArray());
     }
 
+    [Fact]
+    public void CurrentSkillFilterDoesNotPromotePendingAggregateOrChangeUnfilteredBytes()
+    {
+        var source = Session(1);
+        var aggregatePending = ((LocalWorkspaceProjectionRow)source.Session) with
+        {
+            Activity = ((LocalWorkspaceProjectionRow)source.Session).Activity with
+            {
+                Skill = new("certification_pending", null),
+            },
+            SearchTexts = ["paired-skill"],
+        };
+        var currentPair = source with
+        {
+            Session = aggregatePending with
+            {
+                CurrentSkillFilter = new("recorded", 1),
+            },
+        };
+        var withoutFilterFact = source with { Session = aggregatePending };
+        var key = new byte[32];
+        var unfiltered = Parse("{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":null,\"to\":null,\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":null}");
+
+        var expectedBytes = LocalMonitorV1CollectionApplication.SerializeSessions(
+            new(new(LocalRepositoryScopeKind.All, null), [], [withoutFilterFact]), unfiltered, key);
+        var actualBytes = LocalMonitorV1CollectionApplication.SerializeSessions(
+            new(new(LocalRepositoryScopeKind.All, null), [], [currentPair]), unfiltered, key);
+
+        Assert.Equal(expectedBytes, actualBytes);
+        using (var document = JsonDocument.Parse(actualBytes))
+        {
+            var skill = Assert.Single(document.RootElement.GetProperty("items").EnumerateArray())
+                .GetProperty("summary").GetProperty("skill");
+            Assert.Equal("certification_pending", skill.GetProperty("state").GetString());
+            Assert.Equal(JsonValueKind.Null, skill.GetProperty("count").ValueKind);
+        }
+
+        var hasSkill = unfiltered with { HasSkill = true };
+        using var filtered = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(
+            new(new(LocalRepositoryScopeKind.All, null), [], [currentPair]), hasSkill, key));
+        Assert.Equal(source.SessionId,
+            Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray()).GetProperty("session_id").GetString());
+    }
+
     [Theory]
     [InlineData("copilot-sdk")]
     [InlineData("copilot-cli")]
