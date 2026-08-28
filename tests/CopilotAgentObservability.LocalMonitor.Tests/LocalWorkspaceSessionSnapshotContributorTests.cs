@@ -147,14 +147,17 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         Assert.Empty(Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).SearchTexts);
     }
 
-    [Fact]
-    public async Task WorkspaceRefreshRejectsToolNameOnNonToolStructuralSpan()
+    [Theory]
+    [InlineData("chat", "llm_call", false)]
+    [InlineData("execute_tool", "tool_call", true)]
+    public async Task WorkspaceRefreshAcceptsToolSearchFactOnlyForExactToolSpanKind(string operation, string category, bool expected)
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             PRAGMA foreign_keys=OFF;
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
-            INSERT INTO session_events VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,'trace-1','span-1',NULL,'otel-exact','trace-1/span-1','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,content_state)
+            VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:00.0000000+00:00','available');
             PRAGMA foreign_keys=ON;
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
@@ -163,12 +166,28 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, transaction);
             transaction.Commit();
         }
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER,retention_owner_token BLOB);
             CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
-            INSERT INTO raw_records VALUES(1);
-            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(1,'trace-1','span-1',0,'chat','llm_call','misleading-tool');
-            """);
+            INSERT INTO raw_records VALUES(1,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1,randomblob(32));
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,$operation,$category,'exact-tool');
+            """;
+            command.Parameters.AddWithValue("$operation", operation);
+            command.Parameters.AddWithValue("$category", category);
+            command.ExecuteNonQuery();
+        }
+        using (var rawOwner = connection.CreateCommand())
+        {
+            rawOwner.CommandText = "SELECT retention_owner_token FROM raw_records WHERE id=1;";
+            var ownerToken = Assert.IsType<byte[]>(rawOwner.ExecuteScalar());
+            using var transaction = connection.BeginTransaction();
+            new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogStore(
+                "fixture", new FixedTimeProvider(DateTimeOffset.Parse("2026-08-25T00:00:00Z")))
+                .RegisterRawRecord(connection, transaction, 1, DateTimeOffset.Parse("2026-08-24T00:00:00Z"), 1, ownerToken);
+            transaction.Commit();
+        }
         using (var transaction = connection.BeginTransaction())
         {
             LocalWorkspaceProjectionStore.RefreshStructural(connection, transaction, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
@@ -178,7 +197,9 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         var result = await new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(DateTimeOffset.Parse("2026-08-25T00:00:00Z")))
             .ReadAsync(new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
-        Assert.DoesNotContain("misleading-tool", Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).SearchTexts);
+        var searchTexts = Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).SearchTexts;
+        if (expected) Assert.Contains("exact-tool", searchTexts);
+        else Assert.DoesNotContain("exact-tool", searchTexts);
     }
 
     [Fact]
