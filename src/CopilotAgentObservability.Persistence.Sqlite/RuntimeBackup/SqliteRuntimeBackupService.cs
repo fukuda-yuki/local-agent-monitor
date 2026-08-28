@@ -394,6 +394,7 @@ public sealed class SqliteRuntimeBackupService
             var externalError = ValidateExternalState(database, scanRuntimeRoot: true, immutableDatabase: false);
             if (externalError is not null) return CreateFailure(externalError);
             var publicationTime = timeProvider.GetUtcNow();
+            _ = ReadProjectionCursors(database, immutableReadOnly: false);
             var sourcePreflight = PreflightForMigration(
                 database,
                 immutableReadOnly: false,
@@ -401,9 +402,7 @@ public sealed class SqliteRuntimeBackupService
                 workspaceShapeOnly: true,
                 reportBusy: true);
             if (!sourcePreflight.Success)
-                return CreateFailure(sourcePreflight.ErrorCode == RuntimeBackupErrorCodes.SnapshotStoreBusy
-                    ? RuntimeBackupErrorCodes.SnapshotStoreBusy
-                    : RuntimeBackupErrorCodes.RestoreIncompatible);
+                return CreateFailure(sourcePreflight.ErrorCode!);
             using var pinnedAuthority = CaptureSkillRegistryAuthority();
             EnsureCurrentBackupTail(database, publicationTime, pinnedAuthority);
             RefreshProjectionForPublication(database, publicationTime, pinnedAuthority);
@@ -425,6 +424,7 @@ public sealed class SqliteRuntimeBackupService
             return result;
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return CreateFailure(RuntimeBackupErrorCodes.SnapshotStoreBusy); }
+        catch (RuntimeBackupException exception) { return CreateFailure(exception.Code); }
         catch (SqliteException) { return CreateFailure(RuntimeBackupErrorCodes.SnapshotStoreUnavailable); }
         catch (Exception exception) when (IsIo(exception)) { return CreateFailure(RuntimeBackupErrorCodes.PublishFailed); }
         catch (InvalidOperationException) { return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible); }
@@ -554,7 +554,9 @@ public sealed class SqliteRuntimeBackupService
                     || !IsCurrentOrLegacySessionParent(sessionVersion)))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!HasValidLocalArchiveParents(versions)
-                || !HasValidLocalWorkspaceProjectionParents(versions)
+                || !(HasValidLocalWorkspaceProjectionParents(versions)
+                    || !workspaceShapeOnly && archiveWriterVersion is not null
+                       && HasValidLocalWorkspaceProjectionParentsWithoutSnapshot(versions))
                 || !HasValidSkillInvocationSnapshotParents(versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
@@ -622,6 +624,15 @@ public sealed class SqliteRuntimeBackupService
             && skillProjectionVersion == SupportedComponents["skill_projection"]
             && versions.TryGetValue("skill_invocation_snapshot", out var skillSnapshotVersion)
             && skillSnapshotVersion == SupportedComponents["skill_invocation_snapshot"];
+    }
+
+    private static bool HasValidLocalWorkspaceProjectionParentsWithoutSnapshot(
+        IReadOnlyDictionary<string, int> versions)
+    {
+        if (versions.ContainsKey("skill_invocation_snapshot")) return false;
+        var migrated = versions.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
+        migrated["skill_invocation_snapshot"] = SupportedComponents["skill_invocation_snapshot"];
+        return HasValidLocalWorkspaceProjectionParents(migrated);
     }
 
     // The child component's Session-14 conditional trigger registry only activates for the exact
@@ -1268,9 +1279,9 @@ public sealed class SqliteRuntimeBackupService
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
             }
             if (manifest.DatabaseSize != databaseLength || !FixedEquals(databaseHash, manifest.DatabaseSha256)) throw new RuntimeBackupException(RuntimeBackupErrorCodes.ChecksumMismatch);
-            ValidateDatabaseMatchesManifest(stage, manifest);
             var stagedExternalError = ValidateDatabaseExternalRawState(stage, immutableReadOnly: true);
             if (stagedExternalError is not null) throw new RuntimeBackupException(stagedExternalError);
+            ValidateDatabaseMatchesManifest(stage, manifest);
             file.Position = 0;
             var archiveHash = Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant();
             return new(stage, new(true, null, archiveHash, databaseHash, RuntimeBackupContractVersions.Manifest,

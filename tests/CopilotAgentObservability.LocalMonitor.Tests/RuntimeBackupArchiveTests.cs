@@ -189,8 +189,8 @@ public sealed class RuntimeBackupArchiveTests
         temp.CreateDatabase("source-value");
         using (var connection = RuntimeBackupTemp.Open(temp.DatabasePath))
         {
-            RuntimeBackupTemp.Execute(connection, "CREATE TABLE session_projection_state(projector_key TEXT PRIMARY KEY,projection_cursor INTEGER NULL);");
-            RuntimeBackupTemp.Execute(connection, "INSERT INTO session_projection_state(projector_key,projection_cursor) VALUES('sessions',1);");
+            RuntimeBackupTemp.Execute(connection, "CREATE TABLE session_projection_state(projector_key TEXT PRIMARY KEY,projection_cursor INTEGER NULL CHECK (projection_cursor IS NULL OR projection_cursor >= 0),unsupported_event_version_count INTEGER NOT NULL CHECK (unsupported_event_version_count >= 0),updated_at TEXT NOT NULL);");
+            RuntimeBackupTemp.Execute(connection, "INSERT INTO session_projection_state(projector_key,projection_cursor,unsupported_event_version_count,updated_at) VALUES('sessions',1,0,'2026-01-01T00:00:00.0000000+00:00');");
         }
         var bundle = Path.Combine(temp.DirectoryPath, "window.zip");
         SqliteConnection? overlappingWriter = null;
@@ -1630,9 +1630,9 @@ public sealed class RuntimeBackupArchiveTests
         temp.CreateDatabase("value");
         using (var connection = RuntimeBackupTemp.Open(temp.DatabasePath))
         {
-            RuntimeBackupTemp.Execute(connection, "CREATE TABLE session_projection_state(projector_key TEXT PRIMARY KEY,projection_cursor INTEGER NULL);");
+            RuntimeBackupTemp.Execute(connection, "CREATE TABLE session_projection_state(projector_key TEXT PRIMARY KEY,projection_cursor INTEGER NULL CHECK (projection_cursor IS NULL OR projection_cursor >= 0),unsupported_event_version_count INTEGER NOT NULL CHECK (unsupported_event_version_count >= 0),updated_at TEXT NOT NULL);");
             RuntimeBackupTemp.Execute(connection, string.Join('\n', Enumerable.Range(0, RuntimeBackupLimits.MaximumInventoryItems + 1)
-                .Select(index => $"INSERT INTO session_projection_state(projector_key,projection_cursor) VALUES('projector_{index:D3}',{index});")));
+                .Select(index => $"INSERT INTO session_projection_state(projector_key,projection_cursor,unsupported_event_version_count,updated_at) VALUES('projector_{index:D3}',{index},0,'2026-01-01T00:00:00.0000000+00:00');")));
             RuntimeBackupTemp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
         }
         var output = Path.Combine(temp.DirectoryPath, "too-many-cursors.zip");
