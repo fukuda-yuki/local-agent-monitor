@@ -169,16 +169,48 @@ internal static class LocalWorkspaceProjectionBackupValidation
                          SELECT local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,start.source_event_id)
                          FROM local_workspace_node_source_references anchor
                          JOIN session_events start ON start.event_id=anchor.event_id
-                         JOIN session_runs run ON run.session_id=start.session_id AND run.run_id=start.run_id
-                         WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start')
+                          JOIN session_runs run ON run.session_id=start.session_id AND run.run_id=start.run_id
+                          WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start')
                       OR NOT EXISTS(SELECT 1 FROM local_workspace_tool_metadata metadata WHERE metadata.node_id=receipt.node_id)
                       OR EXISTS(SELECT 1 FROM local_workspace_tool_metadata metadata WHERE metadata.node_id=receipt.node_id AND (
-                         metadata.started_state IS NOT 'recorded'
-                         OR metadata.completed_state IS NOT CASE
-                           WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
-                             WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')>1 THEN 'inconsistent'
-                           WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
-                             WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')=1 THEN 'recorded' ELSE 'not_observed' END
+                         CASE WHEN (
+                           SELECT COUNT(*)
+                           FROM session_events candidate
+                           WHERE candidate.session_id=node.session_id COLLATE BINARY
+                             AND candidate.run_id=(
+                               SELECT start.run_id
+                               FROM local_workspace_node_source_references anchor
+                               JOIN session_events start ON start.event_id=anchor.event_id
+                               WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start') COLLATE BINARY
+                             AND candidate.source_surface='copilot-sdk' COLLATE BINARY
+                             AND candidate.source_adapter='copilot-sdk-stream' COLLATE BINARY
+                             AND candidate.source_event_id IS NOT NULL AND length(candidate.source_event_id)>0
+                             AND (
+                               candidate.event_id=(
+                                 SELECT start.event_id
+                                 FROM local_workspace_node_source_references anchor
+                                 JOIN session_events start ON start.event_id=anchor.event_id
+                                 WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start')
+                                 AND candidate.type='tool.execution_start'
+                               OR candidate.type='tool.execution_complete'
+                                 AND candidate.parent_event_id=(
+                                   SELECT start.event_id
+                                   FROM local_workspace_node_source_references anchor
+                                   JOIN session_events start ON start.event_id=anchor.event_id
+                                   WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start'))
+                         )>16 THEN
+                           metadata.started_state IS NOT 'inconsistent'
+                           OR metadata.completed_state IS NOT 'inconsistent'
+                           OR node.lifecycle IS NOT 'unknown'
+                           OR node.status IS NOT 'unknown'
+                         ELSE
+                           metadata.started_state IS NOT 'recorded'
+                           OR metadata.completed_state IS NOT CASE
+                             WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
+                               WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')>1 THEN 'inconsistent'
+                             WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
+                               WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')=1 THEN 'recorded' ELSE 'not_observed' END
+                         END
                          OR metadata.failed_state IS NOT 'not_observed')))
                     OR receipt.semantic_kind='subagent' AND (
                       EXISTS(SELECT 1 FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
@@ -494,6 +526,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
         SqliteConnection? canonicalReplica)
     {
         var before = Snapshot(connection, transaction);
+        var terminalAuthority = LocalWorkspaceTerminalAuthority.Capture(connection, transaction);
         if (publicationTime is null)
         {
             using var readNow = connection.CreateCommand();
@@ -513,11 +546,13 @@ internal static class LocalWorkspaceProjectionBackupValidation
         }
         using (var replicaTransaction = replica.BeginTransaction())
         {
+            terminalAuthority.ApplyTombstones(replica, replicaTransaction);
             LocalWorkspaceProjectionStore.Refresh(
                 replica,
                 replicaTransaction,
                 publicationTime.Value,
                 skillRegistryAuthority ?? FixedSkillRegistryGenerationAuthority.Load());
+            terminalAuthority.ApplyReadDenied(replica, replicaTransaction);
             if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
             replicaTransaction.Rollback();

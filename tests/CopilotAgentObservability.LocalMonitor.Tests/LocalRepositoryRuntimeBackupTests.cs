@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
@@ -74,8 +75,15 @@ public sealed class LocalRepositoryRuntimeBackupTests
         var currentBundle = Path.Combine(directory, "current-catalog.zip");
         var legacyBundle = Path.Combine(directory, "legacy-session13-catalog.zip");
         var target = Path.Combine(directory, "legacy-session13-catalog-restored.db");
-        var service = new SqliteRuntimeBackupService(fixture.Clock);
+        var migrationOrder = new List<string>();
+        var service = new SqliteRuntimeBackupService(fixture.Clock, checkpoint =>
+        {
+            const string prefix = "component-migration:";
+            if (checkpoint.StartsWith(prefix, StringComparison.Ordinal))
+                migrationOrder.Add(checkpoint[prefix.Length..]);
+        });
         Assert.True(service.CreateAndPublish(fixture.DatabasePath, currentBundle).Success);
+        migrationOrder.Clear();
         var sourceHash = DatabaseHash(fixture.DatabasePath);
         RewriteArchiveDatabase(
             currentBundle,
@@ -94,6 +102,11 @@ public sealed class LocalRepositoryRuntimeBackupTests
                         + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
                         + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
                         + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
+                        + "DROP TABLE IF EXISTS local_workspace_skill_metadata;"
+                        + "DROP TABLE IF EXISTS local_workspace_subagent_lifecycle;"
+                        + "DROP TABLE IF EXISTS local_workspace_tool_metadata;"
+                        + "DROP TABLE IF EXISTS local_workspace_semantic_receipts;"
+                        + "DROP TABLE IF EXISTS local_workspace_node_source_references;"
                         + "DROP TABLE IF EXISTS local_workspace_node_content_refs;"
                         + "DROP TABLE IF EXISTS local_workspace_content_tombstones;"
                         + "DROP TABLE IF EXISTS local_workspace_node_edges;"
@@ -138,9 +151,12 @@ public sealed class LocalRepositoryRuntimeBackupTests
         Assert.True(restored.Success, restored.ErrorCode);
         Assert.Equal(sourceHash, DatabaseHash(fixture.DatabasePath));
         Assert.Equal(expected, ReadCatalogSnapshot(target));
+        Assert.Equal(
+            ["session", "local_archive", "skill_invocation_snapshot", "local_workspace_projection"],
+            migrationOrder);
         using var migrated = Open(target);
         Assert.Equal(14L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(4L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(5L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.True(SqliteSessionStore.IsCurrentSchemaValid(migrated, null));
         Assert.Equal(0L, ScalarLong(target, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
         Assert.Equal("session_events", StringJoin(target, "SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('session_repository_observation_contexts') WHERE \"from\"='session_event_id';"));
@@ -753,24 +769,27 @@ public sealed class LocalRepositoryRuntimeBackupTests
     }
 
     [Fact]
-    public void LiveTailKeepsNoSessionLegacyBranchDistinctAndInstallsCatalogOnlyAfterSessionExists()
+    public void LiveTailInstallsExactEmptyCurrentVectorWhenSessionWasAbsent()
     {
         using var temp = new MonitorTempDirectory();
         temp.CreateRawStore().CreateMonitorSchema();
         var service = new SqliteRuntimeBackupService(temp.TimeProvider);
 
-        var legacy = service.Initialize(temp.DatabasePath);
-
-        Assert.True(legacy.Success, legacy.ErrorCode);
-        Assert.Equal(1, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='runtime_backup';"));
-        Assert.Equal(0, ScalarLong(temp.DatabasePath, "SELECT COUNT(*) FROM schema_version WHERE component IN ('session','local_repository_catalog');"));
-
-        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
-        var current = service.Initialize(temp.DatabasePath);
+        var initialized = service.Initialize(temp.DatabasePath);
+        var current = service.PreflightForMigration(temp.DatabasePath);
 
         Assert.True(current.Success, current.ErrorCode);
+        Assert.True(initialized.Success, initialized.ErrorCode);
+        Assert.Empty(current.MigrationSteps!);
         Assert.Equal(14, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(1, ScalarLong(temp.DatabasePath, "SELECT version FROM retention_component_versions WHERE component='retention';"));
         Assert.Equal(1, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='local_repository_catalog';"));
+        Assert.Equal(5, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(1, ScalarLong(temp.DatabasePath,
+            "SELECT COUNT(*) FROM retention_store_instances WHERE typeof(id)='integer' AND id=1 AND typeof(store_instance_id)='text' AND length(store_instance_id)=32;"));
+        Assert.Equal(1, ScalarLong(temp.DatabasePath,
+            "SELECT COUNT(*) FROM retention_worker_state WHERE typeof(id)='integer' AND id=1;"));
+        Assert.Equal(0, ScalarLong(temp.DatabasePath, "SELECT COUNT(*) FROM retention_adapter_coverage;"));
         Assert.All(LocalRepositoryCatalogSchemaV1.TableNames, table =>
             Assert.Equal(table == "local_repository_reconciliation_state" ? 1 : 0, ScalarLong(temp.DatabasePath, $"SELECT COUNT(*) FROM \"{table}\";")));
         Assert.Equal(1, ScalarLong(temp.DatabasePath, """
@@ -779,6 +798,124 @@ public sealed class LocalRepositoryRuntimeBackupTests
               AND last_discovered_span_id IS NULL
               AND updated_at='1970-01-01T00:00:00.0000000+00:00';
             """));
+        var currentBytes = DatabaseHash(temp.DatabasePath);
+        var repeated = service.Initialize(temp.DatabasePath);
+        Assert.True(repeated.Success, repeated.ErrorCode);
+        Assert.Equal(currentBytes, DatabaseHash(temp.DatabasePath));
+    }
+
+    [Fact]
+    public void CurrentRetentionOwnerRejectsEmptyCoverageWhenRawSourceExistsWithoutCatalogOwnership()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+        Assert.True(service.Initialize(temp.DatabasePath).Success);
+        Execute(temp.DatabasePath, """
+            INSERT INTO raw_records(
+                source,trace_id,received_at,resource_attributes_json,payload_json,
+                schema_version,retention_owner_token)
+            VALUES('raw-otlp',NULL,'2026-08-26T00:00:00.0000000+00:00','{}','{}',1,randomblob(32));
+            """);
+        var before = DatabaseHash(temp.DatabasePath);
+        var archive = Path.Combine(Path.GetDirectoryName(temp.DatabasePath)!, "unowned-current-retention.zip");
+
+        var preflight = service.PreflightForMigration(temp.DatabasePath);
+        var created = service.CreateAndPublish(temp.DatabasePath, archive);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+        Assert.False(created.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        Assert.Equal(before, DatabaseHash(temp.DatabasePath));
+        Assert.False(File.Exists(archive));
+    }
+
+    [Theory]
+    [InlineData("raw_record")]
+    [InlineData("analysis_run_raw")]
+    public void CurrentRetentionOwnerRejectsReadableCatalogItemWithMissingSource(string storeKind)
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+        Assert.True(service.Initialize(temp.DatabasePath).Success);
+        long sourceId;
+        if (storeKind == "raw_record")
+        {
+            sourceId = temp.CreateRawStore().Insert(new RawTelemetryRecord(
+                null,
+                RawTelemetrySources.RawOtlp,
+                null,
+                DateTimeOffset.UnixEpoch,
+                null,
+                "{}"));
+        }
+        else
+        {
+            var analysis = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+            analysis.CreateSchema();
+            var run = analysis.StartRun(
+                "synthetic-trace",
+                null,
+                null,
+                MonitorAnalysisFocus.Errors,
+                DateTimeOffset.UnixEpoch);
+            _ = analysis.AppendEvent(
+                run.RunId,
+                run.OperationToken,
+                null,
+                "synthetic-event",
+                "synthetic-message",
+                DateTimeOffset.UnixEpoch);
+            sourceId = run.RunId;
+        }
+        Execute(temp.DatabasePath, """
+            INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES
+                ('session_event_content',1),
+                ('raw_record',1),
+                ('analysis_run_raw',1),
+                ('sensitive_bundle',1),
+                ('analysis_sdk_directory',1);
+            """);
+        Assert.Equal(1, ScalarLong(temp.DatabasePath,
+            $"SELECT COUNT(*) FROM retention_items WHERE store_kind='{storeKind}' AND source_item_id='{sourceId}';"));
+        Execute(temp.DatabasePath, storeKind == "raw_record"
+            ? $"DELETE FROM raw_records WHERE id={sourceId};"
+            : $"DELETE FROM monitor_analysis_runs WHERE id={sourceId};");
+        var before = DatabaseHash(temp.DatabasePath);
+        var archive = Path.Combine(Path.GetDirectoryName(temp.DatabasePath)!, $"readable-missing-{storeKind}.zip");
+
+        var preflight = service.PreflightForMigration(temp.DatabasePath);
+        var created = service.CreateAndPublish(temp.DatabasePath, archive);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+        Assert.False(created.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        Assert.Equal(before, DatabaseHash(temp.DatabasePath));
+        Assert.False(File.Exists(archive));
+    }
+
+    [Theory]
+    [InlineData("partial-coverage")]
+    [InlineData("missing-worker")]
+    public void CurrentRetentionOwnerRejectsPartialOperationalAuthorityWithoutMutation(string corruption)
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+        Assert.True(service.Initialize(temp.DatabasePath).Success);
+        Execute(temp.DatabasePath, corruption == "partial-coverage"
+            ? "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES('raw_record',1);"
+            : "DELETE FROM retention_worker_state WHERE id=1;");
+        var before = DatabaseHash(temp.DatabasePath);
+
+        var preflight = service.PreflightForMigration(temp.DatabasePath);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+        Assert.Equal(before, DatabaseHash(temp.DatabasePath));
     }
 
     [Fact]

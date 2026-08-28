@@ -219,6 +219,59 @@ public sealed partial class RetentionCatalogStore
         return true;
     }
 
+    internal static void ValidateCurrentV1Authority(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+        => ValidateCurrentV1Authority(connection, transaction, restorableCoverage: false);
+
+    internal static void ValidateRestorableCurrentV1Authority(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+        => ValidateCurrentV1Authority(connection, transaction, restorableCoverage: true);
+
+    private static void ValidateCurrentV1Authority(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        bool restorableCoverage)
+    {
+        if (!RequireCurrentV1SchemaWhenPresent(connection, transaction))
+            throw InvalidAuthority();
+        RequireCurrentV1ComponentVersion(connection, transaction);
+        _ = ReadCurrentV1StoreSingleton(connection, transaction);
+        RequireCurrentV1WorkerSingleton(connection, transaction);
+        RequireCurrentV1CoverageOrUnregistered(connection, transaction);
+        if (restorableCoverage)
+            ValidateRestorableCoverage(connection, transaction);
+        else
+            ValidateOperationalCoverage(connection, transaction);
+    }
+
+    private static void RequireCurrentV1WorkerSingleton(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT typeof(id),id FROM retention_worker_state;";
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()
+            || !string.Equals(reader.GetString(0), "integer", StringComparison.Ordinal)
+            || reader.GetInt64(1) != 1
+            || reader.Read())
+            throw InvalidAuthority();
+    }
+
+    private static void RequireCurrentV1CoverageOrUnregistered(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var count = connection.CreateCommand();
+        count.Transaction = transaction;
+        count.CommandText = "SELECT COUNT(*) FROM retention_adapter_coverage;";
+        if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return;
+        RequireCurrentV1Coverage(connection, transaction);
+    }
+
     private static string ReadCurrentV1StoreInstanceId(
         SqliteConnection connection,
         SqliteTransaction transaction)

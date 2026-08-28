@@ -933,7 +933,8 @@ public sealed class RuntimeBackupRestoreTests
         Assert.True(File.Exists(temp.Target + ".runtime-restore-journal.json"));
         Assert.Single(Directory.GetFiles(temp.Root, ".runtime-restore-stage-*.sqlite"));
         var recovered = new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target);
-        Assert.True(recovered.Success, recovered.ErrorCode);
+        Assert.False(recovered.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, recovered.ErrorCode);
         temp.AssertNoRestoreControls();
     }
 
@@ -1133,7 +1134,7 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
-    public void Missing_current_terminal_audit_shape_fails_reconciliation_without_swapping_target()
+    public void Missing_current_terminal_audit_shape_fails_preflight_without_swapping_target()
     {
         using var temp = new RestoreTemp();
         temp.CreateDatabase(temp.Source, "from-backup", includeRaw: true);
@@ -1152,7 +1153,7 @@ public sealed class RuntimeBackupRestoreTests
         var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
 
         Assert.False(result.Success);
-        Assert.Equal(RuntimeBackupErrorCodes.RestoreTombstoneReconcileFailed, result.ErrorCode);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
         Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
     }
 
@@ -1191,7 +1192,6 @@ public sealed class RuntimeBackupRestoreTests
         temp.CreatePreRetentionDatabase(temp.Source, "older");
         var bundle = Path.Combine(temp.Root, "source.zip");
         var service = new SqliteRuntimeBackupService(temp.Clock);
-        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
         var archivedSource = service.PreflightForMigration(temp.Source);
         Assert.True(archivedSource.Success, Describe(archivedSource));
         Assert.DoesNotContain("historical_instruction_analysis", archivedSource.ComponentVersions!.Keys);
@@ -1216,6 +1216,10 @@ public sealed class RuntimeBackupRestoreTests
             archivedSource.MigrationSteps!.Where(step =>
                 step.StartsWith("historical_", StringComparison.Ordinal)
                 || step.StartsWith("sanitized_import:", StringComparison.Ordinal)));
+        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        var publishedSource = service.PreflightForMigration(temp.Source);
+        Assert.True(publishedSource.Success, Describe(publishedSource));
+        Assert.Empty(publishedSource.MigrationSteps!);
         var destination = Path.Combine(temp.Root, "fresh", "monitor.db");
 
         var result = service.Restore(bundle, destination, new RuntimeRestoreOptions());
@@ -1261,10 +1265,12 @@ public sealed class RuntimeBackupRestoreTests
             new RuntimeRestoreOptions());
 
         Assert.True(preflight.Success, Describe(preflight));
+        Assert.Equal(9, preflight.ComponentVersions!["monitor"]);
+        Assert.Contains("monitor:9->11", preflight.MigrationSteps!);
         Assert.True(created.Success, created.ErrorCode);
         Assert.True(preview.Success, preview.ErrorCode);
-        Assert.Equal(9, preview.SourceComponentVersions["monitor"]);
-        Assert.Contains("monitor:9->11", preview.MigrationSteps);
+        Assert.Equal(11, preview.SourceComponentVersions["monitor"]);
+        Assert.DoesNotContain(preview.MigrationSteps, step => step.StartsWith("monitor:", StringComparison.Ordinal));
         Assert.True(restored.Success, restored.ErrorCode);
         using (var verification = temp.Open(temp.Target))
         {

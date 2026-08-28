@@ -903,10 +903,13 @@ public sealed partial class RetentionCatalogStore
     }
 
     internal static void ValidateBackfill(SqliteConnection connection, SqliteTransaction transaction)
-        => ValidateCoverage(connection, transaction, allowMissingCatalogSources: false);
+        => ValidateCoverage(connection, transaction, MissingCatalogSourcePolicy.FinalizedDeletedOnly);
+
+    internal static void ValidateOperationalCoverage(SqliteConnection connection, SqliteTransaction transaction)
+        => ValidateCoverage(connection, transaction, MissingCatalogSourcePolicy.IrreversiblyDenied);
 
     internal static void ValidateRestorableCoverage(SqliteConnection connection, SqliteTransaction transaction)
-        => ValidateCoverage(connection, transaction, allowMissingCatalogSources: true);
+        => ValidateCoverage(connection, transaction, MissingCatalogSourcePolicy.Any);
 
     internal static bool IsRawRecordReadAuthorizedForMigration(
         SqliteConnection connection,
@@ -943,7 +946,10 @@ public sealed partial class RetentionCatalogStore
             && SourceProof(connection, transaction, key) == SourceReceiptProof.Match;
     }
 
-    private static void ValidateCoverage(SqliteConnection connection, SqliteTransaction transaction, bool allowMissingCatalogSources)
+    private static void ValidateCoverage(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        MissingCatalogSourcePolicy missingSourcePolicy)
     {
         foreach (var kind in new[] { RetentionStoreKind.SessionEventContent, RetentionStoreKind.RawRecord, RetentionStoreKind.AnalysisRunRaw })
         {
@@ -957,13 +963,46 @@ public sealed partial class RetentionCatalogStore
                     continue;
                 }
                 if (proof != SourceReceiptProof.Missing
-                    || !allowMissingCatalogSources && !IsFinalizedDeletedItem(connection, transaction, key))
+                    || !AllowsMissingCatalogSource(connection, transaction, key, missingSourcePolicy))
                     throw new RetentionMigrationBlockedException();
             }
 
             if (sourceBackedCatalogCount != SourceCount(connection, transaction, kind))
                 throw new RetentionMigrationBlockedException();
         }
+    }
+
+    private static bool AllowsMissingCatalogSource(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionOwnershipKey key,
+        MissingCatalogSourcePolicy policy) =>
+        policy == MissingCatalogSourcePolicy.Any
+        || IsFinalizedDeletedItem(connection, transaction, key)
+        || policy == MissingCatalogSourcePolicy.IrreversiblyDenied
+            && IsIrreversiblyDeniedItem(connection, transaction, key);
+
+    private static bool IsIrreversiblyDeniedItem(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionOwnershipKey key)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1
+                FROM retention_items i
+                WHERE i.store_instance_id=$store AND i.store_kind=$kind AND i.source_item_id=$source
+                  AND i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed')
+                  AND i.read_denied_at IS NOT NULL AND i.deleted_at IS NULL
+                  AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
+            );
+            """;
+        command.Parameters.AddWithValue("$store", key.StoreInstanceId);
+        command.Parameters.AddWithValue("$kind", RetentionSchemaMigrator.Wire(key.StoreKind));
+        command.Parameters.AddWithValue("$source", key.SourceItemId);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static IEnumerable<RetentionOwnershipKey> CatalogKeys(SqliteConnection connection, SqliteTransaction transaction, RetentionStoreKind kind)
@@ -999,6 +1038,13 @@ public sealed partial class RetentionCatalogStore
         command.Parameters.AddWithValue("$kind", RetentionSchemaMigrator.Wire(key.StoreKind));
         command.Parameters.AddWithValue("$source", key.SourceItemId);
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+    }
+
+    private enum MissingCatalogSourcePolicy
+    {
+        FinalizedDeletedOnly,
+        IrreversiblyDenied,
+        Any,
     }
 
     private static long SourceCount(SqliteConnection connection, SqliteTransaction transaction, RetentionStoreKind kind)

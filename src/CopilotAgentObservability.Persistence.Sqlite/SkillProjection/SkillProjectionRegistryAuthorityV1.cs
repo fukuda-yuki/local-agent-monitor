@@ -56,6 +56,10 @@ internal interface ISkillRegistryGenerationAuthority
     string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
         capture.GetType().FullName ?? "skill-registry-generation";
 
+    string? GetCanonicalArtifactAuthorityIdentity(
+        ISkillRegistryGenerationCapture capture,
+        ISkillRegistryGenerationLease lease) => null;
+
     // Whether the exact producer tuple is accepted by the generation behind the lease.
     bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple);
 }
