@@ -8,7 +8,12 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SELECT
           EXISTS(SELECT 1 FROM local_workspace_execution_headers WHERE session_id=$session_id LIMIT 1 OFFSET 256),
           EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id LIMIT 1 OFFSET 4096)
-            OR COALESCE((SELECT node_overflow FROM local_workspace_sessions WHERE session_id=$session_id),0);
+            OR COALESCE((SELECT node_overflow FROM local_workspace_sessions WHERE session_id=$session_id),0),
+          EXISTS(SELECT 1 FROM (
+            SELECT run_id source_identity FROM session_runs WHERE session_id=$session_id
+            UNION ALL
+            SELECT event_id FROM session_events WHERE session_id=$session_id AND run_id IS NOT NULL)
+            LIMIT 1 OFFSET 4096);
         """;
     private const int MaximumExecutions = 256;
     private const int MaximumNodes = 4096;
@@ -38,12 +43,24 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         var sessionId = request.SessionId;
         var acceptedAt = timeProvider.GetUtcNow();
+        await ValidateSourceOwnerBounds(connection, transaction, sessionId, token);
+        using var pinnedRegistry = registryAuthority is null
+            ? null
+            : PinnedRegistryAuthority.TryCreate(registryAuthority);
+        if (pinnedRegistry is null)
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
-            connection, transaction, [sessionId], acceptedAt, registryAuthority);
+            connection, transaction, [sessionId], acceptedAt, pinnedRegistry);
         currentSkills.TryGetValue(sessionId, out var skillProjection);
+        if (skillProjection?.State == "unavailable")
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         var materializableSkillNodeIds = await ReadMaterializableCurrentSkillNodeIds(
             connection, transaction, sessionId, skillProjection, token);
         await ValidateBounds(connection, transaction, sessionId, materializableSkillNodeIds, token);
+        await ValidateCurrentSkillOwnerGraph(
+            connection, transaction, sessionId, acceptedAt, skillProjection, pinnedRegistry.CanonicalIdentity, token);
+        await ValidateCoreOwnerGraph(connection, transaction, sessionId, token);
+        await ValidateSemanticOwnerGraphs(connection, transaction, sessionId, token);
         var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
             && !syntheticSkillTarget)
@@ -52,19 +69,18 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             await ReadNodes(connection, transaction, request, skillProjection, token), skillProjection);
         var persistedNodeIds = await ReadPersistedCurrentSkillNodeIds(connection, transaction, sessionId, skillProjection, token);
         projectedNodes = await AddMissingCurrentSkillNodes(
-            connection, transaction, request, projectedNodes, skillProjection, materializableSkillNodeIds, token);
+            connection, transaction, request, projectedNodes, skillProjection, materializableSkillNodeIds, persistedNodeIds, token);
         var synthesizedSkillNodes = projectedNodes.Where(node => node.SourceKind == "skill_invocation" && !persistedNodeIds.Contains(node.NodeId)).ToArray();
-        var admittedSkillIdentities = skillProjection?.State == "current"
+        var admittedSkillIdentities = skillProjection?.State is "current" or "certification_pending"
             ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).ToHashSet(StringComparer.Ordinal)
             : [];
         var excludedSkillNodes = projectedNodes.Where(node => node.SourceKind == "skill_invocation"
-            && skillProjection?.State != "certification_pending"
             && !admittedSkillIdentities.Contains(node.SourceIdentity)).ToArray();
         var nodes = projectedNodes.Except(excludedSkillNodes).ToArray();
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
         var executions = ApplyCurrentSkillActivity(
-            await ReadExecutions(connection, transaction, request, executionIds, token), skillProjection, synthesizedSkillNodes);
-        nodes = ApplyCurrentSkillActivity(nodes, executions, excludedSkillNodes, synthesizedSkillNodes);
+            await ReadExecutions(connection, transaction, request, executionIds, skillProjection, token), skillProjection, synthesizedSkillNodes);
+        nodes = ApplyCurrentSkillActivity(nodes, executions, synthesizedSkillNodes);
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         nodes = await ReadV5NodeFacts(connection, transaction, request, nodes, skillProjection, token);
         nodes = ApplyCurrentSkillMetadata(nodes, skillProjection);
@@ -83,14 +99,14 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
             ? await ReadSummaryContent(connection, transaction, sessionId, acceptedAt, token)
             : await ReadContent(connection, transaction, nodeIds, acceptedAt, token);
-        var registryIdentity = ReadRegistryIdentity();
+        var registryIdentity = pinnedRegistry.CanonicalIdentity;
         var revision = await ReadCanonicalRevisionInput(connection, transaction, sessionId, acceptedAt, skillProjection, registryIdentity, token);
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
     }
 
     private static bool IsCurrentSkillNode(string? nodeId, SkillProjectionCurrentInvocationProjection? projection) =>
-        nodeId is not null && projection?.State == "current" && projection.Invocations.Any(invocation =>
+        nodeId is not null && projection?.State is "current" or "certification_pending" && projection.Invocations.Any(invocation =>
             string.Equals(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity), nodeId, StringComparison.Ordinal));
 
     private static async Task<HashSet<string>> ReadPersistedCurrentSkillNodeIds(
@@ -114,8 +130,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SqliteConnection connection, SqliteTransaction transaction, string sessionId,
         SkillProjectionCurrentInvocationProjection? projection, CancellationToken token)
     {
-        var candidates = projection?.State == "current"
-            ? projection.Invocations.Where(static invocation => invocation.ExecutionSourceKind is not null && invocation.ExecutionSourceIdentity is not null)
+        var candidates = projection?.State is "current" or "certification_pending"
+            ? projection.Invocations.Where(static invocation => invocation.CurrentValidState == "current"
+                    && invocation.ExecutionSourceKind is not null && invocation.ExecutionSourceIdentity is not null)
                 .Select(invocation => new
                 {
                     node_id = LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity),
@@ -143,14 +160,17 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         LocalWorkspaceNodeDetail[] nodes,
         SkillProjectionCurrentInvocationProjection? projection,
         IReadOnlySet<string> materializableSkillNodeIds,
+        IReadOnlySet<string> persistedSkillNodeIds,
         CancellationToken token)
     {
-        if (projection?.State != "current") return nodes;
+        if (projection?.State is not ("current" or "certification_pending")) return nodes;
         var existing = nodes.Select(static node => node.NodeId).ToHashSet(StringComparer.Ordinal);
         var additions = new List<LocalWorkspaceNodeDetail>();
         var candidates = projection.Invocations
+            .Where(static invocation => invocation.CurrentValidState == "current")
             .Where(invocation => invocation.ExecutionSourceKind is not null && invocation.ExecutionSourceIdentity is not null)
             .Where(invocation => materializableSkillNodeIds.Contains(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)))
+            .Where(invocation => !persistedSkillNodeIds.Contains(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)))
             .Where(invocation => !existing.Contains(LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity)))
             .Where(invocation => request.Kind is not (LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
                 || string.Equals(request.NodeId, LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity), StringComparison.Ordinal))
@@ -224,7 +244,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         LocalWorkspaceNodeDetail[] nodes,
         SkillProjectionCurrentInvocationProjection? projection)
     {
-        if (projection?.State != "current") return nodes;
+        if (projection?.State is not ("current" or "certification_pending")) return nodes;
         var current = projection.Invocations.ToDictionary(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal);
         return nodes.Select(node =>
         {
@@ -246,20 +266,16 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SkillProjectionCurrentInvocationProjection? projection,
         LocalWorkspaceNodeDetail[] synthesized)
     {
-        var current = projection?.State == "current";
         return executions.Select(execution =>
         {
-            var count = projection is null
-                ? 0
-                : projection.Invocations.LongCount(invocation =>
+            var scoped = projection?.Invocations.Where(invocation =>
                     string.Equals(invocation.ExecutionSourceKind, execution.SourceKind, StringComparison.Ordinal)
-                    && string.Equals(invocation.ExecutionSourceIdentity, execution.SourceIdentity, StringComparison.Ordinal));
-            var skill = current && count > 0
-                ? new LocalWorkspaceFact<long>("recorded", count)
-                : projection?.State == "certification_pending" && count > 0
-                    ? new LocalWorkspaceFact<long>("certification_pending", null)
-                : projection is null
-                    ? new LocalWorkspaceFact<long>("not_observed", null)
+                    && string.Equals(invocation.ExecutionSourceIdentity, execution.SourceIdentity, StringComparison.Ordinal)).ToArray() ?? [];
+            var currentCount = scoped.LongCount(static invocation => invocation.CurrentValidState == "current");
+            var skill = scoped.Any(static invocation => invocation.CurrentValidState == "certification_pending")
+                ? new LocalWorkspaceFact<long>("certification_pending", null)
+                : currentCount > 0
+                    ? new LocalWorkspaceFact<long>("recorded", currentCount)
                     : new LocalWorkspaceFact<long>("not_observed", null);
             return execution with
             {
@@ -272,12 +288,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private static LocalWorkspaceNodeDetail[] ApplyCurrentSkillActivity(
         LocalWorkspaceNodeDetail[] nodes,
         LocalWorkspaceExecutionDetail[] executions,
-        LocalWorkspaceNodeDetail[] excluded,
         LocalWorkspaceNodeDetail[] synthesized)
     {
-        var excludedByParent = excluded.Where(static node => node.ParentNodeId is not null)
-            .GroupBy(static node => node.ParentNodeId!, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.LongCount(), StringComparer.Ordinal);
         var synthesizedByParent = synthesized.Where(static node => node.ParentNodeId is not null)
             .GroupBy(static node => node.ParentNodeId!, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.LongCount(), StringComparer.Ordinal);
@@ -288,9 +300,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 && node.SourceKind == "execution_root"
                     ? node.Activity with { Skill = execution.Activity.Skill }
                     : node.Activity;
-            var childCount = excludedByParent.TryGetValue(node.NodeId, out var removed)
-                ? Math.Max(0, node.ChildCount - removed)
-                : node.ChildCount;
+            var childCount = node.ChildCount;
             if (synthesizedByParent.TryGetValue(node.NodeId, out var added)) childCount += added;
             return node with { Activity = activity, ChildCount = childCount };
         }).ToArray();
@@ -335,11 +345,13 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         using var command = Command(connection, transaction, BoundsSql, sessionId);
         long executionOverflow;
         long nodeOverflow;
+        long sourceOverflow;
         using (var reader = await command.ExecuteReaderAsync(token))
         {
             if (!await reader.ReadAsync(token)) throw new LocalWorkspaceSessionDetailException("workspace_too_large");
             executionOverflow = reader.GetInt64(0);
             nodeOverflow = reader.GetInt64(1);
+            sourceOverflow = reader.GetInt64(2);
         }
         var identities = materializableSkillNodeIds.ToArray();
         if (identities.Length != 0)
@@ -353,28 +365,1386 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             if (Convert.ToInt64(await effective.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) > MaximumNodes)
                 nodeOverflow = 1;
         }
-        if (executionOverflow != 0 || nodeOverflow != 0)
+        if (executionOverflow != 0 || nodeOverflow != 0 || sourceOverflow != 0)
             throw new LocalWorkspaceSessionDetailException("workspace_too_large");
     }
 
-    private string ReadRegistryIdentity()
+    private static async Task ValidateSourceOwnerBounds(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        CancellationToken token)
     {
-        if (registryAuthority is null) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-        var capture = registryAuthority.CaptureGeneration() ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-        if (!registryAuthority.TryAcquireGenerationReadLease(capture, out var lease)) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-        using (lease)
+        var otelOverflow = TableExists(connection, transaction, "skill_projection_invocations")
+            ? "EXISTS(SELECT 1 FROM skill_projection_invocations WHERE session_id=$session_id LIMIT 1 OFFSET 4096)"
+            : "0";
+        var sdkOverflow = TableExists(connection, transaction, "skill_invocation_snapshots")
+            ? "EXISTS(SELECT 1 FROM skill_invocation_snapshots WHERE session_id=$session_id LIMIT 1 OFFSET 4096)"
+            : "0";
+        var tokenOverflow = TableExists(connection, transaction, "local_workspace_token_observations")
+            ? "EXISTS(SELECT 1 FROM local_workspace_token_observations WHERE session_id=$session_id LIMIT 1 OFFSET 4096)"
+            : "0";
+        var monitorSpanOverflow = HasOtelToolOwnerSchema(connection, transaction)
+            ? """
+              EXISTS(SELECT 1 FROM monitor_spans span WHERE EXISTS(
+                SELECT 1 FROM session_events event WHERE event.session_id=$session_id
+                  AND event.source_adapter='otel-exact' COLLATE BINARY
+                  AND event.trace_id=span.trace_id COLLATE BINARY
+                  AND event.source_event_id=span.trace_id||'/'||span.span_id COLLATE BINARY)
+                LIMIT 1 OFFSET 4096)
+              """
+            : "0";
+        using var command = Command(connection, transaction, $"""
+            SELECT
+              EXISTS(SELECT 1 FROM session_runs WHERE session_id=$session_id LIMIT 1 OFFSET 256),
+              EXISTS(SELECT 1 FROM (
+                SELECT run_id source_identity FROM session_runs WHERE session_id=$session_id
+                UNION ALL
+                SELECT event_id FROM session_events WHERE session_id=$session_id AND run_id IS NOT NULL)
+                LIMIT 1 OFFSET 4096),
+              {otelOverflow},
+              {sdkOverflow},
+              {tokenOverflow},
+              {monitorSpanOverflow};
+            """, sessionId);
+        using var reader = await command.ExecuteReaderAsync(token);
+        if (!await reader.ReadAsync(token) || reader.GetInt64(0) != 0 || reader.GetInt64(1) != 0
+            || reader.GetInt64(2) != 0 || reader.GetInt64(3) != 0
+            || reader.GetInt64(4) != 0 || reader.GetInt64(5) != 0)
+            throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+    }
+
+    private static async Task ValidateSemanticOwnerGraphs(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        CancellationToken token)
+    {
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
+        if (await SemanticGraphInvalid(connection, transaction, sessionId, SemanticReceiptCoverageSql, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        var hasOtelOwnerSchema = HasOtelToolOwnerSchema(connection, transaction);
+        if (hasOtelOwnerSchema
+                ? await SemanticGraphInvalid(connection, transaction, sessionId, OtelToolOwnerValidationSql, token)
+                : await RequiresOtelToolOwnerValidation(connection, transaction, sessionId, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        if (await SemanticGraphInvalid(connection, transaction, sessionId, SdkToolOwnerValidationSql, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        if (await SemanticGraphInvalid(connection, transaction, sessionId, SdkSubagentOwnerValidationSql, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+    }
+
+    private static async Task ValidateCoreOwnerGraph(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        CancellationToken token)
+    {
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
+        var executionFactsInvalid = await SemanticGraphInvalid(
+            connection, transaction, sessionId, ExecutionFactsValidationSql, token);
+        var executionRetryFactsInvalid = await SemanticGraphInvalid(
+            connection,
+            transaction,
+            sessionId,
+            HasOtelToolOwnerSchema(connection, transaction)
+                ? ExecutionRetryFactsValidationSql
+                : ExecutionRetryFactsAbsentValidationSql,
+            token);
+        if (executionFactsInvalid || executionRetryFactsInvalid
+            || await SemanticGraphInvalid(connection, transaction, sessionId, CoreOwnerValidationSql, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+    }
+
+    private static async Task<bool> RequiresOtelToolOwnerValidation(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        CancellationToken token)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT EXISTS(
+              SELECT 1 FROM session_events WHERE session_id=$session_id AND source_adapter='otel-exact' COLLATE BINARY
+              UNION ALL
+              SELECT 1 FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+              WHERE node.session_id=$session_id AND receipt.semantic_kind='tool' AND receipt.source_family='otel');
+            """, sessionId);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
+    private static bool HasOtelToolOwnerSchema(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT COUNT(*)=13 FROM pragma_table_info('monitor_spans')
+            WHERE name IN ('raw_record_id','span_ordinal','trace_id','span_id','parent_span_id','operation','category',
+                           'tool_name','mcp_tool_name','mcp_server_hash','status','start_time','end_time');
+            """;
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
+    private const string ExecutionFactsValidationSql = """
+        WITH ranked_tokens AS (
+          SELECT observation.*,
+                 row_number() OVER(PARTITION BY observation.session_id,observation.execution_id ORDER BY
+                   CASE WHEN observation.input_tokens IS NULL AND observation.output_tokens IS NULL
+                          AND observation.total_tokens IS NULL AND observation.reasoning_tokens IS NULL
+                          AND observation.cache_read_tokens IS NULL AND observation.cache_creation_tokens IS NULL
+                        THEN 1 ELSE 0 END,
+                   observation.authority_rank,observation.source_identity COLLATE BINARY) ordinal
+          FROM local_workspace_token_observations observation
+          WHERE observation.session_id=$session_id
+        ),
+        chosen_tokens AS (SELECT * FROM ranked_tokens WHERE ordinal=1),
+        event_facts AS (
+          SELECT header.execution_id,
+                 COUNT(DISTINCT CASE WHEN
+                   (event.type='tool.execution_start' AND event.source_adapter='copilot-sdk-stream'
+                     AND event.source_event_id IS NOT NULL AND trim(event.source_event_id)<>'')
+                   OR (event.type='PreToolUse' AND event.source_surface='claude-code'
+                     AND event.source_adapter='claude-code-hook' AND event.source_event_id IS NOT NULL
+                     AND trim(event.source_event_id)<>'' AND event.adapter_version IS NOT NULL
+                     AND trim(event.adapter_version)<>'' AND event.normalization_version IS NOT NULL
+                     AND trim(event.normalization_version)<>''
+                     AND ((event.source_application_version IS NOT NULL AND trim(event.source_application_version)<>'')
+                       OR (length(event.schema_fingerprint)=64 AND event.schema_fingerprint=lower(event.schema_fingerprint)
+                         AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
+                   THEN event.event_id END) tool_count,
+                 COUNT(DISTINCT CASE WHEN
+                   (event.type='subagent.started' AND event.source_adapter='copilot-sdk-stream'
+                     AND event.source_event_id IS NOT NULL AND trim(event.source_event_id)<>'')
+                   OR (event.type='SubagentStart' AND event.source_surface='claude-code'
+                     AND event.source_adapter='claude-code-hook' AND event.source_event_id IS NOT NULL
+                     AND trim(event.source_event_id)<>'' AND event.adapter_version IS NOT NULL
+                     AND trim(event.adapter_version)<>'' AND event.normalization_version IS NOT NULL
+                     AND trim(event.normalization_version)<>''
+                     AND ((event.source_application_version IS NOT NULL AND trim(event.source_application_version)<>'')
+                       OR (length(event.schema_fingerprint)=64 AND event.schema_fingerprint=lower(event.schema_fingerprint)
+                         AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
+                   THEN event.event_id END) subagent_count,
+                 COUNT(DISTINCT CASE WHEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed')
+                   OR event.terminal_outcome='failed' THEN event.event_id END) error_count
+          FROM local_workspace_execution_headers header
+          LEFT JOIN session_events event ON event.session_id=header.session_id
+            AND event.run_id=header.source_identity COLLATE BINARY
+          WHERE header.session_id=$session_id
+          GROUP BY header.execution_id
+        )
+        SELECT EXISTS(
+          SELECT 1
+          FROM local_workspace_execution_headers header
+          JOIN event_facts event ON event.execution_id=header.execution_id
+          LEFT JOIN chosen_tokens token ON token.session_id=header.session_id
+            AND token.execution_id=header.source_identity COLLATE BINARY
+          WHERE header.session_id=$session_id AND (
+            header.tool_activity_state<>CASE WHEN event.tool_count=0 THEN 'not_observed' ELSE 'recorded' END
+            OR header.tool_activity_count IS NOT CASE WHEN event.tool_count=0 THEN NULL ELSE event.tool_count END
+            OR header.subagent_activity_state<>CASE WHEN event.subagent_count=0 THEN 'not_observed' ELSE 'recorded' END
+            OR header.subagent_activity_count IS NOT CASE WHEN event.subagent_count=0 THEN NULL ELSE event.subagent_count END
+            OR header.error_activity_state<>CASE WHEN event.error_count=0 THEN 'not_observed' ELSE 'recorded' END
+            OR header.error_activity_count IS NOT CASE WHEN event.error_count=0 THEN NULL ELSE event.error_count END
+            OR header.token_authority<>CASE
+              WHEN token.input_tokens IS NULL AND token.output_tokens IS NULL AND token.total_tokens IS NULL
+                AND token.reasoning_tokens IS NULL AND token.cache_read_tokens IS NULL AND token.cache_creation_tokens IS NULL THEN 'none'
+              WHEN (token.total_tokens IS NOT NULL AND token.input_tokens IS NOT NULL AND token.output_tokens IS NOT NULL
+                    AND token.total_tokens<>token.input_tokens+token.output_tokens)
+                OR (token.cache_read_tokens IS NOT NULL
+                    AND (token.input_tokens IS NULL OR token.cache_read_tokens>token.input_tokens)) THEN 'none'
+              ELSE token.authority END
+            OR header.token_state<>CASE
+              WHEN token.input_tokens IS NULL AND token.output_tokens IS NULL AND token.total_tokens IS NULL
+                AND token.reasoning_tokens IS NULL AND token.cache_read_tokens IS NULL AND token.cache_creation_tokens IS NULL THEN 'not_observed'
+              WHEN (token.total_tokens IS NOT NULL AND token.input_tokens IS NOT NULL AND token.output_tokens IS NOT NULL
+                    AND token.total_tokens<>token.input_tokens+token.output_tokens)
+                OR (token.cache_read_tokens IS NOT NULL
+                    AND (token.input_tokens IS NULL OR token.cache_read_tokens>token.input_tokens)) THEN 'inconsistent'
+              ELSE 'recorded' END
+            OR header.available_execution_count<>CASE
+              WHEN token.input_tokens IS NULL AND token.output_tokens IS NULL AND token.total_tokens IS NULL
+                AND token.reasoning_tokens IS NULL AND token.cache_read_tokens IS NULL AND token.cache_creation_tokens IS NULL THEN 0
+              WHEN (token.total_tokens IS NOT NULL AND token.input_tokens IS NOT NULL AND token.output_tokens IS NOT NULL
+                    AND token.total_tokens<>token.input_tokens+token.output_tokens)
+                OR (token.cache_read_tokens IS NOT NULL
+                    AND (token.input_tokens IS NULL OR token.cache_read_tokens>token.input_tokens)) THEN 0
+              ELSE 1 END
+            OR header.total_execution_count<>1
+            OR header.input_token_state<>CASE WHEN token.input_tokens IS NULL THEN 'not_observed'
+              WHEN token.cache_read_tokens IS NOT NULL AND token.cache_read_tokens>token.input_tokens THEN 'inconsistent'
+              ELSE 'recorded' END
+            OR header.input_tokens IS NOT CASE WHEN token.input_tokens IS NOT NULL
+              AND NOT (token.cache_read_tokens IS NOT NULL AND token.cache_read_tokens>token.input_tokens)
+              THEN token.input_tokens END
+            OR header.output_token_state<>CASE WHEN token.output_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END
+            OR header.output_tokens IS NOT token.output_tokens
+            OR header.total_token_state<>CASE WHEN token.total_tokens IS NULL THEN 'not_observed'
+              WHEN token.input_tokens IS NOT NULL AND token.output_tokens IS NOT NULL
+                AND token.total_tokens<>token.input_tokens+token.output_tokens THEN 'inconsistent' ELSE 'recorded' END
+            OR header.total_tokens IS NOT CASE WHEN token.total_tokens IS NOT NULL
+              AND NOT (token.input_tokens IS NOT NULL AND token.output_tokens IS NOT NULL
+                AND token.total_tokens<>token.input_tokens+token.output_tokens) THEN token.total_tokens END
+            OR header.reasoning_token_state<>CASE WHEN token.reasoning_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END
+            OR header.reasoning_tokens IS NOT token.reasoning_tokens
+            OR header.cache_read_token_state<>CASE WHEN token.cache_read_tokens IS NULL THEN 'not_observed'
+              WHEN token.input_tokens IS NULL OR token.cache_read_tokens>token.input_tokens THEN 'inconsistent' ELSE 'recorded' END
+            OR header.cache_read_tokens IS NOT CASE WHEN token.cache_read_tokens IS NOT NULL
+              AND token.input_tokens IS NOT NULL AND token.cache_read_tokens<=token.input_tokens THEN token.cache_read_tokens END
+            OR header.cache_creation_token_state<>CASE WHEN token.cache_creation_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END
+            OR header.cache_creation_tokens IS NOT token.cache_creation_tokens
+            OR header.new_input_token_state<>CASE
+              WHEN token.cache_read_tokens IS NOT NULL
+                AND (token.input_tokens IS NULL OR token.cache_read_tokens>token.input_tokens) THEN 'inconsistent'
+              WHEN token.input_tokens IS NOT NULL AND token.cache_read_tokens IS NOT NULL THEN 'recorded'
+              ELSE 'not_observed' END
+            OR header.new_input_tokens IS NOT CASE WHEN token.input_tokens IS NOT NULL
+              AND token.cache_read_tokens IS NOT NULL AND token.cache_read_tokens<=token.input_tokens
+              THEN token.input_tokens-token.cache_read_tokens END
+            OR header.cache_read_ratio_state<>CASE
+              WHEN token.cache_read_tokens IS NOT NULL
+                AND (token.input_tokens IS NULL OR token.cache_read_tokens>token.input_tokens) THEN 'inconsistent'
+              WHEN token.input_tokens>0 AND token.cache_read_tokens IS NOT NULL THEN 'recorded'
+              ELSE 'not_observed' END
+            OR header.cache_read_ratio_basis_points IS NOT CASE WHEN token.input_tokens>0
+              AND token.cache_read_tokens IS NOT NULL AND token.cache_read_tokens<=token.input_tokens
+              THEN (token.cache_read_tokens*10000)/token.input_tokens END));
+        """;
+
+    private const string ExecutionRetryFactsValidationSql = """
+        WITH exact_spans AS (
+          SELECT DISTINCT event.session_id,event.run_id,span.raw_record_id,span.span_ordinal,fact.retry_count
+          FROM session_events event
+          JOIN monitor_spans span ON event.source_adapter='otel-exact' COLLATE BINARY
+            AND event.source_event_id=span.trace_id||'/'||span.span_id COLLATE BINARY
+            AND event.trace_id=span.trace_id COLLATE BINARY
+          JOIN local_workspace_span_facts fact
+            ON fact.raw_record_id=span.raw_record_id AND fact.span_ordinal=span.span_ordinal
+          WHERE event.session_id=$session_id AND event.run_id IS NOT NULL
+            AND span.operation='chat' COLLATE BINARY AND fact.retry_count IS NOT NULL
+        ),
+        totals AS (SELECT session_id,run_id,SUM(retry_count) retry_count FROM exact_spans GROUP BY session_id,run_id)
+        SELECT EXISTS(
+          SELECT 1 FROM local_workspace_execution_headers header
+          LEFT JOIN totals total ON total.session_id=header.session_id
+            AND total.run_id=header.source_identity COLLATE BINARY
+          WHERE header.session_id=$session_id AND (
+            header.retry_activity_state<>CASE WHEN total.retry_count IS NULL THEN 'not_observed' ELSE 'recorded' END
+            OR header.retry_activity_count IS NOT total.retry_count));
+        """;
+
+    private const string ExecutionRetryFactsAbsentValidationSql = """
+        SELECT EXISTS(SELECT 1 FROM local_workspace_execution_headers
+          WHERE session_id=$session_id AND (retry_activity_state<>'not_observed' OR retry_activity_count IS NOT NULL));
+        """;
+
+    private const string CoreOwnerValidationSql = """
+        WITH ranked_runs AS (
+          SELECT run.*,
+                 row_number() OVER(PARTITION BY run.session_id ORDER BY run.run_id COLLATE BINARY)-1 expected_ordinal,
+                 CASE run.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END expected_lifecycle,
+                 CASE run.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END expected_status,
+                 CASE WHEN local_workspace_ticks(run.started_at) IS NOT NULL THEN 'recorded'
+                      WHEN run.started_at IS NULL THEN 'missing' ELSE 'invalid' END expected_time_authority,
+                 local_workspace_ticks(run.started_at) expected_start_ticks,
+                 CASE WHEN local_workspace_ticks(run.started_at) IS NOT NULL
+                        AND local_workspace_ticks(run.ended_at)>=local_workspace_ticks(run.started_at)
+                      THEN local_workspace_ticks(run.ended_at) END expected_end_ticks,
+                 CASE WHEN local_workspace_ticks(run.started_at) IS NOT NULL
+                        AND local_workspace_ticks(run.ended_at)>=local_workspace_ticks(run.started_at)
+                      THEN (local_workspace_ticks(run.ended_at)-local_workspace_ticks(run.started_at))/10000 END expected_duration,
+                 CASE WHEN length(run.trace_id)=32 AND run.trace_id NOT GLOB '*[^0-9a-f]*' THEN run.trace_id END expected_trace
+          FROM session_runs run WHERE run.session_id=$session_id
+        ),
+        invalid_headers AS (
+          SELECT 1 FROM local_workspace_execution_headers header
+          LEFT JOIN ranked_runs owner ON owner.run_id=header.source_identity COLLATE BINARY
+          WHERE header.session_id=$session_id AND (
+            owner.run_id IS NULL OR header.source_kind<>'session_run'
+            OR header.execution_id<>local_workspace_execution_id('session_run',owner.run_id)
+            OR header.source_ordinal<>owner.expected_ordinal
+            OR header.lifecycle<>owner.expected_lifecycle OR header.status<>owner.expected_status
+            OR header.model IS NOT owner.model OR header.trace_id IS NOT owner.expected_trace
+            OR header.time_authority<>owner.expected_time_authority
+            OR header.start_utc_ticks IS NOT owner.expected_start_ticks
+            OR header.end_utc_ticks IS NOT owner.expected_end_ticks
+            OR header.duration_ms IS NOT owner.expected_duration)
+          UNION ALL
+          SELECT 1 FROM ranked_runs owner WHERE NOT EXISTS(
+            SELECT 1 FROM local_workspace_execution_headers header
+            WHERE header.session_id=owner.session_id AND header.source_kind='session_run'
+              AND header.source_identity=owner.run_id COLLATE BINARY)
+        ),
+        invalid_roots AS (
+          SELECT 1 FROM local_workspace_nodes node
+          LEFT JOIN local_workspace_execution_headers header
+            ON header.execution_id=node.execution_id AND header.session_id=node.session_id
+          WHERE node.session_id=$session_id AND node.source_kind='execution_root' AND (
+            header.execution_id IS NULL OR node.node_id<>local_workspace_node_id('execution_root',header.source_identity)
+            OR node.source_identity<>header.source_identity OR node.source_ordinal<>0
+            OR node.parent_node_id IS NOT NULL OR node.relationship_authority<>'exact' OR node.kind<>'execution'
+            OR node.name_state<>'not_observed' OR node.name_text IS NOT NULL
+            OR node.lifecycle<>CASE header.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END
+            OR node.status<>CASE header.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END
+            OR node.time_authority<>header.time_authority OR node.start_utc_ticks IS NOT header.start_utc_ticks
+            OR node.end_utc_ticks IS NOT header.end_utc_ticks OR node.duration_ms IS NOT header.duration_ms
+            OR node.trace_id IS NOT NULL OR node.span_id IS NOT NULL OR node.event_id IS NOT NULL
+            OR node.skill_activity_state<>header.skill_activity_state OR node.skill_activity_count IS NOT header.skill_activity_count
+            OR node.tool_activity_state<>header.tool_activity_state OR node.tool_activity_count IS NOT header.tool_activity_count
+            OR node.subagent_activity_state<>header.subagent_activity_state OR node.subagent_activity_count IS NOT header.subagent_activity_count
+            OR node.error_activity_state<>header.error_activity_state OR node.error_activity_count IS NOT header.error_activity_count
+            OR node.retry_activity_state<>header.retry_activity_state OR node.retry_activity_count IS NOT header.retry_activity_count
+            OR node.token_authority<>header.token_authority OR node.token_state<>header.token_state
+            OR node.available_execution_count<>header.available_execution_count OR node.total_execution_count<>1
+            OR node.input_token_state<>header.input_token_state OR node.input_tokens IS NOT header.input_tokens
+            OR node.output_token_state<>header.output_token_state OR node.output_tokens IS NOT header.output_tokens
+            OR node.total_token_state<>header.total_token_state OR node.total_tokens IS NOT header.total_tokens
+            OR node.reasoning_token_state<>header.reasoning_token_state OR node.reasoning_tokens IS NOT header.reasoning_tokens
+            OR node.cache_read_token_state<>header.cache_read_token_state OR node.cache_read_tokens IS NOT header.cache_read_tokens
+            OR node.cache_creation_token_state<>header.cache_creation_token_state OR node.cache_creation_tokens IS NOT header.cache_creation_tokens
+            OR node.new_input_token_state<>header.new_input_token_state OR node.new_input_tokens IS NOT header.new_input_tokens
+            OR node.cache_read_ratio_state<>header.cache_read_ratio_state OR node.cache_read_ratio_basis_points IS NOT header.cache_read_ratio_basis_points
+            OR node.retry_relation_state<>'not_observed' OR node.recovery_relation_state<>'not_observed'
+            OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)<>1
+            OR NOT EXISTS(SELECT 1 FROM local_workspace_node_source_references reference
+              WHERE reference.node_id=node.node_id AND reference.source_ordinal=0 AND reference.source_kind='session_run'
+                AND reference.source_identity=header.source_identity AND reference.trace_id IS NULL
+                AND reference.span_id IS NULL AND reference.event_id IS NULL
+                AND reference.revision_input=header.source_kind||'|'||header.source_identity||'|'||header.lifecycle||'|'||header.status||'|'||COALESCE(CAST(header.start_utc_ticks AS TEXT),''))
+            OR EXISTS(SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=node.node_id AND edge.relation_kind='parent'))
+          UNION ALL
+          SELECT 1 FROM local_workspace_execution_headers header WHERE header.session_id=$session_id AND NOT EXISTS(
+            SELECT 1 FROM local_workspace_nodes node WHERE node.session_id=header.session_id
+              AND node.source_kind='execution_root' AND node.source_identity=header.source_identity)
+        ),
+        ranked_events AS (
+          SELECT event.*,
+                 header.execution_id expected_execution_id,
+                 row_number() OVER(PARTITION BY event.run_id ORDER BY event.event_id COLLATE BINARY) expected_ordinal,
+                 parent.event_id valid_parent_event_id,
+                 CASE WHEN event.parent_event_id IS NULL THEN local_workspace_node_id('execution_root',event.run_id)
+                      WHEN parent.event_id IS NOT NULL THEN local_workspace_node_id('session_event',parent.event_id)
+                      ELSE local_workspace_node_id('unknown_relation_group',event.run_id) END expected_parent_node_id,
+                 CASE WHEN event.parent_event_id IS NULL OR parent.event_id IS NOT NULL THEN 'exact' ELSE 'unknown' END expected_relationship,
+                 CASE event.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END expected_lifecycle,
+                 CASE event.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END expected_status,
+                 CASE WHEN local_workspace_ticks(event.occurred_at) IS NOT NULL THEN 'recorded'
+                      WHEN event.occurred_at IS NULL THEN 'missing' ELSE 'invalid' END expected_time_authority,
+                 local_workspace_ticks(event.occurred_at) expected_ticks,
+                 CASE WHEN event.source_adapter='otel-exact' AND event.trace_id IS NOT NULL
+                        AND event.source_event_id LIKE event.trace_id||'/%' THEN event.trace_id END expected_trace,
+                 CASE WHEN event.source_adapter='otel-exact' AND event.trace_id IS NOT NULL
+                        AND event.source_event_id LIKE event.trace_id||'/%'
+                      THEN substr(event.source_event_id,length(event.trace_id)+2) END expected_span
+          FROM session_events event
+          LEFT JOIN local_workspace_execution_headers header
+            ON header.session_id=event.session_id AND header.source_kind='session_run'
+           AND header.source_identity=event.run_id COLLATE BINARY
+          LEFT JOIN session_events parent
+            ON parent.event_id=event.parent_event_id AND parent.session_id=event.session_id AND parent.run_id=event.run_id
+          WHERE event.session_id=$session_id AND event.run_id IS NOT NULL
+        ),
+        invalid_events AS (
+          SELECT 1 FROM local_workspace_nodes node
+          LEFT JOIN ranked_events owner ON owner.event_id=node.source_identity COLLATE BINARY
+          WHERE node.session_id=$session_id AND node.source_kind='session_event' AND (
+            owner.event_id IS NULL OR owner.expected_execution_id IS NULL
+            OR node.node_id<>local_workspace_node_id('session_event',owner.event_id)
+            OR node.execution_id<>owner.expected_execution_id OR node.source_identity<>owner.event_id
+            OR node.source_ordinal<>owner.expected_ordinal OR node.parent_node_id IS NOT owner.expected_parent_node_id
+            OR node.relationship_authority<>owner.expected_relationship
+            OR node.kind<>local_workspace_node_kind(owner.type) OR node.name_state<>'recorded' OR node.name_text IS NOT owner.type
+            OR node.lifecycle<>owner.expected_lifecycle OR node.status<>owner.expected_status
+            OR node.time_authority<>owner.expected_time_authority OR node.start_utc_ticks IS NOT owner.expected_ticks
+            OR node.end_utc_ticks IS NOT owner.expected_ticks
+            OR node.duration_ms IS NOT CASE WHEN owner.expected_ticks IS NULL THEN NULL ELSE 0 END
+            OR node.trace_id IS NOT owner.expected_trace OR node.span_id IS NOT owner.expected_span OR node.event_id IS NOT owner.event_id
+            OR node.skill_activity_state<>'not_observed' OR node.skill_activity_count IS NOT NULL
+            OR node.tool_activity_state<>CASE WHEN local_workspace_node_kind(owner.type)='tool' THEN 'recorded' ELSE 'not_observed' END
+            OR node.tool_activity_count IS NOT CASE WHEN local_workspace_node_kind(owner.type)='tool' THEN 1 END
+            OR node.subagent_activity_state<>CASE WHEN local_workspace_node_kind(owner.type)='subagent' THEN 'recorded' ELSE 'not_observed' END
+            OR node.subagent_activity_count IS NOT CASE WHEN local_workspace_node_kind(owner.type)='subagent' THEN 1 END
+            OR node.error_activity_state<>CASE WHEN local_workspace_node_kind(owner.type)='error' THEN 'recorded' ELSE 'not_observed' END
+            OR node.error_activity_count IS NOT CASE WHEN local_workspace_node_kind(owner.type)='error' THEN 1 END
+            OR node.retry_activity_state<>CASE WHEN local_workspace_node_kind(owner.type)='retry' THEN 'recorded' ELSE 'not_observed' END
+            OR node.retry_activity_count IS NOT CASE WHEN local_workspace_node_kind(owner.type)='retry' THEN 1 END
+            OR node.token_authority<>'none' OR node.token_state<>'not_observed'
+            OR node.available_execution_count<>0 OR node.total_execution_count<>1
+            OR node.input_token_state<>'not_observed' OR node.input_tokens IS NOT NULL
+            OR node.output_token_state<>'not_observed' OR node.output_tokens IS NOT NULL
+            OR node.total_token_state<>'not_observed' OR node.total_tokens IS NOT NULL
+            OR node.reasoning_token_state<>'not_observed' OR node.reasoning_tokens IS NOT NULL
+            OR node.cache_read_token_state<>'not_observed' OR node.cache_read_tokens IS NOT NULL
+            OR node.cache_creation_token_state<>'not_observed' OR node.cache_creation_tokens IS NOT NULL
+            OR node.new_input_token_state<>'not_observed' OR node.new_input_tokens IS NOT NULL
+            OR node.cache_read_ratio_state<>'not_observed' OR node.cache_read_ratio_basis_points IS NOT NULL
+            OR node.retry_relation_state<>'not_observed' OR node.recovery_relation_state<>'not_observed'
+            OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)<>1
+            OR NOT EXISTS(SELECT 1 FROM local_workspace_node_source_references reference
+              WHERE reference.node_id=node.node_id AND reference.source_ordinal=0 AND reference.source_kind='session_event'
+                AND reference.source_identity=owner.event_id AND reference.trace_id IS owner.expected_trace
+                AND reference.span_id IS owner.expected_span AND reference.event_id=owner.event_id
+                AND reference.revision_input=owner.source_adapter||'|'||owner.source_event_id||'|'||owner.type||'|'||COALESCE(owner.occurred_at,''))
+            OR (SELECT COUNT(*) FROM local_workspace_node_edges edge
+                WHERE edge.node_id=node.node_id AND edge.relation_kind='parent')<>
+               CASE WHEN owner.expected_relationship='exact' THEN 1 ELSE 0 END
+            OR (owner.expected_relationship='exact' AND NOT EXISTS(
+              SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=node.node_id
+                AND edge.related_node_id=owner.expected_parent_node_id AND edge.relation_kind='parent'
+                AND edge.relationship_authority='exact' AND edge.source_ordinal=node.source_ordinal))
+            OR (owner.expected_relationship='unknown' AND EXISTS(
+              SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=node.node_id AND edge.relation_kind='parent'))
+            OR (owner.expected_relationship='unknown' AND NOT EXISTS(
+              SELECT 1 FROM local_workspace_nodes unknown_group WHERE unknown_group.session_id=node.session_id
+                AND unknown_group.node_id=owner.expected_parent_node_id AND unknown_group.source_kind='unknown_relation_group'
+                AND unknown_group.execution_id=owner.expected_execution_id)))
+          UNION ALL
+          SELECT 1 FROM ranked_events owner WHERE NOT EXISTS(
+            SELECT 1 FROM local_workspace_nodes node WHERE node.session_id=owner.session_id
+              AND node.source_kind='session_event' AND node.source_identity=owner.event_id)
+        ),
+        expected_unknown_groups AS (
+          SELECT owner.session_id,owner.run_id source_identity,owner.expected_execution_id execution_id,
+                 (SELECT COUNT(*)+1 FROM session_events event WHERE event.run_id=owner.run_id) expected_ordinal
+          FROM ranked_events owner
+          WHERE owner.expected_relationship='unknown' AND owner.expected_execution_id IS NOT NULL
+          GROUP BY owner.session_id,owner.run_id,owner.expected_execution_id
+          UNION
+          SELECT child.session_id,header.source_identity,child.execution_id,
+                 (SELECT COUNT(*)+2 FROM session_events event WHERE event.run_id=header.source_identity)
+          FROM local_workspace_nodes child
+          JOIN local_workspace_execution_headers header ON header.execution_id=child.execution_id AND header.session_id=child.session_id
+          WHERE child.session_id=$session_id AND child.source_kind='skill_invocation'
+            AND child.relationship_authority='unknown'
+            AND child.parent_node_id=local_workspace_node_id('unknown_relation_group',header.source_identity)
+            AND NOT EXISTS(SELECT 1 FROM session_events event
+              LEFT JOIN session_events parent ON parent.event_id=event.parent_event_id AND parent.run_id=event.run_id
+              WHERE event.run_id=header.source_identity AND event.parent_event_id IS NOT NULL AND parent.event_id IS NULL)
+        ),
+        invalid_unknown_groups AS (
+          SELECT 1 FROM local_workspace_nodes node
+          LEFT JOIN expected_unknown_groups expected
+            ON expected.session_id=node.session_id AND expected.source_identity=node.source_identity COLLATE BINARY
+          WHERE node.session_id=$session_id AND node.source_kind='unknown_relation_group' AND (
+            expected.source_identity IS NULL
+            OR node.node_id<>local_workspace_node_id('unknown_relation_group',expected.source_identity)
+            OR node.execution_id<>expected.execution_id OR node.source_ordinal<>expected.expected_ordinal
+            OR node.parent_node_id IS NOT NULL OR node.relationship_authority<>'unknown'
+            OR node.kind<>'unknown_relation_group' OR node.name_state<>'not_observed' OR node.name_text IS NOT NULL
+            OR node.lifecycle<>'unknown' OR node.status<>'unknown' OR node.time_authority<>'missing'
+            OR node.start_utc_ticks IS NOT NULL OR node.end_utc_ticks IS NOT NULL OR node.duration_ms IS NOT NULL
+            OR node.skill_activity_state<>'not_observed' OR node.skill_activity_count IS NOT NULL
+            OR node.tool_activity_state<>'not_observed' OR node.tool_activity_count IS NOT NULL
+            OR node.subagent_activity_state<>'not_observed' OR node.subagent_activity_count IS NOT NULL
+            OR node.error_activity_state<>'not_observed' OR node.error_activity_count IS NOT NULL
+            OR node.retry_activity_state<>'not_observed' OR node.retry_activity_count IS NOT NULL
+            OR node.token_authority<>'none' OR node.token_state<>'not_observed'
+            OR node.available_execution_count<>0 OR node.total_execution_count<>1
+            OR node.input_token_state<>'not_observed' OR node.input_tokens IS NOT NULL
+            OR node.output_token_state<>'not_observed' OR node.output_tokens IS NOT NULL
+            OR node.total_token_state<>'not_observed' OR node.total_tokens IS NOT NULL
+            OR node.reasoning_token_state<>'not_observed' OR node.reasoning_tokens IS NOT NULL
+            OR node.cache_read_token_state<>'not_observed' OR node.cache_read_tokens IS NOT NULL
+            OR node.cache_creation_token_state<>'not_observed' OR node.cache_creation_tokens IS NOT NULL
+            OR node.new_input_token_state<>'not_observed' OR node.new_input_tokens IS NOT NULL
+            OR node.cache_read_ratio_state<>'not_observed' OR node.cache_read_ratio_basis_points IS NOT NULL
+            OR node.trace_id IS NOT NULL OR node.span_id IS NOT NULL OR node.event_id IS NOT NULL
+            OR node.otel_source_identity IS NOT NULL OR node.sdk_source_identity IS NOT NULL
+            OR EXISTS(SELECT 1 FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)
+            OR EXISTS(SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=node.node_id))
+          UNION ALL
+          SELECT 1 FROM expected_unknown_groups expected WHERE NOT EXISTS(
+            SELECT 1 FROM local_workspace_nodes node WHERE node.session_id=expected.session_id
+              AND node.source_kind='unknown_relation_group' AND node.source_identity=expected.source_identity COLLATE BINARY)
+        )
+        SELECT EXISTS(
+          SELECT 1 FROM invalid_headers
+          UNION ALL SELECT 1 FROM invalid_roots
+          UNION ALL SELECT 1 FROM invalid_events
+          UNION ALL SELECT 1 FROM invalid_unknown_groups);
+        """;
+
+    private static async Task<bool> SemanticGraphInvalid(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        string sql,
+        CancellationToken token)
+    {
+        using var command = Command(connection, transaction, sql, sessionId);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
+    private const string SemanticReceiptCoverageSql = """
+        SELECT EXISTS(
+          SELECT 1
+          FROM local_workspace_nodes node
+          LEFT JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=node.node_id
+          WHERE node.session_id=$session_id AND node.source_kind IN ('semantic_tool','semantic_subagent') AND (
+            receipt.node_id IS NULL OR receipt.carrier_digest<>node.source_identity
+            OR receipt.semantic_kind<>CASE node.source_kind WHEN 'semantic_tool' THEN 'tool' ELSE 'subagent' END
+            OR receipt.source_family NOT IN ('otel','session_sdk')
+            OR node.source_kind='semantic_subagent' AND receipt.source_family<>'session_sdk'
+            OR node.kind<>CASE node.source_kind WHEN 'semantic_tool' THEN 'tool' ELSE 'subagent' END
+            OR node.skill_activity_state<>'not_observed' OR node.skill_activity_count IS NOT NULL
+            OR node.tool_activity_state<>CASE node.source_kind WHEN 'semantic_tool' THEN 'recorded' ELSE 'not_observed' END
+            OR node.tool_activity_count IS NOT CASE node.source_kind WHEN 'semantic_tool' THEN 1 END
+            OR node.subagent_activity_state<>CASE node.source_kind WHEN 'semantic_subagent' THEN 'recorded' ELSE 'not_observed' END
+            OR node.subagent_activity_count IS NOT CASE node.source_kind WHEN 'semantic_subagent' THEN 1 END
+            OR node.error_activity_state<>'not_observed' OR node.error_activity_count IS NOT NULL
+            OR node.retry_activity_state<>'not_observed' OR node.retry_activity_count IS NOT NULL
+            OR node.token_authority<>'none' OR node.token_state<>'not_observed'
+            OR node.available_execution_count<>0 OR node.total_execution_count<>1
+            OR node.input_token_state<>'not_observed' OR node.input_tokens IS NOT NULL
+            OR node.output_token_state<>'not_observed' OR node.output_tokens IS NOT NULL
+            OR node.total_token_state<>'not_observed' OR node.total_tokens IS NOT NULL
+            OR node.reasoning_token_state<>'not_observed' OR node.reasoning_tokens IS NOT NULL
+            OR node.cache_read_token_state<>'not_observed' OR node.cache_read_tokens IS NOT NULL
+            OR node.cache_creation_token_state<>'not_observed' OR node.cache_creation_tokens IS NOT NULL
+            OR node.new_input_token_state<>'not_observed' OR node.new_input_tokens IS NOT NULL
+            OR node.cache_read_ratio_state<>'not_observed' OR node.cache_read_ratio_basis_points IS NOT NULL
+            OR node.retry_relation_state<>'not_observed' OR node.recovery_relation_state<>'not_observed'
+            OR node.parent_node_id IS NULL OR node.relationship_authority<>'exact'
+            OR (SELECT COUNT(*) FROM local_workspace_node_edges edge
+                WHERE edge.node_id=node.node_id AND edge.relation_kind='parent')<>1
+            OR NOT EXISTS(SELECT 1 FROM local_workspace_node_edges edge
+                WHERE edge.node_id=node.node_id AND edge.related_node_id=node.parent_node_id
+                  AND edge.relation_kind='parent' AND edge.relationship_authority='exact'
+                  AND edge.source_ordinal=node.source_ordinal)
+            OR node.source_kind='semantic_tool' AND NOT EXISTS(
+                SELECT 1 FROM local_workspace_tool_metadata metadata WHERE metadata.node_id=node.node_id)
+            OR node.source_kind='semantic_subagent' AND NOT EXISTS(
+                SELECT 1 FROM local_workspace_subagent_lifecycle lifecycle WHERE lifecycle.node_id=node.node_id))
+          UNION ALL
+          SELECT 1
+          FROM local_workspace_semantic_receipts receipt
+          JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+          WHERE node.session_id=$session_id AND node.source_kind NOT IN ('semantic_tool','semantic_subagent'));
+        """;
+
+    private const string OtelToolOwnerValidationSql = """
+        WITH base AS (
+          SELECT e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.occurred_at,
+                 m.raw_record_id,m.span_ordinal,m.trace_id,m.span_id,m.parent_span_id,m.status,m.start_time,m.end_time,
+                 local_workspace_ticks(m.start_time) start_ticks,local_workspace_ticks(m.end_time) end_ticks,
+                 COALESCE(m.mcp_tool_name,m.tool_name) tool_name,m.mcp_server_hash,
+                 local_workspace_semantic_digest('otel_tool',m.trace_id,m.span_id) carrier_digest,
+                 (SELECT COUNT(*) FROM monitor_spans owner WHERE owner.trace_id=m.trace_id COLLATE BINARY AND owner.span_id=m.span_id COLLATE BINARY) monitor_owner_count,
+                 (SELECT COUNT(*) FROM session_events owner WHERE owner.source_adapter='otel-exact' COLLATE BINARY
+                    AND owner.trace_id=m.trace_id COLLATE BINARY AND owner.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY) event_owner_count
+          FROM session_events e JOIN monitor_spans m
+            ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
+           AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+          JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
+          WHERE e.session_id=$session_id AND e.run_id IS NOT NULL
+            AND m.operation='execute_tool' COLLATE BINARY AND m.category IN ('tool_call','error')
+        ),
+        lifecycle AS (
+          SELECT base.*,CASE WHEN start_ticks IS NOT NULL THEN 'otel.tool.started' ELSE 'otel.tool.observed' END lifecycle_type
+          FROM base
+          UNION ALL
+          SELECT base.*,CASE WHEN status='error' COLLATE BINARY THEN 'otel.tool.failed' ELSE 'otel.tool.completed' END
+          FROM base WHERE status IN ('ok','error') OR end_ticks IS NOT NULL
+        ),
+        groups AS (
+          SELECT carrier_digest,MIN(session_id) session_id,MIN(run_id) run_id,MIN(event_id) event_id,
+                 MIN(source_adapter) source_adapter,MIN(source_event_id) source_event_id,MIN(occurred_at) occurred_at,
+                 MIN(trace_id) trace_id,MIN(span_id) span_id,MIN(parent_span_id) parent_span_id,
+                 MIN(status) status,MIN(start_time) start_time,MIN(end_time) end_time,
+                 MIN(start_ticks) start_ticks,MIN(end_ticks) end_ticks,
+                 MIN(tool_name) tool_name,COUNT(DISTINCT tool_name) tool_name_count,
+                 MIN(mcp_server_hash) mcp_server_hash,COUNT(DISTINCT mcp_server_hash) mcp_server_count,
+                 COUNT(DISTINCT session_id) session_count,COUNT(DISTINCT run_id) run_count,
+                 COUNT(DISTINCT event_id) event_count,
+                 COUNT(DISTINCT CAST(raw_record_id AS TEXT)||':'||CAST(span_ordinal AS TEXT)) span_owner_count,
+                 MAX(monitor_owner_count) monitor_owner_count,MAX(event_owner_count) event_owner_count,
+                 MIN(lifecycle_type) min_type,MAX(lifecycle_type) max_type,COUNT(DISTINCT lifecycle_type) type_count
+          FROM lifecycle GROUP BY carrier_digest
+        ),
+        expected AS (
+          SELECT groups.*,
+                 CASE WHEN parent_span_id IS NULL THEN 0 ELSE (
+                   SELECT COUNT(*) FROM session_events parent
+                   WHERE parent.session_id=groups.session_id AND parent.run_id=groups.run_id
+                     AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.trace_id=groups.trace_id COLLATE BINARY
+                     AND parent.source_event_id=groups.trace_id||'/'||groups.parent_span_id COLLATE BINARY) END parent_count,
+                 CASE WHEN parent_span_id IS NULL THEN NULL ELSE (
+                   SELECT MIN(parent.event_id) FROM session_events parent
+                   WHERE parent.session_id=groups.session_id AND parent.run_id=groups.run_id
+                     AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.trace_id=groups.trace_id COLLATE BINARY
+                     AND parent.source_event_id=groups.trace_id||'/'||groups.parent_span_id COLLATE BINARY) END parent_event_id,
+                 source_adapter||'|'||source_event_id||'|'||min_type||'|'||max_type||'|'||CAST(type_count AS TEXT)||'|'||
+                   COALESCE(occurred_at,'')||'|otel-exact|normalized-tool-span|v1' reference_revision
+          FROM groups
+        ),
+        invalid_persisted AS (
+          SELECT 1
+          FROM local_workspace_semantic_receipts receipt
+          JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+          LEFT JOIN expected owner ON owner.carrier_digest=receipt.carrier_digest
+          LEFT JOIN local_workspace_execution_headers execution ON execution.execution_id=node.execution_id
+          LEFT JOIN local_workspace_tool_metadata metadata ON metadata.node_id=node.node_id
+          WHERE node.session_id=$session_id AND receipt.semantic_kind='tool' AND receipt.source_family='otel'
+            AND (
+              owner.carrier_digest IS NULL OR owner.session_count<>1 OR owner.run_count<>1 OR owner.event_count<>1
+              OR owner.span_owner_count<>1 OR owner.monitor_owner_count<>1 OR owner.event_owner_count<>1
+              OR length(owner.trace_id)<>32 OR owner.trace_id<>lower(owner.trace_id) OR owner.trace_id GLOB '*[^0-9a-f]*'
+              OR length(owner.span_id)<>16 OR owner.span_id<>lower(owner.span_id) OR owner.span_id GLOB '*[^0-9a-f]*'
+              OR receipt.scope_kind<>'otel_span' OR receipt.authority_receipt<>'otel-exact|normalized-tool-span|v1'
+              OR node.source_kind<>'semantic_tool' OR node.kind<>'tool' OR node.source_identity<>owner.carrier_digest
+              OR node.node_id<>local_workspace_node_id('semantic_tool',owner.carrier_digest)
+              OR node.session_id<>owner.session_id OR node.execution_id<>local_workspace_execution_id('session_run',owner.run_id)
+              OR execution.session_id<>owner.session_id OR execution.source_kind<>'session_run' OR execution.source_identity<>owner.run_id
+              OR node.trace_id IS NOT owner.trace_id OR node.span_id IS NOT owner.span_id OR node.event_id IS NOT owner.event_id
+              OR node.parent_node_id<>CASE WHEN owner.parent_count=1 THEN local_workspace_node_id('session_event',owner.parent_event_id)
+                                          ELSE local_workspace_node_id('execution_root',owner.run_id) END
+              OR node.relationship_authority<>'exact'
+              OR node.name_state<>CASE WHEN owner.tool_name_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR node.name_text IS NOT CASE WHEN owner.tool_name_count=1 THEN owner.tool_name END
+              OR node.lifecycle<>CASE WHEN owner.status='error' COLLATE BINARY THEN 'failed'
+                                     WHEN owner.status='ok' COLLATE BINARY OR owner.end_ticks IS NOT NULL THEN 'completed'
+                                     WHEN owner.start_ticks IS NOT NULL THEN 'started' ELSE 'unknown' END
+              OR node.status<>CASE owner.status WHEN 'error' THEN 'failed' WHEN 'ok' THEN 'completed' ELSE 'unknown' END
+              OR node.time_authority<>CASE WHEN owner.start_time IS NULL AND owner.end_time IS NULL THEN 'missing'
+                                           WHEN owner.start_ticks IS NULL OR owner.end_time IS NOT NULL AND (owner.end_ticks IS NULL OR owner.end_ticks<owner.start_ticks) THEN 'invalid'
+                                           ELSE 'recorded' END
+              OR node.start_utc_ticks IS NOT CASE WHEN owner.start_ticks IS NOT NULL AND (owner.end_time IS NULL OR owner.end_ticks>=owner.start_ticks) THEN owner.start_ticks END
+              OR node.end_utc_ticks IS NOT CASE WHEN owner.start_ticks IS NOT NULL AND owner.end_ticks>=owner.start_ticks THEN owner.end_ticks END
+              OR node.duration_ms IS NOT CASE WHEN owner.start_ticks IS NOT NULL AND owner.end_ticks>=owner.start_ticks THEN (owner.end_ticks-owner.start_ticks)/10000 END
+              OR metadata.node_id IS NULL
+              OR metadata.caller_state<>CASE WHEN owner.parent_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.caller_node_id IS NOT CASE WHEN owner.parent_count=1 THEN local_workspace_node_id('session_event',owner.parent_event_id) END
+              OR metadata.started_state<>CASE WHEN owner.start_ticks IS NOT NULL THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.completed_state<>CASE WHEN owner.status='error' COLLATE BINARY THEN 'not_observed'
+                                                WHEN owner.status='ok' COLLATE BINARY OR owner.end_ticks IS NOT NULL THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.failed_state<>CASE WHEN owner.status='error' COLLATE BINARY THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.exit_state<>'source_unsupported' OR metadata.exit_code IS NOT NULL
+              OR metadata.mcp_server_identity_state<>CASE WHEN owner.mcp_server_count=1 AND length(owner.mcp_server_hash)=64
+                    AND owner.mcp_server_hash=lower(owner.mcp_server_hash) AND owner.mcp_server_hash NOT GLOB '*[^0-9a-f]*' THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.mcp_server_identity IS NOT CASE WHEN owner.mcp_server_count=1 AND length(owner.mcp_server_hash)=64
+                    AND owner.mcp_server_hash=lower(owner.mcp_server_hash) AND owner.mcp_server_hash NOT GLOB '*[^0-9a-f]*' THEN owner.mcp_server_hash END
+              OR metadata.mcp_server_name_state<>'source_unsupported' OR metadata.mcp_server_name IS NOT NULL
+              OR metadata.mcp_tool_name_state<>CASE WHEN owner.tool_name_count=1 THEN 'recorded' ELSE 'invalid' END
+              OR metadata.mcp_tool_name IS NOT CASE WHEN owner.tool_name_count=1 THEN owner.tool_name END
+              OR metadata.retry_state<>'not_observed' OR metadata.recovery_state<>'not_observed'
+              OR metadata.child_activity_state<>'not_observed' OR metadata.child_activity_count IS NOT NULL
+              OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)<>1
+              OR NOT EXISTS(SELECT 1 FROM local_workspace_node_source_references reference
+                    WHERE reference.node_id=node.node_id AND reference.source_ordinal=0 AND reference.source_kind='otel_span'
+                      AND reference.source_identity=owner.event_id AND reference.trace_id=owner.trace_id AND reference.span_id=owner.span_id
+                      AND reference.event_id=owner.event_id AND reference.revision_input=owner.reference_revision)
+            )
+        ),
+        missing_persisted AS (
+          SELECT 1 FROM expected owner
+          WHERE owner.session_id=$session_id AND owner.session_count=1 AND owner.run_count=1 AND owner.event_count=1
+            AND owner.span_owner_count=1 AND owner.monitor_owner_count=1 AND owner.event_owner_count=1
+            AND length(owner.trace_id)=32 AND owner.trace_id=lower(owner.trace_id) AND owner.trace_id NOT GLOB '*[^0-9a-f]*'
+            AND length(owner.span_id)=16 AND owner.span_id=lower(owner.span_id) AND owner.span_id NOT GLOB '*[^0-9a-f]*'
+            AND NOT EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+              WHERE node.session_id=$session_id AND receipt.semantic_kind='tool' AND receipt.source_family='otel'
+                AND receipt.carrier_digest=owner.carrier_digest)
+        )
+        SELECT EXISTS(SELECT 1 FROM invalid_persisted UNION ALL SELECT 1 FROM missing_persisted);
+        """;
+
+    private const string SdkToolOwnerValidationSql = """
+        WITH starts AS (
+          SELECT local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,event.source_event_id) carrier_digest,
+                 event.session_id,event.run_id,event.event_id,event.parent_event_id,event.source_adapter,event.source_event_id,event.type,event.occurred_at,
+                 event.trace_id,event.source_adapter||'|exact_sdk_tool|v1' authority_receipt
+          FROM session_events event JOIN session_runs run ON run.session_id=event.session_id AND run.run_id=event.run_id
+          WHERE event.session_id=$session_id AND event.source_surface='copilot-sdk' COLLATE BINARY
+            AND run.source_surface='copilot-sdk' COLLATE BINARY AND event.source_adapter='copilot-sdk-stream' COLLATE BINARY
+            AND event.type='tool.execution_start' AND event.source_event_id IS NOT NULL AND length(event.source_event_id)>0
+            AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+            AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=event.session_id
+              AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+        ),
+        completions AS (
+          SELECT local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,parent.source_event_id) carrier_digest,
+                 event.session_id,event.run_id,event.event_id,event.parent_event_id,event.source_adapter,event.source_event_id,event.type,event.occurred_at,
+                 event.trace_id,event.source_adapter||'|exact_sdk_tool|v1' authority_receipt
+          FROM session_events event JOIN session_events parent
+            ON parent.event_id=event.parent_event_id AND parent.session_id=event.session_id AND parent.run_id=event.run_id
+           AND parent.source_adapter=event.source_adapter COLLATE BINARY AND parent.type='tool.execution_start'
+          JOIN session_runs run ON run.session_id=event.session_id AND run.run_id=event.run_id
+          WHERE event.session_id=$session_id AND event.source_surface='copilot-sdk' COLLATE BINARY
+            AND parent.source_surface='copilot-sdk' COLLATE BINARY AND run.source_surface='copilot-sdk' COLLATE BINARY
+            AND event.source_adapter='copilot-sdk-stream' COLLATE BINARY AND event.type='tool.execution_complete'
+            AND parent.source_event_id IS NOT NULL AND length(parent.source_event_id)>0
+            AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+            AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=event.session_id
+              AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+        ),
+        candidates AS (SELECT * FROM starts UNION ALL SELECT * FROM completions),
+        groups AS (
+          SELECT carrier_digest,MIN(session_id) session_id,MIN(run_id) run_id,
+                 COUNT(DISTINCT session_id) session_count,COUNT(DISTINCT run_id) run_count,
+                 COUNT(DISTINCT authority_receipt) authority_count,MIN(authority_receipt) authority_receipt,
+                 COUNT(DISTINCT event_id) reference_count,
+                 SUM(type='tool.execution_start') started_count,SUM(type='tool.execution_complete') completed_count,
+                 SUM(trace_id IS NOT NULL) technical_identity_count,
+                 MIN(CASE WHEN type='tool.execution_start' THEN event_id END) start_event_id,
+                 MIN(CASE WHEN type='tool.execution_start' THEN parent_event_id END) start_parent_event_id,
+                 MIN(CASE WHEN type='tool.execution_start' THEN source_adapter END) start_adapter
+          FROM candidates GROUP BY carrier_digest
+        ),
+        expected AS (
+          SELECT groups.*,
+                 CASE WHEN started_count=1 AND start_parent_event_id IS NOT NULL THEN (
+                   SELECT COUNT(*) FROM session_events parent
+                   WHERE parent.event_id=groups.start_parent_event_id AND parent.session_id=groups.session_id
+                     AND parent.run_id=groups.run_id AND parent.source_adapter=groups.start_adapter COLLATE BINARY) ELSE 0 END parent_count
+          FROM groups
+        ),
+        expected_references AS (
+          SELECT candidate.carrier_digest,candidate.event_id,candidate.source_adapter,candidate.source_event_id,
+                 candidate.source_adapter||'|'||candidate.source_event_id||'|'||candidate.type||'|'||candidate.type||'|1|'||
+                   COALESCE(candidate.occurred_at,'')||'|'||candidate.authority_receipt revision_input,
+                 row_number() OVER(PARTITION BY candidate.carrier_digest ORDER BY candidate.event_id COLLATE BINARY)-1 source_ordinal
+          FROM candidates candidate
+        ),
+        invalid_persisted AS (
+          SELECT 1
+          FROM local_workspace_semantic_receipts receipt
+          JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+          LEFT JOIN expected owner ON owner.carrier_digest=receipt.carrier_digest
+          LEFT JOIN local_workspace_execution_headers execution ON execution.execution_id=node.execution_id
+          LEFT JOIN local_workspace_tool_metadata metadata ON metadata.node_id=node.node_id
+          WHERE node.session_id=$session_id AND receipt.semantic_kind='tool' AND receipt.source_family='session_sdk'
+            AND (
+              owner.carrier_digest IS NULL OR owner.session_count<>1 OR owner.run_count<>1 OR owner.authority_count<>1
+              OR owner.technical_identity_count<>0 OR owner.reference_count>4096
+              OR receipt.scope_kind<>'native_run' OR receipt.authority_receipt<>owner.authority_receipt
+              OR node.source_kind<>'semantic_tool' OR node.kind<>'tool' OR node.source_identity<>owner.carrier_digest
+              OR node.node_id<>local_workspace_node_id('semantic_tool',owner.carrier_digest)
+              OR node.session_id<>owner.session_id OR node.execution_id<>local_workspace_execution_id('session_run',owner.run_id)
+              OR execution.session_id<>owner.session_id OR execution.source_kind<>'session_run' OR execution.source_identity<>owner.run_id
+              OR node.trace_id IS NOT NULL OR node.span_id IS NOT NULL OR node.event_id IS NOT NULL
+              OR node.parent_node_id<>CASE WHEN owner.parent_count=1 THEN local_workspace_node_id('session_event',owner.start_parent_event_id)
+                                          ELSE local_workspace_node_id('execution_root',owner.run_id) END
+              OR node.relationship_authority<>'exact' OR node.name_state<>'not_observed' OR node.name_text IS NOT NULL
+              OR node.lifecycle<>CASE WHEN owner.authority_count=1 AND owner.completed_count=1 AND owner.started_count<=1 THEN 'completed'
+                                     WHEN owner.authority_count=1 AND owner.started_count=1 AND owner.completed_count=0 THEN 'started' ELSE 'unknown' END
+              OR node.status<>CASE WHEN owner.authority_count=1 AND owner.completed_count=1 AND owner.started_count<=1 THEN 'completed'
+                                  WHEN owner.authority_count=1 AND owner.started_count=1 AND owner.completed_count=0 THEN 'active' ELSE 'unknown' END
+              OR node.time_authority<>'missing' OR node.start_utc_ticks IS NOT NULL OR node.end_utc_ticks IS NOT NULL OR node.duration_ms IS NOT NULL
+              OR metadata.node_id IS NULL
+              OR metadata.caller_state<>CASE WHEN owner.parent_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.caller_node_id IS NOT CASE WHEN owner.parent_count=1 THEN local_workspace_node_id('session_event',owner.start_parent_event_id) END
+              OR metadata.started_state<>CASE WHEN owner.started_count>1 OR owner.reference_count>16 OR owner.authority_count>1 THEN 'inconsistent'
+                                               WHEN owner.started_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.completed_state<>CASE WHEN owner.completed_count>1 OR owner.reference_count>16 OR owner.authority_count>1 THEN 'inconsistent'
+                                                 WHEN owner.completed_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR metadata.failed_state<>'not_observed' OR metadata.exit_state<>'source_unsupported' OR metadata.exit_code IS NOT NULL
+              OR metadata.mcp_server_identity_state<>'not_observed' OR metadata.mcp_server_identity IS NOT NULL
+              OR metadata.mcp_server_name_state<>'source_unsupported' OR metadata.mcp_server_name IS NOT NULL
+              OR metadata.mcp_tool_name_state<>'invalid' OR metadata.mcp_tool_name IS NOT NULL
+              OR metadata.retry_state<>'not_observed' OR metadata.recovery_state<>'not_observed'
+              OR metadata.child_activity_state<>'not_observed' OR metadata.child_activity_count IS NOT NULL
+              OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)
+                   <>CASE WHEN owner.reference_count>16 THEN 16 ELSE owner.reference_count END
+              OR EXISTS(SELECT 1 FROM expected_references expected_reference
+                    WHERE expected_reference.carrier_digest=owner.carrier_digest AND expected_reference.source_ordinal<16
+                      AND NOT EXISTS(SELECT 1 FROM local_workspace_node_source_references reference
+                        WHERE reference.node_id=node.node_id AND reference.source_ordinal=expected_reference.source_ordinal
+                          AND reference.source_kind='session_event' AND reference.source_identity=expected_reference.event_id
+                          AND reference.trace_id IS NULL AND reference.span_id IS NULL AND reference.event_id=expected_reference.event_id
+                          AND reference.revision_input=expected_reference.revision_input))
+            )
+        ),
+        missing_persisted AS (
+          SELECT 1 FROM expected owner
+          WHERE owner.session_id=$session_id AND owner.session_count=1 AND owner.run_count=1 AND owner.authority_count=1
+            AND owner.technical_identity_count=0
+            AND NOT EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+              WHERE node.session_id=$session_id AND receipt.semantic_kind='tool' AND receipt.source_family='session_sdk'
+                AND receipt.carrier_digest=owner.carrier_digest)
+        )
+        SELECT EXISTS(SELECT 1 FROM invalid_persisted UNION ALL SELECT 1 FROM missing_persisted);
+        """;
+
+    private const string SdkSubagentOwnerValidationSql = """
+        WITH candidates AS (
+          SELECT local_workspace_semantic_digest('session_sdk_subagent',native.native_session_id,run.native_run_id) carrier_digest,
+                 event.session_id,event.run_id,event.event_id,event.source_adapter,event.source_event_id,event.type,event.occurred_at,
+                 event.trace_id,event.source_adapter||'|native_run|v1' authority_receipt
+          FROM session_events event
+          JOIN session_runs run ON run.session_id=event.session_id AND run.run_id=event.run_id
+          JOIN session_native_ids native ON native.session_id=event.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
+          WHERE event.session_id=$session_id AND event.source_adapter='copilot-sdk-stream' COLLATE BINARY
+            AND event.source_surface='copilot-sdk' COLLATE BINARY AND run.source_surface='copilot-sdk' COLLATE BINARY
+            AND event.type IN ('subagent.selected','subagent.started','subagent.completed','subagent.failed','subagent.deselected')
+            AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+            AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=event.session_id
+              AND binding.source_surface='copilot-sdk' COLLATE BINARY)=1
+            AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=event.session_id
+              AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+        ),
+        groups AS (
+          SELECT carrier_digest,MIN(session_id) session_id,MIN(run_id) run_id,
+                 COUNT(DISTINCT session_id) session_count,COUNT(DISTINCT run_id) run_count,
+                 COUNT(DISTINCT authority_receipt) authority_count,MIN(authority_receipt) authority_receipt,
+                 COUNT(DISTINCT event_id) reference_count,
+                 SUM(type='subagent.selected') selected_count,SUM(type='subagent.started') started_count,
+                 SUM(type='subagent.completed') completed_count,SUM(type='subagent.failed') failed_count,
+                 SUM(type='subagent.deselected') deselected_count,
+                 SUM(trace_id IS NOT NULL) technical_identity_count
+          FROM candidates GROUP BY carrier_digest
+        ),
+        expected_references AS (
+          SELECT candidate.carrier_digest,candidate.event_id,candidate.source_adapter,candidate.source_event_id,
+                 candidate.source_adapter||'|'||candidate.source_event_id||'|'||candidate.type||'|'||candidate.type||'|1|'||
+                   COALESCE(candidate.occurred_at,'')||'|'||candidate.authority_receipt revision_input,
+                 row_number() OVER(PARTITION BY candidate.carrier_digest ORDER BY candidate.event_id COLLATE BINARY)-1 source_ordinal
+          FROM candidates candidate
+        ),
+        invalid_persisted AS (
+          SELECT 1
+          FROM local_workspace_semantic_receipts receipt
+          JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+          LEFT JOIN groups owner ON owner.carrier_digest=receipt.carrier_digest
+          LEFT JOIN local_workspace_execution_headers execution ON execution.execution_id=node.execution_id
+          LEFT JOIN local_workspace_subagent_lifecycle lifecycle ON lifecycle.node_id=node.node_id
+          WHERE node.session_id=$session_id AND receipt.semantic_kind='subagent' AND receipt.source_family='session_sdk'
+            AND (
+              owner.carrier_digest IS NULL OR owner.session_count<>1 OR owner.run_count<>1 OR owner.authority_count<>1
+              OR owner.technical_identity_count<>0 OR owner.reference_count>4096
+              OR receipt.scope_kind<>'native_run' OR receipt.authority_receipt<>owner.authority_receipt
+              OR node.source_kind<>'semantic_subagent' OR node.kind<>'subagent' OR node.source_identity<>owner.carrier_digest
+              OR node.node_id<>local_workspace_node_id('semantic_subagent',owner.carrier_digest)
+              OR node.session_id<>owner.session_id OR node.execution_id<>local_workspace_execution_id('session_run',owner.run_id)
+              OR execution.session_id<>owner.session_id OR execution.source_kind<>'session_run' OR execution.source_identity<>owner.run_id
+              OR node.trace_id IS NOT NULL OR node.span_id IS NOT NULL OR node.event_id IS NOT NULL
+              OR node.parent_node_id<>local_workspace_node_id('execution_root',owner.run_id) OR node.relationship_authority<>'exact'
+              OR node.name_state<>'not_observed' OR node.name_text IS NOT NULL OR node.lifecycle<>'unknown' OR node.status<>'unknown'
+              OR node.time_authority<>'missing' OR node.start_utc_ticks IS NOT NULL OR node.end_utc_ticks IS NOT NULL OR node.duration_ms IS NOT NULL
+              OR lifecycle.node_id IS NULL
+              OR lifecycle.selected_state<>CASE WHEN owner.selected_count>1 OR owner.selected_count>0 AND (owner.reference_count>16 OR owner.authority_count>1) THEN 'inconsistent'
+                                                 WHEN owner.selected_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR lifecycle.started_state<>CASE WHEN owner.started_count>1 OR owner.started_count>0 AND (owner.reference_count>16 OR owner.authority_count>1) THEN 'inconsistent'
+                                                WHEN owner.started_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR lifecycle.completed_state<>CASE WHEN owner.completed_count>1 OR owner.completed_count>0 AND (owner.failed_count>0 OR owner.reference_count>16 OR owner.authority_count>1) THEN 'inconsistent'
+                                                  WHEN owner.completed_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR lifecycle.failed_state<>CASE WHEN owner.failed_count>1 OR owner.failed_count>0 AND (owner.completed_count>0 OR owner.reference_count>16 OR owner.authority_count>1) THEN 'inconsistent'
+                                               WHEN owner.failed_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR lifecycle.deselected_state<>CASE WHEN owner.deselected_count>1 OR owner.deselected_count>0 AND (owner.reference_count>16 OR owner.authority_count>1) THEN 'inconsistent'
+                                                   WHEN owner.deselected_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR lifecycle.input_state<>'source_unsupported'
+              OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)
+                   <>CASE WHEN owner.reference_count>16 THEN 16 ELSE owner.reference_count END
+              OR EXISTS(SELECT 1 FROM expected_references expected_reference
+                    WHERE expected_reference.carrier_digest=owner.carrier_digest AND expected_reference.source_ordinal<16
+                      AND NOT EXISTS(SELECT 1 FROM local_workspace_node_source_references reference
+                        WHERE reference.node_id=node.node_id AND reference.source_ordinal=expected_reference.source_ordinal
+                          AND reference.source_kind='session_event' AND reference.source_identity=expected_reference.event_id
+                          AND reference.trace_id IS NULL AND reference.span_id IS NULL AND reference.event_id=expected_reference.event_id
+                          AND reference.revision_input=expected_reference.revision_input))
+            )
+        ),
+        missing_persisted AS (
+          SELECT 1 FROM groups owner
+          WHERE owner.session_id=$session_id AND owner.session_count=1 AND owner.run_count=1 AND owner.authority_count=1
+            AND owner.technical_identity_count=0
+            AND NOT EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
+              JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+              WHERE node.session_id=$session_id AND receipt.semantic_kind='subagent' AND receipt.source_family='session_sdk'
+                AND receipt.carrier_digest=owner.carrier_digest)
+        )
+        SELECT EXISTS(SELECT 1 FROM invalid_persisted UNION ALL SELECT 1 FROM missing_persisted);
+        """;
+
+    private static async Task ValidateCurrentSkillOwnerGraph(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        DateTimeOffset acceptedAt,
+        SkillProjectionCurrentInvocationProjection? projection,
+        string registryIdentity,
+        CancellationToken token)
+    {
+        if (projection is null)
         {
-            if (!registryAuthority.VerifyGenerationIdentity(capture, lease)) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-            return registryAuthority.GetCanonicalGenerationIdentity(capture, lease);
+            using var persisted = Command(connection, transaction,
+                "SELECT EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id AND source_kind='skill_invocation');",
+                sessionId);
+            if (Convert.ToInt64(await persisted.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) == 0)
+                return;
+        }
+        var expected = projection?.State is "current" or "certification_pending"
+            ? projection.Invocations.ToDictionary(
+                invocation => LocalWorkspaceProjectionStore.StableNodeId("skill_invocation", invocation.CanonicalIdentity),
+                StringComparer.Ordinal)
+            : new Dictionary<string, SkillProjectionCanonicalInvocation>(StringComparer.Ordinal);
+        var hasSdkOwner = TableExists(connection, transaction, "skill_invocation_snapshots");
+        await ValidateCurrentSkillNodeFacts(connection, transaction, sessionId, expected.Values, hasSdkOwner, token);
+        var sdkOwnerExists = hasSdkOwner
+            ? """
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN EXISTS(
+                SELECT 1 FROM skill_projection_sdk_claims claim
+                JOIN skill_invocation_snapshots snapshot
+                  ON snapshot.claim_id=claim.claim_id AND snapshot.session_id=claim.session_id AND snapshot.event_id=claim.event_id
+                 AND snapshot.name=claim.skill_name AND snapshot.source IS claim.skill_source
+                 AND snapshot.trigger IS claim.invocation_trigger
+                JOIN session_events event ON event.event_id=snapshot.event_id AND event.session_id=snapshot.session_id
+                 AND event.source_adapter=claim.source_adapter AND event.source_event_id=claim.source_event_id
+                 AND event.source_surface=claim.source_surface AND event.source_application_version=claim.source_application_version
+                 AND event.adapter_version=claim.adapter_version AND event.normalization_version=claim.normalization_version
+                 AND event.schema_fingerprint=claim.schema_fingerprint
+                WHERE 'sdk:'||claim.claim_id=r.source_identity AND claim.session_id=n.session_id
+                  AND snapshot.event_id=r.event_id AND r.trace_id IS NULL AND r.span_id IS NULL) ELSE 0 END
+              """
+            : "0";
+        var sdkOwnerSource = hasSdkOwner
+            ? """
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN (
+                SELECT snapshot.source FROM skill_invocation_snapshots snapshot
+                WHERE 'sdk:'||snapshot.claim_id=r.source_identity AND snapshot.session_id=n.session_id AND snapshot.event_id=r.event_id)
+              """
+            : "CASE WHEN 0 THEN NULL";
+        var sdkOwnerTrigger = hasSdkOwner
+            ? """
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN (
+                SELECT snapshot.trigger FROM skill_invocation_snapshots snapshot
+                WHERE 'sdk:'||snapshot.claim_id=r.source_identity AND snapshot.session_id=n.session_id AND snapshot.event_id=r.event_id)
+              """
+            : "CASE WHEN 0 THEN NULL";
+        var sdkOwnerHistorical = hasSdkOwner
+            ? """
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN (
+                SELECT snapshot.snapshot_id FROM skill_invocation_snapshots snapshot
+                WHERE 'sdk:'||snapshot.claim_id=r.source_identity AND snapshot.session_id=n.session_id AND snapshot.event_id=r.event_id) END
+              """
+            : "NULL";
+        var sdkOwnerProducerTrace = hasSdkOwner
+            ? """
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN (
+                SELECT claim.producer_trace_id FROM skill_projection_sdk_claims claim
+                JOIN skill_invocation_snapshots snapshot
+                  ON snapshot.claim_id=claim.claim_id AND snapshot.session_id=claim.session_id
+                 AND snapshot.event_id=claim.event_id
+                WHERE 'sdk:'||claim.claim_id=r.source_identity AND claim.session_id=n.session_id
+                  AND snapshot.event_id=r.event_id) END
+              """
+            : "NULL";
+        var sdkOwnerProducerSpan = hasSdkOwner
+            ? """
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN (
+                SELECT claim.producer_span_id FROM skill_projection_sdk_claims claim
+                JOIN skill_invocation_snapshots snapshot
+                  ON snapshot.claim_id=claim.claim_id AND snapshot.session_id=claim.session_id
+                 AND snapshot.event_id=claim.event_id
+                WHERE 'sdk:'||claim.claim_id=r.source_identity AND claim.session_id=n.session_id
+                  AND snapshot.event_id=r.event_id) END
+              """
+            : "NULL";
+        using var command = Command(connection, transaction, $"""
+            SELECT n.node_id,n.source_identity,
+              m.source_state,m.source,m.trigger_state,m.trigger,
+              m.historical_snapshot_reference_state,m.historical_snapshot_reference,m.registry_generation_identity,
+              r.source_kind,r.source_ordinal,r.source_identity,r.trace_id,r.span_id,r.event_id,r.revision_input,
+              CASE WHEN r.source_identity LIKE 'otel:%' THEN EXISTS(
+                SELECT 1 FROM skill_projection_invocations i
+                WHERE 'otel:'||CAST(i.raw_record_id AS TEXT)||':'||CAST(i.span_ordinal AS TEXT)=r.source_identity
+                  AND i.session_id=n.session_id AND i.trace_id IS r.trace_id AND i.span_id IS r.span_id
+                  AND EXISTS(SELECT 1 FROM session_events e WHERE e.event_id=r.event_id AND e.session_id=n.session_id
+                    AND e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=r.trace_id COLLATE BINARY
+                    AND e.source_event_id=r.trace_id||'/'||r.span_id COLLATE BINARY)) ELSE 0 END,
+              {sdkOwnerExists},
+              CASE WHEN r.source_identity LIKE 'sdk:%' THEN EXISTS(
+                SELECT 1 FROM retention_items i
+                LEFT JOIN retention_tombstones t ON t.item_id=i.item_id
+                WHERE i.store_kind='session_event_content' AND i.source_item_id=r.event_id
+                  AND t.item_id IS NULL AND i.deleted_at IS NULL AND i.read_denied_at IS NULL AND i.error_code IS NULL
+                  AND (i.state='retained_by_policy' OR i.state='expiring' AND i.expires_at>$now)) ELSE 0 END,
+              {sdkOwnerSource}
+                   WHEN r.source_identity LIKE 'otel:%' THEN (
+                     SELECT invocation.skill_source FROM skill_projection_invocations invocation
+                     WHERE 'otel:'||CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT)=r.source_identity
+                       AND invocation.session_id=n.session_id AND invocation.trace_id IS r.trace_id AND invocation.span_id IS r.span_id)
+                   END,
+              {sdkOwnerTrigger}
+                   WHEN r.source_identity LIKE 'otel:%' THEN (
+                     SELECT invocation.invocation_trigger FROM skill_projection_invocations invocation
+                     WHERE 'otel:'||CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT)=r.source_identity
+                       AND invocation.session_id=n.session_id AND invocation.trace_id IS r.trace_id AND invocation.span_id IS r.span_id)
+                   END,
+              {sdkOwnerHistorical},
+              {sdkOwnerProducerTrace},
+              {sdkOwnerProducerSpan}
+            FROM local_workspace_nodes n
+            JOIN local_workspace_skill_metadata m ON m.node_id=n.node_id
+            LEFT JOIN local_workspace_node_source_references r ON r.node_id=n.node_id
+            WHERE n.session_id=$session_id AND n.source_kind='skill_invocation'
+            ORDER BY n.node_id,r.source_ordinal;
+            """, sessionId);
+        command.Parameters.AddWithValue("$now", Canonical(acceptedAt));
+        var rows = new Dictionary<string, PersistedSkillProof>(StringComparer.Ordinal);
+        using (var reader = await command.ExecuteReaderAsync(token))
+        {
+            while (await reader.ReadAsync(token))
+            {
+                var nodeId = reader.GetString(0);
+                if (!rows.TryGetValue(nodeId, out var proof))
+                {
+                    proof = new(nodeId, reader.GetString(1), reader.GetString(2), S(reader, 3), reader.GetString(4), S(reader, 5),
+                        reader.GetString(6), S(reader, 7), reader.GetString(8), []);
+                    rows.Add(nodeId, proof);
+                }
+                if (!reader.IsDBNull(9))
+                    proof.References.Add(new(reader.GetString(9), reader.GetInt64(10), S(reader, 11), S(reader, 12), S(reader, 13), S(reader, 14),
+                        S(reader, 15), reader.GetInt64(16) != 0, reader.GetInt64(17) != 0, reader.GetInt64(18) != 0,
+                        S(reader, 19), S(reader, 20), S(reader, 21), S(reader, 22), S(reader, 23)));
+            }
+        }
+
+        foreach (var proof in rows.Values)
+        {
+            if (!string.Equals(proof.RegistryIdentity, registryIdentity, StringComparison.Ordinal))
+                RejectSkillOwnerGraph();
+            var persistedRevision = PersistedSkillReferenceRevision(proof);
+            if (persistedRevision is null || proof.References.Any(reference =>
+                    !string.Equals(reference.RevisionInput, persistedRevision, StringComparison.Ordinal)))
+                RejectSkillOwnerGraph();
+            if (!expected.TryGetValue(proof.NodeId, out var invocation))
+            {
+                if (proof.References.Count == 0 || proof.References.Any(reference =>
+                        !reference.LegitimatelyInactive || !InactiveSkillReferenceMatchesCanonical(reference, proof.CanonicalIdentity, null)))
+                    RejectSkillOwnerGraph();
+                continue;
+            }
+            if (!string.Equals(proof.CanonicalIdentity, invocation.CanonicalIdentity, StringComparison.Ordinal))
+                RejectSkillOwnerGraph();
+            var revision = SkillReferenceRevision(invocation);
+            var expectedReferences = new List<PersistedSkillReference>(2);
+            if (invocation.OtelSourceIdentity is not null)
+                expectedReferences.Add(new("skill_claim", 0, invocation.OtelSourceIdentity, invocation.ProducerTraceId,
+                    invocation.ProducerSpanId, invocation.OtelCarrierEventId, revision, true, false, false));
+            if (invocation.SdkSourceIdentity is not null)
+                expectedReferences.Add(new("skill_claim", invocation.OtelSourceIdentity is null ? 0 : 1, invocation.SdkSourceIdentity, null, null,
+                    invocation.SdkCarrierEventId, revision, false, true, true));
+            var ownerTransition = false;
+            var active = new List<PersistedSkillReference>();
+            foreach (var reference in proof.References)
+            {
+                if (expectedReferences.Any(expectedReference => SameSkillReference(reference, expectedReference)))
+                    active.Add(reference);
+                else if (reference.LegitimatelyInactive
+                    && InactiveSkillReferenceMatchesCanonical(reference, proof.CanonicalIdentity, invocation))
+                    ownerTransition = true;
+                else
+                    RejectSkillOwnerGraph();
+            }
+            if (active.Count != expectedReferences.Count
+                || expectedReferences.Any(expectedReference => !active.Any(reference => SameSkillReference(reference, expectedReference))))
+                RejectSkillOwnerGraph();
+            if (ownerTransition
+                    ? !MetadataMatchesPersistedOwners(proof)
+                    : !MetadataMatches(proof, invocation))
+                RejectSkillOwnerGraph();
         }
     }
 
-    private async Task<LocalWorkspaceExecutionDetail[]> ReadExecutions(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, string[] executionIds, CancellationToken token)
+    private static async Task ValidateCurrentSkillNodeFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        IEnumerable<SkillProjectionCanonicalInvocation> invocations,
+        bool hasSdkOwner,
+        CancellationToken token)
+    {
+        var skills = invocations.Select(static invocation => new
+        {
+            identity = invocation.CanonicalIdentity,
+            execution_kind = invocation.ExecutionSourceKind,
+            execution_identity = invocation.ExecutionSourceIdentity,
+            sdk_parent = invocation.SdkSourceParentEventId,
+            sdk_adapter = invocation.SdkSourceAdapter,
+            sdk_event = invocation.SdkCarrierEventId,
+            otel_event = invocation.OtelCarrierEventId,
+            name = invocation.SdkSkillName ?? invocation.OtelSkillName,
+            trace = invocation.ProducerTraceId,
+            span = invocation.ProducerSpanId,
+            otel = invocation.OtelSourceIdentity,
+            sdk = invocation.SdkSourceIdentity,
+        }).ToArray();
+        if (skills.Length == 0) return;
+        var persistedSdkParent = hasSdkOwner
+            ? """
+              (SELECT snapshot.source_parent_event_id FROM local_workspace_node_source_references reference
+               JOIN skill_invocation_snapshots snapshot ON 'sdk:'||snapshot.claim_id=reference.source_identity
+                 AND snapshot.session_id=$session_id AND snapshot.event_id=reference.event_id
+               WHERE reference.node_id=persisted.node_id AND reference.source_kind='skill_claim'
+                 AND reference.source_identity LIKE 'sdk:%' LIMIT 1)
+              """
+            : "NULL";
+        var persistedSdkAdapter = hasSdkOwner
+            ? """
+              (SELECT claim.source_adapter FROM local_workspace_node_source_references reference
+               JOIN skill_projection_sdk_claims claim ON 'sdk:'||claim.claim_id=reference.source_identity
+                 AND claim.session_id=$session_id AND claim.event_id=reference.event_id
+               WHERE reference.node_id=persisted.node_id AND reference.source_kind='skill_claim'
+                 AND reference.source_identity LIKE 'sdk:%' LIMIT 1)
+              """
+            : "NULL";
+        var persistedSdkName = hasSdkOwner
+            ? """
+              (SELECT snapshot.name FROM local_workspace_node_source_references reference
+               JOIN skill_invocation_snapshots snapshot ON 'sdk:'||snapshot.claim_id=reference.source_identity
+                 AND snapshot.session_id=$session_id AND snapshot.event_id=reference.event_id
+               WHERE reference.node_id=persisted.node_id AND reference.source_kind='skill_claim'
+                 AND reference.source_identity LIKE 'sdk:%' LIMIT 1)
+              """
+            : "NULL";
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
+        using var command = Command(connection, transaction, $"""
+            WITH canonical AS (
+              SELECT value->>'identity' canonical_identity,value->>'execution_kind' execution_kind,
+                     value->>'execution_identity' execution_identity,value->>'sdk_parent' sdk_parent,
+                     value->>'sdk_adapter' sdk_adapter,value->>'sdk_event' sdk_event,value->>'otel_event' otel_event,
+                     value->>'name' name,value->>'trace' trace_id,value->>'span' span_id,
+                     value->>'otel' otel_source_identity,value->>'sdk' sdk_source_identity,
+                     row_number() OVER(PARTITION BY value->>'execution_kind',value->>'execution_identity'
+                                       ORDER BY value->>'identity' COLLATE BINARY) skill_ordinal
+              FROM json_each($skills)),
+            core_counts AS (
+              SELECT execution_id,COUNT(*) core_count FROM local_workspace_nodes
+              WHERE session_id=$session_id AND source_kind<>'skill_invocation'
+              GROUP BY execution_id),
+            persisted AS (
+              SELECT c.*,local_workspace_node_id('skill_invocation',c.canonical_identity) node_id,
+                     (SELECT reference.source_identity FROM local_workspace_node_source_references reference
+                      WHERE reference.node_id=local_workspace_node_id('skill_invocation',c.canonical_identity)
+                        AND reference.source_kind='skill_claim' AND reference.source_identity LIKE 'otel:%' LIMIT 1)
+                       persisted_otel_source_identity,
+                     (SELECT reference.source_identity FROM local_workspace_node_source_references reference
+                      WHERE reference.node_id=local_workspace_node_id('skill_invocation',c.canonical_identity)
+                        AND reference.source_kind='skill_claim' AND reference.source_identity LIKE 'sdk:%' LIMIT 1)
+                       persisted_sdk_source_identity,
+                     (SELECT reference.event_id FROM local_workspace_node_source_references reference
+                      WHERE reference.node_id=local_workspace_node_id('skill_invocation',c.canonical_identity)
+                        AND reference.source_kind='skill_claim' AND reference.source_identity LIKE 'otel:%' LIMIT 1)
+                       persisted_otel_event,
+                     (SELECT reference.event_id FROM local_workspace_node_source_references reference
+                      WHERE reference.node_id=local_workspace_node_id('skill_invocation',c.canonical_identity)
+                        AND reference.source_kind='skill_claim' AND reference.source_identity LIKE 'sdk:%' LIMIT 1)
+                       persisted_sdk_event,
+                     (SELECT invocation.skill_name FROM local_workspace_node_source_references reference
+                      JOIN skill_projection_invocations invocation
+                        ON 'otel:'||CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT)=reference.source_identity
+                       AND invocation.session_id=$session_id AND invocation.trace_id IS reference.trace_id
+                       AND invocation.span_id IS reference.span_id
+                      WHERE reference.node_id=local_workspace_node_id('skill_invocation',c.canonical_identity)
+                        AND reference.source_kind='skill_claim' AND reference.source_identity LIKE 'otel:%' LIMIT 1)
+                       persisted_otel_name
+              FROM canonical c),
+            expected_rows AS (
+              SELECT persisted.*,h.execution_id,COALESCE(counts.core_count,0)+persisted.skill_ordinal expected_ordinal,
+                     CASE WHEN {persistedSdkParent} IS NULL THEN local_workspace_node_id('execution_root',h.source_identity)
+                          WHEN (SELECT COUNT(*) FROM session_events p
+                                WHERE p.session_id=$session_id AND p.run_id=persisted.execution_identity
+                                  AND p.source_event_id={persistedSdkParent})=1
+                           AND EXISTS(SELECT 1 FROM session_events p
+                                      WHERE p.session_id=$session_id AND p.run_id=persisted.execution_identity
+                                        AND p.source_adapter={persistedSdkAdapter}
+                                        AND p.source_event_id={persistedSdkParent})
+                            THEN local_workspace_node_id('session_event',(SELECT p.event_id FROM session_events p
+                                 WHERE p.session_id=$session_id AND p.run_id=persisted.execution_identity
+                                   AND p.source_adapter={persistedSdkAdapter}
+                                   AND p.source_event_id={persistedSdkParent}))
+                          ELSE local_workspace_node_id('unknown_relation_group',h.source_identity) END expected_parent,
+                     CASE WHEN {persistedSdkParent} IS NULL THEN 'exact'
+                          WHEN (SELECT COUNT(*) FROM session_events p
+                                WHERE p.session_id=$session_id AND p.run_id=persisted.execution_identity
+                                  AND p.source_event_id={persistedSdkParent})=1
+                           AND EXISTS(SELECT 1 FROM session_events p
+                                      WHERE p.session_id=$session_id AND p.run_id=persisted.execution_identity
+                                        AND p.source_adapter={persistedSdkAdapter}
+                                        AND p.source_event_id={persistedSdkParent})
+                            THEN 'explicit' ELSE 'unknown' END expected_relationship,
+                     COALESCE((SELECT occurred_at FROM session_events WHERE session_id=$session_id AND event_id=persisted.persisted_sdk_event),
+                              (SELECT occurred_at FROM session_events WHERE session_id=$session_id AND event_id=persisted.persisted_otel_event)) occurred_at,
+                     COALESCE(persisted.persisted_sdk_event,persisted.persisted_otel_event) expected_event,
+                     COALESCE({persistedSdkName},persisted.persisted_otel_name) expected_name
+              FROM persisted persisted
+              LEFT JOIN local_workspace_execution_headers h ON h.session_id=$session_id
+                AND h.source_kind=persisted.execution_kind AND h.source_identity=persisted.execution_identity
+              LEFT JOIN core_counts counts ON counts.execution_id=h.execution_id),
+            expected AS (
+              SELECT rows.*,
+                     CASE WHEN local_workspace_ticks(occurred_at) IS NULL
+                          THEN CASE WHEN occurred_at IS NULL THEN 'missing' ELSE 'invalid' END ELSE 'recorded' END expected_time,
+                     local_workspace_ticks(occurred_at) expected_ticks
+              FROM expected_rows rows),
+            invalid AS (
+              SELECT 1 FROM expected e
+              JOIN local_workspace_nodes n
+                ON n.session_id=$session_id AND n.node_id=local_workspace_node_id('skill_invocation',e.canonical_identity)
+              WHERE e.execution_id IS NULL
+                 OR n.execution_id IS NOT e.execution_id
+                 OR n.source_ordinal IS NOT e.expected_ordinal
+                 OR n.parent_node_id IS NOT e.expected_parent
+                 OR n.relationship_authority IS NOT e.expected_relationship
+                 OR n.kind<>'skill'
+                 OR n.name_state IS NOT CASE WHEN e.expected_name IS NULL OR trim(e.expected_name)=''
+                                              THEN 'invalid' ELSE 'recorded' END
+                 OR n.name_text IS NOT CASE WHEN e.expected_name IS NULL OR trim(e.expected_name)=''
+                                            THEN NULL ELSE e.expected_name END
+                 OR n.lifecycle<>'completed' OR n.status<>'completed'
+                 OR n.time_authority IS NOT e.expected_time
+                 OR n.start_utc_ticks IS NOT e.expected_ticks OR n.end_utc_ticks IS NOT e.expected_ticks
+                 OR n.duration_ms IS NOT CASE WHEN e.expected_ticks IS NULL THEN NULL ELSE 0 END
+                 OR n.trace_id IS NOT e.trace_id OR n.span_id IS NOT e.span_id
+                 OR n.event_id IS NOT e.expected_event
+                 OR n.otel_source_identity IS NOT e.persisted_otel_source_identity
+                 OR n.sdk_source_identity IS NOT e.persisted_sdk_source_identity
+                 OR (SELECT COUNT(*) FROM local_workspace_node_edges edge WHERE edge.node_id=n.node_id)<>
+                    CASE WHEN e.expected_relationship IN ('exact','explicit') THEN 1 ELSE 0 END
+                 OR e.expected_relationship IN ('exact','explicit') AND NOT EXISTS(
+                    SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=n.node_id
+                      AND edge.related_node_id=e.expected_parent AND edge.relation_kind='parent'
+                      AND edge.relationship_authority=e.expected_relationship AND edge.source_ordinal=e.expected_ordinal))
+            SELECT EXISTS(SELECT 1 FROM invalid);
+            """, sessionId);
+        command.Parameters.AddWithValue("$skills", System.Text.Json.JsonSerializer.Serialize(skills));
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) != 0)
+            RejectSkillOwnerGraph();
+    }
+
+    private static string SkillReferenceRevision(SkillProjectionCanonicalInvocation invocation) =>
+        invocation.CanonicalIdentity + "|" + (invocation.OtelSourceIdentity ?? string.Empty) + "|" +
+        (invocation.SdkSourceIdentity ?? string.Empty);
+
+    private static string? PersistedSkillReferenceRevision(PersistedSkillProof proof)
+    {
+        var otelReferences = proof.References.Where(static reference =>
+            reference.SourceIdentity?.StartsWith("otel:", StringComparison.Ordinal) == true).Take(2).ToArray();
+        var sdkReferences = proof.References.Where(static reference =>
+            reference.SourceIdentity?.StartsWith("sdk:", StringComparison.Ordinal) == true).Take(2).ToArray();
+        if (otelReferences.Length > 1 || sdkReferences.Length > 1) return null;
+        var otel = otelReferences.SingleOrDefault()?.SourceIdentity;
+        var sdk = sdkReferences.SingleOrDefault()?.SourceIdentity;
+        if (otel is null && sdk is null) return null;
+        if (otel is not null && otelReferences.Single().SourceOrdinal != 0
+            || sdkReferences.SingleOrDefault() is { SourceOrdinal: var sdkOrdinal }
+               && sdkOrdinal != (otel is null ? 0 : 1)) return null;
+        return proof.CanonicalIdentity + "|" + (otel ?? string.Empty) + "|" + (sdk ?? string.Empty);
+    }
+
+    private static bool SameSkillReference(PersistedSkillReference left, PersistedSkillReference right) =>
+        string.Equals(left.SourceKind, right.SourceKind, StringComparison.Ordinal)
+        && left.SourceOrdinal == right.SourceOrdinal
+        && string.Equals(left.SourceIdentity, right.SourceIdentity, StringComparison.Ordinal)
+        && string.Equals(left.TraceId, right.TraceId, StringComparison.Ordinal)
+        && string.Equals(left.SpanId, right.SpanId, StringComparison.Ordinal)
+        && string.Equals(left.EventId, right.EventId, StringComparison.Ordinal);
+
+    private static bool InactiveSkillReferenceMatchesCanonical(
+        PersistedSkillReference reference,
+        string canonicalIdentity,
+        SkillProjectionCanonicalInvocation? invocation)
+    {
+        string? traceId;
+        string? spanId;
+        if (reference.SourceIdentity?.StartsWith("sdk:", StringComparison.Ordinal) == true)
+        {
+            if (string.Equals(canonicalIdentity, reference.SourceIdentity, StringComparison.Ordinal))
+                return invocation is null;
+            traceId = reference.OwnerProducerTraceId;
+            spanId = reference.OwnerProducerSpanId;
+        }
+        else if (reference.SourceIdentity?.StartsWith("otel:", StringComparison.Ordinal) == true)
+        {
+            traceId = reference.TraceId;
+            spanId = reference.SpanId;
+        }
+        else return false;
+        if (traceId is null || spanId is null
+            || !string.Equals(canonicalIdentity, "producer:" + traceId + ":" + spanId, StringComparison.Ordinal))
+            return false;
+        return invocation is null
+            || string.Equals(invocation.ProducerTraceId, traceId, StringComparison.Ordinal)
+               && string.Equals(invocation.ProducerSpanId, spanId, StringComparison.Ordinal);
+    }
+
+    private static bool MetadataMatches(PersistedSkillProof proof, SkillProjectionCanonicalInvocation invocation) =>
+        string.Equals(proof.SourceState, invocation.SkillSource is null ? "not_observed" : "recorded", StringComparison.Ordinal)
+        && string.Equals(proof.Source, invocation.SkillSource, StringComparison.Ordinal)
+        && string.Equals(proof.TriggerState, invocation.InvocationTrigger is null ? "not_observed" : "recorded", StringComparison.Ordinal)
+        && string.Equals(proof.Trigger, invocation.InvocationTrigger, StringComparison.Ordinal)
+        && string.Equals(proof.HistoricalState, invocation.HistoricalSnapshotReference is null ? "not_observed" : "recorded", StringComparison.Ordinal)
+        && string.Equals(proof.HistoricalReference, invocation.HistoricalSnapshotReference, StringComparison.Ordinal);
+
+    private static bool MetadataMatchesPersistedOwners(PersistedSkillProof proof)
+    {
+        var sdkOwners = proof.References.Where(static reference =>
+            reference.SourceIdentity?.StartsWith("sdk:", StringComparison.Ordinal) == true).Take(2).ToArray();
+        var otelOwners = proof.References.Where(static reference =>
+            reference.SourceIdentity?.StartsWith("otel:", StringComparison.Ordinal) == true).Take(2).ToArray();
+        if (sdkOwners.Length > 1 || otelOwners.Length > 1) return false;
+        var sdk = sdkOwners.SingleOrDefault();
+        var otel = otelOwners.SingleOrDefault();
+        if (sdk is null && otel is null) return false;
+        var source = sdk?.OwnerSource ?? otel?.OwnerSource;
+        var trigger = sdk?.OwnerTrigger ?? otel?.OwnerTrigger;
+        var historical = sdk?.OwnerHistoricalReference ?? otel?.OwnerHistoricalReference;
+        return string.Equals(proof.SourceState, source is null ? "not_observed" : "recorded", StringComparison.Ordinal)
+            && string.Equals(proof.Source, source, StringComparison.Ordinal)
+            && string.Equals(proof.TriggerState, trigger is null ? "not_observed" : "recorded", StringComparison.Ordinal)
+            && string.Equals(proof.Trigger, trigger, StringComparison.Ordinal)
+            && string.Equals(proof.HistoricalState, historical is null ? "not_observed" : "recorded", StringComparison.Ordinal)
+            && string.Equals(proof.HistoricalReference, historical, StringComparison.Ordinal);
+    }
+
+    private static void RejectSkillOwnerGraph() =>
+        throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+
+    private sealed record PersistedSkillProof(
+        string NodeId,
+        string CanonicalIdentity,
+        string SourceState,
+        string? Source,
+        string TriggerState,
+        string? Trigger,
+        string HistoricalState,
+        string? HistoricalReference,
+        string RegistryIdentity,
+        List<PersistedSkillReference> References);
+
+    private sealed record PersistedSkillReference(
+        string SourceKind,
+        long SourceOrdinal,
+        string? SourceIdentity,
+        string? TraceId,
+        string? SpanId,
+        string? EventId,
+        string? RevisionInput,
+        bool OtelOwnerExists,
+        bool SdkOwnerExists,
+        bool SdkRetentionActive,
+        string? OwnerSource = null,
+        string? OwnerTrigger = null,
+        string? OwnerHistoricalReference = null,
+        string? OwnerProducerTraceId = null,
+        string? OwnerProducerSpanId = null)
+    {
+        internal bool LegitimatelyInactive =>
+            SourceIdentity?.StartsWith("otel:", StringComparison.Ordinal) == true && OtelOwnerExists
+            || SourceIdentity?.StartsWith("sdk:", StringComparison.Ordinal) == true && SdkOwnerExists && !SdkRetentionActive;
+    }
+
+    private async Task<LocalWorkspaceExecutionDetail[]> ReadExecutions(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, string[] executionIds, SkillProjectionCurrentInvocationProjection? skillProjection, CancellationToken token)
     {
         statementObserver?.Invoke("detail-executions");
         var selection = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
             ? "h.session_id=$session_id"
             : "h.session_id=$session_id AND h.execution_id IN (SELECT CAST(value AS TEXT) FROM json_each($execution_ids))";
+        var admittedSkillIds = AdmittedSkillIdentities(skillProjection);
+        var skillPredicate = SkillPredicate(admittedSkillIds, "child");
         using var command = Command(c, t, $"""
             WITH canonical_latest AS (
               SELECT execution_id FROM local_workspace_execution_headers WHERE session_id=$session_id
@@ -393,7 +1763,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LEFT JOIN (
               SELECT root.execution_id execution_child_id,COUNT(child.node_id) child_count
               FROM local_workspace_nodes root
-              LEFT JOIN local_workspace_nodes child ON child.session_id=root.session_id AND child.execution_id=root.execution_id
+              LEFT JOIN local_workspace_nodes child ON child.session_id=root.session_id AND child.execution_id=root.execution_id AND {skillPredicate}
                 AND (child.parent_node_id=root.node_id OR child.kind='unknown_relation_group' AND child.parent_node_id IS NULL)
               WHERE root.session_id=$session_id AND root.source_kind='execution_root'
               GROUP BY root.execution_id
@@ -403,6 +1773,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               CASE WHEN time_authority='recorded' THEN start_utc_ticks END DESC,source_ordinal,execution_id LIMIT 257;
             """, request.SessionId);
         command.Parameters.AddWithValue("$execution_ids", System.Text.Json.JsonSerializer.Serialize(executionIds));
+        command.Parameters.AddWithValue("$skill_ids", System.Text.Json.JsonSerializer.Serialize(admittedSkillIds));
         var rows = new List<LocalWorkspaceExecutionDetail>();
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
@@ -590,27 +1961,20 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SkillProjectionCurrentInvocationProjection? skillProjection)
     {
         IEnumerable<LocalWorkspaceNodeSourceReferenceDetail> selected = persisted;
-        if (node.SourceKind == "skill_invocation" && skillProjection?.State == "current")
+        if (node.SourceKind == "skill_invocation" && skillProjection?.State is "current" or "certification_pending")
         {
             var invocation = skillProjection.Invocations.SingleOrDefault(value =>
                 string.Equals(value.CanonicalIdentity, node.SourceIdentity, StringComparison.Ordinal));
             if (invocation is not null)
             {
                 var current = new List<LocalWorkspaceNodeSourceReferenceDetail>(2);
+                var revision = SkillReferenceRevision(invocation);
                 if (invocation.OtelSourceIdentity is not null)
-                    current.Add(persisted.SingleOrDefault(reference => reference.SourceKind == "skill_claim"
-                        && reference.SourceIdentity == invocation.OtelSourceIdentity
-                        && reference.TraceId == invocation.ProducerTraceId
-                        && reference.SpanId == invocation.ProducerSpanId
-                        && reference.EventId == invocation.OtelCarrierEventId)
-                        ?? new("skill_claim", invocation.OtelSourceIdentity, invocation.ProducerTraceId,
-                            invocation.ProducerSpanId, invocation.OtelCarrierEventId));
+                    current.Add(new("skill_claim", invocation.OtelSourceIdentity, invocation.ProducerTraceId,
+                        invocation.ProducerSpanId, invocation.OtelCarrierEventId, revision, true));
                 if (invocation.SdkSourceIdentity is not null)
-                    current.Add(persisted.SingleOrDefault(reference => reference.SourceKind == "skill_claim"
-                        && reference.SourceIdentity == invocation.SdkSourceIdentity
-                        && reference.TraceId is null && reference.SpanId is null
-                        && reference.EventId == invocation.SdkCarrierEventId)
-                        ?? new("skill_claim", invocation.SdkSourceIdentity, null, null, invocation.SdkCarrierEventId));
+                    current.Add(new("skill_claim", invocation.SdkSourceIdentity, null, null,
+                        invocation.SdkCarrierEventId, revision, true));
                 selected = current;
             }
         }
@@ -624,16 +1988,12 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private static LocalWorkspaceNodeDetail[] ApplyCurrentSkillMetadata(
         LocalWorkspaceNodeDetail[] nodes, SkillProjectionCurrentInvocationProjection? projection)
     {
-        if (projection?.State == "certification_pending")
-            return nodes.Select(node => node.SourceKind == "skill_invocation" && node.SkillMetadata is not null
-                ? node with { SkillMetadata = node.SkillMetadata with { CurrentValidState = "certification_pending" } }
-                : node).ToArray();
-        if (projection?.State != "current") return nodes;
+        if (projection?.State is not ("current" or "certification_pending")) return nodes;
         var current = projection.Invocations.ToDictionary(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal);
         return nodes.Select(node => node.SourceKind == "skill_invocation" && current.TryGetValue(node.SourceIdentity, out var invocation)
             ? node with
             {
-                SkillMetadata = new("current",
+                SkillMetadata = new(invocation.CurrentValidState,
                     invocation.SkillSource is null ? "not_observed" : "recorded", invocation.SkillSource,
                     invocation.InvocationTrigger is null ? "not_observed" : "recorded", invocation.InvocationTrigger,
                     "unavailable", null,
@@ -651,7 +2011,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         statementObserver?.Invoke("detail-nodes");
         var context = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
-            ? await ReadTimelineContext(c, t, request, token)
+            ? await ReadTimelineContext(c, t, request, skillProjection, token)
             : [];
         var predicate = request.Kind switch
         {
@@ -671,12 +2031,13 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         {
             predicate += " AND ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)>$after_group OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)>$after_ticks) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal>$after_ordinal) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal AND node_id>$after_node_id COLLATE BINARY))";
         }
-        var admittedSkillIds = skillProjection is not null && skillProjection.State is "current" or "certification_pending"
-            ? skillProjection.Invocations.Select(static invocation => invocation.CanonicalIdentity).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
-            : [];
-        var skillPredicate = admittedSkillIds.Length == 0
-            ? "source_kind<>'skill_invocation'"
-            : "(source_kind<>'skill_invocation' OR source_identity IN (SELECT CAST(value AS TEXT) FROM json_each($skill_ids)))";
+        var admittedSkillIds = AdmittedSkillIdentities(skillProjection);
+        var skillPredicate = SkillPredicate(admittedSkillIds);
+        if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content)
+            predicate = predicate.Replace(
+                "WHERE session_id=$session_id AND parent_node_id=$node_id ORDER BY",
+                $"WHERE session_id=$session_id AND parent_node_id=$node_id AND {skillPredicate} ORDER BY",
+                StringComparison.Ordinal);
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline)
             predicate += " AND " + skillPredicate;
         var limit = request.Kind switch
@@ -721,7 +2082,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     }
 
     private static async Task<LocalWorkspaceNodeDetail[]> ReadTimelineContext(
-        SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, CancellationToken token)
+        SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request,
+        SkillProjectionCurrentInvocationProjection? skillProjection, CancellationToken token)
     {
         var predicates = new List<string>();
         if (request.ExecutionId is not null)
@@ -738,13 +2100,15 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             predicates.Add($"node_id=$after_node_id AND {membership} AND (CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal");
         }
         if (predicates.Count == 0) return [];
+        var admittedSkillIds = AdmittedSkillIdentities(skillProjection);
+        var skillPredicate = SkillPredicate(admittedSkillIds);
         using var command = Command(c, t, $"""
             SELECT node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,
               skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
               token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,
               trace_id,span_id,event_id,COALESCE(children.child_count,0)
             FROM local_workspace_nodes
-            LEFT JOIN (SELECT parent_node_id child_parent_id,COUNT(*) child_count FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id IS NOT NULL GROUP BY parent_node_id) children
+            LEFT JOIN (SELECT parent_node_id child_parent_id,COUNT(*) child_count FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id IS NOT NULL AND {skillPredicate} GROUP BY parent_node_id) children
               ON children.child_parent_id=local_workspace_nodes.node_id
             WHERE session_id=$session_id AND ({string.Join(" OR ", predicates)})
             ORDER BY node_id LIMIT 4;
@@ -755,6 +2119,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         command.Parameters.AddWithValue("$after_ticks", request.After?.UtcTicks ?? 0);
         command.Parameters.AddWithValue("$after_ordinal", request.After is null ? 0L : checked((long)request.After.SourceOrdinal));
         command.Parameters.AddWithValue("$after_node_id", (object?)request.After?.NodeId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$skill_ids", System.Text.Json.JsonSerializer.Serialize(admittedSkillIds));
         var rows = new List<LocalWorkspaceNodeDetail>();
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
@@ -763,6 +2128,20 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             && await ExecutionExists(c, t, request, token))
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         return rows.DistinctBy(static row => row.NodeId, StringComparer.Ordinal).ToArray();
+    }
+
+    private static string[] AdmittedSkillIdentities(SkillProjectionCurrentInvocationProjection? projection) =>
+        projection?.State is "current" or "certification_pending"
+            ? projection.Invocations.Select(static invocation => invocation.CanonicalIdentity)
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
+            : [];
+
+    private static string SkillPredicate(IReadOnlyCollection<string> admittedSkillIds, string? alias = null)
+    {
+        var prefix = alias is null ? string.Empty : alias + ".";
+        return admittedSkillIds.Count == 0
+            ? prefix + "source_kind<>'skill_invocation'"
+            : $"({prefix}source_kind<>'skill_invocation' OR {prefix}source_identity IN (SELECT CAST(value AS TEXT) FROM json_each($skill_ids)))";
     }
 
     private static async Task<bool> ExecutionExists(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, CancellationToken token)
@@ -848,7 +2227,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         using var hash=System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-monitor-session-revision-input\0v2\0typed-sqlite-value\0"));
-        var statements = new[]
+        var statements = new List<string>
         {
             "SELECT * FROM sessions WHERE session_id=$session_id",
             "SELECT * FROM session_native_ids WHERE session_id=$session_id ORDER BY source_surface,native_session_id",
@@ -869,13 +2248,22 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT m.* FROM local_workspace_skill_metadata m JOIN local_workspace_nodes n ON n.node_id=m.node_id WHERE n.session_id=$session_id ORDER BY m.node_id",
             "SELECT m.* FROM local_workspace_subagent_lifecycle m JOIN local_workspace_nodes n ON n.node_id=m.node_id WHERE n.session_id=$session_id ORDER BY m.node_id",
             "SELECT x.* FROM local_workspace_content_tombstones x JOIN session_events e ON e.event_id=x.source_item_id WHERE e.session_id=$session_id ORDER BY x.store_kind,x.source_item_id,x.part",
-            "SELECT i.* FROM skill_projection_invocations i WHERE i.session_id=$session_id ORDER BY i.generation_id,i.invocation_id",
-            "SELECT c.* FROM skill_projection_sdk_claims c WHERE c.session_id=$session_id ORDER BY c.claim_id",
-            "SELECT s.* FROM skill_invocation_snapshots s WHERE s.session_id=$session_id ORDER BY s.snapshot_id",
-            "SELECT r.* FROM skill_invocation_snapshot_receipts r JOIN skill_invocation_snapshots s ON s.snapshot_id=r.snapshot_id WHERE s.session_id=$session_id ORDER BY r.snapshot_id",
-            "SELECT h.* FROM skill_projection_trace_heads h WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=h.trace_id) ORDER BY h.trace_id",
-            "SELECT i.store_instance_id,i.store_kind,i.source_item_id,i.receipt_version,i.captured_at,i.expires_at,i.state,i.revision,t.receipt_at,t.deleted_at FROM retention_items i LEFT JOIN retention_tombstones t ON t.item_id=i.item_id WHERE EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.session_id=$session_id AND c.retention_item_id=i.item_id) ORDER BY i.item_id"
         };
+        if (TableExists(c, t, "skill_projection_invocations"))
+        {
+            statements.Add("SELECT i.* FROM skill_projection_invocations i WHERE i.session_id=$session_id ORDER BY i.generation_id,i.invocation_id");
+            statements.Add("SELECT c.* FROM skill_projection_sdk_claims c WHERE c.session_id=$session_id ORDER BY c.claim_id");
+            statements.Add("SELECT h.* FROM skill_projection_trace_heads h WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=h.trace_id) ORDER BY h.trace_id");
+        }
+        if (TableExists(c, t, "skill_invocation_snapshots"))
+        {
+            statements.Add("SELECT s.* FROM skill_invocation_snapshots s WHERE s.session_id=$session_id ORDER BY s.snapshot_id");
+            statements.Add("SELECT r.* FROM skill_invocation_snapshot_receipts r JOIN skill_invocation_snapshots s ON s.snapshot_id=r.snapshot_id WHERE s.session_id=$session_id ORDER BY r.snapshot_id");
+        }
+        statements.AddRange(
+        [
+            "SELECT i.store_instance_id,i.store_kind,i.source_item_id,i.receipt_version,i.captured_at,i.expires_at,i.state,i.revision,t.receipt_at,t.deleted_at FROM retention_items i LEFT JOIN retention_tombstones t ON t.item_id=i.item_id WHERE EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.session_id=$session_id AND c.retention_item_id=i.item_id) ORDER BY i.item_id"
+        ]);
         foreach(var sql in statements)
         {
             using var command=Command(c,t,sql,sessionId);using var reader=await command.ExecuteReaderAsync(token);
@@ -889,7 +2277,29 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         AppendRevisionValue(hash, registryIdentity);
         foreach (var invocation in skillProjection?.Invocations.OrderBy(static value => value.CanonicalIdentity, StringComparer.Ordinal)
             ?? Enumerable.Empty<SkillProjectionCanonicalInvocation>())
+        {
             AppendRevisionValue(hash, invocation.CanonicalIdentity);
+            AppendRevisionValue(hash, invocation.SessionId);
+            AppendRevisionValue(hash, (object?)invocation.ProducerTraceId ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.ProducerSpanId ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.OtelSourceIdentity ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.OtelSkillName ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkSourceIdentity ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkSkillName ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkExpiresAt ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.ExecutionSourceKind ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.ExecutionSourceIdentity ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.OtelCarrierEventId ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkCarrierEventId ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkSourceParentEventId ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkSourceAdapter ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SkillSource ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.InvocationTrigger ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.HistoricalSnapshotReference ?? DBNull.Value);
+            AppendRevisionValue(hash, invocation.CurrentValidState);
+            AppendRevisionValue(hash, (object?)invocation.OtelOwnerRevision ?? DBNull.Value);
+            AppendRevisionValue(hash, (object?)invocation.SdkOwnerRevision ?? DBNull.Value);
+        }
         using (var command = Command(c, t, $$"""
             SELECT c.node_id,c.part,{{EffectiveContentAvailabilitySql}}
             FROM local_workspace_node_content_refs c
@@ -909,6 +2319,15 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             }
         }
         return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$table COLLATE BINARY);";
+        command.Parameters.AddWithValue("$table", table);
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
     }
 
     internal static string ComputeTypedRevisionValueDigestForTest(object? value)
@@ -956,6 +2375,82 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, data.Length);
         hash.AppendData(length);
         hash.AppendData(data);
+    }
+
+    private sealed class PinnedRegistryAuthority :
+        ISkillRegistryGenerationAuthority,
+        ISkillRegistryGenerationCapture,
+        IDisposable
+    {
+        private readonly ISkillRegistryGenerationAuthority inner;
+        private readonly ISkillRegistryGenerationCapture capture;
+        private readonly ISkillRegistryGenerationLease lease;
+
+        private PinnedRegistryAuthority(
+            ISkillRegistryGenerationAuthority inner,
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease,
+            string canonicalIdentity) =>
+            (this.inner, this.capture, this.lease, CanonicalIdentity) = (inner, capture, lease, canonicalIdentity);
+
+        internal string CanonicalIdentity { get; }
+
+        internal static PinnedRegistryAuthority? TryCreate(ISkillRegistryGenerationAuthority authority)
+        {
+            var capture = authority.CaptureGeneration();
+            if (capture is null || !authority.TryAcquireGenerationReadLease(capture, out var lease))
+                return null;
+            if (!authority.VerifyGenerationIdentity(capture, lease))
+            {
+                lease.Dispose();
+                return null;
+            }
+            return new(authority, capture, lease, authority.GetCanonicalGenerationIdentity(capture, lease));
+        }
+
+        public ISkillRegistryGenerationCapture CaptureGeneration() => this;
+
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture candidate,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? generationLease)
+        {
+            if (!ReferenceEquals(candidate, this))
+            {
+                generationLease = null;
+                return false;
+            }
+            generationLease = new BorrowedLease(this);
+            return true;
+        }
+
+        public bool VerifyGenerationIdentity(
+            ISkillRegistryGenerationCapture candidate,
+            ISkillRegistryGenerationLease generationLease) =>
+            ReferenceEquals(candidate, this)
+            && generationLease is BorrowedLease borrowed
+            && ReferenceEquals(borrowed.Owner, this);
+
+        public string GetCanonicalGenerationIdentity(
+            ISkillRegistryGenerationCapture candidate,
+            ISkillRegistryGenerationLease generationLease)
+        {
+            if (!VerifyGenerationIdentity(candidate, generationLease))
+                throw new InvalidOperationException("skill_registry_generation_not_current");
+            return CanonicalIdentity;
+        }
+
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease generationLease, SkillRegistryProducerTuple tuple) =>
+            generationLease is BorrowedLease borrowed
+            && ReferenceEquals(borrowed.Owner, this)
+            && inner.IsProducerTupleAccepted(lease, tuple);
+
+        public void Dispose() => lease.Dispose();
+
+        private sealed class BorrowedLease(PinnedRegistryAuthority owner) : ISkillRegistryGenerationLease
+        {
+            internal PinnedRegistryAuthority Owner { get; } = owner;
+            public void Dispose() { }
+        }
     }
 
     private const string EffectiveContentAvailabilitySql = """

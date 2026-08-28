@@ -121,6 +121,10 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal(DateTimeOffset.Parse("2026-08-26T00:00:02Z").UtcTicks, tool.StartUtcTicks);
         Assert.Equal(DateTimeOffset.Parse("2026-08-26T00:00:04Z").UtcTicks, tool.EndUtcTicks);
         Assert.Equal(2000, tool.DurationMilliseconds);
+        Assert.Equal("recorded", tool.ToolMetadata!.McpServerIdentityState);
+        Assert.Equal(new string('d', 64), tool.ToolMetadata.McpServerIdentity);
+        Assert.Equal("recorded", tool.ToolMetadata.McpToolNameState);
+        Assert.Equal("ReadMcp", tool.ToolMetadata.McpToolName);
         Assert.Equal("subagent", subagent.Kind);
         Assert.NotNull(subagent.SubagentLifecycle);
         Assert.Null(subagent.ToolMetadata);
@@ -152,6 +156,190 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal(3000, Assert.Single(changedTool.Detail.Nodes, node => node.NodeId == toolNodeId).DurationMilliseconds);
     }
 
+    [Theory]
+    [InlineData("DELETE FROM monitor_spans WHERE trace_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND span_id='bbbbbbbbbbbbbbbb';")]
+    [InlineData("INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at) SELECT 2,trace_id,span_id,parent_span_id,1,operation,category,tool_name,mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at FROM monitor_spans WHERE raw_record_id=1;")]
+    [InlineData("UPDATE monitor_spans SET operation='chat' WHERE raw_record_id=1;")]
+    [InlineData("UPDATE monitor_spans SET status='error' WHERE raw_record_id=1;")]
+    [InlineData("UPDATE monitor_spans SET start_time='2026-08-26T00:00:01.0000000+00:00' WHERE raw_record_id=1;")]
+    [InlineData("UPDATE monitor_spans SET mcp_tool_name='ForgedMcp' WHERE raw_record_id=1;")]
+    [InlineData("UPDATE monitor_spans SET mcp_server_hash=lower(hex(randomblob(32))) WHERE raw_record_id=1;")]
+    public async Task ProductionCoordinatorRejectsOtelToolNormalizedOwnerDrift(string mutation)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string nodeId;
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='tool' AND source_family='otel';").Single();
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+        }
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() => CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None).AsTask());
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Theory]
+    [InlineData("DELETE FROM local_workspace_node_source_references WHERE event_id='018f0000-0000-7000-8000-000000000031';", "tool")]
+    [InlineData("UPDATE local_workspace_tool_metadata SET started_state='not_observed' WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='tool' AND source_family='session_sdk');", "tool")]
+    [InlineData("UPDATE local_workspace_nodes SET tool_activity_count=999 WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='tool' AND source_family='session_sdk');", "tool")]
+    [InlineData("UPDATE local_workspace_nodes SET token_authority='session_run',token_state='recorded',available_execution_count=1,input_token_state='recorded',input_tokens=999 WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='tool' AND source_family='session_sdk');", "tool")]
+    [InlineData("UPDATE session_events SET trace_id='cccccccccccccccccccccccccccccccc' WHERE event_id='018f0000-0000-7000-8000-000000000031';", "tool")]
+    [InlineData("UPDATE local_workspace_semantic_receipts SET scope_kind='native_session' WHERE semantic_kind='tool' AND source_family='session_sdk';", "tool")]
+    [InlineData("UPDATE local_workspace_subagent_lifecycle SET started_state='not_observed';", "subagent")]
+    [InlineData("UPDATE local_workspace_nodes SET subagent_activity_count=999 WHERE source_kind='semantic_subagent';", "subagent")]
+    [InlineData("UPDATE local_workspace_nodes SET token_authority='session_run',token_state='recorded',available_execution_count=1,total_token_state='recorded',total_tokens=999 WHERE source_kind='semantic_subagent';", "subagent")]
+    [InlineData("INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('018f0000-0000-7000-8000-000000000023','018f0000-0000-7000-8000-000000000001','018f0000-0000-7000-8000-000000000020','copilot-sdk','copilot-sdk-stream','sdk-subagent-failed','subagent.failed','2026-08-26T00:00:05.5000000+00:00','not_captured');", "subagent")]
+    public async Task ProductionCoordinatorRejectsSdkSemanticOwnerGraphDrift(string mutation, string semanticKind)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string nodeId;
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                semanticKind == "tool"
+                    ? "SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='tool' AND source_family='session_sdk';"
+                    : "SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='subagent' AND source_family='session_sdk';").Single();
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+        }
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() => CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None).AsTask());
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_workspace_node_source_references SET revision_input='synthetic|forged|event|2026-08-26T00:00:05.2500000+00:00' WHERE event_id='018f0000-0000-7000-8000-000000000025';")]
+    [InlineData("UPDATE local_workspace_node_source_references SET revision_input='session_run|018f0000-0000-7000-8000-000000000020|started|active|' WHERE source_kind='session_run' AND source_identity='018f0000-0000-7000-8000-000000000020';")]
+    [InlineData("UPDATE local_workspace_nodes SET execution_id=(SELECT execution_id FROM local_workspace_execution_headers WHERE source_identity='018f0000-0000-7000-8000-000000000010') WHERE source_kind='session_event' AND source_identity='018f0000-0000-7000-8000-000000000025';")]
+    [InlineData("UPDATE local_workspace_nodes SET parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE source_kind='execution_root' AND source_identity='018f0000-0000-7000-8000-000000000010') WHERE source_kind='session_event' AND source_identity='018f0000-0000-7000-8000-000000000025';")]
+    [InlineData("UPDATE session_events SET parent_event_id='018f0000-0000-7000-8000-000000000011' WHERE event_id='018f0000-0000-7000-8000-000000000025';")]
+    [InlineData("UPDATE session_events SET run_id='018f0000-0000-7000-8000-000000000010' WHERE event_id='018f0000-0000-7000-8000-000000000025';")]
+    [InlineData("UPDATE local_workspace_execution_headers SET tool_activity_state='recorded',tool_activity_count=999; UPDATE local_workspace_nodes SET tool_activity_state='recorded',tool_activity_count=999 WHERE source_kind='execution_root';")]
+    [InlineData("UPDATE local_workspace_execution_headers SET retry_activity_state='recorded',retry_activity_count=999; UPDATE local_workspace_nodes SET retry_activity_state='recorded',retry_activity_count=999 WHERE source_kind='execution_root';")]
+    [InlineData("UPDATE local_workspace_execution_headers SET input_token_state='recorded',input_tokens=999; UPDATE local_workspace_nodes SET input_token_state='recorded',input_tokens=999 WHERE source_kind='execution_root';")]
+    public async Task ProductionCoordinatorRejectsExecutionOrRawEventOwnerGraphDrift(string mutation)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, mutation);
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() => CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None).AsTask());
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Theory]
+    [InlineData("orphan_event")]
+    [InlineData("extra_event_parent")]
+    [InlineData("extra_unknown_group")]
+    [InlineData("receiptless_tool")]
+    [InlineData("receiptless_subagent")]
+    public async Task ProductionCoordinatorRejectsUnownedWorkspaceGraphRows(string corruption)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            switch (corruption)
+            {
+                case "orphan_event":
+                    LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                        PRAGMA foreign_keys=OFF;
+                        INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+                        VALUES('orphan-event','018f0000-0000-7000-8000-000000000001','missing-run','copilot-sdk','synthetic','orphan-source','event','2026-08-26T00:00:07.0000000+00:00','not_captured');
+                        """);
+                    break;
+                case "extra_event_parent":
+                    LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                        INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
+                        SELECT child.node_id,parent.node_id,'parent','exact',child.source_ordinal
+                        FROM local_workspace_nodes child,local_workspace_nodes parent
+                        WHERE child.source_kind='session_event' AND child.source_identity='018f0000-0000-7000-8000-000000000025'
+                          AND parent.source_kind='session_event' AND parent.source_identity='018f0000-0000-7000-8000-000000000021';
+                        """);
+                    break;
+                case "extra_unknown_group":
+                    InsertUnownedWorkspaceNode(connection, "unknown_relation_group", "forged-unknown-group");
+                    break;
+                case "receiptless_tool":
+                    InsertReceiptlessSemanticNode(connection, "semantic_tool", "tool");
+                    break;
+                case "receiptless_subagent":
+                    InsertReceiptlessSemanticNode(connection, "semantic_subagent", "subagent");
+                    break;
+            }
+        }
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() => CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None).AsTask());
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Theory]
+    [InlineData("raw_event")]
+    [InlineData("token_observation")]
+    [InlineData("monitor_span")]
+    public async Task ProductionCoordinatorBoundsLiveSourceOwnersBeforeGraphProof(string sourceKind)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            var insertion = sourceKind switch
+            {
+                "raw_event" => """
+                    PRAGMA foreign_keys=OFF;
+                    WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value<4096)
+                    INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+                    SELECT printf('unprojected-%04d',value),'018f0000-0000-7000-8000-000000000001','missing-run','copilot-sdk','synthetic',
+                           printf('unprojected-source-%04d',value),'event','2026-08-26T00:00:07.0000000+00:00','not_captured'
+                    FROM sequence;
+                    """,
+                "token_observation" => """
+                    WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value<4096)
+                    INSERT INTO local_workspace_token_observations(
+                      session_id,execution_id,authority,authority_rank,source_identity,input_tokens)
+                    SELECT '018f0000-0000-7000-8000-000000000001','018f0000-0000-7000-8000-000000000020',
+                           'session_run',0,printf('unprojected-token-%04d',value),1
+                    FROM sequence;
+                    """,
+                "monitor_span" => """
+                    WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value<4096)
+                    INSERT INTO monitor_spans(
+                      raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,
+                      mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at)
+                    SELECT 10000+value,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',NULL,0,
+                           'execute_tool','tool_call','Read','ReadMcp',
+                           'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','ok',2000,
+                           '2026-08-26T00:00:02.0000000+00:00','2026-08-26T00:00:04.0000000+00:00',
+                           '2026-08-26T00:00:04.0000000+00:00'
+                    FROM sequence;
+                    """,
+                _ => throw new InvalidOperationException(sourceKind),
+            };
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, insertion);
+        }
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() => CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None).AsTask());
+        Assert.Equal("workspace_too_large", error.Error);
+    }
+
     [Fact]
     public async Task NodeReadCarriesGlobalLatestAndClosedV5NodeFactsWithoutSerializerInference()
     {
@@ -166,22 +354,9 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
               ('event-grandchild','018f0000-0000-7000-8000-000000000001','run-old','copilot-sdk','synthetic','source-grandchild','event','2026-08-26T00:00:02.0000000+00:00','not_captured'),
               ('event-sibling','018f0000-0000-7000-8000-000000000001','run-old','copilot-sdk','synthetic','source-sibling','event','2026-08-26T00:00:03.0000000+00:00','not_captured');
             UPDATE session_events SET parent_event_id='event-child' WHERE event_id='event-grandchild';
-            CREATE TABLE skill_projection_invocations(session_id TEXT,generation_id INTEGER,invocation_id TEXT);
-            CREATE TABLE skill_projection_sdk_claims(session_id TEXT,claim_id TEXT);
-            CREATE TABLE skill_invocation_snapshots(session_id TEXT,snapshot_id TEXT);
-            CREATE TABLE skill_invocation_snapshot_receipts(snapshot_id TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT);
             """);
-        using (var retention = connection.BeginTransaction())
-        {
-            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, retention);
-            retention.Commit();
-        }
+        InstallSkillAuthorities(connection);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT);
-            CREATE TABLE raw_records(id INTEGER,source TEXT,trace_id TEXT,received_at TEXT,schema_version INTEGER,retention_owner_token BLOB);
-            """);
         var oldRoot = LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT node_id FROM local_workspace_nodes WHERE source_kind='execution_root' AND source_identity='run-old';").Single();
         using var transaction = connection.BeginTransaction();
@@ -229,22 +404,9 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
             INSERT INTO session_runs VALUES('run-permission','018f0000-0000-7000-8000-000000000001','claude-code',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
               VALUES('permission-event','018f0000-0000-7000-8000-000000000001','run-permission','claude-code','claude-code-hook','permission-source','PermissionRequest','2026-08-26T00:00:01.0000000+00:00','not_captured');
-            CREATE TABLE skill_projection_invocations(session_id TEXT,generation_id INTEGER,invocation_id TEXT);
-            CREATE TABLE skill_projection_sdk_claims(session_id TEXT,claim_id TEXT);
-            CREATE TABLE skill_invocation_snapshots(session_id TEXT,snapshot_id TEXT);
-            CREATE TABLE skill_invocation_snapshot_receipts(snapshot_id TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT);
             """);
-        using (var retention = connection.BeginTransaction())
-        {
-            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, retention);
-            retention.Commit();
-        }
+        InstallSkillAuthorities(connection);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-26T00:00:00Z"));
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT);
-            CREATE TABLE raw_records(id INTEGER,source TEXT,trace_id TEXT,received_at TEXT,schema_version INTEGER,retention_owner_token BLOB);
-            """);
         var nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT node_id FROM local_workspace_nodes WHERE source_identity='permission-event';").Single();
         var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(
@@ -268,6 +430,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal("permission-event", source.EventId);
 
         LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE session_events SET source_event_id='permission-source-2' WHERE event_id='permission-event';");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-26T00:00:01Z"));
         using var changedTransaction = connection.BeginTransaction(deferred: true);
         var changed = await contributor.ReadAsync(new DirectReadTransaction(connection, changedTransaction),
             new(LocalRepositorySessionDetailRequestKind.Node, SessionId, NodeId: nodeId), CancellationToken.None);
@@ -288,22 +451,9 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
               ('event-parent','session-a','run-parent','copilot-sdk',NULL,'synthetic','source-parent','event','2026-08-26T00:00:00.0000000+00:00','not_captured'),
               ('event-direct','session-a','run-child','copilot-sdk',NULL,'synthetic','source-direct','event','2026-08-26T00:00:01.0000000+00:00','not_captured'),
               ('event-unknown','session-a','run-child','copilot-sdk','event-parent','synthetic','source-unknown','event','2026-08-26T00:00:02.0000000+00:00','not_captured');
-            CREATE TABLE skill_projection_invocations(session_id TEXT,generation_id INTEGER,invocation_id TEXT);
-            CREATE TABLE skill_projection_sdk_claims(session_id TEXT,claim_id TEXT);
-            CREATE TABLE skill_invocation_snapshots(session_id TEXT,snapshot_id TEXT);
-            CREATE TABLE skill_invocation_snapshot_receipts(snapshot_id TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT);
             """);
-        using (var retention = connection.BeginTransaction())
-        {
-            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, retention);
-            retention.Commit();
-        }
+        InstallSkillAuthorities(connection);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-26T00:00:00Z"));
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT);
-            CREATE TABLE raw_records(id INTEGER,source TEXT,trace_id TEXT,received_at TEXT,schema_version INTEGER,retention_owner_token BLOB);
-            """);
         var executionId = LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT execution_id FROM local_workspace_execution_headers WHERE source_identity='run-child';").Single();
         var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(
@@ -600,7 +750,20 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         using var temp = new MonitorTempDirectory();
         var targetSession = AlertCenterRouteTests.SeedPersistedTraceAndSession(
             temp, "00000000000000000000000000000001", authoritativeToolStatus: true);
-        await using var host = await MonitorTestHost.StartAsync(temp);
+        using (var ownerConnection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
+        {
+            ownerConnection.Open();
+            LocalWorkspaceProjectionSchemaTests.Execute(ownerConnection,
+                "UPDATE monitor_spans SET span_id=printf('%016x',span_ordinal+1) WHERE trace_id='00000000000000000000000000000001';");
+        }
+        var sessionStore = new CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore(
+            temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        new CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionOtelEnricher(
+            temp.DatabasePath, sessionStore, temp.RetentionContext, temp.TimeProvider).ProcessNextBatch(100);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartSessionOtelEnrichment = false,
+        });
         using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         var sessionColumns = new List<string>();
@@ -709,13 +872,104 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
                   ('018f0000-0000-7000-8000-000000000022','{{sessionId}}','{{sdkRunId}}','copilot-sdk',NULL,'copilot-sdk-stream','sdk-subagent-completed','subagent.completed','2026-08-26T00:00:06.0000000+00:00','not_captured');
                 INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,parent_event_id,type,occurred_at,content_state) VALUES
                   ('018f0000-0000-7000-8000-000000000031','{{sessionId}}','{{sdkRunId}}','copilot-sdk','copilot-sdk-stream','sdk-tool-start',NULL,'tool.execution_start','2026-08-26T00:00:03.0000000+00:00','not_captured'),
-                  ('018f0000-0000-7000-8000-000000000032','{{sessionId}}','{{sdkRunId}}','copilot-sdk','copilot-sdk-stream','sdk-tool-complete','018f0000-0000-7000-8000-000000000031','tool.execution_complete','2026-08-26T00:00:04.0000000+00:00','not_captured');
-                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,duration_ms,start_time,end_time,projected_at)
-                  VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',NULL,0,'execute_tool','tool_call','Read','ok',2000,
+                  ('018f0000-0000-7000-8000-000000000032','{{sessionId}}','{{sdkRunId}}','copilot-sdk','copilot-sdk-stream','sdk-tool-complete','018f0000-0000-7000-8000-000000000031','tool.execution_complete','2026-08-26T00:00:04.0000000+00:00','not_captured'),
+                  ('018f0000-0000-7000-8000-000000000025','{{sessionId}}','{{sdkRunId}}','copilot-sdk','synthetic','generic-event',NULL,'event','2026-08-26T00:00:05.2500000+00:00','not_captured');
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at)
+                  VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',NULL,0,'execute_tool','tool_call','Read','ReadMcp','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','ok',2000,
                     '2026-08-26T00:00:02.0000000+00:00','2026-08-26T00:00:04.0000000+00:00','2026-08-26T00:00:04.0000000+00:00');
                 """);
             LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-26T00:10:00Z"));
         }
+    }
+
+    private static void InsertUnownedWorkspaceNode(SqliteConnection connection, string sourceKind, string sourceIdentity)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO local_workspace_nodes(
+              node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,
+              relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,token_state)
+            SELECT $node,header.session_id,header.execution_id,$source_kind,$source_identity,999,NULL,
+                   'unknown','unknown_relation_group','not_observed',NULL,'unknown','unknown','missing',NULL,'not_observed'
+            FROM local_workspace_execution_headers header
+            WHERE header.source_identity='018f0000-0000-7000-8000-000000000020';
+            """;
+        command.Parameters.AddWithValue("$node", LocalWorkspaceProjectionStore.StableNodeId(sourceKind, sourceIdentity));
+        command.Parameters.AddWithValue("$source_kind", sourceKind);
+        command.Parameters.AddWithValue("$source_identity", sourceIdentity);
+        Assert.Equal(1, command.ExecuteNonQuery());
+    }
+
+    private static void InsertReceiptlessSemanticNode(SqliteConnection connection, string sourceKind, string semanticKind)
+    {
+        var sourceIdentity = "unowned-" + semanticKind;
+        var nodeId = LocalWorkspaceProjectionStore.StableNodeId(sourceKind, sourceIdentity);
+        var columns = LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT name FROM pragma_table_info('local_workspace_nodes') ORDER BY cid;");
+        static string Quote(string identifier) => '"' + identifier.Replace("\"", "\"\"") + '"';
+        var columnList = string.Join(',', columns.Select(Quote));
+        var projection = string.Join(',', columns.Select(column => column switch
+        {
+            "node_id" => "$node",
+            "source_identity" => "$source_identity",
+            "source_ordinal" => "source_ordinal+1000",
+            _ => Quote(column),
+        }));
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = $"""
+                INSERT INTO local_workspace_nodes({columnList})
+                SELECT {projection} FROM local_workspace_nodes WHERE source_kind=$source_kind LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$node", nodeId);
+            command.Parameters.AddWithValue("$source_identity", sourceIdentity);
+            command.Parameters.AddWithValue("$source_kind", sourceKind);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+        var metadataTable = semanticKind == "tool" ? "local_workspace_tool_metadata" : "local_workspace_subagent_lifecycle";
+        var metadataColumns = LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            $"SELECT name FROM pragma_table_info('{metadataTable}') ORDER BY cid;");
+        var metadataColumnList = string.Join(',', metadataColumns.Select(Quote));
+        var metadataProjection = string.Join(',', metadataColumns.Select(column => column == "node_id" ? "$node" : Quote(column)));
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = $"""
+                INSERT INTO {metadataTable}({metadataColumnList})
+                SELECT {metadataProjection} FROM {metadataTable}
+                WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE source_kind=$source_kind AND node_id<>$node) LIMIT 1;
+                INSERT INTO local_workspace_node_source_references
+                SELECT $node,source_ordinal,source_kind,source_identity,trace_id,span_id,event_id,revision_input
+                FROM local_workspace_node_source_references
+                WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE source_kind=$source_kind AND node_id<>$node) LIMIT 1;
+                INSERT INTO local_workspace_node_edges
+                SELECT $node,related_node_id,relation_kind,relationship_authority,source_ordinal
+                FROM local_workspace_node_edges
+                WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE source_kind=$source_kind AND node_id<>$node) LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$node", nodeId);
+            command.Parameters.AddWithValue("$source_kind", sourceKind);
+            Assert.Equal(3, command.ExecuteNonQuery());
+        }
+    }
+
+    private static void InstallSkillAuthorities(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
+        CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, transaction);
+        SkillProjectionSchemaV1.Ensure(connection, transaction);
+        transaction.Commit();
+    }
+
+    private static SqliteLocalRepositoryScopeSnapshotService CreateRoundFiveService(string databasePath)
+    {
+        var clock = new FixedTimeProvider(DateTimeOffset.Parse("2026-08-26T00:10:00Z"));
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        return new(databasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority);
     }
 
     private static SqliteConnection OpenFile(string path)
@@ -750,7 +1004,8 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
 
         internal NativeDetailObserver(SqliteConnection connection)
         {
-            database = connection.Handle.DangerousGetHandle();
+            var handle = connection.Handle ?? throw new InvalidOperationException("SQLite handle unavailable.");
+            database = handle.DangerousGetHandle();
             callback = Observe;
             Assert.Equal(0, sqlite3_trace_v2(database, Statement | Profile, callback, IntPtr.Zero));
         }

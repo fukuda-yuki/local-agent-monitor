@@ -55,10 +55,14 @@ internal sealed record SkillProjectionCanonicalInvocation(
     string? SdkSourceAdapter = null,
     string? SkillSource = null,
     string? InvocationTrigger = null,
-    string? HistoricalSnapshotReference = null)
+    string? HistoricalSnapshotReference = null,
+    string CurrentValidState = "current",
+    string? OtelOwnerRevision = null,
+    string? SdkOwnerRevision = null)
 {
     internal IEnumerable<SkillProjectionCurrentSearchFact> ProjectSearchFacts()
     {
+        if (CurrentValidState != "current") yield break;
         if (OtelSourceIdentity is not null && OtelSkillName is not null)
             yield return new(SessionId, OtelSourceIdentity, OtelSkillName);
         if (SdkSourceIdentity is not null && SdkSkillName is not null)
@@ -73,7 +77,7 @@ internal sealed record SkillProjectionCurrentInvocationProjection(
     internal int? InvocationCount => State == "current" ? Invocations.Count : null;
 
     internal IReadOnlyList<SkillProjectionCurrentSearchFact> SearchFacts =>
-        State == "current" ? Invocations.SelectMany(static invocation => invocation.ProjectSearchFacts()).ToArray() : [];
+        Invocations.SelectMany(static invocation => invocation.ProjectSearchFacts()).ToArray();
 }
 
 internal sealed class SkillProjectionReadService
@@ -523,18 +527,31 @@ internal sealed class SkillProjectionReadService
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(sessionIds);
-        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction))
+        if (sessionIds.Count == 0)
             return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
 
-        var sdkAuthorityInstalled = IsSdkAuthorityReadable(connection, transaction);
-        var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
+        var skillProjectionInstalled = RequireCurrentSkillProjectionComponent(connection, transaction);
+        var sdkAuthorityInstalled = RequireCurrentSdkAuthorityComponent(connection, transaction);
+        if (!skillProjectionInstalled)
+        {
+            if (sdkAuthorityInstalled)
+                throw new InvalidOperationException("skill_projection_schema_unsupported");
+            return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
+        }
+        var hasTargetOtelFacts = HasTargetOtelInvocationFacts(connection, transaction, sessionIds);
+        if (hasTargetOtelFacts && !TableInstalled(connection, transaction, "source_trace_compatibility_revisions"))
+            throw new InvalidOperationException("skill_projection_schema_unsupported");
+        var otel = hasTargetOtelFacts ? ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds) : [];
+        var sdkObservations = sdkAuthorityInstalled
+            ? ReadPotentiallyCurrentSdkObservations(connection, transaction, sessionIds, new FixedProjectionTimeProvider(acceptedAt))
+            : [];
         IReadOnlySet<string> unavailableSdkSessions = registryAuthority is null && sdkAuthorityInstalled
-            ? ReadSdkSessionIds(connection, transaction, sessionIds)
+            ? sdkObservations.Select(static observation => observation.SessionId).ToHashSet(StringComparer.Ordinal)
             : new HashSet<string>(StringComparer.Ordinal);
         var sdk = registryAuthority is null || !sdkAuthorityInstalled
             ? []
             : ReadCurrentSdkInvocationFacts(connection, transaction, sessionIds, registryAuthority,
-                new FixedProjectionTimeProvider(acceptedAt), out unavailableSdkSessions);
+                new FixedProjectionTimeProvider(acceptedAt), sdkObservations, out unavailableSdkSessions);
         var result = new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
         var otelBySession = otel.GroupBy(static row => row.Fact.SessionId, StringComparer.Ordinal).ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
         var sdkBySession = sdk.GroupBy(static row => row.Fact.SessionId, StringComparer.Ordinal).ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
@@ -547,6 +564,11 @@ internal sealed class SkillProjectionReadService
             }
             var sessionOtel = otelBySession.GetValueOrDefault(sessionId, []);
             var sessionSdk = sdkBySession.GetValueOrDefault(sessionId, []);
+            if (HasConflictingExactProducerFacts(sessionOtel) || HasConflictingExactProducerFacts(sessionSdk))
+            {
+                result[sessionId] = new("unavailable", []);
+                continue;
+            }
             sessionOtel = DeduplicateExactProducerPairs(sessionOtel);
             sessionSdk = DeduplicateExactProducerPairs(sessionSdk);
             if (sessionOtel.Length == 0 && sessionSdk.Length == 0) continue;
@@ -565,7 +587,7 @@ internal sealed class SkillProjectionReadService
             var remaining = sessionOtel.GroupBy(static row => (row.TraceId, row.SpanId))
                 .ToDictionary(static group => group.Key, static group => new Queue<InvocationFact>(group));
             var admitted = new List<SkillProjectionCanonicalInvocation>();
-            var matched = 0;
+            var matchedSdk = new HashSet<string>(StringComparer.Ordinal);
             foreach (var sdkRow in sessionSdk)
             {
                 if (sdkRow.TraceId is null || sdkRow.SpanId is null ||
@@ -573,39 +595,22 @@ internal sealed class SkillProjectionReadService
                     continue;
                 var otelRow = candidates.Dequeue();
                 admitted.Add(ToExactPairCanonical(otelRow, sdkRow));
-                matched++;
+                matchedSdk.Add(sdkRow.Fact.SourceIdentity);
             }
-            result[sessionId] = matched == sessionOtel.Length && matched == sessionSdk.Length
+            var unmatchedOtel = remaining.Values.SelectMany(static queue => queue)
+                .Select(static row => ToOtelOnlyCanonical(row) with { CurrentValidState = "certification_pending" });
+            var unmatchedSdk = sessionSdk.Where(row => !matchedSdk.Contains(row.Fact.SourceIdentity))
+                .Select(static row => ToSdkOnlyCanonical(row) with { CurrentValidState = "certification_pending" });
+            var unmatched = unmatchedOtel.Concat(unmatchedSdk)
+                .OrderBy(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal).ToArray();
+            result[sessionId] = unmatched.Length == 0
                 ? new("current", admitted)
-                : new("certification_pending", sessionOtel.Select(ToOtelOnlyCanonical)
-                    .Concat(sessionSdk.Select(ToSdkOnlyCanonical))
+                : new("certification_pending", admitted.Concat(unmatched)
                     .OrderBy(static invocation => invocation.CanonicalIdentity, StringComparer.Ordinal)
                     .ToArray());
         }
         return result;
     }
-
-    private static IReadOnlySet<string> ReadSdkSessionIds(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT DISTINCT session_id FROM skill_invocation_snapshots
-            WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-            """;
-        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
-        SqliteCommandExecutionObserver.Executing();
-        using var reader = command.ExecuteReader();
-        var result = new HashSet<string>(StringComparer.Ordinal);
-        while (reader.Read()) result.Add(reader.GetString(0));
-        return result;
-    }
-
-    private static bool IsSdkAuthorityReadable(SqliteConnection connection, SqliteTransaction transaction) =>
-        SkillInvocationSnapshotSchemaV1.ReadDeclaredVersion(connection, transaction) == SkillInvocationSnapshotSchemaV1.Version;
 
     private sealed record InvocationFact(
         SkillProjectionCurrentSearchFact Fact,
@@ -617,7 +622,8 @@ internal sealed class SkillProjectionReadService
         string? SourceAdapter,
         string? SkillSource,
         string? InvocationTrigger,
-        string? HistoricalSnapshotReference);
+        string? HistoricalSnapshotReference,
+        string? OwnerRevision = null);
 
     private static SkillProjectionCanonicalInvocation ToOtelOnlyCanonical(InvocationFact row) => new(
         row.TraceId is not null && row.SpanId is not null
@@ -639,7 +645,8 @@ internal sealed class SkillProjectionReadService
         null,
         row.SkillSource,
         row.InvocationTrigger,
-        row.HistoricalSnapshotReference);
+        row.HistoricalSnapshotReference,
+        OtelOwnerRevision: row.OwnerRevision);
 
     private static SkillProjectionCanonicalInvocation ToSdkOnlyCanonical(InvocationFact row) => new(
         row.Fact.SourceIdentity,
@@ -659,7 +666,8 @@ internal sealed class SkillProjectionReadService
         row.SourceAdapter,
         row.SkillSource,
         row.InvocationTrigger,
-        row.HistoricalSnapshotReference);
+        row.HistoricalSnapshotReference,
+        SdkOwnerRevision: row.OwnerRevision);
 
     private static SkillProjectionCanonicalInvocation ToExactPairCanonical(InvocationFact otel, InvocationFact sdk) => new(
         "producer:" + otel.TraceId + ":" + otel.SpanId,
@@ -679,7 +687,9 @@ internal sealed class SkillProjectionReadService
         sdk.SourceAdapter,
         sdk.SkillSource ?? otel.SkillSource,
         sdk.InvocationTrigger ?? otel.InvocationTrigger,
-        sdk.HistoricalSnapshotReference ?? otel.HistoricalSnapshotReference);
+        sdk.HistoricalSnapshotReference ?? otel.HistoricalSnapshotReference,
+        OtelOwnerRevision: otel.OwnerRevision,
+        SdkOwnerRevision: sdk.OwnerRevision);
 
     private static InvocationFact[] DeduplicateExactProducerPairs(IEnumerable<InvocationFact> facts) =>
         facts.GroupBy(static row =>
@@ -689,6 +699,23 @@ internal sealed class SkillProjectionReadService
                 StringComparer.Ordinal)
             .Select(static group => group.First())
             .ToArray();
+
+    private static bool HasConflictingExactProducerFacts(IEnumerable<InvocationFact> facts) =>
+        facts.Where(static row => !string.IsNullOrEmpty(row.TraceId) && !string.IsNullOrEmpty(row.SpanId))
+            .GroupBy(static row => (row.TraceId, row.SpanId))
+            .Any(static group => group.Skip(1).Any(row => !EquivalentProducerFact(group.First(), row)));
+
+    private static bool EquivalentProducerFact(InvocationFact left, InvocationFact right) =>
+        string.Equals(left.Fact.SessionId, right.Fact.SessionId, StringComparison.Ordinal)
+        && string.Equals(left.Fact.SkillName, right.Fact.SkillName, StringComparison.Ordinal)
+        && string.Equals(left.Fact.ExpiresAt, right.Fact.ExpiresAt, StringComparison.Ordinal)
+        && string.Equals(left.ExecutionSourceIdentity, right.ExecutionSourceIdentity, StringComparison.Ordinal)
+        && string.Equals(left.CarrierEventId, right.CarrierEventId, StringComparison.Ordinal)
+        && string.Equals(left.SourceParentEventId, right.SourceParentEventId, StringComparison.Ordinal)
+        && string.Equals(left.SourceAdapter, right.SourceAdapter, StringComparison.Ordinal)
+        && string.Equals(left.SkillSource, right.SkillSource, StringComparison.Ordinal)
+        && string.Equals(left.InvocationTrigger, right.InvocationTrigger, StringComparison.Ordinal)
+        && string.Equals(left.HistoricalSnapshotReference, right.HistoricalSnapshotReference, StringComparison.Ordinal);
     private sealed class FixedProjectionTimeProvider(DateTimeOffset value) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => value;
@@ -723,7 +750,14 @@ internal sealed class SkillProjectionReadService
             WITH {carrierCte}
             admitted_invocations AS (SELECT 1 marker)
             SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,
-                   invocation.trace_id,invocation.span_id,{carrierColumns},{invocationMetadataColumns}
+                   invocation.trace_id,invocation.span_id,{carrierColumns},{invocationMetadataColumns},
+                   json_array(generation.generation_id,generation.trace_id,generation.compatibility_revision,generation.input_frontier_sha256,
+                     generation.projector_version,generation.lifecycle,generation.created_at,generation.updated_at,
+                     head.desired_generation_id,head.current_generation_id,head.updated_at,
+                     revision.current_revision,revision.current_effective_state,revision.current_exact_version,revision.updated_at,
+                     invocation.invocation_id,invocation.source_arm,invocation.raw_record_id,invocation.span_ordinal,
+                     invocation.skill_name,invocation.skill_source,invocation.invocation_trigger,invocation.source_application_version,
+                     invocation.projected_at,{(hasSessionEvents ? "c.run_id,c.event_id" : "NULL,NULL")})
             FROM skill_projection_invocations invocation
             JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id AND generation.lifecycle='current'
             JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id AND head.current_generation_id=invocation.generation_id
@@ -739,25 +773,51 @@ internal sealed class SkillProjectionReadService
         using var reader = command.ExecuteReader();
         var result = new List<InvocationFact>();
         while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), null, null,
-            reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), null));
+            reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), null, reader.GetString(9)));
         return result;
+    }
+
+    private static bool HasTargetOtelInvocationFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS(SELECT 1 FROM skill_projection_invocations
+              WHERE source_arm='otel_trace_span'
+                AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) LIMIT 1);
+            """;
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        SqliteCommandExecutionObserver.Executing();
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static IReadOnlyList<InvocationFact> ReadCurrentSdkInvocationFacts(
         SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds,
         ISkillRegistryGenerationAuthority registryAuthority, TimeProvider timeProvider,
+        IReadOnlyList<PotentialSdkObservation> observations,
         out IReadOnlySet<string> unavailableSessions)
     {
         var unavailable = new HashSet<string>(StringComparer.Ordinal);
         unavailableSessions = unavailable;
-        if (!IsSdkAuthorityReadable(connection, transaction)) return [];
         var candidates = ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider);
+        var ownedCandidates = ReadStructurallyValidSdkCandidates(
+            connection, transaction, sessionIds, timeProvider, requireCurrentRetention: false);
         var result = new List<InvocationFact>();
+        var structurallyValidSnapshotIds = ownedCandidates.Where(static candidate => candidate.HasValidReceiptFingerprint())
+            .Select(static candidate => candidate.SnapshotId).ToHashSet(StringComparer.Ordinal);
         var authorizations = new Dictionary<SkillRegistryProducerTuple, SkillProjectionCurrentSdkClaimAuthorizationResult>();
         try
         {
             foreach (var candidate in candidates)
             {
+                if (!candidate.HasValidReceiptFingerprint())
+                {
+                    unavailable.Add(candidate.SessionId);
+                    continue;
+                }
                 var tuple = new SkillRegistryProducerTuple(candidate.SourceApplicationVersion, candidate.AdapterVersion,
                     candidate.NormalizationVersion, candidate.PayloadSchema, candidate.SchemaFingerprint);
                 if (!authorizations.TryGetValue(tuple, out var authorizationResult))
@@ -770,13 +830,42 @@ internal sealed class SkillProjectionReadService
                 if (authorizationResult.Authorization is null) continue;
                 result.Add(new(new(candidate.SessionId, "sdk:" + candidate.ClaimId, candidate.SkillName, candidate.ExpiresAt),
                     candidate.ProducerTraceId, candidate.ProducerSpanId, candidate.RunId, candidate.EventId, candidate.SourceParentEventId, candidate.SourceAdapter,
-                    candidate.SkillSource, candidate.Trigger, candidate.SnapshotId));
+                    candidate.SkillSource, candidate.Trigger, candidate.SnapshotId,
+                    System.Text.Json.JsonSerializer.Serialize(candidate)));
             }
+            foreach (var observation in observations)
+                if (!structurallyValidSnapshotIds.Contains(observation.SnapshotId))
+                    unavailable.Add(observation.SessionId);
         }
         finally
         {
             foreach (var authorization in authorizations.Values) authorization.Authorization?.Dispose();
         }
+        return result;
+    }
+
+    private sealed record PotentialSdkObservation(string SessionId, string SnapshotId);
+
+    private static IReadOnlyList<PotentialSdkObservation> ReadPotentiallyCurrentSdkObservations(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        TimeProvider timeProvider)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT s.session_id,s.snapshot_id
+            FROM skill_invocation_snapshots s
+            WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND s.state='available' AND s.reason='none'
+            ORDER BY s.session_id COLLATE BINARY,s.snapshot_id COLLATE BINARY;
+            """;
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        SqliteCommandExecutionObserver.Executing();
+        using var reader = command.ExecuteReader();
+        var result = new List<PotentialSdkObservation>();
+        while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1)));
         return result;
     }
 
@@ -802,7 +891,9 @@ internal sealed class SkillProjectionReadService
         string SourceAdapter, string SourceEventId, string SourceSurface, string NativeSessionId, string? RunNativeId,
         bool SourceEphemeral, DateTimeOffset OccurredAt, string PayloadSha256, ulong PayloadBytes, string State,
         string Reason, string? Trigger, string? BodySha256, ulong? BodyUtf8Bytes, string? DefinitionPathSha256,
-        ulong? DefinitionPathUtf8Bytes, string ContentDocumentSha256)
+        ulong? DefinitionPathUtf8Bytes, string ContentDocumentSha256,
+        string RetentionItemId, long RetentionRevision, string RetentionState, string RetentionExpiresAt,
+        string? RetentionReadDeniedAt, string? RetentionDeletedAt, string? RetentionErrorCode, string? RetentionTombstoneAt)
     {
         internal bool HasValidReceiptFingerprint() => string.Equals(ReceiptFingerprint,
             SkillInvocationSnapshotReceiptFingerprint.Compute(new(SourceAdapter, SourceEventId, SourceSurface,
@@ -814,22 +905,32 @@ internal sealed class SkillProjectionReadService
     }
 
     private static IReadOnlyList<StructurallyValidSdkCandidate> ReadStructurallyValidSdkCandidates(
-        SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, TimeProvider timeProvider)
+        SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, TimeProvider timeProvider,
+        bool requireCurrentRetention = true)
     {
+        var retentionAdmission = requireCurrentRetention
+            ? """
+              AND i.state IN ('retained_by_policy','expiring') AND i.read_denied_at IS NULL AND i.deleted_at IS NULL
+              AND i.error_code IS NULL AND (i.state='retained_by_policy' OR i.expires_at>$now)
+              AND t.item_id IS NULL
+              """
+            : string.Empty;
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT s.session_id,s.snapshot_id,s.claim_id,s.event_id,s.run_id,s.source_parent_event_id,
                    s.source_application_version,s.adapter_version,s.normalization_version,s.payload_schema,s.schema_fingerprint,
                    s.name,s.source,s.trace_id,s.span_id,CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END,r.request_fingerprint_sha256,
                    e.source_adapter,e.source_event_id,e.source_surface,s.native_session_id,u.native_run_id,
                    s.source_ephemeral,e.occurred_at,s.payload_sha256,s.payload_bytes,s.state,s.reason,s.trigger,
-                   s.body_sha256,s.body_utf8_bytes,s.definition_path_sha256,s.definition_path_utf8_bytes,s.content_document_sha256
+                   s.body_sha256,s.body_utf8_bytes,s.definition_path_sha256,s.definition_path_utf8_bytes,s.content_document_sha256,
+                   i.item_id,i.revision,i.state,i.expires_at,i.read_denied_at,i.deleted_at,i.error_code,t.receipt_at
             FROM skill_invocation_snapshots s
             JOIN session_events e ON e.session_id=s.session_id AND e.event_id=s.event_id
             JOIN skill_invocation_snapshot_receipts r ON r.snapshot_id=s.snapshot_id
             JOIN retention_items i ON i.item_id=s.content_item_id AND i.store_kind='session_event_content'
               AND i.source_item_id=s.event_id AND i.captured_at=s.captured_at
+            LEFT JOIN retention_tombstones t ON t.item_id=i.item_id
             JOIN session_event_content c ON c.event_id=s.event_id AND c.content_kind='application/json'
               AND c.captured_at=s.captured_at AND c.expires_at=i.expires_at
             JOIN sessions se ON se.session_id=s.session_id AND se.created_at<=s.captured_at AND se.updated_at>=s.captured_at
@@ -856,9 +957,7 @@ internal sealed class SkillProjectionReadService
               AND e.normalization_version=s.normalization_version AND e.schema_fingerprint=s.schema_fingerprint
               AND e.trace_id IS s.trace_id AND e.run_id IS s.run_id
               AND r.source_adapter=e.source_adapter AND r.source_event_id=e.source_event_id AND r.created_at=s.captured_at
-              AND i.state IN ('retained_by_policy','expiring') AND i.read_denied_at IS NULL AND i.deleted_at IS NULL
-              AND i.error_code IS NULL AND (i.state='retained_by_policy' OR i.expires_at>$now)
-              AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
+              {retentionAdmission}
               AND (s.run_id IS NULL OR (u.source_surface='copilot-sdk' AND u.native_run_id IS NOT NULL AND length(u.native_run_id)>0
                 AND (SELECT COUNT(*) FROM session_runs ux WHERE ux.session_id=s.session_id AND ux.source_surface='copilot-sdk' AND ux.native_run_id=u.native_run_id)=1))
               AND (SELECT COUNT(*) FROM skill_invocation_snapshot_receipts rx WHERE rx.snapshot_id=s.snapshot_id)=1
@@ -882,10 +981,81 @@ internal sealed class SkillProjectionReadService
                 reader.GetString(24), checked((ulong)reader.GetInt64(25)), reader.GetString(26), reader.GetString(27),
                 reader.IsDBNull(28) ? null : reader.GetString(28), reader.IsDBNull(29) ? null : reader.GetString(29),
                 reader.IsDBNull(30) ? null : checked((ulong)reader.GetInt64(30)), reader.IsDBNull(31) ? null : reader.GetString(31),
-                reader.IsDBNull(32) ? null : checked((ulong)reader.GetInt64(32)), reader.GetString(33));
-            if (candidate.HasValidReceiptFingerprint()) result.Add(candidate);
+                reader.IsDBNull(32) ? null : checked((ulong)reader.GetInt64(32)), reader.GetString(33),
+                reader.GetString(34), reader.GetInt64(35), reader.GetString(36), reader.GetString(37),
+                reader.IsDBNull(38) ? null : reader.GetString(38), reader.IsDBNull(39) ? null : reader.GetString(39),
+                reader.IsDBNull(40) ? null : reader.GetString(40), reader.IsDBNull(41) ? null : reader.GetString(41));
+            result.Add(candidate);
         }
         return result;
+    }
+
+    private static bool RequireCurrentSkillProjectionComponent(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        var ownedObjectCount = OwnedObjectCount(connection, transaction, "skill\\_projection\\_%");
+        var declaredVersion = ReadComponentVersion(connection, transaction, "skill_projection");
+        var hasObsoleteAuthority = SkillProjectionSchemaV1.HasObsoleteAuthority(connection, transaction);
+        if (declaredVersion is null && ownedObjectCount == 0 && !hasObsoleteAuthority) return false;
+        if (declaredVersion != SkillProjectionSchemaV1.Version
+            || hasObsoleteAuthority
+            || !SkillProjectionSchemaV1.HasExactOwnedSchema(connection, transaction))
+            throw new InvalidOperationException("skill_projection_schema_unsupported");
+        return true;
+    }
+
+    private static bool RequireCurrentSdkAuthorityComponent(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        var ownedObjectCount = SkillInvocationSnapshotSchemaV1.ReadOwnedObjects(connection, transaction).Count;
+        long? declaredVersion;
+        try
+        {
+            declaredVersion = SkillInvocationSnapshotSchemaV1.ReadDeclaredVersion(connection, transaction);
+        }
+        catch (InvalidOperationException)
+        {
+            throw new InvalidOperationException("skill_projection_schema_unsupported");
+        }
+        if (declaredVersion is null && ownedObjectCount == 0) return false;
+        if (declaredVersion != SkillInvocationSnapshotSchemaV1.Version
+            || !SkillInvocationSnapshotSchemaV1.HasExactOwnedSchema(connection, transaction))
+            throw new InvalidOperationException("skill_projection_schema_unsupported");
+        return true;
+    }
+
+    private static long? ReadComponentVersion(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string component)
+    {
+        if (!TableInstalled(connection, transaction, "schema_version")) return null;
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT version,typeof(version) FROM schema_version WHERE component=$component COLLATE BINARY;";
+        command.Parameters.AddWithValue("$component", component);
+        SqliteCommandExecutionObserver.Executing();
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        if (reader.GetString(1) != "integer") throw new InvalidOperationException("skill_projection_schema_unsupported");
+        var version = reader.GetInt64(0);
+        if (reader.Read()) throw new InvalidOperationException("skill_projection_schema_unsupported");
+        return version;
+    }
+
+    private static long OwnedObjectCount(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string pattern)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE $pattern ESCAPE '\\';";
+        command.Parameters.AddWithValue("$pattern", pattern);
+        SqliteCommandExecutionObserver.Executing();
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
     }
 
     private static bool ComponentInstalled(SqliteConnection connection, SqliteTransaction transaction)
