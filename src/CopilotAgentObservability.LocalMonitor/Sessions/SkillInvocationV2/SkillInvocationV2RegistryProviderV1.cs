@@ -84,6 +84,14 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
         return typedCapture.Generation.Identity.ToString("D");
     }
 
+    public string? GetCanonicalArtifactAuthorityIdentity(
+        ISkillRegistryGenerationCapture capture,
+        ISkillRegistryGenerationLease lease) =>
+        capture is GenerationCapture typedCapture && lease is GenerationLease
+            && VerifyGenerationIdentity(capture, lease)
+            ? typedCapture.Generation.ArtifactAuthorityIdentity
+            : null;
+
     public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
     {
         if (lease is not GenerationLease typedLease)
@@ -142,6 +150,10 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
             if (!VerifyGenerationIdentity(capture, lease)) throw new InvalidOperationException("skill_registry_generation_not_current");
             return generation.Identity.ToString("D");
         }
+        public string? GetCanonicalArtifactAuthorityIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) =>
+            VerifyGenerationIdentity(capture, lease) ? generation.ArtifactAuthorityIdentity : null;
         public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
         {
             if (lease is not ProposedGenerationLease typed || !ReferenceEquals(typed.Generation, generation)) return false;
@@ -185,9 +197,13 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
         {
             Identity = identity;
             Registry = registry;
+            var current = registry.History.Single(item => item.Revision == registry.CurrentRevision);
+            ArtifactAuthorityIdentity = $"{current.Revision}:{current.ArtifactFingerprint}";
         }
 
         internal Guid Identity { get; }
+
+        internal string ArtifactAuthorityIdentity { get; }
 
         internal SkillInvocationV2ArtifactRegistry Registry { get; }
     }

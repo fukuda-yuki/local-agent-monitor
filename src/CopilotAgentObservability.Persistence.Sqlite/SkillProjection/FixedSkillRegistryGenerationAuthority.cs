@@ -7,14 +7,20 @@ internal sealed class FixedSkillRegistryGenerationAuthority : ISkillRegistryGene
     private readonly IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> entries;
     private readonly int revision;
     private readonly string artifactFingerprint;
+    private readonly string artifactAuthorityIdentity;
+    private readonly string generationIdentity;
     private readonly Generation generation = new();
 
-    private FixedSkillRegistryGenerationAuthority(SkillInvocationV2CompatibilityRegistryRevision revision)
+    private FixedSkillRegistryGenerationAuthority(
+        SkillInvocationV2CompatibilityRegistryRevision revision,
+        string? generationIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(revision);
         entries = revision.Entries;
         this.revision = revision.Revision;
         artifactFingerprint = revision.ArtifactFingerprint;
+        artifactAuthorityIdentity = $"{revision.Revision}:{revision.ArtifactFingerprint}";
+        this.generationIdentity = generationIdentity ?? artifactAuthorityIdentity;
     }
 
     internal static FixedSkillRegistryGenerationAuthority Load()
@@ -29,6 +35,34 @@ internal sealed class FixedSkillRegistryGenerationAuthority : ISkillRegistryGene
         if (!registry.TryResolveWriterVersion(writerVersion, out var revision))
             throw new InvalidOperationException("Skill invocation v2 writer provenance is unavailable.");
         return new(revision);
+    }
+
+    internal static FixedSkillRegistryGenerationAuthority ForWriterVersion(
+        string writerVersion,
+        string generationIdentity)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(generationIdentity);
+        var registry = SkillInvocationV2ArtifactRegistry.Load();
+        if (!registry.TryResolveWriterVersion(writerVersion, out var revision))
+            throw new InvalidOperationException("Skill invocation v2 writer provenance is unavailable.");
+        return new(revision, generationIdentity);
+    }
+
+    internal static FixedSkillRegistryGenerationAuthority ForPersistedGenerationIdentity(
+        string currentWriterVersion,
+        string generationIdentity)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(generationIdentity);
+        var registry = SkillInvocationV2ArtifactRegistry.Load();
+        var historical = registry.History.SingleOrDefault(revision =>
+            string.Equals(
+                generationIdentity,
+                $"{revision.Revision}:{revision.ArtifactFingerprint}",
+                StringComparison.Ordinal));
+        if (historical is not null) return new(historical, generationIdentity);
+        if (!registry.TryResolveWriterVersion(currentWriterVersion, out var current))
+            throw new InvalidOperationException("Skill invocation v2 writer provenance is unavailable.");
+        return new(current, generationIdentity);
     }
 
     internal bool MatchesWriterVersion(string writerVersion) =>
@@ -60,8 +94,13 @@ internal sealed class FixedSkillRegistryGenerationAuthority : ISkillRegistryGene
     public string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease)
     {
         if (!VerifyGenerationIdentity(capture, lease)) throw new InvalidOperationException("skill_registry_generation_not_current");
-        return $"{revision}:{artifactFingerprint}";
+        return generationIdentity;
     }
+
+    public string? GetCanonicalArtifactAuthorityIdentity(
+        ISkillRegistryGenerationCapture capture,
+        ISkillRegistryGenerationLease lease) =>
+        VerifyGenerationIdentity(capture, lease) ? artifactAuthorityIdentity : null;
 
     public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
     {

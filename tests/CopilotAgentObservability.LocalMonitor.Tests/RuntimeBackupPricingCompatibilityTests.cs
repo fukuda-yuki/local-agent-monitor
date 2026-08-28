@@ -116,6 +116,70 @@ public sealed class RuntimeBackupPricingCompatibilityTests
     }
 
     [Fact]
+    public void InitializeExecutesEveryMissingComponentInRegisteredOrder()
+    {
+        using var database = new PricingBackupDatabase();
+        database.CreateCore(alertVersion: 1);
+        var migrated = new List<string>();
+        var service = new SqliteRuntimeBackupService(database.Clock, checkpoint =>
+        {
+            const string prefix = "component-migration:";
+            if (checkpoint.StartsWith(prefix, StringComparison.Ordinal))
+                migrated.Add(checkpoint[prefix.Length..]);
+        });
+
+        var result = service.Initialize(database.Path);
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Equal(
+        [
+            "local_repository_catalog",
+            "local_archive",
+            "skill_projection",
+            "skill_invocation_snapshot",
+            "local_workspace_projection",
+            "doctor",
+            "alert_engine",
+            "alert_lifecycle",
+            "first_trace_navigation",
+            "historical_instruction_analysis",
+            "historical_import",
+            "sanitized_import",
+            "runtime_backup",
+            "pricing",
+        ], migrated);
+    }
+
+    [Fact]
+    public void InitializeRollsBackAlertUpgradeAndEveryMissingComponentWhenFinalMigrationFails()
+    {
+        using var database = new PricingBackupDatabase();
+        database.CreateCore(alertVersion: 1);
+        database.Checkpoint();
+        var before = File.ReadAllBytes(database.Path);
+        var service = new SqliteRuntimeBackupService(database.Clock, checkpoint =>
+        {
+            if (checkpoint == "component-migration:pricing")
+                throw new InvalidOperationException("synthetic migration failure");
+        });
+
+        var result = service.Initialize(database.Path);
+        database.Checkpoint();
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(database.Path));
+        using var connection = database.Open(readOnly: true);
+        Assert.Equal(1L, database.Scalar(connection,
+            "SELECT version FROM schema_version WHERE component='alert_engine';"));
+        Assert.Equal(0L, database.Scalar(connection,
+            "SELECT COUNT(*) FROM schema_version WHERE component IN " +
+            "('local_repository_catalog','local_archive','skill_projection','skill_invocation_snapshot'," +
+            "'local_workspace_projection','doctor','alert_lifecycle','first_trace_navigation'," +
+            "'historical_instruction_analysis','historical_import','sanitized_import','runtime_backup','pricing');"));
+    }
+
+    [Fact]
     public void Backup_restore_preserves_pricing_catalog_canonical_bytes()
     {
         using var database = new PricingBackupDatabase();

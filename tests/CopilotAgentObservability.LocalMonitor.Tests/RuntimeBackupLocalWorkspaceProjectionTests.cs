@@ -4,6 +4,8 @@ using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
+using CopilotAgentObservability.ConfigCli;
 using Microsoft.Data.Sqlite;
 using System.IO.Compression;
 using System.Reflection;
@@ -56,6 +58,506 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Fact]
+    public void DynamicR0002WriterArchiveIsPortableAcrossFreshMonitorAndCliAuthorities()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("fresh-process-r0002.zip");
+        var target = fixture.Path("fresh-process-r0002-target.db");
+        var cliTarget = fixture.Path("fresh-process-r0002-cli-target.db");
+        var restartedGate = new LocalWorkspacePublicationGate();
+        var restartedMonitor = new SqliteRuntimeBackupService(
+            fixture.Clock,
+            new SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry.Load(), restartedGate),
+            restartedGate);
+        var restartedCli = new SqliteRuntimeBackupService(fixture.Clock);
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        var monitorInspection = restartedMonitor.Inspect(archive);
+        var cliInspection = restartedCli.Inspect(archive);
+        var restored = restartedMonitor.Restore(archive, target, new RuntimeRestoreOptions());
+        var cliOutput = new StringWriter();
+        var cliError = new StringWriter();
+        var cliExit = RuntimeBackupCli.Run(
+            ["restore", "--bundle", archive, "--database", cliTarget],
+            cliOutput,
+            cliError);
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.True(monitorInspection.Success, monitorInspection.ErrorCode);
+        Assert.True(cliInspection.Success, cliInspection.ErrorCode);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(["demo-skill"], Strings(target, "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill';"));
+        Assert.Equal(0, cliExit);
+        Assert.Equal(string.Empty, cliError.ToString());
+        Assert.Equal(1L, Scalar(cliTarget, "SELECT COUNT(*) FROM skill_invocation_snapshots;"));
+    }
+
+    [Fact]
+    public void DynamicRegistryGenerationIdentityRemainsOpaqueAcrossProvidersAndPublications()
+    {
+        var first = new SkillInvocationV2RegistryProviderV1();
+        var second = new SkillInvocationV2RegistryProviderV1();
+        var beforePublication = CanonicalIdentity(first);
+
+        Assert.NotEqual(beforePublication, CanonicalIdentity(second));
+        first.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
+        Assert.NotEqual(beforePublication, CanonicalIdentity(first));
+    }
+
+    [Theory]
+    [InlineData("capture")]
+    [InlineData("lease")]
+    [InlineData("verify")]
+    public void RegistryAuthorityFailureRejectsPublicationBeforeSourceMutation(string failure)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path($"authority-{failure}-publication.zip");
+        NormalizeForByteComparison(fixture.DatabasePath);
+        var before = File.ReadAllBytes(fixture.DatabasePath);
+        var service = new SqliteRuntimeBackupService(
+            fixture.Clock,
+            new FailingRegistryGenerationAuthority(failure),
+            fixture.Gate);
+
+        var created = service.CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.False(created.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(fixture.DatabasePath));
+        Assert.False(File.Exists(archive));
+    }
+
+    [Theory]
+    [InlineData("capture")]
+    [InlineData("lease")]
+    [InlineData("verify")]
+    public void RegistryAuthorityFailureDoesNotReplaceManifestInspectionAndCannotMutateRestoreTarget(string failure)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path($"authority-{failure}-restore.zip");
+        var target = fixture.Path($"authority-{failure}-target.db");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        File.Copy(fixture.DatabasePath, target);
+        NormalizeForByteComparison(target);
+        var before = File.ReadAllBytes(target);
+        var gate = new LocalWorkspacePublicationGate();
+        var service = new SqliteRuntimeBackupService(
+            fixture.Clock,
+            new FailingRegistryGenerationAuthority(failure),
+            gate);
+
+        var inspected = service.Inspect(archive);
+        var restored = service.Restore(archive, target, new RuntimeRestoreOptions());
+
+        Assert.True(inspected.Success, inspected.ErrorCode);
+        Assert.False(restored.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restored.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(target));
+    }
+
+    [Theory]
+    [InlineData("preview")]
+    [InlineData("restore-new")]
+    [InlineData("restore-existing")]
+    public void RestoreOperationHoldsOneRegistryGenerationCaptureThroughValidationAndSafetyBackup(string operation)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path($"single-authority-{operation}.zip");
+        var target = fixture.Path($"single-authority-{operation}.db");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        if (operation == "restore-existing") File.Copy(fixture.DatabasePath, target);
+        var authority = new SingleCaptureRegistryGenerationAuthority();
+        var gate = new LocalWorkspacePublicationGate();
+        var service = new SqliteRuntimeBackupService(fixture.Clock, authority, gate);
+
+        var result = operation == "preview"
+            ? service.Preview(archive, target).Success
+            : service.Restore(archive, target, new RuntimeRestoreOptions()).Success;
+
+        Assert.True(result);
+        Assert.Equal(1, authority.CaptureCount);
+        Assert.Equal(1, authority.LeaseDisposeCount);
+    }
+
+    [Fact]
+    public void ExistingDynamicTargetUsesCapturedAuthorityForPreviewAndSafetyBackup()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("dynamic-existing-source.zip");
+        var target = fixture.Path("dynamic-existing-target.db");
+        var safetyArchive = fixture.Path("dynamic-existing-safety.zip");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        File.Copy(fixture.DatabasePath, target);
+        Assert.Equal(CanonicalIdentity(fixture.Authority), Text(target,
+            "SELECT registry_generation_identity FROM local_workspace_skill_metadata;"));
+        Assert.NotEqual(CanonicalIdentity(FixedSkillRegistryGenerationAuthority.Load()), Text(target,
+            "SELECT registry_generation_identity FROM local_workspace_skill_metadata;"));
+
+        var preview = fixture.Service.Preview(archive, target);
+        var restored = fixture.Service.Restore(
+            archive,
+            target,
+            new RuntimeRestoreOptions(PreRestoreOutputPath: safetyArchive));
+
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.True(restored.PreRestoreBackupCreated);
+        Assert.True(File.Exists(safetyArchive));
+        Assert.Equal(["demo-skill"], Strings(target,
+            "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill';"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CommittedCrashRecoveryReconstructsPersistedDynamicAuthority(bool targetExisted)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path($"dynamic-committed-{targetExisted}.zip");
+        var target = fixture.Path($"dynamic-committed-{targetExisted}.db");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        if (targetExisted)
+            Assert.True(new SqliteRuntimeBackupService(fixture.Clock).Initialize(target).Success);
+        var crashing = new SqliteRuntimeBackupService(fixture.Clock, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.AfterCommittedJournalCandidateFlushed)
+                throw new SimulatedProcessCrashException();
+        });
+        crashing.ConfigureSkillRegistryAuthority(fixture.Authority);
+
+        Assert.Throws<SimulatedProcessCrashException>(() =>
+            crashing.Restore(archive, target, new RuntimeRestoreOptions()));
+
+        var recovering = new SqliteRuntimeBackupService(fixture.Clock);
+        var structuralPreflight = recovering.PreflightForMigration(target);
+        Assert.True(structuralPreflight.Success,
+            $"{structuralPreflight.ErrorCode};{string.Join(',', structuralPreflight.ComponentVersions?.Select(item => $"{item.Key}:{item.Value}") ?? [])}");
+
+        var recovered = recovering.Initialize(target);
+
+        Assert.True(recovered.Success, recovered.ErrorCode);
+        Assert.Equal(["demo-skill"], Strings(target,
+            "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill';"));
+        Assert.False(File.Exists(target + ".runtime-restore-journal.json"));
+        Assert.False(File.Exists(target + ".runtime-restore-journal.json.commit"));
+        Assert.False(File.Exists(target + ".runtime-restore-rollback"));
+    }
+
+    [Theory]
+    [InlineData("INSERT INTO schema_version(component,version) VALUES('future_component',1);")]
+    [InlineData("UPDATE schema_version SET version=2 WHERE component='runtime_backup';")]
+    [InlineData("ALTER TABLE runtime_backup_receipts ADD COLUMN injected TEXT;")]
+    public void PublicationPreflightRejectsUnknownFutureOrMalformedComponentWithoutSourceMutation(string mutation)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("preflight-rejected.zip");
+        Execute(fixture.DatabasePath, mutation);
+        NormalizeForByteComparison(fixture.DatabasePath);
+        var before = File.ReadAllBytes(fixture.DatabasePath);
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.False(created.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(fixture.DatabasePath));
+        Assert.False(File.Exists(archive));
+    }
+
+    [Fact]
+    public void CreateAndPublishAdoptsMissingRetentionCatalogForExistingRawAndSessionContent()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        Execute(fixture.DatabasePath, """
+            INSERT INTO raw_records(
+                source,trace_id,received_at,resource_attributes_json,payload_json,
+                schema_version,retention_owner_token)
+            VALUES(
+                'raw-otlp',NULL,'2026-08-26T00:00:00.0000000+00:00','{}','{}',
+                1,randomblob(32));
+            """);
+        RemoveRetentionAndDependentComponents(fixture.DatabasePath);
+        var archive = fixture.Path("missing-retention-adoption.zip");
+
+        Assert.Equal(1L, Scalar(fixture.DatabasePath, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(1L, Scalar(fixture.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+        var preflight = fixture.Service.PreflightForMigration(fixture.DatabasePath);
+        Assert.True(preflight.Success,
+            $"{preflight.ErrorCode};{string.Join(',', preflight.ComponentVersions?.Select(item => $"{item.Key}:{item.Value}") ?? [])}");
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        var inspected = fixture.Service.Inspect(archive);
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.True(inspected.Success, inspected.ErrorCode);
+        Assert.Equal(1L, Scalar(fixture.DatabasePath,
+            "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record';"));
+        Assert.Equal(1L, Scalar(fixture.DatabasePath,
+            "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content';"));
+    }
+
+    [Fact]
+    public void IncompleteLiveTailPreservesSourceAbsentReadDeniedWorkspaceAuthority()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        SeedTerminalEventContent(fixture.DatabasePath, fixture.Authority);
+        SetTerminalContentState(fixture.DatabasePath, fixture.Authority, "read_denied");
+        Execute(fixture.DatabasePath,
+            $"DELETE FROM session_event_content WHERE event_id='{TerminalEventId}';");
+        RemovePricingComponent(fixture.DatabasePath);
+        var archive = fixture.Path("incomplete-live-tail.zip");
+        var preflight = fixture.Service.PreflightForMigration(fixture.DatabasePath);
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.True(preflight.Success,
+            $"{preflight.ErrorCode};{string.Join(',', preflight.ComponentVersions?.Select(item => $"{item.Key}:{item.Value}") ?? [])}");
+        Assert.Equal("read_denied", WorkspaceContentState(fixture.DatabasePath));
+        Assert.Equal(1L, Scalar(fixture.DatabasePath,
+            "SELECT COUNT(*) FROM schema_version WHERE component='pricing' AND version=1;"));
+        Assert.True(created.Success, created.ErrorCode);
+    }
+
+    [Fact]
+    public void IncompleteSafetySnapshotPreservesSourceAbsentReadDeniedWorkspaceAuthority()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var incoming = fixture.Path("incomplete-safety-incoming.zip");
+        SeedTerminalEventContent(fixture.DatabasePath, fixture.Authority);
+        var targetDirectory = fixture.Path("app");
+        Directory.CreateDirectory(targetDirectory);
+        var target = System.IO.Path.Combine(targetDirectory, "incomplete-safety-target.db");
+        File.Copy(fixture.DatabasePath, target);
+        SetArchivedContentState(fixture.DatabasePath, fixture.Authority, "not_captured");
+        var incomingCreated = fixture.Service.CreateAndPublish(fixture.DatabasePath, incoming);
+        Assert.True(incomingCreated.Success, incomingCreated.ErrorCode);
+        SetTerminalContentState(target, fixture.Authority, "read_denied");
+        Execute(target, $"DELETE FROM session_event_content WHERE event_id='{TerminalEventId}';");
+        RemovePricingComponent(target);
+        var safetyArchive = System.IO.Path.Combine(targetDirectory, "incomplete-safety.zip");
+        var restoredSafety = System.IO.Path.Combine(targetDirectory, "incomplete-safety-restored.db");
+
+        var restored = fixture.Service.Restore(
+            incoming,
+            target,
+            new RuntimeRestoreOptions(PreRestoreOutputPath: safetyArchive));
+        var safetyRestore = fixture.Service.Restore(
+            safetyArchive,
+            restoredSafety,
+            new RuntimeRestoreOptions());
+
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.True(safetyRestore.Success, safetyRestore.ErrorCode);
+        Assert.Equal("read_denied", WorkspaceContentState(restoredSafety));
+        Assert.Equal(0L, Scalar(restoredSafety,
+            $"SELECT COUNT(*) FROM session_event_content WHERE event_id='{TerminalEventId}';"));
+    }
+
+    [Fact]
+    public void AlertV1MigrationRunsInsideTheRegisteredAtomicTail()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        DowngradeAlertToV1(fixture.DatabasePath);
+        RemovePricingComponent(fixture.DatabasePath);
+        var archive = fixture.Path("alert-v1-tail.zip");
+        var preflight = fixture.Service.PreflightForMigration(fixture.DatabasePath);
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.True(preflight.Success,
+            $"{preflight.ErrorCode};{string.Join(',', preflight.ComponentVersions?.Select(item => $"{item.Key}:{item.Value}") ?? [])}");
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.Equal(2L, Scalar(fixture.DatabasePath,
+            "SELECT version FROM schema_version WHERE component='alert_engine';"));
+        Assert.True(fixture.Service.Inspect(archive).Success);
+    }
+
+    [Theory]
+    [InlineData("not_captured", "read_denied")]
+    [InlineData("not_captured", "deleted")]
+    [InlineData("invalid", "read_denied")]
+    [InlineData("invalid", "deleted")]
+    [InlineData("deleted", "read_denied")]
+    public void RestorePreservesCurrentTerminalWorkspaceAuthorityAcrossArchivedReferences(
+        string archivedState,
+        string terminalState)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        SeedTerminalEventContent(fixture.DatabasePath, fixture.Authority);
+        NormalizeForByteComparison(fixture.DatabasePath);
+        var targetDirectory = fixture.Path("app");
+        Directory.CreateDirectory(targetDirectory);
+        var target = System.IO.Path.Combine(targetDirectory, $"terminal-{archivedState}-{terminalState}.db");
+        File.Copy(fixture.DatabasePath, target);
+        if (archivedState == "deleted")
+            SetTerminalContentState(fixture.DatabasePath, fixture.Authority, archivedState);
+        else
+            SetArchivedContentState(fixture.DatabasePath, fixture.Authority, archivedState);
+        Assert.Equal(archivedState, WorkspaceContentState(fixture.DatabasePath));
+        var archive = fixture.Path($"terminal-{archivedState}-{terminalState}.zip");
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        Assert.True(created.Success, created.ErrorCode);
+        SetTerminalContentState(target, fixture.Authority, terminalState);
+        Assert.Equal(terminalState, WorkspaceContentState(target));
+        if (terminalState == "read_denied")
+        {
+            Assert.Equal(1L, Scalar(target, """
+                SELECT COUNT(*) FROM local_workspace_node_content_refs r
+                JOIN session_events e ON e.event_id=r.source_item_id
+                JOIN retention_items i ON i.item_id=r.retention_item_id
+                WHERE r.availability_state='read_denied'
+                  AND r.revision_input=e.content_state||'|'||i.captured_at||'|'||i.expires_at||'|'||
+                    i.item_id||'|'||i.store_instance_id||'|'||CAST(i.revision AS TEXT)||'|'||i.state||'|';
+                """));
+        }
+
+        var preview = fixture.Service.Preview(archive, target);
+        var restored = fixture.Service.Restore(archive, target, new RuntimeRestoreOptions());
+
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal(1, preview.TerminalReconciliationCount);
+        Assert.False(preview.RequiresConfirmation);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(terminalState, WorkspaceContentState(target));
+        Assert.Equal(0L, Scalar(target,
+            $"SELECT COUNT(*) FROM session_event_content WHERE event_id='{TerminalEventId}';"));
+        Assert.Equal(terminalState == "deleted" ? 1L : 0L, Scalar(target,
+            $"SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE store_kind='session_event_content' AND source_item_id='{TerminalEventId}';"));
+        var roundTripArchive = System.IO.Path.Combine(
+            targetDirectory,
+            $"terminal-roundtrip-{archivedState}-{terminalState}.zip");
+        var roundTripPreflight = fixture.Service.PreflightForMigration(target);
+        Assert.True(roundTripPreflight.Success, roundTripPreflight.ErrorCode);
+        var roundTrip = fixture.Service.CreateAndPublish(target, roundTripArchive);
+        Assert.True(roundTrip.Success, roundTrip.ErrorCode);
+        Assert.True(fixture.Service.Inspect(roundTripArchive).Success);
+        Assert.Equal(terminalState, WorkspaceContentState(target));
+    }
+
+    [Fact]
+    public void RestoreReplaysExactReadDeniedPointerWithoutFallbackContentReference()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        SeedTerminalEventContent(
+            fixture.DatabasePath,
+            fixture.Authority,
+            eventType: "UserPromptSubmit",
+            contentJson: "{\"prompt\":\"synthetic\"}",
+            sourceAdapter: "claude-code-hook",
+            schemaFingerprint: new string('0', 64));
+        var targetDirectory = fixture.Path("app");
+        Directory.CreateDirectory(targetDirectory);
+        var target = System.IO.Path.Combine(targetDirectory, "terminal-pointer.db");
+        File.Copy(fixture.DatabasePath, target);
+        SetArchivedContentState(fixture.DatabasePath, fixture.Authority, "not_captured");
+        var archive = fixture.Path("terminal-pointer.zip");
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        Assert.True(created.Success, created.ErrorCode);
+        SetTerminalContentState(target, fixture.Authority, "read_denied");
+        Assert.Equal(["instruction|/prompt|read_denied"], Strings(target,
+            $"SELECT part||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id='{TerminalEventId}';"));
+
+        var restored = fixture.Service.Restore(archive, target, new RuntimeRestoreOptions());
+
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(["instruction|/prompt|read_denied"], Strings(target,
+            $"SELECT part||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id='{TerminalEventId}';"));
+        Assert.Equal(0L, Scalar(target,
+            $"SELECT COUNT(*) FROM local_workspace_node_content_refs WHERE source_item_id='{TerminalEventId}' AND part='event_content';"));
+        Assert.Equal(0L, Scalar(target,
+            $"SELECT COUNT(*) FROM session_event_content WHERE event_id='{TerminalEventId}';"));
+    }
+
+    [Fact]
+    public void PublicationRejectsSourceAbsentReadDeniedWithUnauthenticatedRevisionWithoutMutation()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        SeedTerminalEventContent(fixture.DatabasePath, fixture.Authority);
+        var targetDirectory = fixture.Path("app");
+        Directory.CreateDirectory(targetDirectory);
+        var target = System.IO.Path.Combine(targetDirectory, "terminal-revision.db");
+        File.Copy(fixture.DatabasePath, target);
+        SetArchivedContentState(fixture.DatabasePath, fixture.Authority, "not_captured");
+        var archive = fixture.Path("terminal-revision-source.zip");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        SetTerminalContentState(target, fixture.Authority, "read_denied");
+        Assert.True(fixture.Service.Restore(archive, target, new RuntimeRestoreOptions()).Success);
+        Assert.Equal(0L, Scalar(target,
+            $"SELECT COUNT(*) FROM session_event_content WHERE event_id='{TerminalEventId}';"));
+        Execute(target,
+            $"UPDATE local_workspace_node_content_refs SET revision_input='fabricated' WHERE source_item_id='{TerminalEventId}';");
+        NormalizeForByteComparison(target);
+        var before = File.ReadAllBytes(target);
+        var output = System.IO.Path.Combine(targetDirectory, "terminal-revision-tampered.zip");
+
+        var created = fixture.Service.CreateAndPublish(target, output);
+
+        Assert.False(created.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(target));
+        Assert.False(File.Exists(output));
+    }
+
+    [Theory]
+    [InlineData("run_id")]
+    [InlineData("source_surface")]
+    [InlineData("source_adapter")]
+    [InlineData("source_event_id")]
+    [InlineData("parent_event_id")]
+    [InlineData("trace_id")]
+    public void TerminalReconciliationRejectsSameSessionEventWithDifferentExactLineage(string mutation)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        SeedTerminalEventContent(fixture.DatabasePath, fixture.Authority);
+        var targetDirectory = fixture.Path("app");
+        Directory.CreateDirectory(targetDirectory);
+        var target = System.IO.Path.Combine(targetDirectory, $"terminal-lineage-{mutation}.db");
+        File.Copy(fixture.DatabasePath, target);
+        SetArchivedContentState(fixture.DatabasePath, fixture.Authority, "not_captured");
+        var archive = fixture.Path($"terminal-lineage-{mutation}.zip");
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        Assert.True(created.Success, created.ErrorCode);
+        MutateTerminalEventLineage(target, mutation);
+        SetTerminalContentState(target, fixture.Authority, "read_denied");
+        NormalizeForByteComparison(target);
+        var before = File.ReadAllBytes(target);
+
+        var preview = fixture.Service.Preview(archive, target);
+        var restored = fixture.Service.Restore(archive, target, new RuntimeRestoreOptions());
+
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreTombstoneReconcileFailed, preview.ErrorCode);
+        Assert.False(restored.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreTombstoneReconcileFailed, restored.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(target));
+    }
+
+    [Fact]
+    public void LegacyV4WorkspaceTombstoneCaptureMapsToSessionEventContentInV5()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        SeedTerminalEventContent(fixture.DatabasePath, fixture.Authority);
+        SetTerminalContentState(fixture.DatabasePath, fixture.Authority, "deleted");
+        var destination = fixture.Path("v4-terminal-destination.db");
+        File.Copy(fixture.DatabasePath, destination);
+        ReplaceWorkspaceTombstonesWithV4Shape(fixture.DatabasePath);
+        Execute(destination, "DELETE FROM local_workspace_content_tombstones;");
+
+        using (var source = Open(fixture.DatabasePath))
+        using (var sourceTransaction = source.BeginTransaction())
+        using (var target = Open(destination))
+        using (var targetTransaction = target.BeginTransaction())
+        {
+            var authority = LocalWorkspaceTerminalAuthority.Capture(source, sourceTransaction);
+            authority.ApplyTombstones(target, targetTransaction);
+            targetTransaction.Commit();
+            sourceTransaction.Rollback();
+        }
+
+        Assert.Equal(1L, Scalar(destination,
+            $"SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE store_kind='session_event_content' AND source_item_id='{TerminalEventId}';"));
+    }
+
+    [Fact]
     public void HistoricalR0001WriterArchiveInspectsStructurallyAndStagesWithCurrentR0002Authority()
     {
         using var fixture = new HistoricalBackupFixture(PublicationAt, PublicationAt.AddDays(1));
@@ -66,6 +568,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         var sourceBeforeInspection = File.ReadAllBytes(fixture.DatabasePath);
         var archiveBeforeInspection = File.ReadAllBytes(archive);
         var manifest = ReadManifest(archive);
+        File.Copy(fixture.DatabasePath, target);
         var currentService = new SqliteRuntimeBackupService(fixture.Clock);
         var inspected = currentService.Inspect(archive);
         var preview = currentService.Preview(archive, target);
@@ -406,6 +909,77 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Assert.Throws<InvalidOperationException>(() => ValidateDurableSemanticGraphForTest(connection));
     }
 
+    [Fact]
+    public void DurableSdkToolValidatorAuthenticatesOverflowBeyondPersistedReferences()
+    {
+        using var connection = LocalWorkspaceProjectionBackfillTests.OpenUnavailableSdkToolFixture("deleted");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000020','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-run-2',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            """);
+        for (var index = 0; index < 16; index++)
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $$"""
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state)
+                  VALUES('0198f5b8-0c00-7000-8000-{{index + 100:D12}}','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','0198f5b8-0c00-7000-8000-000000000011','copilot-sdk-stream','source-complete-{{index:D2}}','tool.execution_complete','2026-08-24T00:01:{{index:D2}}.0000000+00:00','not_captured');
+                """);
+        }
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(
+                connection, transaction, PublicationAt, FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE local_workspace_tool_metadata
+               SET started_state='inconsistent'
+             WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts WHERE semantic_kind='tool');
+            """);
+
+        Assert.Equal(["16:inconsistent:inconsistent:unknown:unknown"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT COUNT(reference.source_ordinal)||':'||metadata.started_state||':'||metadata.completed_state||':'||node.lifecycle||':'||node.status
+                  FROM local_workspace_tool_metadata metadata
+                  JOIN local_workspace_nodes node ON node.node_id=metadata.node_id
+                  JOIN local_workspace_node_source_references reference ON reference.node_id=metadata.node_id
+                 GROUP BY metadata.node_id;
+                """));
+        Assert.Equal(["17:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT COUNT(*)||':'||SUM(NOT EXISTS(
+              SELECT 1 FROM local_workspace_node_source_references reference
+               WHERE reference.event_id=event.event_id
+                 AND reference.node_id IN (SELECT node_id FROM local_workspace_semantic_receipts)))
+              FROM session_events event
+             WHERE event.type IN ('tool.execution_start','tool.execution_complete')
+               AND event.run_id='0198f5b8-0c00-7000-8000-000000000010';
+            """));
+        ValidateDurableSemanticGraphForTest(connection);
+
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE session_events
+               SET run_id='0198f5b8-0c00-7000-8000-000000000020'
+             WHERE event_id=(
+               SELECT event.event_id
+                 FROM session_events event
+                WHERE event.type='tool.execution_complete'
+                  AND NOT EXISTS(
+                    SELECT 1 FROM local_workspace_node_source_references reference
+                     WHERE reference.event_id=event.event_id
+                       AND reference.node_id IN (SELECT node_id FROM local_workspace_semantic_receipts))
+                LIMIT 1);
+            """);
+        Assert.Equal(["16:0"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT COUNT(*)||':'||SUM(NOT EXISTS(
+              SELECT 1 FROM local_workspace_node_source_references reference
+               WHERE reference.event_id=event.event_id
+                 AND reference.node_id IN (SELECT node_id FROM local_workspace_semantic_receipts)))
+              FROM session_events event
+             WHERE event.type IN ('tool.execution_start','tool.execution_complete')
+               AND event.run_id='0198f5b8-0c00-7000-8000-000000000010';
+            """));
+
+        Assert.Throws<InvalidOperationException>(() => ValidateDurableSemanticGraphForTest(connection));
+    }
+
     [Theory]
     [InlineData("DELETE FROM session_native_ids;")]
     [InlineData("UPDATE session_native_ids SET native_session_id='drifted-native-session';")]
@@ -600,6 +1174,370 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         command.ExecuteNonQuery();
     }
 
+    private static void NormalizeForByteComparison(string path) =>
+        Execute(path, "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
+
+    private static void RemoveRetentionAndDependentComponents(string path)
+    {
+        using var connection = Open(path);
+        SetForeignKeys(connection, enabled: false);
+        using var transaction = connection.BeginTransaction();
+        foreach (var trigger in LocalWorkspaceProjectionSchemaV1.OwnedObjects.Where(item => item.Type == "trigger"))
+            Execute(connection, transaction, $"DROP TRIGGER IF EXISTS {trigger.Name};");
+        foreach (var table in LocalWorkspaceProjectionSchemaV1.TableNames.Reverse())
+            Execute(connection, transaction, $"DROP TABLE {table};");
+        Execute(connection, transaction, "DELETE FROM schema_version WHERE component='local_workspace_projection';");
+        foreach (var trigger in SkillInvocationSnapshotSchemaV1.TriggerDefinitions)
+            Execute(connection, transaction, $"DROP TRIGGER IF EXISTS {trigger.Name};");
+        Execute(connection, transaction, "DROP TABLE skill_invocation_snapshot_receipts;");
+        Execute(connection, transaction, "DROP TABLE skill_invocation_snapshots;");
+        Execute(connection, transaction, "DELETE FROM schema_version WHERE component='skill_invocation_snapshot';");
+        foreach (var trigger in SkillProjectionSchemaV1.TriggerDefinitions)
+            Execute(connection, transaction, $"DROP TRIGGER IF EXISTS {trigger.Name};");
+        foreach (var table in SkillProjectionSchemaV1.TableNames.Reverse())
+            Execute(connection, transaction, $"DROP TABLE {table};");
+        Execute(connection, transaction, "DELETE FROM schema_version WHERE component='skill_projection';");
+        foreach (var table in RetentionTables)
+            Execute(connection, transaction, $"DROP TABLE {table};");
+        transaction.Commit();
+        SetForeignKeys(connection, enabled: true);
+    }
+
+    private static void RemovePricingComponent(string path)
+    {
+        using var connection = Open(path);
+        SetForeignKeys(connection, enabled: false);
+        using var transaction = connection.BeginTransaction();
+        foreach (var item in PricingSchemaV1.OwnedObjects
+                     .Where(static item => item.Type is "trigger" or "index"))
+            Execute(connection, transaction, $"DROP {item.Type.ToUpperInvariant()} IF EXISTS \"{item.Name}\";");
+        foreach (var item in PricingSchemaV1.OwnedObjects
+                     .Where(static item => item.Type == "table")
+                     .Reverse())
+            Execute(connection, transaction, $"DROP TABLE IF EXISTS \"{item.Name}\";");
+        Execute(connection, transaction, "DELETE FROM schema_version WHERE component='pricing';");
+        transaction.Commit();
+        SetForeignKeys(connection, enabled: true);
+    }
+
+    private static void DowngradeAlertToV1(string path)
+    {
+        using var connection = Open(path);
+        SetForeignKeys(connection, enabled: false);
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, """
+            DROP TABLE alert_suppressions;
+            DROP TABLE alert_receipts;
+            DROP TABLE alert_evaluations;
+            DELETE FROM schema_version WHERE component='alert_engine';
+            """);
+        AlertSchemaV1.Create(connection, transaction);
+        transaction.Commit();
+        SetForeignKeys(connection, enabled: true);
+    }
+
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static void SetForeignKeys(SqliteConnection connection, bool enabled)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA foreign_keys={(enabled ? "ON" : "OFF")};";
+        command.ExecuteNonQuery();
+    }
+
+    private static void SeedTerminalEventContent(
+        string path,
+        ISkillRegistryGenerationAuthority authority,
+        string eventType = "event",
+        string contentJson = "{\"value\":\"synthetic\"}",
+        string sourceAdapter = "terminal-fixture",
+        string? schemaFingerprint = null)
+    {
+        const string captured = "2026-08-26T00:00:00.0000000+00:00";
+        const string expires = "2026-11-24T00:00:00.0000000+00:00";
+        const string kind = "application/json";
+        const string sourceEvent = "terminal-event";
+        var token = Enumerable.Repeat((byte)71, 32).ToArray();
+        using var connection = Open(path);
+        using var transaction = connection.BeginTransaction();
+        var sessionId = TransactionText(connection, transaction,
+            "SELECT session_id FROM sessions ORDER BY session_id LIMIT 1;");
+        var storeId = TransactionText(connection, transaction,
+            "SELECT store_instance_id FROM retention_store_instances WHERE id=1;");
+        var receipt = RetentionOwnershipReceipt.CreateSession(new(
+            storeId,
+            TerminalEventId,
+            kind,
+            captured,
+            DateTimeOffset.Parse(captured).UtcDateTime.Ticks,
+            expires,
+            DateTimeOffset.Parse(expires).UtcDateTime.Ticks,
+            sessionId,
+            TerminalRunId,
+            sourceAdapter,
+            sourceEvent,
+            token));
+        using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,status)
+                VALUES($run,$session,'copilot-sdk','terminal-run','completed');
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,schema_fingerprint)
+                VALUES($event,$session,$run,'copilot-sdk',$adapter,$source,$type,$captured,'available',$fingerprint);
+                INSERT INTO session_event_content(
+                    event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token)
+                VALUES($event,$kind,$content,$captured,$expires,$token);
+                INSERT INTO retention_items(
+                    item_id,store_instance_id,store_kind,source_item_id,receipt_version,
+                    ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,
+                    revision,adapter_coverage_version)
+                VALUES($item,$store,'session_event_content',$event,1,$receipt,$captured,$expires,
+                    'raw-default-90d',1,'expiring',1,1);
+                """;
+            insert.Parameters.AddWithValue("$event", TerminalEventId);
+            insert.Parameters.AddWithValue("$session", sessionId);
+            insert.Parameters.AddWithValue("$run", TerminalRunId);
+            insert.Parameters.AddWithValue("$adapter", sourceAdapter);
+            insert.Parameters.AddWithValue("$source", sourceEvent);
+            insert.Parameters.AddWithValue("$type", eventType);
+            insert.Parameters.AddWithValue("$fingerprint", (object?)schemaFingerprint ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$content", contentJson);
+            insert.Parameters.AddWithValue("$captured", captured);
+            insert.Parameters.AddWithValue("$expires", expires);
+            insert.Parameters.AddWithValue("$kind", kind);
+            insert.Parameters.AddWithValue("$token", token);
+            insert.Parameters.AddWithValue("$item", TerminalItemId);
+            insert.Parameters.AddWithValue("$store", storeId);
+            insert.Parameters.AddWithValue("$receipt", receipt);
+            insert.ExecuteNonQuery();
+        }
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, PublicationAt, authority);
+        transaction.Commit();
+        Assert.Equal("available", WorkspaceContentState(path));
+    }
+
+    private static void SetArchivedContentState(
+        string path,
+        ISkillRegistryGenerationAuthority authority,
+        string state)
+    {
+        using var connection = Open(path);
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, state == "not_captured"
+            ? $"""
+                DELETE FROM session_event_content WHERE event_id='{TerminalEventId}';
+                DELETE FROM retention_items WHERE item_id='{TerminalItemId}';
+                UPDATE session_events SET content_state='not_captured' WHERE event_id='{TerminalEventId}';
+                """
+            : $"UPDATE session_events SET content_state='unsupported' WHERE event_id='{TerminalEventId}';");
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, PublicationAt, authority);
+        transaction.Commit();
+    }
+
+    private static void MutateTerminalEventLineage(string path, string mutation)
+    {
+        const string otherRunId = "0199f5b8-0c00-7000-8000-000000000099";
+        const string otherParentEventId = "0199f5b8-0c00-7000-8000-000000000098";
+        using var connection = Open(path);
+        using var transaction = connection.BeginTransaction();
+        var sessionId = TransactionText(connection, transaction,
+            $"SELECT session_id FROM session_events WHERE event_id='{TerminalEventId}';");
+        var storeId = TransactionText(connection, transaction,
+            "SELECT store_instance_id FROM retention_store_instances WHERE id=1;");
+        var captured = TransactionText(connection, transaction,
+            $"SELECT captured_at FROM retention_items WHERE item_id='{TerminalItemId}';");
+        var expires = TransactionText(connection, transaction,
+            $"SELECT expires_at FROM retention_items WHERE item_id='{TerminalItemId}';");
+        var contentKind = TransactionText(connection, transaction,
+            $"SELECT content_kind FROM session_event_content WHERE event_id='{TerminalEventId}';");
+        var currentSourceAdapter = TransactionText(connection, transaction,
+            $"SELECT source_adapter FROM session_events WHERE event_id='{TerminalEventId}';");
+        var currentSourceEventId = TransactionText(connection, transaction,
+            $"SELECT source_event_id FROM session_events WHERE event_id='{TerminalEventId}';");
+        var sourceAdapter = mutation == "source_adapter" ? "other-adapter" : currentSourceAdapter;
+        var sourceEventId = mutation == "source_event_id" ? "terminal-event-other" : currentSourceEventId;
+        var runId = mutation == "run_id" ? otherRunId : TerminalRunId;
+        if (mutation == "run_id")
+        {
+            Execute(connection, transaction, $"""
+                INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,status)
+                VALUES('{otherRunId}','{sessionId}','copilot-sdk','terminal-run-other','completed');
+                """);
+        }
+        if (mutation == "parent_event_id")
+        {
+            Execute(connection, transaction, $"""
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state)
+                VALUES('{otherParentEventId}','{sessionId}','{TerminalRunId}','copilot-sdk',
+                    '{sourceAdapter}','terminal-parent-other','event',
+                    '2026-08-25T23:59:59.0000000+00:00','not_captured');
+                """);
+        }
+        Execute(connection, transaction, $"""
+            UPDATE session_events
+            SET run_id='{runId}',
+                source_surface='{(mutation == "source_surface" ? "claude-code" : "copilot-sdk")}',
+                source_adapter='{sourceAdapter}',
+                source_event_id='{sourceEventId}',
+                parent_event_id={(mutation == "parent_event_id" ? $"'{otherParentEventId}'" : "parent_event_id")},
+                trace_id={(mutation == "trace_id" ? "'terminal-trace-other'" : "trace_id")}
+            WHERE event_id='{TerminalEventId}';
+            """);
+        var token = Enumerable.Repeat((byte)71, 32).ToArray();
+        var receipt = RetentionOwnershipReceipt.CreateSession(new(
+            storeId,
+            TerminalEventId,
+            contentKind,
+            captured,
+            DateTimeOffset.Parse(captured).UtcDateTime.Ticks,
+            expires,
+            DateTimeOffset.Parse(expires).UtcDateTime.Ticks,
+            sessionId,
+            runId,
+            sourceAdapter,
+            sourceEventId,
+            token));
+        using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = $"UPDATE retention_items SET ownership_receipt=$receipt WHERE item_id='{TerminalItemId}';";
+            update.Parameters.AddWithValue("$receipt", receipt);
+            Assert.Equal(1, update.ExecuteNonQuery());
+        }
+        transaction.Commit();
+    }
+
+    private static void ReplaceWorkspaceTombstonesWithV4Shape(string path)
+    {
+        Execute(path, """
+            ALTER TABLE local_workspace_content_tombstones RENAME TO local_workspace_content_tombstones_v5;
+            CREATE TABLE local_workspace_content_tombstones(
+                source_item_id TEXT NOT NULL,
+                part TEXT NOT NULL,
+                locator_kind TEXT NOT NULL,
+                json_pointer TEXT NULL,
+                selected_utf8_bytes INTEGER NULL,
+                deleted_at TEXT NOT NULL,
+                retention_item_id TEXT NOT NULL,
+                retention_revision INTEGER NOT NULL,
+                PRIMARY KEY(source_item_id,part));
+            INSERT INTO local_workspace_content_tombstones(
+                source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,
+                deleted_at,retention_item_id,retention_revision)
+            SELECT source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,
+                   deleted_at,retention_item_id,retention_revision
+            FROM local_workspace_content_tombstones_v5;
+            DROP TABLE local_workspace_content_tombstones_v5;
+            """);
+    }
+
+    private static void SetTerminalContentState(
+        string path,
+        ISkillRegistryGenerationAuthority authority,
+        string state)
+    {
+        const string deniedAt = "2026-08-27T00:00:00.0000000+00:00";
+        const string deletedAt = "2026-08-27T00:00:01.0000000+00:00";
+        using var connection = Open(path);
+        using var transaction = connection.BeginTransaction();
+        if (state == "read_denied")
+        {
+            Execute(connection, transaction, $"""
+                UPDATE retention_items
+                SET state='expired_pending_deletion',revision=4,
+                    read_denied_at='{deniedAt}',queued_at='{deniedAt}'
+                WHERE item_id='{TerminalItemId}';
+                """);
+        }
+        else
+        {
+            Execute(connection, transaction, $"""
+                UPDATE retention_items
+                SET state='deleted',revision=5,read_denied_at='{deniedAt}',
+                    queued_at='{deniedAt}',deleted_at='{deletedAt}'
+                WHERE item_id='{TerminalItemId}';
+                INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at)
+                VALUES('{TerminalItemId}','{deletedAt}','{deletedAt}');
+                """);
+            LocalWorkspaceProjectionStore.CompleteSessionEventContentDeletion(
+                connection,
+                transaction,
+                TerminalEventId,
+                DateTimeOffset.Parse(deletedAt));
+            Execute(connection, transaction,
+                $"DELETE FROM session_event_content WHERE event_id='{TerminalEventId}';");
+        }
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, PublicationAt, authority);
+        transaction.Commit();
+    }
+
+    private static string WorkspaceContentState(string path) => Text(path,
+        $"SELECT availability_state FROM local_workspace_node_content_refs WHERE store_kind='session_event_content' AND source_item_id='{TerminalEventId}';");
+
+    private static string TransactionText(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        return (string)command.ExecuteScalar()!;
+    }
+
+    private const string TerminalRunId = "0199f5b8-0c00-7000-8000-000000000000";
+    private const string TerminalEventId = "0199f5b8-0c00-7000-8000-000000000001";
+    private const string TerminalItemId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    private static readonly string[] RetentionTables =
+    [
+        "retention_audit_events",
+        "retention_operation_receipts",
+        "retention_mutation_idempotency",
+        "retention_confirmation_bindings",
+        "retention_mutation_previews",
+        "retention_worker_state",
+        "retention_legacy_bundle_journal",
+        "retention_legacy_bundle_blockers",
+        "retention_analysis_sdk_directory_members",
+        "retention_analysis_sdk_directory_reservations",
+        "retention_adapter_coverage",
+        "retention_delete_journal",
+        "retention_leases",
+        "retention_file_capture_members",
+        "retention_file_capture_reservations",
+        "retention_capture_journal",
+        "retention_tombstones",
+        "retention_items",
+        "retention_store_instances",
+        "retention_component_versions",
+    ];
+
+    private static string CanonicalIdentity(ISkillRegistryGenerationAuthority authority)
+    {
+        var capture = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(authority.CaptureGeneration());
+        Assert.True(authority.TryAcquireGenerationReadLease(capture, out var lease));
+        using (lease)
+        {
+            Assert.True(authority.VerifyGenerationIdentity(capture, lease));
+            return authority.GetCanonicalGenerationIdentity(capture, lease);
+        }
+    }
+
     private static long Scalar(string path, string sql)
     {
         using var connection = Open(path);
@@ -694,7 +1632,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         internal string Path(string name) => System.IO.Path.Combine(System.IO.Path.GetDirectoryName(DatabasePath)!, name);
         public void Dispose() => fixture.Dispose();
 
-        private const string ValidRequest = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"backup-sdk-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"demo-skill\",\"path\":\"skills/demo/SKILL.md\",\"content\":\"synthetic body\",\"source\":\"project\",\"trigger\":\"user-invoked\"}}]}";
+        private const string ValidRequest = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"backup-sdk-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":\"backup-sdk-run\",\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"demo-skill\",\"path\":\"skills/demo/SKILL.md\",\"content\":\"synthetic body\",\"source\":\"project\",\"trigger\":\"user-invoked\"}}]}";
     }
 
     private sealed class HistoricalBackupFixture : IDisposable
@@ -723,7 +1661,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         internal string Path(string name) => System.IO.Path.Combine(System.IO.Path.GetDirectoryName(DatabasePath)!, name);
         public void Dispose() => fixture.Dispose();
 
-        private const string HistoricalRequest = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"backup-sdk-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"historical-skill\",\"path\":\"skills/historical/SKILL.md\",\"content\":\"synthetic historical body\",\"source\":\"project\",\"trigger\":\"user-invoked\"}}]}";
+        private const string HistoricalRequest = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"backup-sdk-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":\"backup-sdk-run\",\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"historical-skill\",\"path\":\"skills/historical/SKILL.md\",\"content\":\"synthetic historical body\",\"source\":\"project\",\"trigger\":\"user-invoked\"}}]}";
     }
 
     private sealed class HistoricalRuntimeCapability : ISkillInvocationV2RuntimeCapability
@@ -750,4 +1688,115 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
             return instant;
         }
     }
+
+    private sealed class FailingRegistryGenerationAuthority(string failure) : ISkillRegistryGenerationAuthority
+    {
+        private readonly Generation generation = new();
+
+        public ISkillRegistryGenerationCapture? CaptureGeneration() =>
+            failure == "capture" ? null : generation;
+
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture capture,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            lease = failure == "lease" || !ReferenceEquals(capture, generation) ? null : generation;
+            return lease is not null;
+        }
+
+        public bool VerifyGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) =>
+            failure != "verify" && ReferenceEquals(capture, generation) && ReferenceEquals(lease, generation);
+
+        public string GetCanonicalGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease)
+        {
+            if (!VerifyGenerationIdentity(capture, lease))
+                throw new InvalidOperationException("skill_registry_generation_not_current");
+            var registry = SkillInvocationV2ArtifactRegistry.Load();
+            var current = registry.History.Single(item => item.Revision == registry.CurrentRevision);
+            return $"{current.Revision}:{current.ArtifactFingerprint}";
+        }
+
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) =>
+            ReferenceEquals(lease, generation);
+
+        private sealed class Generation : ISkillRegistryGenerationCapture, ISkillRegistryGenerationLease
+        {
+            public void Dispose() { }
+        }
+    }
+
+    private sealed class SingleCaptureRegistryGenerationAuthority : ISkillRegistryGenerationAuthority
+    {
+        private readonly ISkillRegistryGenerationAuthority inner = FixedSkillRegistryGenerationAuthority.Load();
+
+        internal int CaptureCount { get; private set; }
+        internal int LeaseDisposeCount { get; private set; }
+
+        public ISkillRegistryGenerationCapture? CaptureGeneration()
+        {
+            CaptureCount++;
+            return CaptureCount == 1 ? inner.CaptureGeneration() : null;
+        }
+
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture capture,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            if (!inner.TryAcquireGenerationReadLease(capture, out var innerLease))
+            {
+                lease = null;
+                return false;
+            }
+            lease = new CountingLease(innerLease, () => LeaseDisposeCount++);
+            return true;
+        }
+
+        public bool VerifyGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) =>
+            lease is CountingLease counting
+            && inner.VerifyGenerationIdentity(capture, counting.Inner);
+
+        public string GetCanonicalGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) =>
+            lease is CountingLease counting
+                ? inner.GetCanonicalGenerationIdentity(capture, counting.Inner)
+                : throw new InvalidOperationException();
+
+        public string? GetCanonicalArtifactAuthorityIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) =>
+            lease is CountingLease counting
+                ? inner.GetCanonicalArtifactAuthorityIdentity(capture, counting.Inner)
+                : null;
+
+        public bool IsProducerTupleAccepted(
+            ISkillRegistryGenerationLease lease,
+            SkillRegistryProducerTuple tuple) =>
+            lease is CountingLease counting
+            && inner.IsProducerTupleAccepted(counting.Inner, tuple);
+
+        private sealed class CountingLease(
+            ISkillRegistryGenerationLease inner,
+            Action dispose) : ISkillRegistryGenerationLease
+        {
+            private int disposed;
+
+            internal ISkillRegistryGenerationLease Inner { get; } = inner;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+                Inner.Dispose();
+                dispose();
+            }
+        }
+    }
+
+    private sealed class SimulatedProcessCrashException : Exception;
 }
