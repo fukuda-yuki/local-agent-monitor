@@ -915,6 +915,96 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
     }
 
+    [Fact]
+    public void WorkspaceFinalizationValidatesSemanticsBeforeWritingTheV5Stamp()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        using var connection = Open(fixture.DatabasePath);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE test_workspace_stamp_audit(attempts INTEGER NOT NULL);
+            INSERT INTO test_workspace_stamp_audit VALUES(0);
+            CREATE TRIGGER test_workspace_stamp_insert BEFORE INSERT ON schema_version
+            WHEN NEW.component='local_workspace_projection'
+            BEGIN UPDATE test_workspace_stamp_audit SET attempts=attempts+1; END;
+            CREATE TRIGGER test_workspace_stamp_update BEFORE UPDATE OF version ON schema_version
+            WHEN NEW.component='local_workspace_projection'
+            BEGIN UPDATE test_workspace_stamp_audit SET attempts=attempts+1; END;
+            UPDATE local_workspace_execution_headers SET source_identity='tampered-execution';
+            """);
+        using var transaction = connection.BeginTransaction();
+        var finalizer = typeof(LocalWorkspaceProjectionSchemaV1).GetMethod(
+            "ValidateAndRestampCurrent",
+            BindingFlags.Static | BindingFlags.NonPublic);
+
+        Assert.NotNull(finalizer);
+        var failure = Assert.Throws<TargetInvocationException>(() =>
+            finalizer.Invoke(null, [connection, transaction]));
+        Assert.Equal("local_workspace_projection_semantic_validation_failed", failure.InnerException!.Message);
+        Assert.Equal(0L, Convert.ToInt64(new SqliteCommand(
+            "SELECT attempts FROM test_workspace_stamp_audit;", connection, transaction).ExecuteScalar()));
+        transaction.Rollback();
+    }
+
+    [Fact]
+    public void PublicationRefreshRollsBackWhenTheFinalWorkspaceStampCannotBeWritten()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        Execute(fixture.DatabasePath, """
+            UPDATE local_workspace_sessions SET revision_seed='tampered';
+            CREATE TRIGGER test_workspace_stamp_insert_block BEFORE INSERT ON schema_version
+            WHEN NEW.component='local_workspace_projection'
+            BEGIN SELECT RAISE(ABORT,'blocked_workspace_stamp'); END;
+            CREATE TRIGGER test_workspace_stamp_update_block BEFORE UPDATE OF version ON schema_version
+            WHEN NEW.component='local_workspace_projection'
+            BEGIN SELECT RAISE(ABORT,'blocked_workspace_stamp'); END;
+            """);
+        var before = Text(fixture.DatabasePath,
+            "SELECT revision_seed FROM local_workspace_sessions LIMIT 1;");
+        var refresh = typeof(SqliteRuntimeBackupService).GetMethod(
+            "RefreshProjectionForPublication",
+            BindingFlags.Static | BindingFlags.NonPublic);
+
+        Assert.NotNull(refresh);
+        Assert.Throws<TargetInvocationException>(() => refresh.Invoke(
+            null, [fixture.DatabasePath, PublicationAt, fixture.Authority]));
+
+        Assert.Equal(before, Text(fixture.DatabasePath,
+            "SELECT revision_seed FROM local_workspace_sessions LIMIT 1;"));
+        Assert.Equal(5L, Scalar(fixture.DatabasePath,
+            "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+    }
+
+    [Fact]
+    public void CreateAndPublishRejectsOversizedRawProjectionPayloadBeforeSourceMutation()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("oversized-raw-preflight.zip");
+        using (var connection = Open(fixture.DatabasePath))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                INSERT INTO raw_records(
+                    source,trace_id,received_at,resource_attributes_json,payload_json,
+                    schema_version,retention_owner_token)
+                VALUES('raw-otlp',NULL,'2026-08-26T00:00:00.0000000+00:00',NULL,$payload,1,randomblob(32));
+                """;
+            command.Parameters.AddWithValue("$payload",
+                BuildPaddedEmptyOtlpPayload(RawReplayLimits.MaximumRawRecordBytes + 1));
+            command.ExecuteNonQuery();
+        }
+        Execute(fixture.DatabasePath,
+            "UPDATE local_workspace_sessions SET revision_seed='repairable-preflight-tamper';");
+        NormalizeForByteComparison(fixture.DatabasePath);
+        var before = File.ReadAllBytes(fixture.DatabasePath);
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.False(created.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(fixture.DatabasePath));
+        Assert.False(File.Exists(archive));
+    }
+
     [Theory]
     [InlineData("UPDATE local_workspace_sessions SET label_text='tampered';")]
     [InlineData("UPDATE local_workspace_session_search_facts SET normalized_text='tampered' WHERE kind='label';")]

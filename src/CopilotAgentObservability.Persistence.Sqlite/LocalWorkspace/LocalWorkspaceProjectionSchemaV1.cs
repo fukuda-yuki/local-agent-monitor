@@ -1,4 +1,6 @@
 using System.Globalization;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using CopilotAgentObservability.RawReplay;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
 
@@ -366,6 +368,20 @@ internal static class LocalWorkspaceProjectionSchemaV1
             "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
             "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
             StringComparison.Ordinal));
+    private static readonly SqliteOwnedSchemaDefinition V5Sessions = new("table", "local_workspace_sessions", "local_workspace_sessions",
+        V4Sessions.Sql
+            .Replace(
+                "label_state TEXT NOT NULL,",
+                "label_state TEXT NOT NULL CHECK(label_state IN ('recorded','not_observed','not_captured','expired')),",
+                StringComparison.Ordinal)
+            .Replace(
+                "timing_state TEXT NOT NULL,",
+                "timing_state TEXT NOT NULL CHECK(timing_state IN ('recorded','not_observed','inconsistent')),",
+                StringComparison.Ordinal)
+            .Replace(
+                "CHECK((last_seen_at IS NULL)=(last_seen_epoch_ms IS NULL))",
+                "CHECK((last_seen_at IS NULL)=(last_seen_epoch_ms IS NULL)),\n                CHECK((timing_state='recorded' AND started_at IS NOT NULL AND last_seen_at IS NOT NULL AND ((ended_at IS NULL AND duration_ms IS NULL) OR (ended_at IS NOT NULL AND duration_ms IS NOT NULL))) OR (timing_state<>'recorded' AND duration_ms IS NULL))",
+                StringComparison.Ordinal));
     private static readonly SqliteOwnedSchemaDefinition V5Nodes = new("table", "local_workspace_nodes", "local_workspace_nodes",
         V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes").Sql
             .Replace(
@@ -378,7 +394,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 StringComparison.Ordinal));
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
     [
-        .. V4Definitions.Where(static definition => definition.Name is not ("local_workspace_execution_headers" or "local_workspace_executions_by_session" or "local_workspace_nodes" or "local_workspace_nodes_by_parent" or "local_workspace_node_edges" or "local_workspace_content_tombstones" or "local_workspace_node_content_refs")),
+        V5Sessions,
+        .. V4Definitions.Where(static definition => definition.Name is not ("local_workspace_sessions" or "local_workspace_execution_headers" or "local_workspace_executions_by_session" or "local_workspace_nodes" or "local_workspace_nodes_by_parent" or "local_workspace_node_edges" or "local_workspace_content_tombstones" or "local_workspace_node_content_refs")),
         V5ExecutionHeaders,
         V4Definitions.Single(static definition => definition.Name == "local_workspace_executions_by_session"),
         V5Nodes,
@@ -608,30 +625,17 @@ internal static class LocalWorkspaceProjectionSchemaV1
         if (version == 4 && SqliteOwnedSchemaAuthority.Equal(owned, SqliteOwnedSchemaAuthority.Compile(V4Definitions)))
         {
             ValidateSemanticRows(connection, transaction);
+            var terminalAuthority = LocalWorkspaceTerminalAuthority.Capture(connection, transaction);
             migrationCheckpoint?.Invoke("after_validate");
             Execute(connection, transaction, """
                 CREATE TEMP TABLE local_workspace_v4_tombstones AS
                 SELECT 'session_event_content' store_kind,source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision
                 FROM local_workspace_content_tombstones
                 WHERE part<>'subagent_input' AND NOT (json_pointer IS '/agent_id');
-                DROP TABLE local_workspace_node_content_refs;
-                DROP TABLE local_workspace_node_edges;
-                DROP TABLE local_workspace_nodes;
-                DROP TABLE local_workspace_execution_headers;
-                DROP TABLE local_workspace_content_tombstones;
                 """);
-            Execute(connection, transaction, V5ExecutionHeaders.Sql);
-            Execute(connection, transaction, V4Definitions.Single(static definition => definition.Name == "local_workspace_executions_by_session").Sql);
-            Execute(connection, transaction, V5Nodes.Sql);
-            Execute(connection, transaction, V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes_by_parent").Sql);
-            Execute(connection, transaction, V4Definitions.Single(static definition => definition.Name == "local_workspace_node_edges").Sql);
-            Execute(connection, transaction, V5ContentTombstones.Sql);
-            Execute(connection, transaction, V5ContentReferences.Sql);
-            foreach (var definition in Definitions.Where(static definition =>
-                !V4Definitions.Any(v4 => v4.Name == definition.Name)
-                && definition.Name != "local_workspace_source_references_by_node"))
-                Execute(connection, transaction, definition.Sql);
-            Execute(connection, transaction, Definitions.Single(static definition => definition.Name == "local_workspace_source_references_by_node").Sql);
+            foreach (var table in V4Definitions.Where(static definition => definition.Type == "table").Select(static definition => definition.Name).Reverse())
+                Execute(connection, transaction, $"DROP TABLE {table};");
+            foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
             Execute(connection, transaction, """
                 INSERT INTO local_workspace_content_tombstones(store_kind,source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision)
                 SELECT store_kind,source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision
@@ -642,6 +646,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
             BackfillSpanFacts(connection, transaction);
             migrationCheckpoint?.Invoke("after_backfill");
             RefreshProjection(connection, transaction, now, skillRegistryAuthority);
+            terminalAuthority.ApplyReadDenied(connection, transaction);
             migrationCheckpoint?.Invoke("after_refresh");
             ValidateSemanticRows(connection, transaction);
             migrationCheckpoint?.Invoke("after_semantic_validation");
@@ -679,6 +684,20 @@ internal static class LocalWorkspaceProjectionSchemaV1
         if (ReadVersion(connection, transaction) != Version
             || !SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects))
             throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 5.");
+    }
+
+    internal static void ValidateAndRestampCurrent(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
+        Validate(connection, transaction);
+        ValidateSemanticRows(connection, transaction);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "UPDATE schema_version SET version=5 WHERE component='local_workspace_projection' AND version=5;";
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException("local_workspace_projection_component_stamp_invalid");
     }
 
     internal static void ValidateCurrentOrExactLegacy(SqliteConnection connection, SqliteTransaction? transaction)
@@ -733,6 +752,29 @@ internal static class LocalWorkspaceProjectionSchemaV1
         var retentionAuthorityInstalled = TableExists(connection, transaction, "retention_items")
             && TableExists(connection, transaction, "retention_store_instances")
             && TableExists(connection, transaction, "retention_tombstones");
+        var readDeniedValidation = contentStoreKindInstalled && retentionAuthorityInstalled
+            ? $$"""
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     LEFT JOIN session_events e ON e.event_id=c.source_item_id
+                     LEFT JOIN session_event_content s ON s.event_id=c.source_item_id
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     WHERE c.availability_state='read_denied' AND (
+                       c.store_kind<>'session_event_content' OR e.event_id IS NULL OR i.item_id IS NULL
+                       OR i.store_kind IS NOT c.store_kind OR i.source_item_id IS NOT c.source_item_id
+                       OR i.store_instance_id IS NOT c.retention_store_instance_id
+                       OR i.store_instance_id IS NOT (SELECT store_instance_id FROM retention_store_instances WHERE id=1)
+                       OR i.captured_at IS NOT c.source_captured_at OR i.expires_at IS NOT c.source_expires_at
+                       OR i.revision IS NOT c.retention_revision OR i.ownership_receipt IS NOT c.retention_ownership_receipt
+                       OR c.retention_owner_token IS NOT NULL OR i.read_denied_at IS NULL OR i.state='deleted'
+                       OR i.deleted_at IS NOT NULL OR i.error_code IS NOT NULL
+                       OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
+                       OR (s.event_id IS NOT NULL AND (s.captured_at IS NOT i.captured_at OR s.expires_at IS NOT i.expires_at
+                         OR local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,s.content_kind,s.captured_at,s.expires_at,
+                           e.session_id,e.run_id,e.source_adapter,e.source_event_id,s.retention_owner_token,i.ownership_receipt)<>1))
+                       OR c.revision_input<>e.content_state||'|'||i.captured_at||'|'||i.expires_at||'|'||i.item_id||'|'||i.store_instance_id||'|'||CAST(i.revision AS TEXT)||'|'||i.state||'|'
+                     ))
+              """
+            : "OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs WHERE availability_state='read_denied')";
         var retentionValidation = contentStoreKindInstalled && tombstoneStoreKindInstalled && retentionAuthorityInstalled
             ? """
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
@@ -808,11 +850,32 @@ internal static class LocalWorkspaceProjectionSchemaV1
         command.Transaction = transaction;
         command.CommandText = $"""
             SELECT
-              EXISTS(SELECT 1 FROM local_workspace_execution_headers h
+              EXISTS(SELECT 1 FROM local_workspace_sessions s
+                     WHERE s.label_state NOT IN ('recorded','not_observed','not_captured','expired')
+                        OR s.timing_state NOT IN ('recorded','not_observed','inconsistent')
+                        OR NOT ((s.timing_state='recorded' AND s.started_at IS NOT NULL AND s.last_seen_at IS NOT NULL
+                          AND ((s.ended_at IS NULL AND s.duration_ms IS NULL) OR (s.ended_at IS NOT NULL AND s.duration_ms IS NOT NULL)))
+                          OR (s.timing_state<>'recorded' AND s.duration_ms IS NULL)))
+              OR EXISTS(SELECT 1 FROM local_workspace_execution_headers h
+                     LEFT JOIN session_runs r ON r.run_id=h.source_identity AND r.session_id=h.session_id
+                     WHERE r.run_id IS NULL)
+              OR EXISTS(SELECT 1 FROM local_workspace_execution_headers h
                      WHERE h.execution_id<>local_workspace_execution_id(h.source_kind,h.source_identity)
                         OR (h.end_utc_ticks IS NULL)<>(h.duration_ms IS NULL)
                         OR (h.end_utc_ticks IS NOT NULL AND (h.duration_ms IS NULL OR h.time_authority<>'recorded' OR h.start_utc_ticks IS NULL
                           OR h.end_utc_ticks<h.start_utc_ticks OR h.duration_ms<>(h.end_utc_ticks-h.start_utc_ticks)/10000)))
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes n
+                     JOIN local_workspace_execution_headers h ON h.execution_id=n.execution_id
+                     WHERE n.source_kind='execution_root' AND n.source_identity<>h.source_identity)
+              OR EXISTS(SELECT 1 FROM local_workspace_execution_headers h
+                     WHERE (SELECT COUNT(*) FROM local_workspace_nodes n
+                            WHERE n.execution_id=h.execution_id AND n.source_kind='execution_root'
+                              AND n.source_identity=h.source_identity)<>1)
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes n
+                     JOIN local_workspace_execution_headers h ON h.execution_id=n.execution_id
+                     LEFT JOIN session_events e ON e.event_id=n.source_identity
+                       AND e.session_id=n.session_id AND e.run_id=h.source_identity
+                     WHERE n.source_kind='session_event' AND e.event_id IS NULL)
               OR EXISTS(SELECT 1 FROM local_workspace_nodes n
                      WHERE n.node_id<>local_workspace_node_id(n.source_kind,n.source_identity)
                         OR NOT EXISTS(SELECT 1 FROM local_workspace_execution_headers h WHERE h.execution_id=n.execution_id AND h.session_id=n.session_id)
@@ -831,6 +894,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
                          AND e.relationship_authority=n.relationship_authority))
               {contentBindingValidation}
               {retentionValidation}
+              {readDeniedValidation}
               OR EXISTS(SELECT 1 FROM local_workspace_nodes WHERE source_kind='skill_invocation' AND otel_source_identity IS NULL AND sdk_source_identity IS NULL)
               {v5Validation}
               {spanFactValidation}
@@ -910,23 +974,45 @@ internal static class LocalWorkspaceProjectionSchemaV1
         long lastRawRecordId = long.MinValue;
         while (true)
         {
-            RawTelemetryRecord? record = null;
-            using var records = connection.CreateCommand();
-            records.Transaction = transaction;
-            records.CommandText = "SELECT id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version FROM raw_records WHERE id>$after ORDER BY id LIMIT 1;";
-            records.Parameters.AddWithValue("$after", lastRawRecordId);
-            using var reader = records.ExecuteReader();
-            if (!reader.Read()) break;
-            if (!DateTimeOffset.TryParseExact(reader.GetString(3), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
-                throw new InvalidOperationException("local_workspace_projection_raw_timestamp_invalid");
-            lastRawRecordId = reader.GetInt64(0);
-            record = new RawTelemetryRecord(lastRawRecordId, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), receivedAt,
-                reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetInt32(6));
-            reader.Close();
+            using (var candidate = connection.CreateCommand())
+            {
+                candidate.Transaction = transaction;
+                candidate.CommandText = "SELECT id,typeof(payload_json),length(CAST(payload_json AS BLOB)) FROM raw_records WHERE id>$after ORDER BY id LIMIT 1;";
+                candidate.Parameters.AddWithValue("$after", lastRawRecordId);
+                using var reader = candidate.ExecuteReader();
+                if (!reader.Read()) break;
+                lastRawRecordId = reader.GetInt64(0);
+                if (reader.GetString(1) != "text" || reader.IsDBNull(2)
+                    || reader.GetInt64(2) is < 1 or > RawReplayLimits.MaximumRawRecordBytes)
+                    throw new InvalidOperationException("local_workspace_projection_raw_payload_invalid");
+            }
+
+            RawTelemetryRecord record;
+            using (var records = connection.CreateCommand())
+            {
+                records.Transaction = transaction;
+                records.CommandText = "SELECT source,trace_id,received_at,resource_attributes_json,payload_json,schema_version FROM raw_records WHERE id=$id AND typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND $maximum;";
+                records.Parameters.AddWithValue("$id", lastRawRecordId);
+                records.Parameters.AddWithValue("$maximum", RawReplayLimits.MaximumRawRecordBytes);
+                using var reader = records.ExecuteReader();
+                if (!reader.Read())
+                    throw new InvalidOperationException("local_workspace_projection_raw_payload_invalid");
+                if (!DateTimeOffset.TryParseExact(reader.GetString(2), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
+                    throw new InvalidOperationException("local_workspace_projection_raw_timestamp_invalid");
+                record = new RawTelemetryRecord(lastRawRecordId, reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), receivedAt,
+                    reader.IsDBNull(3) ? null : reader.GetString(3), reader.GetString(4), reader.GetInt32(5));
+            }
 
             var facts = MonitorSpanProjectionBuilder.Build(record)
                 .Select(span => new { raw = record.Id, ordinal = span.SpanOrdinal, retry = span.RetryCount, total = span.ProducerTotalTokens })
                 .ToArray();
+            using (var delete = connection.CreateCommand())
+            {
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM local_workspace_span_facts WHERE raw_record_id=$raw_record_id;";
+                delete.Parameters.AddWithValue("$raw_record_id", record.Id);
+                delete.ExecuteNonQuery();
+            }
             if (facts.Length == 0) continue;
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;

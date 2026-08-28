@@ -273,6 +273,7 @@ public sealed class SqliteRuntimeBackupService
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow(),
                 skillRegistryAuthority ?? throw new InvalidOperationException("local_workspace_projection_authority_unavailable"));
             terminalAuthority.ApplyReadDenied(connection, transaction);
+            LocalWorkspaceProjectionSchemaV1.ValidateAndRestampCurrent(connection, transaction);
         }
         transaction.Commit();
     }
@@ -447,6 +448,7 @@ public sealed class SqliteRuntimeBackupService
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, publicationTime,
                 authority);
             terminalAuthority.ApplyReadDenied(connection, transaction);
+            LocalWorkspaceProjectionSchemaV1.ValidateAndRestampCurrent(connection, transaction);
         }
         transaction.Commit();
     }
@@ -1553,7 +1555,8 @@ public sealed class SqliteRuntimeBackupService
             || versions.ContainsKey("local_repository_catalog")
             || versions.ContainsKey("local_archive")
             || versions.ContainsKey("skill_invocation_snapshot")
-            || versions.ContainsKey("local_workspace_projection"))
+            || versions.ContainsKey("local_workspace_projection")
+            || workspaceShapeOnly)
         {
             if (versions.ContainsKey("local_repository_catalog")
                 && (!versions.TryGetValue("session", out var localRepositorySessionVersion)
@@ -1572,6 +1575,10 @@ public sealed class SqliteRuntimeBackupService
             using var componentTransaction = connection.BeginTransaction(deferred: true);
             try
             {
+                if (workspaceShapeOnly)
+                    LocalWorkspaceProjectionBackupValidation.ValidateRawSemanticReconstructionPreflight(
+                        connection,
+                        componentTransaction);
                 if (versions.ContainsKey("retention"))
                 {
                     if (retentionCoverageValidation == RetentionCoverageValidation.Restorable)
@@ -1596,6 +1603,8 @@ public sealed class SqliteRuntimeBackupService
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
+                    if (workspaceShapeOnly && versions["local_workspace_projection"] == 4)
+                        LocalWorkspaceProjectionSchemaV1.ValidateSemanticRows(connection, componentTransaction);
                     if (workspaceShapeOnly
                         || versions["local_workspace_projection"] is 1 or 2 or 3 or 4)
                         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, componentTransaction);
@@ -2633,6 +2642,7 @@ public sealed class SqliteRuntimeBackupService
                 timeProvider.GetUtcNow(),
                 capturedAuthority);
             terminalAuthority.ApplyReadDenied(staged, transaction);
+            LocalWorkspaceProjectionSchemaV1.ValidateAndRestampCurrent(staged, transaction);
             EnsureForeignKeysValid(staged, transaction);
             transaction.Commit();
             currentTransaction.Rollback();
@@ -2905,6 +2915,7 @@ public sealed class SqliteRuntimeBackupService
                         timeProvider.GetUtcNow(),
                         authority);
                     terminalAuthority.ApplyReadDenied(connection, transaction);
+                    LocalWorkspaceProjectionSchemaV1.ValidateAndRestampCurrent(connection, transaction);
                     EnsureForeignKeysValid(connection, transaction);
                     transaction.Commit();
                 }
@@ -2961,6 +2972,7 @@ public sealed class SqliteRuntimeBackupService
                 LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow(), authority);
                 terminalAuthority.ApplyTombstones(connection, transaction);
                 terminalAuthority.ApplyReadDenied(connection, transaction);
+                LocalWorkspaceProjectionSchemaV1.ValidateAndRestampCurrent(connection, transaction);
                 CompleteComponentMigration("local_workspace_projection", versions);
                 EnsureDoctorSchema(connection, transaction);
                 CompleteComponentMigration("doctor", versions);
@@ -3140,6 +3152,7 @@ public sealed class SqliteRuntimeBackupService
                 authority);
             terminalAuthority.ApplyTombstones(connection, transaction);
             terminalAuthority.ApplyReadDenied(connection, transaction);
+            LocalWorkspaceProjectionSchemaV1.ValidateAndRestampCurrent(connection, transaction);
             CompleteComponentMigration("local_workspace_projection", versions);
             EnsureDoctorSchema(connection, transaction);
             CompleteComponentMigration("doctor", versions);
