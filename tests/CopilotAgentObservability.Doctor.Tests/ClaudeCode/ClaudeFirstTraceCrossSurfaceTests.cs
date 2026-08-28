@@ -1037,7 +1037,13 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 var origin = GetSingleBoundAddress(app);
                 var ingestionWorker = new IngestionWriterWorker(
                     queue,
-                    new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter),
+                    new SqliteIngestionCommitStore(
+                        databasePath,
+                        RawTelemetryStoreConnectionOptions.MonitorWriter,
+                        time,
+                        writeFailureInjector: null,
+                        app.Services.GetRequiredService<ILocalWorkspacePublicationGate>(),
+                        app.Services.GetRequiredService<ILocalWorkspaceProjectionTransactionParticipant>()),
                     compatibility,
                     health);
                 await ingestionWorker.StartAsync(CancellationToken.None);
@@ -1139,7 +1145,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             using var response = await Client.PostAsync(
                 "/v1/traces",
                 new StringContent(payload, Encoding.UTF8, "application/json"));
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.True(response.StatusCode == HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
         }
 
         public async Task DrainAsync()

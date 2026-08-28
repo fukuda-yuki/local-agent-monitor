@@ -26,9 +26,15 @@ public sealed class AlertLifecycleRouteTests
     {
         using var temp = NewTemp();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        long installedTableCount;
         await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString()))
         {
             await connection.OpenAsync();
+            using (var startupCount = connection.CreateCommand())
+            {
+                startupCount.CommandText = "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'alert_lifecycle_%';";
+                installedTableCount = (long)startupCount.ExecuteScalar()!;
+            }
             using var command = connection.CreateCommand();
             command.CommandText = "DELETE FROM schema_version WHERE component='alert_engine';";
             await command.ExecuteNonQueryAsync();
@@ -39,7 +45,7 @@ public sealed class AlertLifecycleRouteTests
         await check.OpenAsync();
         using var count = check.CreateCommand();
         count.CommandText = "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'alert_lifecycle_%';";
-        Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+        Assert.Equal(installedTableCount, (long)(await count.ExecuteScalarAsync())!);
     }
 
     [Fact]

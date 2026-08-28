@@ -469,16 +469,21 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                   local_workspace_semantic_digest('session_label_value',projected.label_text,
                     local_workspace_semantic_digest('session_label_time',carrier.occurred_at,carrier.captured_at)||
                     local_workspace_semantic_digest('session_label_expiry',carrier.source_expires_at,CAST(carrier.instruction_count AS TEXT)))) COLLATE BINARY),
-            expected_search AS (
+            expected_search_unbounded AS (
               SELECT session_id,'label' kind,event_id source_identity,
                      local_workspace_search(label_text) normalized_text,effective_expires_at expires_at
               FROM expected_labels
               UNION
               {toolSearchRows}),
+            expected_search AS (
+              SELECT session_id,kind,source_identity,normalized_text,expires_at
+              FROM expected_search_unbounded
+              WHERE expires_at IS NULL OR expires_at COLLATE BINARY>$now COLLATE BINARY),
             actual_search AS (
               SELECT session_id,kind,source_identity,normalized_text,expires_at
               FROM local_workspace_session_search_facts
               WHERE kind IN ('label','tool')
+                AND (expires_at IS NULL OR expires_at COLLATE BINARY>$now COLLATE BINARY)
                 AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
             search_drift AS (
               SELECT 1 FROM (SELECT session_id,kind,source_identity,normalized_text,expires_at FROM actual_search EXCEPT SELECT session_id,kind,source_identity,normalized_text,expires_at FROM expected_search)

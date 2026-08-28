@@ -128,10 +128,14 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        using (var transaction = connection.BeginTransaction())
+        {
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, transaction);
+            transaction.Commit();
+        }
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
             CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,tool_name TEXT);
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             INSERT INTO local_workspace_session_search_facts VALUES
               ('0198f5b8-0c00-7000-8000-000000000001','label','label-1','expired label','2026-08-26T00:00:00.0000000+00:00'),
               ('0198f5b8-0c00-7000-8000-000000000001','tool','1:0','expired tool','2026-08-26T00:00:00.0000000+00:00');
@@ -154,13 +158,16 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             PRAGMA foreign_keys=ON;
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        using (var transaction = connection.BeginTransaction())
+        {
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, transaction);
+            transaction.Commit();
+        }
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
             CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             INSERT INTO raw_records VALUES(1);
             INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(1,'trace-1','span-1',0,'chat','llm_call','misleading-tool');
-            INSERT INTO retention_items VALUES('raw_record','1','expiring',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00');
             """);
         using (var transaction = connection.BeginTransaction())
         {

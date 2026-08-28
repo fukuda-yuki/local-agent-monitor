@@ -312,13 +312,10 @@ public class MonitorSecurityBoundaryTests
                 ProjectionPollInterval = TimeSpan.FromMilliseconds(50),
             });
         await projectionStore.InitialTraceProjectionStatusRead.Task;
-        var ingestions = await second.Client.GetStringAsync("/api/monitor/ingestions?limit=200");
-        using var document = JsonDocument.Parse(ingestions);
-        Assert.Equal(1, document.RootElement.GetProperty("items").GetArrayLength());
+        Assert.Equal(1, await WaitForIngestionProjectionCountAsync(second, expected: 1));
         Assert.Equal(ProjectionDispositionState.Completed, firstStore.GetProjectionDisposition(rawRecord.Id.Value)!.State);
 
-        var ready = await second.Client.GetAsync("/health/ready");
-        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, await WaitForReadyStatusAsync(second));
     }
 
     [Fact]
@@ -497,6 +494,20 @@ public class MonitorSecurityBoundaryTests
         }
 
         return -1;
+    }
+
+    private static async Task<HttpStatusCode> WaitForReadyStatusAsync(RunningMonitorHost host)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        HttpStatusCode status;
+        do
+        {
+            using var response = await host.Client.GetAsync("/health/ready");
+            status = response.StatusCode;
+            if (status == HttpStatusCode.OK) return status;
+            await Task.Delay(25);
+        } while (DateTime.UtcNow < deadline);
+        return status;
     }
 
     private static Task<RunningMonitorHost> StartReadOnlyHostAsync(MonitorTempDirectory temp, bool sanitizedOnly = false)

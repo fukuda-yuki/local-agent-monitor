@@ -95,8 +95,9 @@ public sealed class SkillCurrentAuthorizationTests
         Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
         var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [], captureAvailable: [false]);
 
-        RefreshWorkspace(database, authority);
+        var exception = Assert.Throws<InvalidOperationException>(() => RefreshWorkspace(database, authority));
 
+        Assert.Equal("skill_registry_generation_unavailable", exception.Message);
         Assert.Empty(SearchFacts(database));
     }
 
