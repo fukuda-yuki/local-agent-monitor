@@ -389,6 +389,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               EXISTS(SELECT 1 FROM monitor_spans span WHERE EXISTS(
                 SELECT 1 FROM session_events event WHERE event.session_id=$session_id
                   AND event.source_adapter='otel-exact' COLLATE BINARY
+                  AND event.type='otel.span' COLLATE BINARY
                   AND event.trace_id=span.trace_id COLLATE BINARY
                   AND event.source_event_id=span.trace_id||'/'||span.span_id COLLATE BINARY)
                 LIMIT 1 OFFSET 4096)
@@ -464,7 +465,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         using var command = Command(connection, transaction, """
             SELECT EXISTS(
-              SELECT 1 FROM session_events WHERE session_id=$session_id AND source_adapter='otel-exact' COLLATE BINARY
+              SELECT 1 FROM session_events WHERE session_id=$session_id
+                AND source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
               UNION ALL
               SELECT 1 FROM local_workspace_semantic_receipts receipt
               JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
@@ -627,6 +629,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
           SELECT DISTINCT event.session_id,event.run_id,span.raw_record_id,span.span_ordinal,fact.retry_count
           FROM session_events event
           JOIN monitor_spans span ON event.source_adapter='otel-exact' COLLATE BINARY
+            AND event.type='otel.span' COLLATE BINARY
             AND event.source_event_id=span.trace_id||'/'||span.span_id COLLATE BINARY
             AND event.trace_id=span.trace_id COLLATE BINARY
           JOIN local_workspace_span_facts fact
@@ -742,9 +745,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  CASE WHEN local_workspace_ticks(event.occurred_at) IS NOT NULL THEN 'recorded'
                       WHEN event.occurred_at IS NULL THEN 'missing' ELSE 'invalid' END expected_time_authority,
                  local_workspace_ticks(event.occurred_at) expected_ticks,
-                 CASE WHEN event.source_adapter='otel-exact' AND event.trace_id IS NOT NULL
+                 CASE WHEN event.source_adapter='otel-exact' AND event.type='otel.span' AND event.trace_id IS NOT NULL
                         AND event.source_event_id LIKE event.trace_id||'/%' THEN event.trace_id END expected_trace,
-                 CASE WHEN event.source_adapter='otel-exact' AND event.trace_id IS NOT NULL
+                 CASE WHEN event.source_adapter='otel-exact' AND event.type='otel.span' AND event.trace_id IS NOT NULL
                         AND event.source_event_id LIKE event.trace_id||'/%'
                       THEN substr(event.source_event_id,length(event.trace_id)+2) END expected_span
           FROM session_events event
@@ -814,15 +817,19 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             SELECT 1 FROM local_workspace_nodes node WHERE node.session_id=owner.session_id
               AND node.source_kind='session_event' AND node.source_identity=owner.event_id)
         ),
-        expected_unknown_groups AS (
+        expected_unknown_group_candidates AS (
           SELECT owner.session_id,owner.run_id source_identity,owner.expected_execution_id execution_id,
-                 (SELECT COUNT(*)+1 FROM session_events event WHERE event.run_id=owner.run_id) expected_ordinal
+                 (SELECT COUNT(*)+1 FROM session_events event
+                  WHERE event.session_id=owner.session_id AND event.run_id=owner.run_id) expected_ordinal,
+                 1 priority
           FROM ranked_events owner
           WHERE owner.expected_relationship='unknown' AND owner.expected_execution_id IS NOT NULL
           GROUP BY owner.session_id,owner.run_id,owner.expected_execution_id
-          UNION
+          UNION ALL
           SELECT child.session_id,header.source_identity,child.execution_id,
-                 (SELECT COUNT(*)+2 FROM session_events event WHERE event.run_id=header.source_identity)
+                 (SELECT COUNT(*)+2 FROM session_events event
+                  WHERE event.session_id=child.session_id AND event.run_id=header.source_identity),
+                 2
           FROM local_workspace_nodes child
           JOIN local_workspace_execution_headers header ON header.execution_id=child.execution_id AND header.session_id=child.session_id
           WHERE child.session_id=$session_id AND child.source_kind='skill_invocation'
@@ -830,7 +837,30 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             AND child.parent_node_id=local_workspace_node_id('unknown_relation_group',header.source_identity)
             AND NOT EXISTS(SELECT 1 FROM session_events event
               LEFT JOIN session_events parent ON parent.event_id=event.parent_event_id AND parent.run_id=event.run_id
-              WHERE event.run_id=header.source_identity AND event.parent_event_id IS NOT NULL AND parent.event_id IS NULL)
+              WHERE event.session_id=child.session_id AND event.run_id=header.source_identity
+                AND event.parent_event_id IS NOT NULL AND parent.event_id IS NULL)
+          UNION ALL
+          SELECT child.session_id,header.source_identity,child.execution_id,
+                 (SELECT COUNT(*)+2 FROM session_events event
+                  WHERE event.session_id=child.session_id AND event.run_id=header.source_identity)+
+                 (SELECT COUNT(*) FROM local_workspace_nodes skill
+                  WHERE skill.session_id=child.session_id AND skill.execution_id=child.execution_id
+                    AND skill.source_kind='skill_invocation'),
+                 3
+          FROM local_workspace_nodes child
+          JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=child.node_id
+          JOIN local_workspace_execution_headers header
+            ON header.execution_id=child.execution_id AND header.session_id=child.session_id
+          WHERE child.session_id=$session_id AND child.source_kind='semantic_tool'
+            AND child.relationship_authority='unknown'
+            AND child.parent_node_id=local_workspace_node_id('unknown_relation_group',header.source_identity)
+            AND receipt.semantic_kind='tool' AND receipt.source_family='otel'
+        ),
+        expected_unknown_groups AS (
+          SELECT DISTINCT candidate.session_id,candidate.source_identity,candidate.execution_id,candidate.expected_ordinal
+          FROM expected_unknown_group_candidates candidate
+          WHERE candidate.priority=(SELECT MIN(other.priority) FROM expected_unknown_group_candidates other
+            WHERE other.session_id=candidate.session_id AND other.source_identity=candidate.source_identity COLLATE BINARY)
         ),
         invalid_unknown_groups AS (
           SELECT 1 FROM local_workspace_nodes node
@@ -915,13 +945,25 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             OR node.new_input_token_state<>'not_observed' OR node.new_input_tokens IS NOT NULL
             OR node.cache_read_ratio_state<>'not_observed' OR node.cache_read_ratio_basis_points IS NOT NULL
             OR node.retry_relation_state<>'not_observed' OR node.recovery_relation_state<>'not_observed'
-            OR node.parent_node_id IS NULL OR node.relationship_authority<>'exact'
+            OR node.parent_node_id IS NULL OR node.relationship_authority NOT IN ('exact','unknown')
+            OR node.relationship_authority='unknown'
+               AND NOT (receipt.semantic_kind='tool' AND receipt.source_family='otel')
             OR (SELECT COUNT(*) FROM local_workspace_node_edges edge
-                WHERE edge.node_id=node.node_id AND edge.relation_kind='parent')<>1
-            OR NOT EXISTS(SELECT 1 FROM local_workspace_node_edges edge
+                WHERE edge.node_id=node.node_id AND edge.relation_kind='parent')<>
+               CASE node.relationship_authority WHEN 'exact' THEN 1 ELSE 0 END
+            OR node.relationship_authority='exact' AND NOT EXISTS(SELECT 1 FROM local_workspace_node_edges edge
                 WHERE edge.node_id=node.node_id AND edge.related_node_id=node.parent_node_id
                   AND edge.relation_kind='parent' AND edge.relationship_authority='exact'
                   AND edge.source_ordinal=node.source_ordinal)
+            OR node.relationship_authority='unknown' AND NOT EXISTS(
+                SELECT 1 FROM local_workspace_nodes relation_group
+                JOIN local_workspace_execution_headers execution
+                  ON execution.execution_id=node.execution_id AND execution.session_id=node.session_id
+                WHERE relation_group.node_id=node.parent_node_id
+                  AND relation_group.session_id=node.session_id
+                  AND relation_group.execution_id=node.execution_id
+                  AND relation_group.source_kind='unknown_relation_group'
+                  AND relation_group.source_identity=execution.source_identity COLLATE BINARY)
             OR node.source_kind='semantic_tool' AND NOT EXISTS(
                 SELECT 1 FROM local_workspace_tool_metadata metadata WHERE metadata.node_id=node.node_id)
             OR node.source_kind='semantic_subagent' AND NOT EXISTS(
@@ -938,16 +980,18 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
           SELECT e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.occurred_at,
                  m.raw_record_id,m.span_ordinal,m.trace_id,m.span_id,m.parent_span_id,m.status,m.start_time,m.end_time,
                  local_workspace_ticks(m.start_time) start_ticks,local_workspace_ticks(m.end_time) end_ticks,
-                 COALESCE(m.mcp_tool_name,m.tool_name) tool_name,m.mcp_server_hash,
+                 m.tool_name,m.mcp_tool_name,m.mcp_server_hash,
                  local_workspace_semantic_digest('otel_tool',m.trace_id,m.span_id) carrier_digest,
-                 (SELECT COUNT(*) FROM monitor_spans owner WHERE owner.trace_id=m.trace_id COLLATE BINARY AND owner.span_id=m.span_id COLLATE BINARY) monitor_owner_count,
+                 (SELECT COUNT(*) FROM monitor_spans owner WHERE lower(owner.trace_id)=m.trace_id COLLATE BINARY AND lower(owner.span_id)=m.span_id COLLATE BINARY) monitor_owner_count,
                  (SELECT COUNT(*) FROM session_events owner WHERE owner.source_adapter='otel-exact' COLLATE BINARY
-                    AND owner.trace_id=m.trace_id COLLATE BINARY AND owner.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY) event_owner_count
+                    AND owner.type='otel.span' COLLATE BINARY
+                    AND lower(owner.trace_id)=m.trace_id COLLATE BINARY
+                    AND lower(owner.source_event_id)=m.trace_id||'/'||m.span_id COLLATE BINARY) event_owner_count
           FROM session_events e JOIN monitor_spans m
             ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
            AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
           JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
-          WHERE e.session_id=$session_id AND e.run_id IS NOT NULL
+          WHERE e.session_id=$session_id AND e.run_id IS NOT NULL AND e.type='otel.span' COLLATE BINARY
             AND m.operation='execute_tool' COLLATE BINARY AND m.category IN ('tool_call','error')
         ),
         lifecycle AS (
@@ -964,6 +1008,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  MIN(status) status,MIN(start_time) start_time,MIN(end_time) end_time,
                  MIN(start_ticks) start_ticks,MIN(end_ticks) end_ticks,
                  MIN(tool_name) tool_name,COUNT(DISTINCT tool_name) tool_name_count,
+                 MIN(mcp_tool_name) mcp_tool_name,COUNT(DISTINCT mcp_tool_name) mcp_tool_name_count,
                  MIN(mcp_server_hash) mcp_server_hash,COUNT(DISTINCT mcp_server_hash) mcp_server_count,
                  COUNT(DISTINCT session_id) session_count,COUNT(DISTINCT run_id) run_count,
                  COUNT(DISTINCT event_id) event_count,
@@ -977,12 +1022,14 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  CASE WHEN parent_span_id IS NULL THEN 0 ELSE (
                    SELECT COUNT(*) FROM session_events parent
                    WHERE parent.session_id=groups.session_id AND parent.run_id=groups.run_id
-                     AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.trace_id=groups.trace_id COLLATE BINARY
+                     AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.type='otel.span' COLLATE BINARY
+                     AND parent.trace_id=groups.trace_id COLLATE BINARY
                      AND parent.source_event_id=groups.trace_id||'/'||groups.parent_span_id COLLATE BINARY) END parent_count,
                  CASE WHEN parent_span_id IS NULL THEN NULL ELSE (
                    SELECT MIN(parent.event_id) FROM session_events parent
                    WHERE parent.session_id=groups.session_id AND parent.run_id=groups.run_id
-                     AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.trace_id=groups.trace_id COLLATE BINARY
+                     AND parent.source_adapter='otel-exact' COLLATE BINARY AND parent.type='otel.span' COLLATE BINARY
+                     AND parent.trace_id=groups.trace_id COLLATE BINARY
                      AND parent.source_event_id=groups.trace_id||'/'||groups.parent_span_id COLLATE BINARY) END parent_event_id,
                  source_adapter||'|'||source_event_id||'|'||min_type||'|'||max_type||'|'||CAST(type_count AS TEXT)||'|'||
                    COALESCE(occurred_at,'')||'|otel-exact|normalized-tool-span|v1' reference_revision
@@ -1007,9 +1054,10 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR node.session_id<>owner.session_id OR node.execution_id<>local_workspace_execution_id('session_run',owner.run_id)
               OR execution.session_id<>owner.session_id OR execution.source_kind<>'session_run' OR execution.source_identity<>owner.run_id
               OR node.trace_id IS NOT owner.trace_id OR node.span_id IS NOT owner.span_id OR node.event_id IS NOT owner.event_id
-              OR node.parent_node_id<>CASE WHEN owner.parent_count=1 THEN local_workspace_node_id('session_event',owner.parent_event_id)
-                                          ELSE local_workspace_node_id('execution_root',owner.run_id) END
-              OR node.relationship_authority<>'exact'
+              OR node.parent_node_id<>CASE WHEN owner.parent_span_id IS NULL THEN local_workspace_node_id('execution_root',owner.run_id)
+                                          WHEN owner.parent_count=1 THEN local_workspace_node_id('session_event',owner.parent_event_id)
+                                          ELSE local_workspace_node_id('unknown_relation_group',owner.run_id) END
+              OR node.relationship_authority<>CASE WHEN owner.parent_span_id IS NULL OR owner.parent_count=1 THEN 'exact' ELSE 'unknown' END
               OR node.name_state<>CASE WHEN owner.tool_name_count=1 THEN 'recorded' ELSE 'not_observed' END
               OR node.name_text IS NOT CASE WHEN owner.tool_name_count=1 THEN owner.tool_name END
               OR node.lifecycle<>CASE WHEN owner.status='error' COLLATE BINARY THEN 'failed'
@@ -1035,8 +1083,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR metadata.mcp_server_identity IS NOT CASE WHEN owner.mcp_server_count=1 AND length(owner.mcp_server_hash)=64
                     AND owner.mcp_server_hash=lower(owner.mcp_server_hash) AND owner.mcp_server_hash NOT GLOB '*[^0-9a-f]*' THEN owner.mcp_server_hash END
               OR metadata.mcp_server_name_state<>'source_unsupported' OR metadata.mcp_server_name IS NOT NULL
-              OR metadata.mcp_tool_name_state<>CASE WHEN owner.tool_name_count=1 THEN 'recorded' ELSE 'invalid' END
-              OR metadata.mcp_tool_name IS NOT CASE WHEN owner.tool_name_count=1 THEN owner.tool_name END
+              OR metadata.mcp_tool_name_state<>CASE WHEN owner.mcp_tool_name_count=1 THEN 'recorded'
+                                                     WHEN owner.mcp_tool_name_count=0 THEN 'not_observed' ELSE 'invalid' END
+              OR metadata.mcp_tool_name IS NOT CASE WHEN owner.mcp_tool_name_count=1 THEN owner.mcp_tool_name END
               OR metadata.retry_state<>'not_observed' OR metadata.recovery_state<>'not_observed'
               OR metadata.child_activity_state<>'not_observed' OR metadata.child_activity_count IS NOT NULL
               OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)<>1
@@ -1044,6 +1093,21 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                     WHERE reference.node_id=node.node_id AND reference.source_ordinal=0 AND reference.source_kind='otel_span'
                       AND reference.source_identity=owner.event_id AND reference.trace_id=owner.trace_id AND reference.span_id=owner.span_id
                       AND reference.event_id=owner.event_id AND reference.revision_input=owner.reference_revision)
+              OR (SELECT COUNT(*) FROM local_workspace_node_edges edge
+                  WHERE edge.node_id=node.node_id AND edge.relation_kind='parent')<>
+                 CASE WHEN owner.parent_span_id IS NULL OR owner.parent_count=1 THEN 1 ELSE 0 END
+              OR (owner.parent_span_id IS NULL OR owner.parent_count=1) AND NOT EXISTS(
+                  SELECT 1 FROM local_workspace_node_edges edge
+                  WHERE edge.node_id=node.node_id AND edge.related_node_id=node.parent_node_id
+                    AND edge.relation_kind='parent' AND edge.relationship_authority='exact'
+                    AND edge.source_ordinal=node.source_ordinal)
+              OR owner.parent_span_id IS NOT NULL AND owner.parent_count<>1 AND NOT EXISTS(
+                  SELECT 1 FROM local_workspace_nodes relation_group
+                  WHERE relation_group.node_id=node.parent_node_id
+                    AND relation_group.session_id=node.session_id
+                    AND relation_group.execution_id=node.execution_id
+                    AND relation_group.source_kind='unknown_relation_group'
+                    AND relation_group.source_identity=owner.run_id COLLATE BINARY)
             )
         ),
         missing_persisted AS (
@@ -1072,6 +1136,11 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
             AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=event.session_id
               AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+            AND EXISTS(SELECT 1 FROM session_events completion
+              WHERE completion.session_id=event.session_id AND completion.run_id=event.run_id
+                AND completion.source_surface=event.source_surface COLLATE BINARY
+                AND completion.source_adapter=event.source_adapter COLLATE BINARY
+                AND completion.type='tool.execution_complete' AND completion.parent_event_id=event.event_id)
         ),
         completions AS (
           SELECT local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,parent.source_event_id) carrier_digest,
@@ -1140,8 +1209,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR node.relationship_authority<>'exact' OR node.name_state<>'not_observed' OR node.name_text IS NOT NULL
               OR node.lifecycle<>CASE WHEN owner.authority_count=1 AND owner.completed_count=1 AND owner.started_count<=1 THEN 'completed'
                                      WHEN owner.authority_count=1 AND owner.started_count=1 AND owner.completed_count=0 THEN 'started' ELSE 'unknown' END
-              OR node.status<>CASE WHEN owner.authority_count=1 AND owner.completed_count=1 AND owner.started_count<=1 THEN 'completed'
-                                  WHEN owner.authority_count=1 AND owner.started_count=1 AND owner.completed_count=0 THEN 'active' ELSE 'unknown' END
+              OR node.status<>'unknown'
               OR node.time_authority<>'missing' OR node.start_utc_ticks IS NOT NULL OR node.end_utc_ticks IS NOT NULL OR node.duration_ms IS NOT NULL
               OR metadata.node_id IS NULL
               OR metadata.caller_state<>CASE WHEN owner.parent_count=1 THEN 'recorded' ELSE 'not_observed' END
@@ -1154,7 +1222,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR metadata.exit_state<>'source_unsupported' OR metadata.exit_code IS NOT NULL
               OR metadata.mcp_server_identity_state<>'not_observed' OR metadata.mcp_server_identity IS NOT NULL
               OR metadata.mcp_server_name_state<>'source_unsupported' OR metadata.mcp_server_name IS NOT NULL
-              OR metadata.mcp_tool_name_state<>'invalid' OR metadata.mcp_tool_name IS NOT NULL
+              OR metadata.mcp_tool_name_state<>'not_observed' OR metadata.mcp_tool_name IS NOT NULL
               OR metadata.retry_state<>'not_observed' OR metadata.recovery_state<>'not_observed'
               OR metadata.child_activity_state<>'not_observed' OR metadata.child_activity_count IS NOT NULL
               OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=node.node_id)
@@ -1365,6 +1433,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                   AND i.session_id=n.session_id AND i.trace_id IS r.trace_id AND i.span_id IS r.span_id
                   AND EXISTS(SELECT 1 FROM session_events e WHERE e.event_id=r.event_id AND e.session_id=n.session_id
                     AND e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=r.trace_id COLLATE BINARY
+                    AND e.type='otel.span' COLLATE BINARY
                     AND e.source_event_id=r.trace_id||'/'||r.span_id COLLATE BINARY)) ELSE 0 END,
               {sdkOwnerExists},
               CASE WHEN r.source_identity LIKE 'sdk:%' THEN EXISTS(
@@ -1483,6 +1552,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             span = invocation.ProducerSpanId,
             otel = invocation.OtelSourceIdentity,
             sdk = invocation.SdkSourceIdentity,
+            state = invocation.CurrentValidState,
         }).ToArray();
         if (skills.Length == 0) return;
         var persistedSdkParent = hasSdkOwner
@@ -1519,7 +1589,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                      value->>'execution_identity' execution_identity,value->>'sdk_parent' sdk_parent,
                      value->>'sdk_adapter' sdk_adapter,value->>'sdk_event' sdk_event,value->>'otel_event' otel_event,
                      value->>'name' name,value->>'trace' trace_id,value->>'span' span_id,
-                     value->>'otel' otel_source_identity,value->>'sdk' sdk_source_identity,
+                      value->>'otel' otel_source_identity,value->>'sdk' sdk_source_identity,value->>'state' current_valid_state,
                      row_number() OVER(PARTITION BY value->>'execution_kind',value->>'execution_identity'
                                        ORDER BY value->>'identity' COLLATE BINARY) skill_ordinal
               FROM json_each($skills)),
@@ -1594,10 +1664,11 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               FROM expected_rows rows),
             invalid AS (
               SELECT 1 FROM expected e
-              JOIN local_workspace_nodes n
-                ON n.session_id=$session_id AND n.node_id=local_workspace_node_id('skill_invocation',e.canonical_identity)
-              WHERE e.execution_id IS NULL
-                 OR n.execution_id IS NOT e.execution_id
+               LEFT JOIN local_workspace_nodes n
+                 ON n.session_id=$session_id AND n.node_id=local_workspace_node_id('skill_invocation',e.canonical_identity)
+               WHERE n.node_id IS NULL AND e.current_valid_state='certification_pending'
+                  OR n.node_id IS NOT NULL AND (e.execution_id IS NULL
+                  OR n.execution_id IS NOT e.execution_id
                  OR n.source_ordinal IS NOT e.expected_ordinal
                  OR n.parent_node_id IS NOT e.expected_parent
                  OR n.relationship_authority IS NOT e.expected_relationship
@@ -1616,10 +1687,10 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  OR n.sdk_source_identity IS NOT e.persisted_sdk_source_identity
                  OR (SELECT COUNT(*) FROM local_workspace_node_edges edge WHERE edge.node_id=n.node_id)<>
                     CASE WHEN e.expected_relationship IN ('exact','explicit') THEN 1 ELSE 0 END
-                 OR e.expected_relationship IN ('exact','explicit') AND NOT EXISTS(
-                    SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=n.node_id
-                      AND edge.related_node_id=e.expected_parent AND edge.relation_kind='parent'
-                      AND edge.relationship_authority=e.expected_relationship AND edge.source_ordinal=e.expected_ordinal))
+                  OR e.expected_relationship IN ('exact','explicit') AND NOT EXISTS(
+                     SELECT 1 FROM local_workspace_node_edges edge WHERE edge.node_id=n.node_id
+                       AND edge.related_node_id=e.expected_parent AND edge.relation_kind='parent'
+                       AND edge.relationship_authority=e.expected_relationship AND edge.source_ordinal=e.expected_ordinal)))
             SELECT EXISTS(SELECT 1 FROM invalid);
             """, sessionId);
         command.Parameters.AddWithValue("$skills", System.Text.Json.JsonSerializer.Serialize(skills));
@@ -1832,7 +1903,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                        JOIN session_events e ON e.event_id=r.event_id AND e.session_id=n.session_id AND e.run_id=h.source_identity
                        WHERE receipt.node_id=n.node_id AND receipt.semantic_kind='tool' AND receipt.source_family='otel'
                          AND receipt.carrier_digest=n.source_identity AND receipt.authority_receipt='otel-exact|normalized-tool-span|v1'
-                         AND e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=r.trace_id COLLATE BINARY
+                         AND e.source_adapter='otel-exact' COLLATE BINARY AND e.type='otel.span' COLLATE BINARY
+                         AND e.trace_id=r.trace_id COLLATE BINARY
                          AND e.source_event_id=r.trace_id||'/'||r.span_id COLLATE BINARY) THEN 1
                     WHEN n.source_kind='semantic_tool' AND r.source_kind='session_event'
                      AND EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
@@ -2033,6 +2105,10 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND parent_node_id=$parent_node_id",
             _ => """
                 session_id=$session_id AND (node_id=$node_id
+                OR node_id=(SELECT root.node_id FROM local_workspace_nodes selected
+                  JOIN local_workspace_nodes root ON root.session_id=selected.session_id
+                    AND root.execution_id=selected.execution_id AND root.source_kind='execution_root'
+                  WHERE selected.session_id=$session_id AND selected.node_id=$node_id)
                 OR node_id IN (WITH RECURSIVE ancestors(node_id,depth) AS (SELECT parent_node_id,1 FROM local_workspace_nodes WHERE session_id=$session_id AND node_id=$node_id UNION ALL SELECT n.parent_node_id,a.depth+1 FROM local_workspace_nodes n JOIN ancestors a ON n.node_id=a.node_id WHERE a.node_id IS NOT NULL AND a.depth<=4097) SELECT node_id FROM ancestors WHERE node_id IS NOT NULL)
                 OR node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id=$node_id ORDER BY CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,CASE WHEN time_authority='recorded' THEN start_utc_ticks END,source_ordinal,node_id LIMIT 201)
                 OR node_id IN (SELECT related_node_id FROM local_workspace_node_edges WHERE node_id=$node_id AND relation_kind='retry' ORDER BY source_ordinal,related_node_id LIMIT 201)
@@ -2245,9 +2321,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT * FROM session_native_ids WHERE session_id=$session_id ORDER BY source_surface,native_session_id",
             "SELECT * FROM session_runs WHERE session_id=$session_id ORDER BY run_id",
             "SELECT * FROM session_events WHERE session_id=$session_id ORDER BY event_id",
-            "SELECT m.* FROM monitor_spans m WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY m.raw_record_id,m.span_ordinal",
-            "SELECT r.id,r.source,r.trace_id,r.received_at,r.schema_version,r.retention_owner_token FROM raw_records r WHERE EXISTS(SELECT 1 FROM monitor_spans m JOIN session_runs s ON s.trace_id=m.trace_id WHERE s.session_id=$session_id AND m.raw_record_id=r.id) ORDER BY r.id",
-            "SELECT f.* FROM local_workspace_span_facts f JOIN monitor_spans m ON m.raw_record_id=f.raw_record_id AND m.span_ordinal=f.span_ordinal WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY f.raw_record_id,f.span_ordinal",
+            "SELECT m.* FROM monitor_spans m WHERE EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=$session_id AND e.source_adapter='otel-exact' COLLATE BINARY AND e.type='otel.span' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY) ORDER BY m.raw_record_id,m.span_ordinal",
+            "SELECT r.id,r.source,r.trace_id,r.received_at,r.schema_version,r.retention_owner_token FROM raw_records r WHERE EXISTS(SELECT 1 FROM monitor_spans m JOIN session_events e ON e.session_id=$session_id AND e.source_adapter='otel-exact' COLLATE BINARY AND e.type='otel.span' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY WHERE m.raw_record_id=r.id) ORDER BY r.id",
+            "SELECT f.* FROM local_workspace_span_facts f JOIN monitor_spans m ON m.raw_record_id=f.raw_record_id AND m.span_ordinal=f.span_ordinal WHERE EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=$session_id AND e.source_adapter='otel-exact' COLLATE BINARY AND e.type='otel.span' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY) ORDER BY f.raw_record_id,f.span_ordinal",
             "SELECT c.event_id,c.content_kind,c.captured_at,c.expires_at,c.retention_owner_token FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id=$session_id ORDER BY c.event_id",
             "SELECT session_id,sort_group,sort_epoch_ms,label_state,label_text,label_source_identity,label_expires_at,status,completeness,source_state,model_state,timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed FROM local_workspace_sessions WHERE session_id=$session_id",
             "SELECT * FROM local_workspace_execution_headers WHERE session_id=$session_id ORDER BY execution_id LIMIT 257",

@@ -94,6 +94,65 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task ProductionCoordinatorKeepsAStandaloneSdkToolStartAsARawEvent()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string rawNodeId;
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection,
+                "DELETE FROM session_events WHERE event_id='018f0000-0000-7000-8000-000000000032';");
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+            Assert.Equal(["0"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_semantic_receipts
+                WHERE semantic_kind='tool' AND source_family='session_sdk';
+                """));
+            rawNodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node_id FROM local_workspace_nodes
+                WHERE source_kind='session_event' AND source_identity='018f0000-0000-7000-8000-000000000031';
+                """).Single();
+        }
+
+        var service = CreateRoundFiveService(temp.DatabasePath);
+        await service.ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+        var node = await service.ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: rawNodeId), CancellationToken.None);
+
+        var raw = Assert.Single(node.Detail.Nodes, value => value.NodeId == rawNodeId);
+        Assert.Equal("session_event", raw.SourceKind);
+        Assert.Equal("event", raw.Kind);
+    }
+
+    [Fact]
+    public async Task ProductionCoordinatorKeepsSdkToolOutcomeUnknownWithoutOtelOrHookAuthority()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string nodeId;
+        using (var connection = OpenFile(temp.DatabasePath))
+            nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node_id FROM local_workspace_semantic_receipts
+                WHERE semantic_kind='tool' AND source_family='session_sdk';
+                """).Single();
+
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None);
+
+        var tool = Assert.Single(detail.Detail.Nodes, value => value.NodeId == nodeId);
+        Assert.Equal("completed", tool.Lifecycle);
+        Assert.Equal("unknown", tool.Status);
+    }
+
+    [Fact]
     public async Task ProductionCoordinatorRejectsCoherentOtelToolExecutionActivityDrift()
     {
         using var temp = new MonitorTempDirectory();
@@ -265,6 +324,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     [InlineData("UPDATE monitor_spans SET start_time='2026-08-26T00:00:01.0000000+00:00' WHERE raw_record_id=1;")]
     [InlineData("UPDATE monitor_spans SET mcp_tool_name='ForgedMcp' WHERE raw_record_id=1;")]
     [InlineData("UPDATE monitor_spans SET mcp_server_hash=lower(hex(randomblob(32))) WHERE raw_record_id=1;")]
+    [InlineData("INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at) SELECT 2,upper(trace_id),upper(span_id),parent_span_id,1,operation,category,tool_name,mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at FROM monitor_spans WHERE raw_record_id=1;")]
     public async Task ProductionCoordinatorRejectsOtelToolNormalizedOwnerDrift(string mutation)
     {
         using var temp = new MonitorTempDirectory();
@@ -282,6 +342,161 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() => CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
             new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None).AsTask());
         Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Fact]
+    public async Task ProductionCoordinatorRejectsAStaleOtelSemanticToolAfterExactEventTypeDrift()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string nodeId;
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node_id FROM local_workspace_semantic_receipts
+                WHERE semantic_kind='tool' AND source_family='otel';
+                """).Single();
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                UPDATE session_events SET type='event'
+                WHERE event_id='018f0000-0000-7000-8000-000000000011';
+                UPDATE local_workspace_nodes SET kind='event',name_text='event'
+                WHERE source_kind='session_event' AND source_identity='018f0000-0000-7000-8000-000000000011';
+                UPDATE local_workspace_node_source_references
+                SET revision_input='otel-exact|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb|event|2026-08-26T09:00:00.0000000+00:00'
+                WHERE source_kind='session_event' AND source_identity='018f0000-0000-7000-8000-000000000011';
+                """);
+        }
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() =>
+            CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+                new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None).AsTask());
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Fact]
+    public async Task ProductionCoordinatorUsesOnlyMcpToolNameForMcpIdentity()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string nodeId;
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                UPDATE monitor_spans SET tool_name='GenericTool',mcp_tool_name=NULL WHERE raw_record_id=1;
+                """);
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+            nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node_id FROM local_workspace_semantic_receipts
+                WHERE semantic_kind='tool' AND source_family='otel';
+                """).Single();
+        }
+
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None);
+
+        var tool = Assert.Single(detail.Detail.Nodes, value => value.NodeId == nodeId);
+        Assert.Equal("recorded", tool.NameState);
+        Assert.Equal("GenericTool", tool.NameText);
+        Assert.Equal("not_observed", tool.ToolMetadata!.McpToolNameState);
+        Assert.Null(tool.ToolMetadata.McpToolName);
+    }
+
+    [Fact]
+    public async Task ProductionCoordinatorReadsAnUnresolvedOtelParentThroughTheExecutionUnknownGroup()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        string nodeId;
+        string groupId;
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection,
+                "UPDATE monitor_spans SET parent_span_id='cccccccccccccccc' WHERE raw_record_id=1;");
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+            nodeId = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node_id FROM local_workspace_semantic_receipts
+                WHERE semantic_kind='tool' AND source_family='otel';
+                """).Single();
+            groupId = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node_id FROM local_workspace_nodes
+                WHERE source_kind='unknown_relation_group' AND source_identity='018f0000-0000-7000-8000-000000000010';
+                """).Single();
+        }
+
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: nodeId), CancellationToken.None);
+
+        var tool = Assert.Single(detail.Detail.Nodes, value => value.NodeId == nodeId);
+        Assert.Equal(groupId, tool.ParentNodeId);
+        Assert.Equal("unknown", tool.RelationshipAuthority);
+        Assert.Contains(detail.Detail.Nodes, value => value.NodeId == groupId && value.Kind == "unknown_relation_group");
+    }
+
+    [Fact]
+    public async Task UnlinkedSameTraceOtelRowsDoNotExpandTheCanonicalRevisionInput()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        var service = CreateRoundFiveService(temp.DatabasePath);
+        var before = await service.ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+        using (var connection = OpenFile(temp.DatabasePath))
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                INSERT INTO raw_records(id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token)
+                VALUES(2,'raw-otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-26T00:00:07.0000000+00:00','{}','{}',1,randomblob(32));
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,mcp_tool_name,status,start_time,end_time,projected_at)
+                VALUES(2,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','cccccccccccccccc',NULL,0,'execute_tool','tool_call','Unlinked','Unlinked','ok','2026-08-26T00:00:07.0000000+00:00','2026-08-26T00:00:08.0000000+00:00','2026-08-26T00:00:08.0000000+00:00');
+                INSERT INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+                VALUES(2,0,1,10);
+                """);
+
+        var after = await service.ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+
+        Assert.Equal(before.WorkspaceRevision, after.WorkspaceRevision);
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_workspace_sessions SET label_state='future_label_state';")]
+    [InlineData("UPDATE local_workspace_sessions SET label_state='recorded',label_text=NULL,label_source_identity=NULL,label_expires_at=NULL;")]
+    [InlineData("UPDATE local_workspace_sessions SET timing_state='future_timing_state';")]
+    [InlineData("UPDATE local_workspace_sessions SET status='completed',timing_state='recorded',started_at=NULL,ended_at='2026-08-26T00:00:02.0000000+00:00',last_seen_at='2026-08-26T00:00:02.0000000+00:00',last_seen_epoch_ms=1787702402000,duration_ms=1000;")]
+    [InlineData("UPDATE local_workspace_sessions SET status='active',timing_state='recorded',started_at='2026-08-26T00:00:01.0000000+00:00',ended_at='2026-08-26T00:00:02.0000000+00:00',last_seen_at='2026-08-26T00:00:02.0000000+00:00',last_seen_epoch_ms=1787702402000,duration_ms=1000;")]
+    [InlineData("UPDATE local_workspace_sessions SET status='completed',timing_state='recorded',started_at='2026-08-26T00:00:01.0000000+00:00',ended_at='2026-08-26T00:00:02.0000000+00:00',last_seen_at='2026-08-26T00:00:02.0000000+00:00',last_seen_epoch_ms=1787702402000,duration_ms=NULL;")]
+    [InlineData("UPDATE local_workspace_session_activity SET state='recorded',count=NULL WHERE kind='tool';")]
+    [InlineData("UPDATE local_workspace_token_observations SET input_tokens=-1;")]
+    public async Task ProductionCoordinatorRejectsATamperedClosedSessionSummaryRow(string mutation)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection,
+                "PRAGMA ignore_check_constraints=ON;" + mutation);
+        }
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+                new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None));
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Message);
     }
 
     [Theory]

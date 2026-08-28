@@ -185,16 +185,14 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     }
 
     [Fact]
-    public void PersistedSqliteMatrix_RegistryUnavailableFailsClosed()
+    public void PersistedSqliteMatrix_RegistryUnavailableAbortsTheLiveWorkspaceRefresh()
     {
         using var fixture = new CurrentInvocationProjectionFixture(registryAvailable: false);
-        fixture.SeedSdkOnly("unavailable", "unavailable-skill");
 
-        var session = fixture.Read("unavailable");
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            fixture.SeedSdkOnly("unavailable", "unavailable-skill"));
 
-        Assert.Equal("unavailable", session.State);
-        Assert.Null(session.InvocationCount);
-        Assert.Empty(session.SearchFacts);
+        Assert.Equal("skill_registry_generation_unavailable", error.Message);
     }
 
     [Fact]
@@ -534,6 +532,20 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         var root = Assert.Single(summary.Detail.Nodes, static node => node.SourceKind == "execution_root");
         Assert.Equal(fixture.PersistedRootChildCount("pending-count"), execution.ChildCount);
         Assert.Equal(fixture.PersistedRootChildCount("pending-count"), root.ChildCount);
+    }
+
+    [Fact]
+    public async Task ProductionCoordinatorRejectsAMissingPendingSkillNode()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedMismatchedPair("pending-missing", "pending-skill", "b1", "c1", "b2", "c2");
+        fixture.RefreshWorkspace();
+        fixture.DeletePendingSkillNode("pending-missing");
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await fixture.ReadDetailAsync("pending-missing", LocalRepositorySessionDetailRequestKind.Summary));
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
     }
 
     [Fact]
@@ -2156,6 +2168,22 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.CommandText = "DELETE FROM local_workspace_nodes WHERE session_id=$session AND source_kind='session_event' AND source_identity IN (SELECT event_id FROM session_events WHERE session_id=$session AND type='skill.invoked');";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         Assert.True(command.ExecuteNonQuery() > 0);
+    }
+
+    internal void DeletePendingSkillNode(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM local_workspace_nodes
+            WHERE node_id=(
+              SELECT node.node_id FROM local_workspace_nodes node
+              JOIN local_workspace_skill_metadata metadata ON metadata.node_id=node.node_id
+              WHERE node.session_id=$session AND metadata.current_valid_state='certification_pending'
+              ORDER BY node.node_id LIMIT 1);
+            """;
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     internal void RefreshWorkspaceProjection(string sessionKey)

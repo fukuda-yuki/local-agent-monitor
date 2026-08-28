@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using System.Numerics;
+using System.Text;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
@@ -58,7 +59,14 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                          AND i.expires_at=c.expires_at COLLATE BINARY
                          AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY)) THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
-                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed,
+                       CASE WHEN p.label_state IN ('recorded','not_observed','not_captured','expired') AND (
+                         p.label_state='recorded' AND p.label_text IS NOT NULL AND trim(p.label_text)<>''
+                           AND length(p.label_text)<=160 AND instr(p.label_text,char(10))=0 AND instr(p.label_text,char(13))=0
+                           AND instr(p.label_text,char(8232))=0 AND instr(p.label_text,char(8233))=0
+                           AND p.label_source_identity IS NOT NULL AND p.label_expires_at IS NOT NULL
+                         OR p.label_state<>'recorded' AND p.label_text IS NULL
+                           AND p.label_source_identity IS NULL AND p.label_expires_at IS NULL) THEN 1 ELSE 0 END
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id
@@ -76,7 +84,14 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                          AND i.expires_at=c.expires_at COLLATE BINARY
                          AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY)) THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
-                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed,
+                       CASE WHEN p.label_state IN ('recorded','not_observed','not_captured','expired') AND (
+                         p.label_state='recorded' AND p.label_text IS NOT NULL AND trim(p.label_text)<>''
+                           AND length(p.label_text)<=160 AND instr(p.label_text,char(10))=0 AND instr(p.label_text,char(13))=0
+                           AND instr(p.label_text,char(8232))=0 AND instr(p.label_text,char(8233))=0
+                           AND p.label_source_identity IS NOT NULL AND p.label_expires_at IS NOT NULL
+                         OR p.label_state<>'recorded' AND p.label_text IS NULL
+                           AND p.label_source_identity IS NULL AND p.label_expires_at IS NULL) THEN 1 ELSE 0 END
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id
@@ -88,7 +103,14 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                        CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR c.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired' ELSE p.label_state END,
                        CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND c.expires_at COLLATE BINARY > $now COLLATE BINARY THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
-                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed,
+                       CASE WHEN p.label_state IN ('recorded','not_observed','not_captured','expired') AND (
+                         p.label_state='recorded' AND p.label_text IS NOT NULL AND trim(p.label_text)<>''
+                           AND length(p.label_text)<=160 AND instr(p.label_text,char(10))=0 AND instr(p.label_text,char(13))=0
+                           AND instr(p.label_text,char(8232))=0 AND instr(p.label_text,char(8233))=0
+                           AND p.label_source_identity IS NOT NULL AND p.label_expires_at IS NOT NULL
+                         OR p.label_state<>'recorded' AND p.label_text IS NULL
+                           AND p.label_source_identity IS NULL AND p.label_expires_at IS NULL) THEN 1 ELSE 0 END
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
@@ -99,7 +121,14 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                        CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR c.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired' ELSE p.label_state END,
                        CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND c.expires_at COLLATE BINARY > $now COLLATE BINARY THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
-                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed,
+                       CASE WHEN p.label_state IN ('recorded','not_observed','not_captured','expired') AND (
+                         p.label_state='recorded' AND p.label_text IS NOT NULL AND trim(p.label_text)<>''
+                           AND length(p.label_text)<=160 AND instr(p.label_text,char(10))=0 AND instr(p.label_text,char(13))=0
+                           AND instr(p.label_text,char(8232))=0 AND instr(p.label_text,char(8233))=0
+                           AND p.label_source_identity IS NOT NULL AND p.label_expires_at IS NOT NULL
+                         OR p.label_state<>'recorded' AND p.label_text IS NULL
+                           AND p.label_source_identity IS NULL AND p.label_expires_at IS NULL) THEN 1 ELSE 0 END
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
@@ -113,6 +142,8 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             {
                 if (rows.Count == MaximumSessions)
                     throw new InvalidOperationException("local_repository_session_limit_exceeded");
+                if (reader.GetInt64(17) != 1)
+                    throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
                 rows.Add(new(
                     reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3),
                     reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6),
@@ -202,7 +233,132 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             }
             foreach (var pair in observations) if (byId.TryGetValue(pair.Key, out var row)) row.TokenAggregate = ReadTokens(pair.Value);
         }
-        return new(Array.AsReadOnly(rows.Select(static row => (ILocalRepositorySessionSnapshotRow)row.Freeze()).ToArray()));
+        var frozen = rows.Select(static row => row.Freeze()).ToArray();
+        if (frozen.Any(static row => !ValidClosedRow(row)))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        return new(Array.AsReadOnly(frozen.Cast<ILocalRepositorySessionSnapshotRow>().ToArray()));
+    }
+
+    private static bool ValidClosedRow(LocalWorkspaceProjectionRow row)
+    {
+        if (row.SortGroup is not (0 or 1)
+            || row.SortGroup == 1 && row.SortEpochMilliseconds != 0
+            || row.LabelState is not ("recorded" or "not_observed" or "not_captured" or "expired")
+            || (row.LabelState == "recorded") != (row.LabelText is not null)
+            || row.LabelText is not null && !ValidLabel(row.LabelText)
+            || row.Status is not ("active" or "completed" or "failed" or "unknown")
+            || row.Completeness is not ("unbound" or "partial" or "rich" or "full")
+            || !ValidSet(row.Sources, 5) || !ValidSet(row.Models, 16)
+            || !ValidCount(row.Activity.Skill) || !ValidCount(row.Activity.Tool)
+            || !ValidCount(row.Activity.Subagent) || !ValidCount(row.Activity.Error)
+            || !ValidCount(row.Activity.Retry) || !ValidTokens(row.Tokens)
+            || !ValidTiming(row))
+            return false;
+        return true;
+
+        static bool ValidLabel(string value) =>
+            !string.IsNullOrWhiteSpace(value)
+            && !value.EnumerateRunes().Any(static rune => rune.Value is '\r' or '\n' or 0x2028 or 0x2029)
+            && value.EnumerateRunes().Take(161).Count() <= 160;
+
+        static bool ValidSet(LocalWorkspaceSetFact? fact, int maximum)
+        {
+            if (fact?.Values is null
+                || fact.State is not ("recorded" or "not_observed" or "projection_invalid")
+                || (fact.State == "recorded") != (fact.Values.Count > 0)
+                || fact.Values.Count > maximum)
+                return false;
+            string? previous = null;
+            foreach (var value in fact.Values)
+            {
+                if (string.IsNullOrWhiteSpace(value)
+                    || previous is not null && StringComparer.Ordinal.Compare(previous, value) >= 0)
+                    return false;
+                previous = value;
+            }
+            return true;
+        }
+
+        static bool ValidCount(LocalWorkspaceFact<long>? fact) =>
+            fact is not null && ValidFactState(fact.State)
+            && (fact.State == "recorded") == fact.Value.HasValue
+            && fact.Value is null or >= 0;
+
+        static bool ValidValue(LocalWorkspaceFact<long>? fact, long maximum = long.MaxValue) =>
+            ValidCount(fact) && (fact!.Value is null || fact.Value <= maximum);
+
+        static bool ValidFactState(string state) => state is
+            "recorded" or "not_observed" or "source_unsupported" or "capture_gap" or
+            "certification_pending" or "not_captured" or "expired" or "redacted" or
+            "malformed" or "oversized" or "inconsistent" or "projection_invalid";
+
+        static bool ValidTokens(LocalWorkspaceTokenFacts? tokens)
+        {
+            if (tokens is null
+                || tokens.Authority is not ("session_run" or "llm_span" or "mixed" or "none")
+                || !ValidFactState(tokens.State)
+                || tokens.AvailableExecutionCount < 0 || tokens.TotalExecutionCount < 0
+                || tokens.AvailableExecutionCount > tokens.TotalExecutionCount
+                || !ValidValue(tokens.Input) || !ValidValue(tokens.Output) || !ValidValue(tokens.Total)
+                || !ValidValue(tokens.Reasoning) || !ValidValue(tokens.CacheRead)
+                || !ValidValue(tokens.CacheCreation) || !ValidValue(tokens.NewInput)
+                || !ValidValue(tokens.CacheReadRatioBasisPoints, 10_000))
+                return false;
+            if (tokens.Input is { State: "recorded", Value: not null } input
+                && tokens.CacheRead is { State: "recorded", Value: not null } cache)
+            {
+                if (cache.Value > input.Value)
+                    return tokens.State == "inconsistent"
+                        && tokens.NewInput is { State: "inconsistent", Value: null }
+                        && tokens.CacheReadRatioBasisPoints is { State: "inconsistent", Value: null };
+                if (tokens.NewInput.State == "recorded" && tokens.NewInput.Value != input.Value - cache.Value)
+                    return false;
+                if (tokens.CacheReadRatioBasisPoints.State == "recorded"
+                    && (input.Value == 0
+                        || tokens.CacheReadRatioBasisPoints.Value != (long)((BigInteger)cache.Value * 10_000 / input.Value)))
+                    return false;
+            }
+            return true;
+        }
+
+        static bool ValidTiming(LocalWorkspaceProjectionRow value)
+        {
+            if (value.TimingState is not ("recorded" or "not_observed" or "inconsistent")
+                || !TryCanonical(value.StartedAt, out var started)
+                || !TryCanonical(value.EndedAt, out var ended)
+                || !TryCanonical(value.LastSeenAt, out var lastSeen)
+                || (lastSeen is null) != (value.LastSeenEpochMilliseconds is null)
+                || lastSeen is not null && value.LastSeenEpochMilliseconds != lastSeen.Value.ToUnixTimeMilliseconds()
+                || value.DurationMilliseconds is < 0)
+                return false;
+            if (value.TimingState == "not_observed")
+                return started is null && ended is null && value.DurationMilliseconds is null;
+            if (value.TimingState == "inconsistent")
+                return value.DurationMilliseconds is null;
+            if (started is null || lastSeen is null)
+                return false;
+            if ((ended is null) != (value.DurationMilliseconds is null)
+                || value.Status == "active" && ended is not null
+                || value.Status == "completed" && ended is null)
+                return false;
+            if (ended is null)
+                return true;
+            return ended >= started
+                && value.DurationMilliseconds == ended.Value.ToUnixTimeMilliseconds() - started.Value.ToUnixTimeMilliseconds();
+        }
+
+        static bool TryCanonical(string? text, out DateTimeOffset? value)
+        {
+            value = null;
+            if (text is null) return true;
+            if (!DateTimeOffset.TryParseExact(text, "O", System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsed)
+                || parsed.Offset != TimeSpan.Zero
+                || parsed.ToString("O", System.Globalization.CultureInfo.InvariantCulture) != text)
+                return false;
+            value = parsed;
+            return true;
+        }
     }
 
     private static LocalWorkspaceTokenFacts ReadTokens(IReadOnlyList<TokenObservation> rows)
