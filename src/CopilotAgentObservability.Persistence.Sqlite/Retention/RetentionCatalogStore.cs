@@ -358,6 +358,7 @@ public sealed partial class RetentionCatalogStore
     internal ValueTask<RetentionPreparedBatch> PrepareCleanupBatchAsync(DateTimeOffset now, int promotionLimit, int claimLimit, TimeSpan elapsedBudget, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested(); using var c = Open(); using var t = c.BeginTransaction(deferred: false);
+        ValidateWorkspaceInstallationState(c, t);
         var nowText = Timestamp(now);
         if (!CoverageMatches(c, t))
         {
@@ -421,6 +422,7 @@ public sealed partial class RetentionCatalogStore
         try
         {
             using var c = Open(); using var t = c.BeginTransaction(deferred: false); var nowText = Timestamp(now);
+            ValidateWorkspaceInstallationState(c, t);
             using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "SELECT item_id,store_instance_id,store_kind,source_item_id,ownership_receipt,private_locator,state,revision,adapter_coverage_version FROM retention_items WHERE item_id=$id;"; q.Parameters.AddWithValue("$id", work.ItemId); using var r = q.ExecuteReader(); if (!r.Read() || r.GetInt64(7) != work.ExpectedRevision) { t.Commit(); return ValueTask.FromResult(new RetentionClaimResult(RetentionClaimDisposition.StaleNoOp, null, null, null)); }
             var state = r.GetString(6); var revision = r.GetInt64(7); var coverage = r.GetInt32(8); var store = r.GetString(1); var kind = TryParseKind(r.GetString(2)); var source = r.GetString(3); var receipt = Convert.ToBase64String(r.GetFieldValue<byte[]>(4)); var locator = r.IsDBNull(5) ? null : new RetentionPrivateLocatorHandle(r.GetString(5)); r.Close();
             if (kind is null || coverage != RetentionV1Constants.AdapterCoverageVersion || !CoverageMatches(c, t)) { Exec(c, t, "UPDATE retention_worker_state SET worker_error_code='retention_adapter_coverage_mismatch' WHERE id=1 AND worker_error_code IS NOT 'retention_adapter_coverage_mismatch';"); t.Commit(); return ValueTask.FromResult(new RetentionClaimResult(RetentionClaimDisposition.CoverageBlocked, null, null, null)); }
@@ -440,6 +442,7 @@ public sealed partial class RetentionCatalogStore
         try
         {
             using var c = Open(); using var t = c.BeginTransaction(deferred: false);
+            ValidateWorkspaceInstallationState(c, t);
             var fenceDisposition = CheckIntentFence(c, t, fence, now);
             if (fenceDisposition is not null) { t.Commit(); return ValueTask.FromResult(new RetentionIntentResult(fenceDisposition.Value, 0, expectedCursor)); }
             var attempt = ScalarInt(c, t, "SELECT attempt_count FROM retention_items WHERE item_id=$id", ("$id", fence.ItemId));
@@ -471,6 +474,13 @@ public sealed partial class RetentionCatalogStore
     }
 
     internal ValueTask<RetentionMutationDisposition> TryCancelBeforeIntentAsync(RetentionDeleteFence fence, DateTimeOffset now, CancellationToken cancellationToken) => ValueTask.FromResult(Mutate(cancellationToken, c => { using var t = c.BeginTransaction(); if (!Owns(c, t, fence, now) || HasCurrentDeleteJournal(c, t, fence.ItemId, fence.ExpectedRevision)) { t.Commit(); return RetentionMutationDisposition.StaleNoOp; } Exec(c, t, "DELETE FROM retention_leases WHERE item_id=$id AND lease_kind='deletion' AND owner=$owner AND generation=$generation;", ("$id", fence.ItemId), ("$owner", fence.LeaseOwner), ("$generation", fence.LeaseGeneration)); Exec(c, t, "UPDATE retention_items SET state='deletion_queued',revision=revision+1 WHERE item_id=$id AND revision=$revision;", ("$id", fence.ItemId), ("$revision", fence.ExpectedRevision)); t.Commit(); return RetentionMutationDisposition.Applied; }));
+
+    private static void ValidateWorkspaceInstallationState(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        if (LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction)
+            == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+    }
 
     internal ValueTask<RetentionRenewalResult> TryRenewDeletionLeaseAsync(RetentionDeleteFence fence, DateTimeOffset now, DateTimeOffset? notAfter, CancellationToken cancellationToken)
     { cancellationToken.ThrowIfCancellationRequested(); using var c = Open(); using var t = c.BeginTransaction(); if (notAfter is { } cap && cap <= now) { t.Commit(); return ValueTask.FromResult(RetentionRenewalResult.LeaseLost); } var expiry = notAfter is { } capped && capped < now + RetentionV1Constants.LeaseDuration ? capped : now + RetentionV1Constants.LeaseDuration; Exec(c, t, "UPDATE retention_leases SET expires_at=$expiry WHERE item_id=$id AND lease_kind='deletion' AND owner=$owner AND generation=$generation AND expires_at>$now AND EXISTS(SELECT 1 FROM retention_items WHERE item_id=$id AND state='deleting' AND revision=$revision);", ("$expiry", Timestamp(expiry)), ("$id", fence.ItemId), ("$owner", fence.LeaseOwner), ("$generation", fence.LeaseGeneration), ("$now", Timestamp(now)), ("$revision", fence.ExpectedRevision)); using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "SELECT changes();"; var changed = Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture); t.Commit(); return ValueTask.FromResult(changed == 1 ? RetentionRenewalResult.Renewed : RetentionRenewalResult.LeaseLost); }

@@ -60,6 +60,191 @@ public sealed class ProjectionDispositionContractTests
     }
 
     [Fact]
+    public void Commit_ZeroResolutionBatchRejectsUnsupportedWorkspaceBeforeAnyWrite()
+    {
+        using var temp = new MonitorTempDirectory();
+        CreateSchema(temp.DatabasePath);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
+                .Commit(CreateZeroResolutionBatch("zero-resolution", ValidPayload("zero-resolution"))));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM retention_items;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM source_schema_observations;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM monitor_projection_dispositions;"));
+    }
+
+    [Fact]
+    public void Commit_DuplicateBatchRejectsUnsupportedWorkspaceBeforeReplayReturn()
+    {
+        using var temp = new MonitorTempDirectory();
+        CreateSchema(temp.DatabasePath);
+        var batch = CreateZeroResolutionBatch("duplicate-gate", ValidPayload("duplicate-gate"));
+        var store = new SqliteIngestionCommitStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        _ = store.Commit(batch);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+        var before = IngestionMutationSnapshot(temp.DatabasePath);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => store.Commit(batch));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(before, IngestionMutationSnapshot(temp.DatabasePath));
+    }
+
+    [Fact]
+    public void RawInsert_RejectsUnsupportedWorkspaceBeforeSourceOrCatalogWrite()
+    {
+        using var temp = new MonitorTempDirectory();
+        CreateSchema(temp.DatabasePath);
+        var store = ProjectionStore(temp.DatabasePath);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => store.Insert(new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: "raw-gate",
+            ReceivedAt: ObservedAt,
+            ResourceAttributesJson: null,
+            PayloadJson: ValidPayload("raw-gate"))));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM retention_items;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM source_trace_version_observations;"));
+    }
+
+    [Fact]
+    public void TryBeginProjection_RejectsUnsupportedWorkspaceBeforeDispositionClaim()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, ValidPayload("begin-gate"));
+        var store = ProjectionStore(temp.DatabasePath);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            store.TryBeginProjection(committed.RawRecordId, expectedRevision: 1, ObservedAt.AddMinutes(1)));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.NotStarted, 1, ObservedAt);
+    }
+
+    [Fact]
+    public void RecordProjectionFailure_RejectsUnsupportedWorkspaceBeforeDispositionUpdate()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, ValidPayload("failure-gate"));
+        var store = ProjectionStore(temp.DatabasePath);
+        Assert.True(store.TryBeginProjection(committed.RawRecordId, expectedRevision: 1, ObservedAt.AddMinutes(1)));
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            store.RecordProjectionFailure(committed.RawRecordId, expectedRevision: 2, ObservedAt.AddMinutes(2)));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Pending, 2, ObservedAt.AddMinutes(1));
+    }
+
+    [Fact]
+    public void ApplyProjection_RejectsUnsupportedWorkspaceBeforeCoreProjectionWrite()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, ValidPayload("projection-gate"));
+        var store = ProjectionStore(temp.DatabasePath);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => store.ApplyProjection(
+            committed.RawRecordId,
+            RawTelemetrySources.RawOtlp,
+            ObservedAt,
+            EmptyProjection(),
+            ObservedAt.AddMinutes(2)));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM monitor_ingestions;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM monitor_traces;"));
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.NotStarted, 1, ObservedAt);
+    }
+
+    [Fact]
+    public async Task ProjectionWorker_UnsupportedWorkspaceLeavesCoreProjectionAndDispositionUnchanged()
+    {
+        using var temp = new MonitorTempDirectory();
+        var committed = Commit(temp.DatabasePath, ValidPayload("worker-gate"));
+        var store = ProjectionStore(temp.DatabasePath);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+        var health = ReadyHealth();
+        var worker = new ProjectionWorker(
+            new RawTelemetryStoreProjectionStore(store),
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath),
+            new MutableTimeProvider(ObservedAt.AddMinutes(1)));
+
+        await worker.RunProjectionPassAsync();
+
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM monitor_ingestions;"));
+        Assert.Equal(0L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM monitor_traces;"));
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.NotStarted, 1, ObservedAt);
+    }
+
+    [Fact]
+    public async Task ProjectionWorker_RejectsUnsupportedWorkspaceBeforeTraceReconciliationMutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        CreateSchema(temp.DatabasePath);
+        Execute(temp.DatabasePath, """
+            INSERT INTO monitor_traces(trace_id,client_kind,span_count,projected_at)
+            VALUES('reconciliation-gate','stale-client',0,'2026-07-17T00:00:00.0000000+00:00');
+            INSERT INTO source_trace_attribution_reconciliation_queue(trace_id)
+            VALUES('reconciliation-gate');
+            """);
+        InstallUnsupportedWorkspace(temp.DatabasePath);
+        var store = ProjectionStore(temp.DatabasePath);
+        var worker = new ProjectionWorker(
+            new RawTelemetryStoreProjectionStore(store),
+            ReadyHealth(),
+            new SqliteSourceCompatibilityStore(temp.DatabasePath),
+            new MutableTimeProvider(ObservedAt.AddMinutes(1)));
+
+        await worker.RunProjectionPassAsync();
+
+        Assert.Equal("stale-client", ScalarText(temp.DatabasePath,
+            "SELECT client_kind FROM monitor_traces WHERE trace_id='reconciliation-gate';"));
+        Assert.Equal(1L, Scalar(temp.DatabasePath,
+            "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue WHERE trace_id='reconciliation-gate';"));
+    }
+
+    [Fact]
+    public async Task ProjectionWorker_WhenWorkspaceBecomesUnsupportedAfterPreflight_ReconciliationFailsClosed()
+    {
+        using var temp = new MonitorTempDirectory();
+        CreateSchema(temp.DatabasePath);
+        Execute(temp.DatabasePath, """
+            INSERT INTO monitor_traces(trace_id,client_kind,span_count,projected_at)
+            VALUES('reconciliation-race','stale-client',0,'2026-07-17T00:00:00.0000000+00:00');
+            INSERT INTO source_trace_attribution_reconciliation_queue(trace_id)
+            VALUES('reconciliation-race');
+            """);
+        var store = ProjectionStore(temp.DatabasePath);
+        var worker = new ProjectionWorker(
+            new AfterFirstStatusProjectionStore(
+                new RawTelemetryStoreProjectionStore(store),
+                () => InstallUnsupportedWorkspace(temp.DatabasePath)),
+            ReadyHealth(),
+            new SqliteSourceCompatibilityStore(temp.DatabasePath),
+            new MutableTimeProvider(ObservedAt.AddMinutes(1)));
+
+        await worker.RunProjectionPassAsync();
+
+        Assert.Equal("stale-client", ScalarText(temp.DatabasePath,
+            "SELECT client_kind FROM monitor_traces WHERE trace_id='reconciliation-race';"));
+        Assert.Equal(1L, Scalar(temp.DatabasePath,
+            "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue WHERE trace_id='reconciliation-race';"));
+    }
+
+    [Fact]
     public async Task TryBeginProjection_UsesRevisionCasSoExactlyOneConcurrentCallerWins()
     {
         using var temp = new MonitorTempDirectory();
@@ -327,9 +512,15 @@ public sealed class ProjectionDispositionContractTests
 
     private static CommittedIngestionIds CommitWithoutSchema(string databasePath, string payload)
     {
+        return new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
+            .Commit(CreateZeroResolutionBatch(Guid.CreateVersion7().ToString("D"), payload));
+    }
+
+    private static ValidatedIngestionBatch CreateZeroResolutionBatch(string batchId, string payload)
+    {
         var inventory = OtlpJsonStructuralWalker.Build(ValidPayload("inventory"), ObservedAt);
         var observation = SourceObservationBatchDraft.Create(
-            Guid.CreateVersion7().ToString("D"),
+            batchId,
             RawTelemetrySources.RawOtlp,
             sourceApplicationVersion: null,
             RawTelemetrySources.RawOtlp,
@@ -350,8 +541,7 @@ public sealed class ProjectionDispositionContractTests
             ReceivedAt: ObservedAt,
             ResourceAttributesJson: null,
             PayloadJson: payload);
-        return new SqliteIngestionCommitStore(databasePath, RawTelemetryStoreConnectionOptions.MonitorWriter)
-            .Commit(ValidatedIngestionBatch.Create(raw, observation));
+        return ValidatedIngestionBatch.Create(raw, observation);
     }
 
     private static void CreateSchema(string databasePath)
@@ -376,6 +566,15 @@ public sealed class ProjectionDispositionContractTests
     private static string ValidPayload(string traceId) =>
         $$"""{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"{{traceId}}","spanId":"span"}]}]}]}""";
 
+    private static void InstallUnsupportedWorkspace(string databasePath) =>
+        Execute(databasePath, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',6);");
+
+    private static string IngestionMutationSnapshot(string databasePath) => string.Join("|",
+        Scalar(databasePath, "SELECT COUNT(*) FROM raw_records;"),
+        Scalar(databasePath, "SELECT COUNT(*) FROM retention_items;"),
+        Scalar(databasePath, "SELECT COUNT(*) FROM source_schema_observations;"),
+        Scalar(databasePath, "SELECT COUNT(*) FROM monitor_projection_dispositions;"));
+
     private static void Execute(string databasePath, string sql)
     {
         using var connection = Open(databasePath);
@@ -390,6 +589,14 @@ public sealed class ProjectionDispositionContractTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return (long)command.ExecuteScalar()!;
+    }
+
+    private static string ScalarText(string databasePath, string sql)
+    {
+        using var connection = Open(databasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (string)command.ExecuteScalar()!;
     }
 
     private static string[] ReadColumnNames(string databasePath, string table)
@@ -422,6 +629,21 @@ public sealed class ProjectionDispositionContractTests
         var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         return connection;
+    }
+
+    private sealed class AfterFirstStatusProjectionStore(
+        IMonitorProjectionStore inner,
+        Action afterFirstStatus) : ProjectionStoreTestDouble
+    {
+        private int statusRead;
+
+        public override MonitorProjectionStatus GetProjectionStatus()
+        {
+            var status = inner.GetProjectionStatus();
+            if (Interlocked.Exchange(ref statusRead, 1) == 0)
+                afterFirstStatus();
+            return status;
+        }
     }
 
     private sealed class InterleavedProjectionStore : ProjectionStoreTestDouble

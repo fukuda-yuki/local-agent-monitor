@@ -395,6 +395,9 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
             return false;
         }
         using var transaction = connection.BeginTransaction();
+        if (LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction)
+            == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
         var pendingTraceIds = ReadPendingTraceSourceReconciliationIds(
             connection,
             transaction);

@@ -110,6 +110,7 @@ internal sealed partial class RawTelemetryStore
         var traceSourceResolutions = OtlpTraceSourceResolver.Resolve(record.PayloadJson);
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
+        ValidateWorkspaceInstallationState(connection, transaction);
         var catalog = new Retention.RetentionCatalogStore(databasePath, timeProvider);
         try { catalog.InitializeForWrite(connection, transaction); }
         catch (SqliteException) { throw new Retention.RetentionMigrationBlockedException(); }
@@ -192,6 +193,7 @@ internal sealed partial class RawTelemetryStore
 
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction(deferred: false);
+        ValidateWorkspaceInstallationState(connection, transaction);
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes);
         using var publications = Retention.RetentionGrantPublicationSet.EnterInOrder(
             retentionLease.Grants
@@ -370,7 +372,10 @@ internal sealed partial class RawTelemetryStore
         string nextState)
     {
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        ValidateWorkspaceInstallationState(connection, transaction);
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             $"""
             UPDATE monitor_projection_dispositions
@@ -381,7 +386,9 @@ internal sealed partial class RawTelemetryStore
         AddParameter(command, "$updated_at", FormatTimestamp(updatedAt));
         AddParameter(command, "$raw_record_id", rawRecordId);
         AddParameter(command, "$expected_revision", expectedRevision);
-        return command.ExecuteNonQuery() == 1;
+        var changed = command.ExecuteNonQuery() == 1;
+        transaction.Commit();
+        return changed;
     }
 
     private static bool HasPendingDisposition(
@@ -416,7 +423,10 @@ internal sealed partial class RawTelemetryStore
     public MonitorProjectionStatus GetProjectionStatus()
     {
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        ValidateWorkspaceInstallationState(connection, transaction);
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             SELECT COUNT(*), MIN(received_at)
@@ -675,6 +685,7 @@ internal sealed partial class RawTelemetryStore
 
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction(deferred: false);
+        var collectionFactsInstalled = ValidateWorkspaceInstallationState(connection, transaction);
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes);
         using var publications = Retention.RetentionGrantPublicationSet.EnterInOrder(
             retentionLease.Grants
@@ -719,11 +730,6 @@ internal sealed partial class RawTelemetryStore
         var validSpans = spans
             .Where(span => !string.IsNullOrWhiteSpace(span.TraceId))
             .ToList();
-
-        var collectionState = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
-        if (collectionState == LocalWorkspaceProjectionInstallationState.Unsupported)
-            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
-        var collectionFactsInstalled = collectionState == LocalWorkspaceProjectionInstallationState.Current;
 
         // Insert spans — idempotent via UNIQUE(raw_record_id, span_ordinal).
         foreach (var span in validSpans)
@@ -1125,6 +1131,16 @@ internal sealed partial class RawTelemetryStore
         }
 
         return new MonitorProjectionPage<T>(rows, HasMore: false);
+    }
+
+    private static bool ValidateWorkspaceInstallationState(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        var state = LocalWorkspaceProjectionSchemaV1.ReadInstallationState(connection, transaction);
+        if (state == LocalWorkspaceProjectionInstallationState.Unsupported)
+            throw new InvalidOperationException("local_workspace_projection_schema_unsupported");
+        return state == LocalWorkspaceProjectionInstallationState.Current;
     }
 
     private ValueTask<Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadSelectedRawRecordsAsync(
