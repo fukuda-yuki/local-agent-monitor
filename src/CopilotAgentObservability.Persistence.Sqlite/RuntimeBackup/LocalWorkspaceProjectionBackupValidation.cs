@@ -1,3 +1,4 @@
+using CopilotAgentObservability.RawReplay;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 
@@ -5,6 +6,20 @@ namespace CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 internal static class LocalWorkspaceProjectionBackupValidation
 {
+    internal static void ValidateRawSemanticReconstructionPreflight(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='raw_records');";
+        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+            return;
+        command.CommandText = $"SELECT EXISTS(SELECT 1 FROM raw_records WHERE typeof(payload_json)<>'text' OR length(CAST(payload_json AS BLOB)) NOT BETWEEN 1 AND {RawReplayLimits.MaximumRawRecordBytes} LIMIT 1);";
+        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidOperationException();
+    }
+
     internal static void Validate(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -446,13 +461,21 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 return;
             }
         }
-        var monitorKeys = new HashSet<(long RawId, int Ordinal)>();
-        using (var spans = connection.CreateCommand())
+        ValidateRawSemanticReconstructionPreflight(connection, transaction);
+
+        using (var orphan = connection.CreateCommand())
         {
-            spans.Transaction = transaction;
-            spans.CommandText = "SELECT raw_record_id,span_ordinal FROM monitor_spans ORDER BY raw_record_id,span_ordinal;";
-            using var reader = spans.ExecuteReader();
-            while (reader.Read()) monitorKeys.Add((reader.GetInt64(0), reader.GetInt32(1)));
+            orphan.Transaction = transaction;
+            orphan.CommandText = """
+                SELECT EXISTS(
+                  SELECT 1 FROM local_workspace_span_facts fact
+                  WHERE NOT EXISTS(
+                    SELECT 1 FROM monitor_spans span
+                    WHERE span.raw_record_id=fact.raw_record_id
+                      AND span.span_ordinal=fact.span_ordinal));
+                """;
+            if (Convert.ToInt64(orphan.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException();
         }
 
         bool hasRetention;
@@ -462,46 +485,9 @@ internal static class LocalWorkspaceProjectionBackupValidation
             retention.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='retention_items');";
             hasRetention = Convert.ToInt64(retention.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
         }
-        var expected = new Dictionary<(long RawId, int Ordinal), (long? Retry, long? Total)>();
-        var availableRawIds = new HashSet<long>();
-        if (hasRetention)
-        using (var records = connection.CreateCommand())
-        {
-            records.Transaction = transaction;
-            records.CommandText = """
-                SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version
-                FROM raw_records r
-                JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(r.id AS TEXT)
-                WHERE i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
-                  AND i.deleted_at IS NULL AND i.error_code IS NULL
-                ORDER BY r.id;
-                """;
-            using var reader = records.ExecuteReader();
-            while (reader.Read())
-            {
-                var rawId = reader.GetInt64(0);
-                availableRawIds.Add(rawId);
-                if (!DateTimeOffset.TryParseExact(reader.GetString(3), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
-                    throw new InvalidOperationException();
-                var raw = new RawTelemetryRecord(rawId, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), receivedAt,
-                    reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetInt32(6));
-                foreach (var span in MonitorSpanProjectionBuilder.Build(raw))
-                    if (monitorKeys.Contains((rawId, span.SpanOrdinal)))
-                        expected.Add((rawId, span.SpanOrdinal), (span.RetryCount, span.ProducerTotalTokens));
-            }
-        }
 
-        var actual = new Dictionary<(long RawId, int Ordinal), (long? Retry, long? Total)>();
-        using (var facts = connection.CreateCommand())
-        {
-            facts.Transaction = transaction;
-            facts.CommandText = "SELECT raw_record_id,span_ordinal,retry_count,producer_total_tokens FROM local_workspace_span_facts ORDER BY raw_record_id,span_ordinal;";
-            using var reader = facts.ExecuteReader();
-            while (reader.Read())
-                actual.Add((reader.GetInt64(0), reader.GetInt32(1)),
-                    (reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetInt64(3)));
-        }
-        if (hasRetention)
+        if (!hasRetention) return;
+
         using (var deleted = connection.CreateCommand())
         {
             deleted.Transaction = transaction;
@@ -511,13 +497,110 @@ internal static class LocalWorkspaceProjectionBackupValidation
                   JOIN retention_tombstones t ON t.item_id=i.item_id
                   WHERE i.state='deleted' AND i.read_denied_at IS NOT NULL AND i.deleted_at=t.deleted_at);
                 """;
-            if (Convert.ToInt64(deleted.ExecuteScalar(), CultureInfo.InvariantCulture) != 0) throw new InvalidOperationException();
+            if (Convert.ToInt64(deleted.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException();
         }
-        if (actual.Keys.Any(key => !monitorKeys.Contains(key)))
-            throw new InvalidOperationException();
-        var availableActual = actual.Where(pair => availableRawIds.Contains(pair.Key.RawId)).ToDictionary();
-        if (expected.Count != availableActual.Count || expected.Any(pair => !availableActual.TryGetValue(pair.Key, out var value) || value != pair.Value))
-            throw new InvalidOperationException();
+
+        using (var expectedTable = connection.CreateCommand())
+        {
+            expectedTable.Transaction = transaction;
+            expectedTable.CommandText = """
+                CREATE TEMP TABLE IF NOT EXISTS local_workspace_expected_span_facts(
+                    span_ordinal INTEGER PRIMARY KEY,
+                    retry_count INTEGER NULL,
+                    producer_total_tokens INTEGER NULL
+                ) WITHOUT ROWID;
+                """;
+            expectedTable.ExecuteNonQuery();
+        }
+
+        long? afterRawRecordId = null;
+        while (true)
+        {
+            RawTelemetryRecord? raw = null;
+            using (var record = connection.CreateCommand())
+            {
+                record.Transaction = transaction;
+                record.CommandText = """
+                    SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version
+                    FROM raw_records r
+                    JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(r.id AS TEXT)
+                    WHERE i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
+                      AND i.deleted_at IS NULL AND i.error_code IS NULL
+                      AND ($after IS NULL OR r.id>$after)
+                    ORDER BY r.id
+                    LIMIT 1;
+                    """;
+                record.Parameters.AddWithValue("$after", afterRawRecordId.HasValue ? afterRawRecordId.Value : DBNull.Value);
+                using var reader = record.ExecuteReader();
+                if (reader.Read())
+                {
+                    var rawId = reader.GetInt64(0);
+                    if (!DateTimeOffset.TryParseExact(reader.GetString(3), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
+                        throw new InvalidOperationException();
+                    raw = new RawTelemetryRecord(rawId, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), receivedAt,
+                        reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetInt32(6));
+                    afterRawRecordId = rawId;
+                }
+            }
+            if (raw is null) break;
+
+            using (var clear = connection.CreateCommand())
+            {
+                clear.Transaction = transaction;
+                clear.CommandText = "DELETE FROM temp.local_workspace_expected_span_facts;";
+                clear.ExecuteNonQuery();
+            }
+            using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO temp.local_workspace_expected_span_facts(
+                      span_ordinal,retry_count,producer_total_tokens)
+                    VALUES($ordinal,$retry,$total);
+                    """;
+                var ordinal = insert.Parameters.Add("$ordinal", SqliteType.Integer);
+                var retry = insert.Parameters.Add("$retry", SqliteType.Integer);
+                var total = insert.Parameters.Add("$total", SqliteType.Integer);
+                insert.Prepare();
+                foreach (var span in MonitorSpanProjectionBuilder.Build(raw))
+                {
+                    ordinal.Value = span.SpanOrdinal;
+                    retry.Value = span.RetryCount.HasValue ? span.RetryCount.Value : DBNull.Value;
+                    total.Value = span.ProducerTotalTokens.HasValue ? span.ProducerTotalTokens.Value : DBNull.Value;
+                    insert.ExecuteNonQuery();
+                }
+            }
+
+            using var compare = connection.CreateCommand();
+            compare.Transaction = transaction;
+            compare.CommandText = """
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM temp.local_workspace_expected_span_facts expected
+                  JOIN monitor_spans span
+                    ON span.raw_record_id=$raw AND span.span_ordinal=expected.span_ordinal
+                  LEFT JOIN local_workspace_span_facts actual
+                    ON actual.raw_record_id=span.raw_record_id AND actual.span_ordinal=span.span_ordinal
+                  WHERE actual.raw_record_id IS NULL
+                     OR actual.retry_count IS NOT expected.retry_count
+                     OR actual.producer_total_tokens IS NOT expected.producer_total_tokens
+                  UNION ALL
+                  SELECT 1
+                  FROM local_workspace_span_facts actual
+                  WHERE actual.raw_record_id=$raw
+                    AND NOT EXISTS(
+                      SELECT 1
+                      FROM monitor_spans span
+                      JOIN temp.local_workspace_expected_span_facts expected
+                        ON expected.span_ordinal=span.span_ordinal
+                      WHERE span.raw_record_id=actual.raw_record_id
+                        AND span.span_ordinal=actual.span_ordinal));
+                """;
+            compare.Parameters.AddWithValue("$raw", raw.Id!.Value);
+            if (Convert.ToInt64(compare.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException();
+        }
     }
 
     private static void ValidateCanonicalProjection(

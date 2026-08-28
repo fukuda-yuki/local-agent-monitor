@@ -6,9 +6,11 @@ using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.ConfigCli;
+using CopilotAgentObservability.RawReplay;
 using Microsoft.Data.Sqlite;
 using System.IO.Compression;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -125,6 +127,157 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
         Assert.Equal(before, File.ReadAllBytes(fixture.DatabasePath));
         Assert.False(File.Exists(archive));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public void PublicationEnforcesExactRawPayloadCeilingBeforeWorkspaceSemanticReconstruction(
+        int excessBytes,
+        bool accepted)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var payload = BuildPaddedEmptyOtlpPayload(RawReplayLimits.MaximumRawRecordBytes + excessBytes);
+        fixture.RawStore.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            null,
+            PublicationAt,
+            null,
+            payload));
+        var archive = fixture.Path($"raw-payload-boundary-{excessBytes}.zip");
+        var receiptCount = Scalar(fixture.DatabasePath, "SELECT COUNT(*) FROM runtime_backup_receipts;");
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.Equal(accepted, created.Success);
+        Assert.Equal(accepted ? null : RuntimeBackupErrorCodes.RestoreIncompatible, created.ErrorCode);
+        if (accepted)
+        {
+            Assert.True(fixture.Service.Inspect(archive).Success);
+        }
+        else
+        {
+            Assert.Equal(receiptCount, Scalar(fixture.DatabasePath, "SELECT COUNT(*) FROM runtime_backup_receipts;"));
+            Assert.False(File.Exists(archive));
+        }
+    }
+
+    [Fact]
+    public void RawSemanticReconstructionPreflightRejectsOversizedPayloadWithoutSourceMutation()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        fixture.RawStore.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            null,
+            PublicationAt,
+            null,
+            BuildPaddedEmptyOtlpPayload(RawReplayLimits.MaximumRawRecordBytes + 1)));
+        NormalizeForByteComparison(fixture.DatabasePath);
+        var before = File.ReadAllBytes(fixture.DatabasePath);
+
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.DatabasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString()))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction(deferred: true);
+            Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.ValidateRawSemanticReconstructionPreflight(
+                    connection,
+                    transaction));
+            transaction.Rollback();
+        }
+
+        Assert.Equal(before, File.ReadAllBytes(fixture.DatabasePath));
+    }
+
+    [Fact]
+    public void RestoreRejectsOversizedWorkspaceRawPayloadBeforeTargetMutation()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        fixture.RawStore.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            null,
+            PublicationAt,
+            null,
+            BuildPaddedEmptyOtlpPayload(RawReplayLimits.MaximumRawRecordBytes)));
+        var source = fixture.Path("raw-payload-restore-source.zip");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, source).Success);
+        var oversized = fixture.Path("raw-payload-restore-oversized.zip");
+        RewriteArchiveDatabase(source, oversized, fixture.Path("raw-payload-restore-stage.db"), path =>
+        {
+            using var connection = Open(path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE raw_records SET payload_json=$payload WHERE id=(SELECT MAX(id) FROM raw_records);";
+            command.Parameters.AddWithValue("$payload", BuildPaddedEmptyOtlpPayload(RawReplayLimits.MaximumRawRecordBytes + 1));
+            Assert.Equal(1, command.ExecuteNonQuery());
+        });
+        var target = fixture.Path("raw-payload-restore-target.db");
+        File.Copy(fixture.DatabasePath, target);
+        NormalizeForByteComparison(target);
+        var before = File.ReadAllBytes(target);
+
+        var restored = fixture.Service.Restore(oversized, target, new RuntimeRestoreOptions());
+
+        Assert.False(restored.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restored.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(target));
+    }
+
+    [Fact]
+    public void ValidationAcceptsRawFactCardinalityBeyondDetailNodeLimitAndFindsLateTamper()
+    {
+        const int spanCount = 4_097;
+        using var fixture = new LocalRepositoryCatalogFixture();
+        using (var connection = Open(fixture.DatabasePath))
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, PublicationAt);
+        var raw = new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            PublicationAt,
+            null,
+            BuildSyntheticSpanPayload(spanCount));
+        var rawId = fixture.RawStore.Insert(raw);
+        fixture.RawStore.ApplyProjection(
+            rawId,
+            raw.Source,
+            raw.ReceivedAt,
+            MonitorProjectionBuilder.Build(raw),
+            raw.ReceivedAt);
+        fixture.RawStore.ApplySpanProjection(
+            rawId,
+            MonitorSpanProjectionBuilder.Build(raw),
+            raw.ReceivedAt);
+
+        using (var connection = Open(fixture.DatabasePath))
+        using (var transaction = connection.BeginTransaction(deferred: true))
+        {
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction);
+            transaction.Rollback();
+        }
+        Assert.Equal(spanCount, Scalar(fixture.DatabasePath,
+            $"SELECT COUNT(*) FROM local_workspace_span_facts WHERE raw_record_id={rawId};"));
+
+        using (var connection = Open(fixture.DatabasePath))
+        using (var transaction = connection.BeginTransaction())
+        {
+            using var tamper = connection.CreateCommand();
+            tamper.Transaction = transaction;
+            tamper.CommandText = "UPDATE local_workspace_span_facts SET retry_count=1 WHERE raw_record_id=$raw AND span_ordinal=$ordinal;";
+            tamper.Parameters.AddWithValue("$raw", rawId);
+            tamper.Parameters.AddWithValue("$ordinal", spanCount - 1);
+            Assert.Equal(1, tamper.ExecuteNonQuery());
+            Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+            transaction.Rollback();
+        }
     }
 
     [Theory]
@@ -1166,6 +1319,26 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         return connection;
     }
 
+    private static string BuildPaddedEmptyOtlpPayload(int utf8Bytes)
+    {
+        const string prefix = "{\"resourceSpans\":[],\"padding\":\"";
+        const string suffix = "\"}";
+        return prefix + new string('x', utf8Bytes - prefix.Length - suffix.Length) + suffix;
+    }
+
+    private static string BuildSyntheticSpanPayload(int count)
+    {
+        var builder = new StringBuilder("{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[");
+        for (var index = 0; index < count; index++)
+        {
+            if (index != 0) builder.Append(',');
+            builder.Append("{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"")
+                .Append(index.ToString("x16", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\",\"name\":\"synthetic\"}");
+        }
+        return builder.Append("]}]}]}").ToString();
+    }
+
     private static void Execute(string path, string sql)
     {
         using var connection = Open(path);
@@ -1580,6 +1753,33 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Write(target, "database.sqlite", database);
     }
 
+    private static void RewriteArchiveDatabase(
+        string source,
+        string output,
+        string databasePath,
+        Action<string> mutation)
+    {
+        byte[] manifest;
+        byte[] database;
+        using (var archive = ZipFile.OpenRead(source))
+        {
+            manifest = Read(archive.GetEntry("manifest.json")!);
+            database = Read(archive.GetEntry("database.sqlite")!);
+        }
+        File.WriteAllBytes(databasePath, database);
+        mutation(databasePath);
+        NormalizeForByteComparison(databasePath);
+        database = File.ReadAllBytes(databasePath);
+        var parsed = RuntimeBackupJson.ParseManifest(manifest) with
+        {
+            DatabaseSha256 = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant(),
+            DatabaseSize = database.LongLength,
+        };
+        using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+        Write(target, "manifest.json", RuntimeBackupJson.WriteManifest(parsed));
+        Write(target, "database.sqlite", database);
+    }
+
     private static RuntimeBackupManifestData ReadManifest(string source)
     {
         using var archive = ZipFile.OpenRead(source);
@@ -1628,6 +1828,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         internal RecordingTimeProvider Clock { get; }
         internal SkillInvocationV2RegistryProviderV1 Authority { get; }
         internal LocalWorkspacePublicationGate Gate { get; }
+        internal RawTelemetryStore RawStore => fixture.RawStore;
         internal SqliteRuntimeBackupService Service { get; }
         internal string Path(string name) => System.IO.Path.Combine(System.IO.Path.GetDirectoryName(DatabasePath)!, name);
         public void Dispose() => fixture.Dispose();
