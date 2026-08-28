@@ -420,8 +420,28 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
             var temp=new MonitorTempDirectory();var id=AlertCenterRouteTests.SeedPersistedTraceAndSession(temp,"00000000000000000000000000000001",true).ToString("D");
             var options=new MonitorHostTestOptions{StartWriter=false,StartProjectionWorker=false,StartSessionWriter=false,StartSessionOtelEnrichment=false,StartLocalRepositoryCatalogHostedService=false,StartRetentionCleanupWorker=false,UseUserSecrets=false};
             var host=await MonitorTestHost.StartAsync(temp,testOptions:options);
-            using(var c=Open(temp.DatabasePath)){LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR IGNORE INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token) SELECT event_id,'json','{}','2026-08-26T00:00:00.0000000+00:00','2030-08-27T00:00:00.0000000+00:00',randomblob(32) FROM session_events WHERE session_id=$session ORDER BY event_id LIMIT 1; INSERT OR REPLACE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes WHERE session_id=$session AND parent_node_id IS NOT NULL AND relationship_authority='exact' ORDER BY node_id LIMIT 1;";q.Parameters.AddWithValue("$session",id);Assert.True(q.ExecuteNonQuery()>0,"revision fixture did not seed an exact parent edge");t.Commit();}
+            using(var c=Open(temp.DatabasePath))
+            {
+                InstallRetainedContent(c, id);
+                LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);
+                using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;
+                q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR REPLACE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes WHERE session_id=$session AND parent_node_id IS NOT NULL AND relationship_authority='exact' ORDER BY node_id LIMIT 1;";
+                q.Parameters.AddWithValue("$session",id);Assert.True(q.ExecuteNonQuery()>0,"revision fixture did not seed an exact parent edge");t.Commit();
+            }
             return new(temp,host,id);
+        }
+        private static void InstallRetainedContent(SqliteConnection connection, string sessionId)
+        {
+            const string capturedAt = "2026-08-26T00:00:00.0000000+00:00";
+            const string expiresAt = "2030-08-27T00:00:00.0000000+00:00";
+            using var seed = connection.CreateCommand();
+            seed.CommandText = "INSERT OR IGNORE INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token) SELECT event_id,'application/json','{}',$captured,$expires,randomblob(32) FROM session_events WHERE session_id=$session ORDER BY event_id LIMIT 1; INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version) SELECT 'revision-content',store_instance_id,'session_event_content',event_id,1,randomblob(32),$captured,$expires,'raw-default-90d',1,'expiring',1,1 FROM retention_store_instances CROSS JOIN session_events WHERE retention_store_instances.id=1 AND session_events.session_id=$session ORDER BY event_id LIMIT 1;";
+            seed.Parameters.AddWithValue("$session", sessionId);seed.Parameters.AddWithValue("$captured", capturedAt);seed.Parameters.AddWithValue("$expires", expiresAt);seed.ExecuteNonQuery();
+            using var read = connection.CreateCommand();
+            read.CommandText = "SELECT i.store_instance_id,e.event_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token FROM retention_items i JOIN session_events e ON e.event_id=i.source_item_id JOIN session_event_content c ON c.event_id=e.event_id WHERE i.item_id='revision-content';";
+            using var reader = read.ExecuteReader();Assert.True(reader.Read());
+            var receipt = RetentionOwnershipReceipt.CreateSession(new(reader.GetString(0),reader.GetString(1),"application/json",capturedAt,DateTimeOffset.Parse(capturedAt).UtcTicks,expiresAt,DateTimeOffset.Parse(expiresAt).UtcTicks,sessionId,reader.IsDBNull(2)?null:reader.GetString(2),reader.GetString(3),reader.GetString(4),(byte[])reader.GetValue(5)));reader.Close();
+            using var update = connection.CreateCommand();update.CommandText="UPDATE retention_items SET ownership_receipt=$receipt WHERE item_id='revision-content';";update.Parameters.AddWithValue("$receipt",receipt);Assert.Equal(1,update.ExecuteNonQuery());
         }
         internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadSummaryAsync()=>service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary,SessionId),CancellationToken.None);
         internal string Archive(LocalArchiveTargetKind kind,string id,long revision,LocalArchiveAction action)

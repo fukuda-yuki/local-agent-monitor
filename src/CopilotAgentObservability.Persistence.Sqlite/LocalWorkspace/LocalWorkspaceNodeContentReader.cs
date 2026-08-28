@@ -581,6 +581,10 @@ internal sealed class LocalWorkspaceNodeContentReader(
             return LocalWorkspaceNodeContentReadDisposition.Stale;
         var readability = RetentionCatalogStore.ClassifyRowReadability(
             state.Value, expiresAt, !reader.IsDBNull(2), now);
+        if (state == RetentionItemLifecycle.Deleted)
+            return LocalWorkspaceNodeContentReadDisposition.Deleted;
+        if (state == RetentionItemLifecycle.ExpiredPendingDeletion)
+            return LocalWorkspaceNodeContentReadDisposition.Expired;
         return readability switch
         {
             RetentionRowReadability.AlreadyDenied => LocalWorkspaceNodeContentReadDisposition.ReadDenied,
