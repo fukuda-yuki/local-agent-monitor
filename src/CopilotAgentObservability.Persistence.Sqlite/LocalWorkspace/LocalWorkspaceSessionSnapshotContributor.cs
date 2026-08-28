@@ -165,12 +165,19 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 row.Activity["skill"] = projection.State == "current"
                     ? new("recorded", projection.InvocationCount)
                     : new(projection.State, null);
-                if (projection.State == "current")
-                    row.SearchTexts.AddRange(projection.SearchFacts
-                        .Select(static fact => fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant()));
+                var currentInvocationCount = projection.Invocations.LongCount(
+                    static invocation => invocation.CurrentValidState == "current");
+                row.CurrentSkillFilter = currentInvocationCount > 0
+                    ? new("recorded", currentInvocationCount)
+                    : row.Activity["skill"];
+                row.SearchTexts.AddRange(projection.SearchFacts
+                    .Select(static fact => fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant()));
             }
             else
+            {
                 row.Activity["skill"] = new("not_observed", null);
+                row.CurrentSkillFilter = row.Activity["skill"];
+            }
             row.SearchTexts.Sort(StringComparer.Ordinal);
         }
         using (var command = connection.CreateCommand())
@@ -275,14 +282,18 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         internal List<string> Models { get; } = [];
         internal List<string> SearchTexts { get; } = [];
         internal Dictionary<string, LocalWorkspaceFact<long>> Activity { get; } = new(StringComparer.Ordinal);
+        internal LocalWorkspaceFact<long>? CurrentSkillFilter { get; set; }
         internal LocalWorkspaceTokenFacts? TokenAggregate { get; set; }
         internal LocalWorkspaceProjectionRow Freeze()
         {
             LocalWorkspaceFact<long> A(string kind) => Activity.TryGetValue(kind, out var fact) ? fact : new("not_observed", null);
             var tokens = TokenAggregate ?? new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
-            return new(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
+            return new LocalWorkspaceProjectionRow(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
                 new(sourceState, Array.AsReadOnly(Sources.ToArray())), new(modelState, Array.AsReadOnly(Models.ToArray())), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
-                timingState, startedAt, endedAt, lastSeenAt, lastSeenEpoch, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), Array.AsReadOnly(SearchTexts.ToArray()), revision);
+                timingState, startedAt, endedAt, lastSeenAt, lastSeenEpoch, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), Array.AsReadOnly(SearchTexts.ToArray()), revision)
+            {
+                CurrentSkillFilter = CurrentSkillFilter,
+            };
         }
     }
 }

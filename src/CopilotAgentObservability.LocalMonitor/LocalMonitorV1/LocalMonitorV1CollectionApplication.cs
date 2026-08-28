@@ -140,7 +140,7 @@ internal static class LocalMonitorV1CollectionApplication
             && (request.Sources.Count == 0 || p.Sources.Values.Any(request.Sources.Contains))
             && (request.Models.Count == 0 || p.Models.Values.Any(request.Models.Contains))
             && (request.Statuses.Count == 0 || request.Statuses.Contains(p.Status))
-            && Fact(p.Activity.Skill, request.HasSkill) && Fact(p.Activity.Subagent, request.HasSubagent) && Fact(p.Activity.Error, request.HasError) && Fact(p.Activity.Retry, request.HasRetry)
+            && Fact(p.CurrentSkillFilter ?? p.Activity.Skill, request.HasSkill) && Fact(p.Activity.Subagent, request.HasSubagent) && Fact(p.Activity.Error, request.HasError) && Fact(p.Activity.Retry, request.HasRetry)
             && (request.QueryNormalized is null || p.SearchTexts.Any(text => text.Contains(request.QueryNormalized, StringComparison.Ordinal)));
     }
 
