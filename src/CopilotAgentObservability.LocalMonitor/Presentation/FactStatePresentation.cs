@@ -13,6 +13,9 @@ internal enum FactState
     RawNotCaptured,
     RawExpired,
     Inconsistent,
+    RawDeleted,
+    RawReadDenied,
+    ProjectionInvalid,
 }
 
 internal readonly record struct RecordedFactCount(ulong Value);
@@ -144,6 +147,9 @@ internal sealed class FactStatePresentation
                 (PositiveCountText(count!.Value), "安定して取得できるか未確認です。", true),
             FactState.RawNotCaptured => ("内容は記録されていません", null, false),
             FactState.RawExpired => ("保存期間を過ぎたため表示できません", null, false),
+            FactState.RawDeleted or FactState.RawReadDenied =>
+                ("保存期間を過ぎたため表示できません", null, false),
+            FactState.ProjectionInvalid => ("記録が一部欠けています", null, false),
             FactState.Inconsistent =>
                 ("内訳を表示できません", "記録された値に整合しない項目があります。", false),
             _ => throw InvalidRequest(),
@@ -195,6 +201,9 @@ internal sealed class FactStatePresentation
             case FactState.CaptureGap:
             case FactState.RawNotCaptured:
             case FactState.RawExpired:
+            case FactState.RawDeleted:
+            case FactState.RawReadDenied:
+            case FactState.ProjectionInvalid:
                 if (count is not null
                     || explanation?.ReasonText is null)
                 {
@@ -257,6 +266,8 @@ internal static class ReservedContractTokenBoundary
         "RawNotCaptured",
         "NotCaptured",
         "RawExpired",
+        "RawDeleted",
+        "RawReadDenied",
         "Inconsistent",
         "ProjectionInvalid",
         "ExpiredPendingDeletion",
@@ -283,6 +294,10 @@ internal static class ReservedContractTokenBoundary
         "not-captured",
         "raw_expired",
         "raw-expired",
+        "raw_deleted",
+        "raw-deleted",
+        "raw_read_denied",
+        "raw-read-denied",
         "projection_invalid",
         "projection-invalid",
         "expired_pending_deletion",

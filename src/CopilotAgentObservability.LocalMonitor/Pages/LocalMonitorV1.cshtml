@@ -1,0 +1,42 @@
+@model CopilotAgentObservability.LocalMonitor.Pages.LocalMonitorV1PageModel
+@using CopilotAgentObservability.LocalMonitor.LocalMonitorV1
+@{
+    Layout = "_Layout";
+}
+
+@if (Model.PageState is not null && Model.RouteKind is null)
+{
+    <section data-page-state="@Model.PageState"
+             data-recovery-action="@Model.RecoveryAction">
+        <div role="status" aria-live="polite">
+            <h1>ページを表示できません</h1>
+            <p>状態を確認して、もう一度お試しください。</p>
+        </div>
+    </section>
+}
+else
+{
+    <section data-local-monitor-v1-host
+             data-fact-state-renderer="shared"
+             data-route-kind="@Model.RouteKind?.ToString()"
+             data-page-state="@Model.PageState"
+             data-recovery-action="@Model.RecoveryAction"
+             data-execution-id="@Model.Query?.ExecutionId"
+             data-node-id="@Model.Query?.NodeId"
+             data-analysis-id="@Model.Query?.AnalysisId">
+        @if (Model.PageState is not null)
+        {
+            <div role="status" aria-live="polite">
+                <h1>ページを表示できません</h1>
+                <p>状態を確認して、もう一度お試しください。</p>
+            </div>
+        }
+    </section>
+}
+
+@section LocalMonitorV1Scripts {
+    @if (Model.RouteKind is not null)
+    {
+        <script src="/local-monitor-v1-shared.js" defer></script>
+    }
+}

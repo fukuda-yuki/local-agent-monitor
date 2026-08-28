@@ -19,6 +19,7 @@
   };
 
   let settingsInvoker = null;
+  let suppressRouteState = false;
 
   function setReceiverState(kind) {
     const display = DISPLAY[kind] ?? DISPLAY.unreachable;
@@ -49,21 +50,34 @@
     }
   }
 
-  function openSettings(invoker, section) {
+  function openSettings(invoker, section, updateHistory = true) {
     settingsInvoker = invoker;
-    if (section === null) {
-      delete modal.dataset.requestedSection;
-    } else {
-      modal.dataset.requestedSection = section;
+    if (section === null) delete modal.dataset.requestedSection;
+    else modal.dataset.requestedSection = section;
+    if (!modal.open) modal.showModal();
+    if (updateHistory && window.LocalMonitorV1History) {
+      suppressRouteState = true;
+      try {
+        window.LocalMonitorV1History.setSettings(section ?? "state");
+      } finally {
+        suppressRouteState = false;
+      }
     }
-    modal.showModal();
     document.dispatchEvent(new CustomEvent("cao-settings-open", {
       detail: { section },
     }));
     closeAction.focus({ preventScroll: true });
   }
 
-  function closeSettings() {
+  function closeSettings(updateHistory = true) {
+    if (updateHistory && window.LocalMonitorV1History) {
+      suppressRouteState = true;
+      try {
+        window.LocalMonitorV1History.closeSettings();
+      } finally {
+        suppressRouteState = false;
+      }
+    }
     if (modal.open) modal.close();
   }
 
@@ -83,6 +97,16 @@
     settingsInvoker = null;
     if (returnTarget && returnTarget.isConnected) {
       returnTarget.focus({ preventScroll: true });
+    }
+  });
+
+  document.addEventListener("cao-route-state", event => {
+    if (suppressRouteState) return;
+    const section = event.detail?.settings ?? null;
+    if (section !== null) {
+      openSettings(settingsInvoker, section, false);
+    } else if (modal.open) {
+      closeSettings(false);
     }
   });
 

@@ -324,6 +324,32 @@ public sealed class FactStatePresentationTests
     }
 
     [Theory]
+    [InlineData((int)FactState.RawDeleted)]
+    [InlineData((int)FactState.RawReadDenied)]
+    public void Resolve_DeletedAndReadDeniedUseTheAcceptedGroupedUnavailablePresentation(int stateValue)
+    {
+        var presentation = FactStatePresentation.Resolve(
+            new(
+                (FactState)stateValue,
+                Explanation: new(ReasonText: "保存済み内容へアクセスできません。")));
+
+        Assert.Equal("保存期間を過ぎたため表示できません", presentation.PrimaryText);
+        Assert.False(presentation.AllowsDerivedVisualization);
+    }
+
+    [Fact]
+    public void Resolve_ProjectionInvalidUsesTheSharedCaptureGapPresentation()
+    {
+        var presentation = FactStatePresentation.Resolve(
+            new(
+                FactState.ProjectionInvalid,
+                Explanation: new(ReasonText: "投影結果を安全に表示できません。")));
+
+        Assert.Equal("記録が一部欠けています", presentation.PrimaryText);
+        Assert.False(presentation.AllowsDerivedVisualization);
+    }
+
+    [Theory]
     [MemberData(nameof(UnavailableExplanationCases))]
     public void Resolve_RequiresTheAuthorizedExplanationForUnavailableStates(
         int stateValue,
