@@ -624,6 +624,36 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Empty(result.SearchFacts);
     }
 
+    [Fact]
+    public void CurrentSkillReadMarksOrphanSdkClaimUnavailableInsteadOfFallingThroughToOtel()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedExactPair("orphan-claim", "exact-skill", "1c", "2c", 1);
+        fixture.DeleteLatestSdkSnapshotGraph("orphan-claim");
+
+        var result = fixture.Read("orphan-claim");
+
+        Assert.Equal("unavailable", result.State);
+        Assert.Null(result.InvocationCount);
+        Assert.Empty(result.Invocations);
+        Assert.Empty(result.SearchFacts);
+    }
+
+    [Fact]
+    public void CurrentSkillReadMarksSdkClaimUnavailableWhenSnapshotComponentIsAbsent()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedExactPair("claim-without-component", "exact-skill", "1d", "2d", 1);
+        fixture.RemoveSdkAuthorityComponent("claim-without-component");
+
+        var result = fixture.Read("claim-without-component");
+
+        Assert.Equal("unavailable", result.State);
+        Assert.Null(result.InvocationCount);
+        Assert.Empty(result.Invocations);
+        Assert.Empty(result.SearchFacts);
+    }
+
     [Theory]
     [InlineData("claim_name")]
     [InlineData("receipt")]
@@ -1463,6 +1493,81 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
             restore.CommandText = definition;
             restore.ExecuteNonQuery();
         }
+        transaction.Commit();
+    }
+
+    internal void DeleteLatestSdkSnapshotGraph(string sessionKey)
+    {
+        using var connection = Open();
+        var triggerNames = new[]
+        {
+            "skill_invocation_snapshot_receipts_delete_rejected",
+            "skill_invocation_snapshot_rows_delete_rejected",
+        };
+        var triggerDefinitions = new List<string>();
+        foreach (var triggerName in triggerNames)
+        {
+            using var read = connection.CreateCommand();
+            read.CommandText = "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=$name;";
+            read.Parameters.AddWithValue("$name", triggerName);
+            triggerDefinitions.Add(Assert.IsType<string>(read.ExecuteScalar()));
+        }
+
+        using var transaction = connection.BeginTransaction();
+        foreach (var triggerName in triggerNames)
+        {
+            using var drop = connection.CreateCommand();
+            drop.Transaction = transaction;
+            drop.CommandText = "DROP TRIGGER " + triggerName + ";";
+            drop.ExecuteNonQuery();
+        }
+
+        var snapshotId = latestWrites[sessionKey].SnapshotId.ToString("D");
+        using (var receipt = connection.CreateCommand())
+        {
+            receipt.Transaction = transaction;
+            receipt.CommandText = "DELETE FROM skill_invocation_snapshot_receipts WHERE snapshot_id=$snapshot;";
+            receipt.Parameters.AddWithValue("$snapshot", snapshotId);
+            Assert.Equal(1, receipt.ExecuteNonQuery());
+        }
+        using (var snapshot = connection.CreateCommand())
+        {
+            snapshot.Transaction = transaction;
+            snapshot.CommandText = "DELETE FROM skill_invocation_snapshots WHERE snapshot_id=$snapshot;";
+            snapshot.Parameters.AddWithValue("$snapshot", snapshotId);
+            Assert.Equal(1, snapshot.ExecuteNonQuery());
+        }
+
+        foreach (var triggerDefinition in triggerDefinitions)
+        {
+            using var restore = connection.CreateCommand();
+            restore.Transaction = transaction;
+            restore.CommandText = triggerDefinition;
+            restore.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    internal void RemoveSdkAuthorityComponent(string sessionKey)
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            DROP TRIGGER skill_invocation_snapshot_session_event_update_rejected;
+            DROP TRIGGER skill_invocation_snapshot_session_event_delete_rejected;
+            DROP TABLE skill_invocation_snapshot_receipts;
+            DROP TABLE skill_invocation_snapshots;
+            DELETE FROM schema_version WHERE component='skill_invocation_snapshot';
+            """;
+        command.ExecuteNonQuery();
+
+        using var claim = connection.CreateCommand();
+        claim.Transaction = transaction;
+        claim.CommandText = "SELECT COUNT(*) FROM skill_projection_sdk_claims WHERE session_id=$session;";
+        claim.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        Assert.Equal(1L, claim.ExecuteScalar());
         transaction.Commit();
     }
 
