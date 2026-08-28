@@ -36,13 +36,14 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     {
         using var fixture = new CurrentInvocationProjectionFixture();
         fixture.SeedSdkOnly("backup", "dynamic-skill");
-        fixture.RefreshWorkspace();
+        var registryAuthority = new CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.SkillInvocationV2RegistryProviderV1();
+        fixture.RefreshWorkspace(registryAuthority);
         var archive = fixture.File("dynamic-registry.zip");
         var restored = fixture.File("dynamic-registry-restored.sqlite");
         var clock = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-01T01:00:00Z"));
         string? lastCheckpoint = null;
         var service = new SqliteRuntimeBackupService(clock, value => lastCheckpoint = value);
-        service.ConfigureSkillRegistryAuthority(fixture.RegistryAuthority);
+        service.ConfigureSkillRegistryAuthority(registryAuthority);
 
         var created = service.CreateAndPublish(fixture.DatabasePath, archive);
         var inspected = service.Inspect(archive);
@@ -53,12 +54,12 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.True(restore.Success, $"{restore.ErrorCode}:{lastCheckpoint}");
         var detailService = new SqliteLocalRepositoryScopeSnapshotService(
             restored,
-            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: fixture.RegistryAuthority),
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: registryAuthority),
             SqliteLocalArchiveFactSnapshotContributor.Instance,
             detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
-                registryAuthority: fixture.RegistryAuthority,
+                registryAuthority: registryAuthority,
                 timeProvider: clock),
-            skillRegistryAuthority: fixture.RegistryAuthority);
+            skillRegistryAuthority: registryAuthority);
         var detail = await detailService.ReadDetailAsync(
             new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId("backup")),
             CancellationToken.None);
@@ -1343,18 +1344,20 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         (SkillInvocationV2ArtifactRegistry)typeof(SkillInvocationV2ArtifactRegistry)
             .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
                 [typeof(int), typeof(IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision>), typeof(IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry>)], null)!
-            .Invoke([1, Array.Empty<SkillInvocationV2CompatibilityRegistryRevision>(), entries]);
+            .Invoke([1, new[] { new SkillInvocationV2CompatibilityRegistryRevision(1, entries, new string('a', 64)) }, entries]);
 
     internal SkillProjectionCurrentInvocationProjection Read(string sessionKey) => ReadAll()[sessions[sessionKey]];
 
     internal string SessionId(string sessionKey) => sessions[sessionKey];
 
-    internal void RefreshWorkspace()
+    internal void RefreshWorkspace() => RefreshWorkspace(authority);
+
+    internal void RefreshWorkspace(ISkillRegistryGenerationAuthority registryAuthority)
     {
         using var connection = Open();
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, readAt);
         using var transaction = connection.BeginTransaction();
-        LocalWorkspaceProjectionStore.Refresh(connection, transaction, readAt, authority);
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, readAt, registryAuthority);
         transaction.Commit();
     }
 

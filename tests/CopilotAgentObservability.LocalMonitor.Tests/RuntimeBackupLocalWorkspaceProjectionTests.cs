@@ -916,7 +916,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000020','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-run-2',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             """);
-        for (var index = 0; index < 16; index++)
+        for (var index = 0; index < 15; index++)
         {
             LocalWorkspaceProjectionSchemaTests.Execute(connection, $$"""
                 INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state)

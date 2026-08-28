@@ -198,20 +198,22 @@ internal static class LocalWorkspaceProjectionBackupValidation
                                    FROM local_workspace_node_source_references anchor
                                    JOIN session_events start ON start.event_id=anchor.event_id
                                    WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start'))
-                         )>16 THEN
-                           metadata.started_state IS NOT 'inconsistent'
-                           OR metadata.completed_state IS NOT 'inconsistent'
-                           OR node.lifecycle IS NOT 'unknown'
-                           OR node.status IS NOT 'unknown'
-                         ELSE
-                           metadata.started_state IS NOT 'recorded'
-                           OR metadata.completed_state IS NOT CASE
-                             WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
-                               WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')>1 THEN 'inconsistent'
-                             WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
-                               WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')=1 THEN 'recorded' ELSE 'not_observed' END
-                         END
-                         OR metadata.failed_state IS NOT 'not_observed')))
+                          )>16 THEN
+                            metadata.started_state IS NOT 'inconsistent'
+                            OR metadata.completed_state IS NOT 'inconsistent'
+                            OR metadata.failed_state IS NOT 'inconsistent'
+                            OR node.lifecycle IS NOT 'unknown'
+                            OR node.status IS NOT 'unknown'
+                          ELSE
+                            metadata.started_state IS NOT 'recorded'
+                            OR metadata.completed_state IS NOT CASE
+                              WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
+                                WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')>1 THEN 'inconsistent'
+                              WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
+                                WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_complete')=1 THEN 'recorded' ELSE 'not_observed' END
+                            OR metadata.failed_state IS NOT 'not_observed'
+                          END
+                          )))
                     OR receipt.semantic_kind='subagent' AND (
                       EXISTS(SELECT 1 FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
                         WHERE reference.node_id=receipt.node_id AND event.type NOT IN ('subagent.selected','subagent.started','subagent.completed','subagent.failed','subagent.deselected'))

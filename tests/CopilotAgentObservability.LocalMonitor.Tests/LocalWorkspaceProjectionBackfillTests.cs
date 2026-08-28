@@ -646,7 +646,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         }
 
         var first = LocalWorkspaceProjectionSchemaTests.Strings(connection, """
-            SELECT receipt.authority_receipt||':'||metadata.started_state||':'||metadata.completed_state||':'||node.lifecycle||':'||node.status||':'||COUNT(reference.source_ordinal)
+            SELECT receipt.authority_receipt||':'||metadata.started_state||':'||metadata.completed_state||':'||metadata.failed_state||':'||node.lifecycle||':'||node.status||':'||COUNT(reference.source_ordinal)
             FROM local_workspace_tool_metadata metadata
             JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=metadata.node_id
             JOIN local_workspace_nodes node ON node.node_id=metadata.node_id
@@ -654,7 +654,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             GROUP BY metadata.node_id;
             """);
         Assert.Single(first);
-        Assert.EndsWith(":inconsistent:inconsistent:unknown:unknown:16", first[0], StringComparison.Ordinal);
+        Assert.EndsWith(":inconsistent:inconsistent:inconsistent:unknown:unknown:16", first[0], StringComparison.Ordinal);
         var firstReferences = LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT event_id||':'||revision_input FROM local_workspace_node_source_references WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts) ORDER BY source_ordinal;");
         Assert.Contains(firstReferences, reference =>
@@ -668,7 +668,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         }
 
         Assert.Equal(first, LocalWorkspaceProjectionSchemaTests.Strings(connection, """
-            SELECT receipt.authority_receipt||':'||metadata.started_state||':'||metadata.completed_state||':'||node.lifecycle||':'||node.status||':'||COUNT(reference.source_ordinal)
+            SELECT receipt.authority_receipt||':'||metadata.started_state||':'||metadata.completed_state||':'||metadata.failed_state||':'||node.lifecycle||':'||node.status||':'||COUNT(reference.source_ordinal)
             FROM local_workspace_tool_metadata metadata
             JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=metadata.node_id
             JOIN local_workspace_nodes node ON node.node_id=metadata.node_id

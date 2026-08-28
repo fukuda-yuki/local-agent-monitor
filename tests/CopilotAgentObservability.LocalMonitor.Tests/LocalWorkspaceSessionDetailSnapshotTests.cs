@@ -119,6 +119,65 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task ProductionCoordinatorAcceptsCanonicalSdkToolOverflowSnapshot()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string otelRunId = "018f0000-0000-7000-8000-000000000010";
+        const string sdkRunId = "018f0000-0000-7000-8000-000000000020";
+        const string startEventId = "018f0000-0000-7000-8000-000000000031";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, otelRunId, sdkRunId);
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            for (var index = 0; index < 15; index++)
+            {
+                var eventId = index == 0
+                    ? "018f0000-0000-7000-8000-000000000030"
+                    : $"018f0000-0000-7000-8000-{index + 100:D12}";
+                using var insert = connection.CreateCommand();
+                insert.CommandText = """
+                    INSERT INTO session_events(
+                      event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                      parent_event_id,type,occurred_at,content_state)
+                    VALUES($event,$session,$run,'copilot-sdk','copilot-sdk-stream',$source,$parent,
+                      'tool.execution_complete',$occurred,'not_captured');
+                    """;
+                insert.Parameters.AddWithValue("$event", eventId);
+                insert.Parameters.AddWithValue("$session", sessionId);
+                insert.Parameters.AddWithValue("$run", sdkRunId);
+                insert.Parameters.AddWithValue("$source", $"sdk-tool-overflow-{index:D2}");
+                insert.Parameters.AddWithValue("$parent", startEventId);
+                insert.Parameters.AddWithValue("$occurred", $"2026-08-26T00:00:{index + 10:D2}.0000000+00:00");
+                Assert.Equal(1, insert.ExecuteNonQuery());
+            }
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(
+                connection,
+                transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:00Z"),
+                FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+
+            Assert.Equal(["inconsistent:inconsistent:inconsistent:16"],
+                LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                    SELECT metadata.started_state||':'||metadata.completed_state||':'||metadata.failed_state||':'||COUNT(reference.source_ordinal)
+                    FROM local_workspace_tool_metadata metadata
+                    JOIN local_workspace_semantic_receipts receipt ON receipt.node_id=metadata.node_id
+                    JOIN local_workspace_node_source_references reference ON reference.node_id=metadata.node_id
+                    WHERE receipt.source_family='session_sdk'
+                    GROUP BY metadata.node_id;
+                    """));
+        }
+
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+
+        var execution = Assert.Single(detail.Detail.Executions, value => value.SourceIdentity == sdkRunId);
+        Assert.Equal("recorded", execution.Activity.Tool.State);
+        Assert.Equal(1, execution.Activity.Tool.Value);
+    }
+
+    [Fact]
     public async Task ProductionCoordinatorReadsAuthorizedOtelToolAndSdkSubagentAcrossEveryDetailShape()
     {
         using var temp = new MonitorTempDirectory();

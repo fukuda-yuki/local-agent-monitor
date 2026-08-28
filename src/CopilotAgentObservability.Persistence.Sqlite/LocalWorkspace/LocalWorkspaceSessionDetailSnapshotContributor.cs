@@ -1114,7 +1114,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
           SELECT candidate.carrier_digest,candidate.event_id,candidate.source_adapter,candidate.source_event_id,
                  candidate.source_adapter||'|'||candidate.source_event_id||'|'||candidate.type||'|'||candidate.type||'|1|'||
                    COALESCE(candidate.occurred_at,'')||'|'||candidate.authority_receipt revision_input,
-                 row_number() OVER(PARTITION BY candidate.carrier_digest ORDER BY candidate.event_id COLLATE BINARY)-1 source_ordinal
+                  row_number() OVER(PARTITION BY candidate.carrier_digest
+                    ORDER BY (candidate.type='tool.execution_start') DESC,candidate.event_id COLLATE BINARY)-1 source_ordinal
           FROM candidates candidate
         ),
         invalid_persisted AS (
@@ -1149,7 +1150,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                                                WHEN owner.started_count=1 THEN 'recorded' ELSE 'not_observed' END
               OR metadata.completed_state<>CASE WHEN owner.completed_count>1 OR owner.reference_count>16 OR owner.authority_count>1 THEN 'inconsistent'
                                                  WHEN owner.completed_count=1 THEN 'recorded' ELSE 'not_observed' END
-              OR metadata.failed_state<>'not_observed' OR metadata.exit_state<>'source_unsupported' OR metadata.exit_code IS NOT NULL
+              OR metadata.failed_state<>CASE WHEN owner.reference_count>16 OR owner.authority_count>1 THEN 'inconsistent' ELSE 'not_observed' END
+              OR metadata.exit_state<>'source_unsupported' OR metadata.exit_code IS NOT NULL
               OR metadata.mcp_server_identity_state<>'not_observed' OR metadata.mcp_server_identity IS NOT NULL
               OR metadata.mcp_server_name_state<>'source_unsupported' OR metadata.mcp_server_name IS NOT NULL
               OR metadata.mcp_tool_name_state<>'invalid' OR metadata.mcp_tool_name IS NOT NULL
