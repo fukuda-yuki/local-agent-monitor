@@ -51,6 +51,7 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         {
             using var connection = OpenConnection();
             using var transaction = connection.BeginTransaction();
+            workspaceParticipant.ValidateInstallationState(connection, transaction);
             if (FindExisting(connection, transaction, batch.IngestBatchId) is { } existing)
             {
                 transaction.Commit();

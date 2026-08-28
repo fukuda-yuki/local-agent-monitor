@@ -101,6 +101,7 @@ internal sealed class ProjectionWorker : BackgroundService
 
         try
         {
+            _ = store.GetProjectionStatus();
             var anyProjected =
                 compatibilityStore?.ReconcileProjectedTraceSourceAttribution() == true;
             if (skillProjectionWorker is not null)

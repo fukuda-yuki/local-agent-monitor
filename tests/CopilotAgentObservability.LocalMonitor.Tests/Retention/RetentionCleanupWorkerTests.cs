@@ -263,12 +263,104 @@ public sealed class RetentionCleanupWorkerTests
         Assert.Equal(tombstoneBefore, FullItemRowsDump(db.Path, "retention_tombstones", item));
     }
 
+    [Fact]
+    public async Task PrepareCleanupBatch_RejectsUnsupportedWorkspaceBeforePromotionOrQueueMutation()
+    {
+        using var db = NewDb();
+        var (store, time, item) = Setup(db.Path);
+        Exec(db.Path,
+            "UPDATE retention_items SET state='expiring',revision=1,read_denied_at=NULL,queued_at=NULL,expires_at=$now WHERE item_id=$id;",
+            item,
+            time.GetUtcNow().ToString("O"));
+        InstallUnsupportedWorkspace(db.Path);
+        var before = CleanupMutationSnapshot(db.Path, item);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.PrepareCleanupBatchAsync(
+                time.GetUtcNow(),
+                RetentionV1Constants.ExpiryScanItemLimit,
+                RetentionV1Constants.ClaimBatchLimit,
+                RetentionV1Constants.ScanElapsedBudget,
+                CancellationToken.None));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(before, CleanupMutationSnapshot(db.Path, item));
+    }
+
+    [Fact]
+    public async Task TryClaimDeletion_RejectsUnsupportedWorkspaceBeforeLeaseOrStateMutation()
+    {
+        using var db = NewDb();
+        var (store, time, item) = Setup(db.Path);
+        InstallUnsupportedWorkspace(db.Path);
+        var before = CleanupMutationSnapshot(db.Path, item);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.TryClaimDeletionAsync(
+                new(item, 1, RetentionWorkKind.Queued),
+                "workspace-gate",
+                time.GetUtcNow(),
+                CancellationToken.None));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(before, CleanupMutationSnapshot(db.Path, item));
+    }
+
+    [Fact]
+    public async Task EnsureDeleteIntent_RejectsUnsupportedWorkspaceBeforeJournalOrAttemptMutation()
+    {
+        using var db = NewDb();
+        var (store, time, item) = Setup(db.Path);
+        var claim = Assert.IsType<RetentionDeletionClaim>((await store.TryClaimDeletionAsync(
+            new(item, 1, RetentionWorkKind.Queued),
+            "workspace-gate",
+            time.GetUtcNow(),
+            CancellationToken.None)).Claim);
+        InstallUnsupportedWorkspace(db.Path);
+        var before = CleanupMutationSnapshot(db.Path, item);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.EnsureDeleteIntentAsync(
+                claim.Fence,
+                claim.IntentCursor,
+                time.GetUtcNow(),
+                CancellationToken.None));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(before, CleanupMutationSnapshot(db.Path, item));
+    }
+
+    [Fact]
+    public async Task CleanupCoordinator_RejectsUnsupportedWorkspaceBeforeCatalogOrAdapterMutation()
+    {
+        using var db = NewDb();
+        var (store, time, item) = Setup(db.Path);
+        InstallUnsupportedWorkspace(db.Path);
+        var before = CleanupMutationSnapshot(db.Path, item);
+        var raw = new StrictAdapter(RetentionStoreKind.RawRecord);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await new RetentionCleanupCoordinator(store, Registry(raw), time)
+                .RunOneCycleAsync(CancellationToken.None, CancellationToken.None));
+
+        Assert.Equal("local_workspace_projection_schema_unsupported", exception.Message);
+        Assert.Equal(0, raw.Calls);
+        Assert.Equal(before, CleanupMutationSnapshot(db.Path, item));
+    }
+
     private static (RetentionCatalogStore Store, MutableTimeProvider Time, string Item) Setup(string path) { var time = new MutableTimeProvider(new DateTimeOffset(2026, 7, 19, 0, 0, 0, TimeSpan.Zero)); var store = new RetentionCatalogStore(path, time); store.CreateSchema(); SeedExactAdapterCoverage(path); AddQueuedItem(path, "item", time.GetUtcNow()); return (store, time, "item"); }
     private static void SeedExactAdapterCoverage(string path) { using var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q = c.CreateCommand(); q.CommandText = "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);"; q.ExecuteNonQuery(); }
+    private static void InstallUnsupportedWorkspace(string path) => Execute(path, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',6);");
     private static void AddQueuedItem(string path, string item, DateTimeOffset now) { var source = new RawTelemetryStore(path); source.CreateMonitorSchema(); var rawId = source.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, now, null, "{}")); using var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q = c.CreateCommand(); q.CommandText = "UPDATE retention_items SET item_id=$item,state='deletion_queued',revision=1,read_denied_at=$now,queued_at=$now,expires_at=$now WHERE store_kind='raw_record' AND source_item_id=$source;"; q.Parameters.AddWithValue("$item", item); q.Parameters.AddWithValue("$now", now.ToString("O")); q.Parameters.AddWithValue("$source", rawId.ToString()); q.ExecuteNonQuery(); }
     private static RetentionAdapterRegistry Registry(StrictAdapter raw) => new(new IRetentionDeletionAdapter[] { new StrictAdapter(RetentionStoreKind.SessionEventContent), raw, new StrictAdapter(RetentionStoreKind.AnalysisRunRaw), new StrictAdapter(RetentionStoreKind.SensitiveBundle), new StrictAdapter(RetentionStoreKind.AnalysisSdkDirectory) });
     private static string FullRowDump(string path, string table, string keyColumn, object keyValue) => FullRows(path, table, $"{keyColumn}=$key", ("$key", keyValue));
     private static string FullItemRowsDump(string path, string table, string itemId) => FullRows(path, table, "item_id=$item", ("$item", itemId));
+    private static string CleanupMutationSnapshot(string path, string itemId) => string.Join("\n---\n",
+        FullRowDump(path, "retention_items", "item_id", itemId),
+        FullItemRowsDump(path, "retention_leases", itemId),
+        FullItemRowsDump(path, "retention_delete_journal", itemId),
+        FullItemRowsDump(path, "retention_tombstones", itemId),
+        FullRowDump(path, "retention_worker_state", "id", 1));
     private static string FullRows(string path, string table, string predicate, params (string Name, object Value)[] parameters)
     {
         using var connection = new SqliteConnection($"Data Source={path};Pooling=False"); connection.Open();
