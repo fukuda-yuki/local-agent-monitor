@@ -1533,23 +1533,44 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     public async Task ParticipantKeepsPinnedLabelAndToolSearchFactsPastHistoricalExpiryUntilUnpinned()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        using (var retentionTransaction = connection.BeginTransaction())
+        {
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, retentionTransaction);
+            retentionTransaction.Commit();
+        }
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             PRAGMA foreign_keys=OFF;
-            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER);
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER,retention_owner_token BLOB);
             CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
             INSERT INTO session_events VALUES
               ('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,'synthetic','prompt-1','user.message','2026-08-24T00:00:00.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
               ('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:01.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
             INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000002','application/json','{"value":"Pinned label"}','2026-08-24T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00',randomblob(32));
-            INSERT INTO raw_records VALUES(41,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1);
+            INSERT INTO raw_records VALUES(41,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1,randomblob(32));
             INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(41,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',3,'execute_tool','tool_call','PinnedTool');
-            INSERT INTO retention_items VALUES
-              ('session_event_content','0198f5b8-0c00-7000-8000-000000000002','retained_by_policy',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00'),
-              ('raw_record','41','retained_by_policy',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00');
             PRAGMA foreign_keys=ON;
             """);
+        InstallCurrentRetentionRows(connection);
+        var storeInstance = LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT store_instance_id FROM retention_store_instances WHERE id=1;").Single();
+        using (var rawOwner = connection.CreateCommand())
+        {
+            rawOwner.CommandText = "SELECT retention_owner_token FROM raw_records WHERE id=41;";
+            var ownerToken = Assert.IsType<byte[]>(rawOwner.ExecuteScalar());
+            var receivedAt = DateTimeOffset.Parse("2026-08-24T00:00:00Z");
+            var receipt = CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateRawRecord(
+                new(storeInstance, 41, "2026-08-24T00:00:00.0000000+00:00", receivedAt.UtcTicks, 1, ownerToken));
+            using var retention = connection.CreateCommand();
+            retention.CommandText = """
+                UPDATE retention_items SET state='retained_by_policy' WHERE store_kind='session_event_content';
+                INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version)
+                VALUES('raw-41',$store,'raw_record','41',1,$receipt,'2026-08-24T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00','raw-default-90d',1,'retained_by_policy',1,1);
+                """;
+            retention.Parameters.AddWithValue("$store", storeInstance);
+            retention.Parameters.AddWithValue("$receipt", receipt);
+            retention.ExecuteNonQuery();
+        }
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
 
         Assert.Equal(["label:pinned label:null", "tool:pinnedtool:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
@@ -1953,6 +1974,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, $"""
             INSERT INTO sessions VALUES('{sessionId}','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_native_ids VALUES('{sessionId}','copilot-sdk','native-session','native','2026-08-24T00:00:00.0000000+00:00');
             INSERT INTO session_runs VALUES('{runId}','{sessionId}','copilot-sdk','{nativeRunId}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
               VALUES

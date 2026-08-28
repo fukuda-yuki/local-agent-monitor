@@ -521,6 +521,9 @@ internal static class LocalWorkspaceProjectionStore
         Execute(connection, transaction, """
             WITH ranked AS (
               SELECT o.*,row_number() OVER(PARTITION BY o.session_id,o.execution_id ORDER BY
+                CASE WHEN o.input_tokens IS NULL AND o.output_tokens IS NULL AND o.total_tokens IS NULL
+                           AND o.reasoning_tokens IS NULL AND o.cache_read_tokens IS NULL AND o.cache_creation_tokens IS NULL
+                     THEN 1 ELSE 0 END,
                 o.authority_rank,o.source_identity COLLATE BINARY) ordinal
               FROM local_workspace_token_observations o WHERE o.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
             chosen AS (SELECT * FROM ranked WHERE ordinal=1)
