@@ -13,6 +13,24 @@ public sealed class LocalMonitorV1RouteTransportQueryTests
     private const string Cursor = "AZvvJSfubUCDILx2dEkk4j_S1wLGQUOW4o1TpZMGBmrYAAAAAZ_mZOZ7MDE4ZjJiNGUtN2MxYS03ZjFhLTlhMmItNmMzZDRlNWY2MDcyZb_UESMy6-2NWv8kzNcu3qwsgZxvWyIdPDe5nrnqQaw";
 
     [Theory]
+    [InlineData("/", "RepositorySelection")]
+    [InlineData("/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/sessions", "RepositorySessions")]
+    [InlineData("/sessions", "AllSessions")]
+    [InlineData("/sessions/unassigned", "UnassignedSessions")]
+    [InlineData("/sessions/018f2b4e-7c1a-7f1a-9a2b-6c3d4e5f6072", "SessionDetail")]
+    [InlineData("/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073", "ComparisonDetail")]
+    public void CanonicalUrlBuilder_EmitsTheSixExactPrimaryPathLiterals(
+        string path,
+        string routeKindName)
+    {
+        var routeKind = Enum.Parse<LocalMonitorV1PrimaryRouteKind>(routeKindName);
+        var parsedPath = LocalMonitorV1PrimaryPathParser.Classify(path);
+        var query = new LocalMonitorV1PageQuery { RouteKind = routeKind };
+
+        Assert.Equal(path, LocalMonitorV1CanonicalUrlBuilder.Build(parsedPath, query));
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData("?")]
     public void EmptyQuery_IsEquivalentToNoQuery(string rawQuery)

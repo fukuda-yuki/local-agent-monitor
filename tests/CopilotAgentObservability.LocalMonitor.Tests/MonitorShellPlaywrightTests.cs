@@ -10,11 +10,122 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorShellPlaywrightTests
 {
+    private const string RepositoryId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071";
     private const string SessionId = "018f2b4e-7c1a-7f1a-9a2b-6c3d4e5f6072";
+    private const string ComparisonId = "018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073";
     private const string ExecutionId = "018f2b4e-7c1a-7f1a-ba2b-6c3d4e5f6074";
     private const string AnalysisId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075";
     private const string NodeId = "node-0123456789abcdef0123456789abcdef";
     private const string Cursor = "AZvvJSfubUCDILx2dEkk4j_S1wLGQUOW4o1TpZMGBmrYAAAAAZ_mZOZ7MDE4ZjJiNGUtN2MxYS03ZjFhLTlhMmItNmMzZDRlNWY2MDcyZb_UESMy6-2NWv8kzNcu3qwsgZxvWyIdPDe5nrnqQaw";
+
+    [Fact]
+    public async Task SharedPaths_MatchCanonicalBuildersAndRejectEveryNonIdentityWithoutSideEffects()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.GotoAsync($"{host.Url}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var result = await page.EvaluateAsync<string[]>(
+            $$"""
+            () => {
+              const paths = window.LocalMonitorV1Paths;
+              const snapshot = () => JSON.stringify({
+                href: location.href,
+                historyLength: history.length,
+                historyState: history.state,
+                localStorage: [...Object.entries(localStorage)],
+                sessionStorage: [...Object.entries(sessionStorage)]
+              });
+              const before = snapshot();
+              const outputs = [
+                paths.repositorySelection(),
+                paths.repositorySessions("{{RepositoryId}}"),
+                paths.allSessions(),
+                paths.unassignedSessions(),
+                paths.session("{{SessionId}}"),
+                paths.comparison("{{RepositoryId}}", "{{ComparisonId}}"),
+                paths.comparison("{{SessionId}}", "{{SessionId}}")
+              ];
+              const invalid = [
+                null,
+                undefined,
+                42,
+                "",
+                "{{SessionId.ToUpperInvariant()}}",
+                "018f2b4e-7c1a-4f1a-9a2b-6c3d4e5f6072",
+                " {{SessionId}}",
+                "/sessions/{{SessionId}}",
+                "https://monitor.invalid/{{SessionId}}",
+                "Repository Name",
+                "owner/repository"
+              ];
+              const attempts = invalid.flatMap(value => [
+                () => paths.repositorySessions(value),
+                () => paths.session(value),
+                () => paths.comparison(value, "{{ComparisonId}}"),
+                () => paths.comparison("{{RepositoryId}}", value)
+              ]);
+              attempts.push(
+                () => paths.repositorySelection("extra"),
+                () => paths.allSessions("extra"),
+                () => paths.unassignedSessions("extra"),
+                () => paths.repositorySessions(),
+                () => paths.repositorySessions("{{RepositoryId}}", "extra"),
+                () => paths.session(),
+                () => paths.session("{{SessionId}}", "extra"),
+                () => paths.comparison("{{RepositoryId}}"),
+                () => paths.comparison("{{RepositoryId}}", "{{ComparisonId}}", "extra")
+              );
+              const rejected = attempts.every(attempt => {
+                try { attempt(); return false; }
+                catch { return true; }
+              });
+              return [
+                ...outputs,
+                String(Object.isFrozen(paths)),
+                Object.keys(paths).join(","),
+                String(rejected),
+                String(before === snapshot())
+              ];
+            }
+            """);
+
+        Assert.Equal(
+            [
+                "/",
+                $"/repositories/{RepositoryId}/sessions",
+                "/sessions",
+                "/sessions/unassigned",
+                $"/sessions/{SessionId}",
+                $"/repositories/{RepositoryId}/comparisons/{ComparisonId}",
+                $"/repositories/{SessionId}/comparisons/{SessionId}",
+                "true",
+                "repositorySelection,repositorySessions,allSessions,unassignedSessions,session,comparison",
+                "true",
+                "true",
+            ],
+            result);
+
+        foreach (var path in new[]
+                 {
+                     "/",
+                     $"/repositories/{RepositoryId}/sessions",
+                     "/sessions",
+                     "/sessions/unassigned",
+                     $"/sessions/{SessionId}",
+                     $"/repositories/{RepositoryId}/comparisons/{ComparisonId}",
+                 })
+        {
+            await page.GotoAsync(host.Url + path, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            Assert.Equal(
+                "/sessions",
+                await page.EvaluateAsync<string>("() => window.LocalMonitorV1Paths.allSessions()"));
+        }
+    }
 
     [Fact]
     public async Task SharedHistory_RestoresOnlyCanonicalUrlSafeStateAndSettings()
@@ -173,6 +284,7 @@ public class MonitorShellPlaywrightTests
                 new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
             Assert.Equal(rejectedQuery, await rejectedQueryPage.EvaluateAsync<string>("() => location.search"));
             Assert.False(await rejectedQueryPage.EvaluateAsync<bool>("() => 'LocalMonitorV1History' in window"));
+            Assert.False(await rejectedQueryPage.EvaluateAsync<bool>("() => 'LocalMonitorV1Paths' in window"));
             await Expect(rejectedQueryPage.Locator("script[src='/local-monitor-v1-shared.js']")).ToHaveCountAsync(0);
             await Expect(rejectedQueryPage.Locator("[data-route-kind], [data-requested-section], [data-execution-id], [data-node-id], [data-analysis-id]")).ToHaveCountAsync(0);
             var visibleText = await rejectedQueryPage.Locator("body").InnerTextAsync();
@@ -188,6 +300,7 @@ public class MonitorShellPlaywrightTests
         Assert.Equal(503, unavailableResponse?.Status);
         Assert.Equal("?settings=ai", await unavailablePage.EvaluateAsync<string>("() => location.search"));
         Assert.True(await unavailablePage.EvaluateAsync<bool>("() => 'LocalMonitorV1History' in window"));
+        Assert.True(await unavailablePage.EvaluateAsync<bool>("() => 'LocalMonitorV1Paths' in window"));
         await Expect(unavailablePage.Locator("script[src='/local-monitor-v1-shared.js']")).ToHaveCountAsync(1);
         await Expect(unavailablePage.Locator("[data-route-kind='AllSessions']")).ToHaveCountAsync(1);
         await Expect(unavailablePage.Locator("#settings-modal[data-requested-section='ai']")).ToBeVisibleAsync();
