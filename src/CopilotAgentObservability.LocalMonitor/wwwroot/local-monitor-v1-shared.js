@@ -31,6 +31,42 @@
   ];
   const routeKind = host.dataset.routeKind;
 
+  function requirePathArity(actual, expected) {
+    if (actual !== expected) throw new TypeError("invalid primary path");
+  }
+
+  function requireUuidV7(value) {
+    if (typeof value !== "string" || !UUID_V7.test(value)) throw new TypeError("invalid primary path");
+    return value;
+  }
+
+  const pathApi = Object.freeze({
+    repositorySelection() {
+      requirePathArity(arguments.length, 0);
+      return "/";
+    },
+    repositorySessions(repositoryId) {
+      requirePathArity(arguments.length, 1);
+      return `/repositories/${requireUuidV7(repositoryId)}/sessions`;
+    },
+    allSessions() {
+      requirePathArity(arguments.length, 0);
+      return "/sessions";
+    },
+    unassignedSessions() {
+      requirePathArity(arguments.length, 0);
+      return "/sessions/unassigned";
+    },
+    session(sessionId) {
+      requirePathArity(arguments.length, 1);
+      return `/sessions/${requireUuidV7(sessionId)}`;
+    },
+    comparison(repositoryId, comparisonId) {
+      requirePathArity(arguments.length, 2);
+      return `/repositories/${requireUuidV7(repositoryId)}/comparisons/${requireUuidV7(comparisonId)}`;
+    },
+  });
+
   function allowedKeys() {
     if (["RepositorySessions", "AllSessions", "UnassignedSessions"].includes(routeKind)) return EXPLORER_KEYS;
     if (routeKind === "SessionDetail") return SESSION_KEYS;
@@ -293,6 +329,7 @@
       document.dispatchEvent(new CustomEvent("cao-route-state", { detail: current() }));
     });
     window.LocalMonitorV1History = api;
+    window.LocalMonitorV1Paths = pathApi;
     document.dispatchEvent(new CustomEvent("cao-route-state", { detail: current() }));
   }
   window.LocalMonitorV1FactState = Object.freeze({ render: renderFactState });
