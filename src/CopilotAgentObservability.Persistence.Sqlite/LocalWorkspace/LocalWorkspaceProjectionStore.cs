@@ -343,8 +343,10 @@ internal static class LocalWorkspaceProjectionStore
                 """, idsJson);
         }
         ApplyLabels(connection, transaction, idsJson, now, labelProofInstalled);
-        var skillProjection = SkillProjectionReadService.ReadCurrentInvocationProjection(
-            connection, transaction, sessionIds, now, skillRegistryAuthority);
+        var skillProjection = HasSkillInvocationInputs(connection, transaction, idsJson)
+            ? SkillProjectionReadService.ReadCurrentInvocationProjection(
+                connection, transaction, sessionIds, now, skillRegistryAuthority)
+            : new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
         ApplySearchFacts(connection, transaction, idsJson, now, skillProjection);
         if (TableExists(connection, transaction, "local_workspace_execution_headers"))
             RefreshDetailProjection(connection, transaction, sessionIds, skillProjection, now,
@@ -354,6 +356,50 @@ internal static class LocalWorkspaceProjectionStore
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
         state.Parameters.AddWithValue("$now", Canonical(now)); SqliteCommandExecutionObserver.Executing(); state.ExecuteNonQuery();
+    }
+
+    private static bool HasSkillInvocationInputs(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string idsJson)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        var otelArm = TableExists(connection, transaction, "monitor_spans")
+            ? """
+              UNION ALL
+              SELECT 1 FROM monitor_spans span
+              JOIN session_runs run ON run.trace_id=span.trace_id
+              WHERE run.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                AND span.category='skill'
+            """
+            : string.Empty;
+        var sdkClaimArm = TableExists(connection, transaction, "skill_projection_sdk_claims")
+            ? """
+              UNION ALL
+              SELECT 1 FROM skill_projection_sdk_claims claim
+              WHERE claim.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              """
+            : string.Empty;
+        var projectedOtelArm = TableExists(connection, transaction, "monitor_skill_invocations")
+            ? """
+              UNION ALL
+              SELECT 1 FROM monitor_skill_invocations invocation
+              WHERE invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              """
+            : string.Empty;
+        command.CommandText = $"""
+            SELECT EXISTS(
+              SELECT 1 FROM session_events event
+              WHERE event.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                AND event.type='skill.invoked'
+              {otelArm}
+              {sdkClaimArm}
+              {projectedOtelArm});
+            """;
+        command.Parameters.AddWithValue("$ids", idsJson);
+        SqliteCommandExecutionObserver.Executing();
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static void RefreshDetailProjection(
@@ -1599,8 +1645,8 @@ internal static class LocalWorkspaceProjectionStore
             SELECT local_workspace_node_id('semantic_subagent',carrier_digest),
                    CASE WHEN selected_count>1 OR selected_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN selected_count=1 THEN 'recorded' ELSE 'not_observed' END,
                    CASE WHEN started_count>1 OR started_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN started_count=1 THEN 'recorded' ELSE 'not_observed' END,
-                   CASE WHEN completed_count>1 OR completed_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN completed_count=1 THEN 'recorded' ELSE 'not_observed' END,
-                   CASE WHEN failed_count>1 OR failed_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN failed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN completed_count>1 OR completed_count>0 AND (failed_count>0 OR reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN completed_count=1 THEN 'recorded' ELSE 'not_observed' END,
+                   CASE WHEN failed_count>1 OR failed_count>0 AND (completed_count>0 OR reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN failed_count=1 THEN 'recorded' ELSE 'not_observed' END,
                    CASE WHEN deselected_count>1 OR deselected_count>0 AND (reference_count>16 OR authority_count>1) THEN 'inconsistent' WHEN deselected_count=1 THEN 'recorded' ELSE 'not_observed' END,'source_unsupported'
             FROM groups WHERE EXISTS(SELECT 1 FROM local_workspace_nodes node
               WHERE node.node_id=local_workspace_node_id('semantic_subagent',groups.carrier_digest));
