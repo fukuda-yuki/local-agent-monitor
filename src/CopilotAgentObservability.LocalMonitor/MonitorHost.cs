@@ -560,7 +560,8 @@ internal static class MonitorHost
                         registryAuthority: skillRegistryAuthority,
                         timeProvider: timeProvider),
                     publicationGate: publicationGate,
-                    skillRegistryAuthority: skillRegistryAuthority));
+                    skillRegistryAuthority: skillRegistryAuthority,
+                    timeProvider: timeProvider));
             builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
                 testOptions?.LocalRepositoryScopeSnapshotService
                 ?? services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());

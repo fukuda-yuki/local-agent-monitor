@@ -366,7 +366,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
     private static readonly SqliteOwnedSchemaDefinition V5ExecutionHeaders = new("table", "local_workspace_execution_headers", "local_workspace_execution_headers",
         V4Definitions.Single(static definition => definition.Name == "local_workspace_execution_headers").Sql.Replace(
             "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
-            "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
+            "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000)),\n                CHECK((time_authority='recorded' AND ((status='active' AND end_utc_ticks IS NULL AND duration_ms IS NULL) OR (status IN ('completed','failed') AND end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL) OR (status='unknown' AND ((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL))))) OR (time_authority<>'recorded' AND end_utc_ticks IS NULL AND duration_ms IS NULL))",
             StringComparison.Ordinal));
     private static readonly SqliteOwnedSchemaDefinition V5Sessions = new("table", "local_workspace_sessions", "local_workspace_sessions",
         V4Sessions.Sql
@@ -375,12 +375,20 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 "label_state TEXT NOT NULL CHECK(label_state IN ('recorded','not_observed','not_captured','expired')),",
                 StringComparison.Ordinal)
             .Replace(
+                "label_expires_at TEXT NULL,",
+                "label_expires_at TEXT NULL,\n                label_owner_revision TEXT NULL CHECK(label_owner_revision IS NULL OR (length(label_owner_revision)=64 AND label_owner_revision=lower(label_owner_revision) AND label_owner_revision NOT GLOB '*[^0-9a-f]*')),\n                instruction_count INTEGER NULL CHECK(instruction_count IS NULL OR instruction_count>=1),",
+                StringComparison.Ordinal)
+            .Replace(
+                "CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL))",
+                "CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL AND label_owner_revision IS NOT NULL AND instruction_count IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL AND label_owner_revision IS NULL AND instruction_count IS NULL))",
+                StringComparison.Ordinal)
+            .Replace(
                 "timing_state TEXT NOT NULL,",
                 "timing_state TEXT NOT NULL CHECK(timing_state IN ('recorded','not_observed','inconsistent')),",
                 StringComparison.Ordinal)
             .Replace(
                 "CHECK((last_seen_at IS NULL)=(last_seen_epoch_ms IS NULL))",
-                "CHECK((last_seen_at IS NULL)=(last_seen_epoch_ms IS NULL)),\n                CHECK((timing_state='recorded' AND started_at IS NOT NULL AND last_seen_at IS NOT NULL AND ((ended_at IS NULL AND duration_ms IS NULL) OR (ended_at IS NOT NULL AND duration_ms IS NOT NULL))) OR (timing_state<>'recorded' AND duration_ms IS NULL))",
+                "CHECK((last_seen_at IS NULL)=(last_seen_epoch_ms IS NULL)),\n                CHECK((timing_state='recorded' AND started_at IS NOT NULL AND last_seen_at IS NOT NULL AND ((status='active' AND ended_at IS NULL AND duration_ms IS NULL) OR (status IN ('completed','failed') AND ended_at IS NOT NULL AND duration_ms IS NOT NULL) OR (status='unknown' AND ((ended_at IS NULL AND duration_ms IS NULL) OR (ended_at IS NOT NULL AND duration_ms IS NOT NULL))))) OR (timing_state<>'recorded' AND duration_ms IS NULL))",
                 StringComparison.Ordinal));
     private static readonly SqliteOwnedSchemaDefinition V5Nodes = new("table", "local_workspace_nodes", "local_workspace_nodes",
         V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes").Sql
@@ -390,8 +398,13 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 StringComparison.Ordinal)
             .Replace(
                 "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
-                "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
+                "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000)),\n                CHECK((time_authority='recorded' AND ((status='active' AND end_utc_ticks IS NULL AND duration_ms IS NULL) OR (status IN ('completed','failed') AND end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL) OR (status='unknown' AND ((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL))))) OR (time_authority<>'recorded' AND start_utc_ticks IS NULL AND end_utc_ticks IS NULL AND duration_ms IS NULL))",
                 StringComparison.Ordinal));
+    private static readonly SqliteOwnedSchemaDefinition V5NodeEdges = new("table", "local_workspace_node_edges", "local_workspace_node_edges",
+        V4Definitions.Single(static definition => definition.Name == "local_workspace_node_edges").Sql.Replace(
+            "relation_kind IN ('parent','retry','recovery')",
+            "relation_kind='parent'",
+            StringComparison.Ordinal));
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
     [
         V5Sessions,
@@ -400,7 +413,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
         V4Definitions.Single(static definition => definition.Name == "local_workspace_executions_by_session"),
         V5Nodes,
         V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes_by_parent"),
-        V4Definitions.Single(static definition => definition.Name == "local_workspace_node_edges"),
+        V5NodeEdges,
         V5ContentTombstones,
         V5ContentReferences,
         new("table", "local_workspace_semantic_receipts", "local_workspace_semantic_receipts", """
@@ -854,13 +867,19 @@ internal static class LocalWorkspaceProjectionSchemaV1
                      WHERE s.label_state NOT IN ('recorded','not_observed','not_captured','expired')
                         OR s.timing_state NOT IN ('recorded','not_observed','inconsistent')
                         OR NOT ((s.timing_state='recorded' AND s.started_at IS NOT NULL AND s.last_seen_at IS NOT NULL
-                          AND ((s.ended_at IS NULL AND s.duration_ms IS NULL) OR (s.ended_at IS NOT NULL AND s.duration_ms IS NOT NULL)))
+                          AND ((s.status='active' AND s.ended_at IS NULL AND s.duration_ms IS NULL)
+                            OR (s.status IN ('completed','failed') AND s.ended_at IS NOT NULL AND s.duration_ms IS NOT NULL)
+                            OR (s.status='unknown' AND ((s.ended_at IS NULL AND s.duration_ms IS NULL) OR (s.ended_at IS NOT NULL AND s.duration_ms IS NOT NULL)))))
                           OR (s.timing_state<>'recorded' AND s.duration_ms IS NULL)))
               OR EXISTS(SELECT 1 FROM local_workspace_execution_headers h
                      LEFT JOIN session_runs r ON r.run_id=h.source_identity AND r.session_id=h.session_id
                      WHERE r.run_id IS NULL)
               OR EXISTS(SELECT 1 FROM local_workspace_execution_headers h
                      WHERE h.execution_id<>local_workspace_execution_id(h.source_kind,h.source_identity)
+                        OR NOT ((h.time_authority='recorded' AND ((h.status='active' AND h.end_utc_ticks IS NULL AND h.duration_ms IS NULL)
+                          OR (h.status IN ('completed','failed') AND h.end_utc_ticks IS NOT NULL AND h.duration_ms IS NOT NULL)
+                          OR (h.status='unknown' AND ((h.end_utc_ticks IS NULL AND h.duration_ms IS NULL) OR (h.end_utc_ticks IS NOT NULL AND h.duration_ms IS NOT NULL)))))
+                          OR (h.time_authority<>'recorded' AND h.end_utc_ticks IS NULL AND h.duration_ms IS NULL))
                         OR (h.end_utc_ticks IS NULL)<>(h.duration_ms IS NULL)
                         OR (h.end_utc_ticks IS NOT NULL AND (h.duration_ms IS NULL OR h.time_authority<>'recorded' OR h.start_utc_ticks IS NULL
                           OR h.end_utc_ticks<h.start_utc_ticks OR h.duration_ms<>(h.end_utc_ticks-h.start_utc_ticks)/10000)))
@@ -880,11 +899,16 @@ internal static class LocalWorkspaceProjectionSchemaV1
                      WHERE n.node_id<>local_workspace_node_id(n.source_kind,n.source_identity)
                         OR NOT EXISTS(SELECT 1 FROM local_workspace_execution_headers h WHERE h.execution_id=n.execution_id AND h.session_id=n.session_id)
                         OR (n.parent_node_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=n.parent_node_id AND p.execution_id=n.execution_id))
+                        OR NOT ((n.time_authority='recorded' AND ((n.status='active' AND n.end_utc_ticks IS NULL AND n.duration_ms IS NULL)
+                          OR (n.status IN ('completed','failed') AND n.end_utc_ticks IS NOT NULL AND n.duration_ms IS NOT NULL)
+                          OR (n.status='unknown' AND ((n.end_utc_ticks IS NULL AND n.duration_ms IS NULL) OR (n.end_utc_ticks IS NOT NULL AND n.duration_ms IS NOT NULL)))))
+                          OR (n.time_authority<>'recorded' AND n.start_utc_ticks IS NULL AND n.end_utc_ticks IS NULL AND n.duration_ms IS NULL))
                         OR (n.end_utc_ticks IS NULL)<>(n.duration_ms IS NULL)
                         OR (n.end_utc_ticks IS NOT NULL AND (n.duration_ms IS NULL OR n.time_authority<>'recorded' OR n.start_utc_ticks IS NULL
                           OR n.end_utc_ticks<n.start_utc_ticks OR n.duration_ms<>(n.end_utc_ticks-n.start_utc_ticks)/10000)))
               OR EXISTS(SELECT 1 FROM local_workspace_node_edges e
-                     WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id)
+                     WHERE e.relation_kind<>'parent'
+                        OR NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id)
                         OR (e.relation_kind='parent' AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes n WHERE n.node_id=e.node_id
                           AND n.parent_node_id=e.related_node_id AND n.relationship_authority=e.relationship_authority)))
               OR EXISTS(SELECT 1 FROM local_workspace_nodes n

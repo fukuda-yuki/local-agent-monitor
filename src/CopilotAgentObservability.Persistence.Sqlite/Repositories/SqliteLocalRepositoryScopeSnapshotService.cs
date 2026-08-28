@@ -23,6 +23,8 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     private readonly Func<SqliteConnection>? connectionFactory;
     private readonly Action<string, int>? catalogRowObserver;
     private readonly ILocalWorkspacePublicationGate publicationGate;
+    private readonly ISkillRegistryGenerationAuthority? skillRegistryAuthority;
+    private readonly TimeProvider timeProvider;
 
     internal SqliteLocalRepositoryScopeSnapshotService(
         string databasePath,
@@ -38,7 +40,8 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         Func<SqliteConnection>? connectionFactory = null,
         Action<string, int>? catalogRowObserver = null,
         ILocalWorkspacePublicationGate? publicationGate = null,
-        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(sessionContributor);
@@ -58,6 +61,13 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         this.connectionFactory = connectionFactory;
         this.catalogRowObserver = catalogRowObserver;
         this.publicationGate = publicationGate ?? new LocalWorkspacePublicationGate();
+        this.skillRegistryAuthority = skillRegistryAuthority
+            ?? (this.detailContributor as LocalWorkspaceSessionDetailSnapshotContributor)?.RegistryAuthority
+            ?? (sessionContributor as LocalWorkspaceSessionSnapshotContributor)?.RegistryAuthority;
+        this.timeProvider = timeProvider
+            ?? (this.detailContributor as LocalWorkspaceSessionDetailSnapshotContributor)?.TimeProvider
+            ?? (sessionContributor as LocalWorkspaceSessionSnapshotContributor)?.TimeProvider
+            ?? TimeProvider.System;
     }
 
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
@@ -89,6 +99,12 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         ValidateRequest(request);
         cancellationToken.ThrowIfCancellationRequested();
         await using var publicationLease = await publicationGate.AcquireReadAsync(cancellationToken).ConfigureAwait(false);
+        var acceptedAt = timeProvider.GetUtcNow();
+        using var pinnedRegistry = skillRegistryAuthority is null
+            ? null
+            : LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(skillRegistryAuthority);
+        if (sessionContributor is LocalWorkspaceSessionSnapshotContributor && pinnedRegistry is null)
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         try
         {
             using var connection = Open();
@@ -104,7 +120,9 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             {
                 var sessionContribution = await capability.RunContributorAsync(
                     ReadPhase.Session,
-                    token => sessionContributor.ReadAsync(capability, request, token),
+                    token => sessionContributor is LocalWorkspaceSessionSnapshotContributor workspaceSession && pinnedRegistry is not null
+                        ? workspaceSession.ReadPinnedAsync(capability, request, acceptedAt, pinnedRegistry, token)
+                        : sessionContributor.ReadAsync(capability, request, token),
                     cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 var sessionRows = ValidateAndFreezeSessionRows(sessionContribution, cancellationToken);
@@ -136,17 +154,21 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     catalog,
                     cancellationToken);
 
+                var snapshot = Compose(request, sessionRows, catalog, archive, compositionObserver, cancellationToken);
+
                 LocalWorkspaceSessionDetailContribution? detail = null;
                 if (detailRequest is not null && sessionRows.Length != 0)
                 {
+                    var revisionSession = snapshot.Sessions.SingleOrDefault(item => item.SessionId == request.TargetSessionId);
                     detail = await capability.RunContributorAsync(
                         ReadPhase.Archive,
-                        token => detailContributor.ReadAsync(capability, detailRequest, token),
+                        token => detailContributor is LocalWorkspaceSessionDetailSnapshotContributor workspaceDetail && pinnedRegistry is not null
+                            ? workspaceDetail.ReadPinnedAsync(capability, detailRequest, acceptedAt, pinnedRegistry, revisionSession, token)
+                            : detailContributor.ReadAsync(capability, detailRequest, token),
                         cancellationToken).ConfigureAwait(false);
                     ValidateDetail(request.TargetSessionId!, detailRequest, detail);
                 }
 
-                var snapshot = Compose(request, sessionRows, catalog, archive, compositionObserver, cancellationToken);
                 finalReturnObserver?.Invoke();
                 cancellationToken.ThrowIfCancellationRequested();
                 return (snapshot, detail);
@@ -211,6 +233,13 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     {
         if (!Enum.IsDefined(request.Kind) || request.Limit is < 1 or > 200)
             throw new ArgumentException("invalid_detail_request", nameof(request));
+        if (request.ExpectedWorkspaceRevision is not null
+            && (request.Kind is not (LocalRepositorySessionDetailRequestKind.Timeline
+                    or LocalRepositorySessionDetailRequestKind.Node
+                    or LocalRepositorySessionDetailRequestKind.Content)
+                || request.ExpectedWorkspaceRevision.Length != 64
+                || request.ExpectedWorkspaceRevision.Any(static value => value is not (>= '0' and <= '9' or >= 'a' and <= 'f'))))
+            throw new ArgumentException("invalid_detail_request", nameof(request));
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Summary
             && (request.ExecutionId is not null || request.ParentNodeId is not null || request.After is not null || request.NodeId is not null)
             || request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
@@ -226,14 +255,23 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             throw new ArgumentException("invalid_detail_request", nameof(request));
     }
 
-    private static string ComputeRevision(LocalRepositoryScopeSessionSnapshot session, LocalWorkspaceSessionDetailContribution detail)
+    private static string ComputeRevision(LocalRepositoryScopeSessionSnapshot session, LocalWorkspaceSessionDetailContribution detail) =>
+        ComputeRevisionForTest(
+            session,
+            detail.CanonicalRevisionInput ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"),
+            detail.SkillRegistryGenerationIdentity ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
+
+    internal static string ComputeRevisionForTest(
+        LocalRepositoryScopeSessionSnapshot session,
+        string canonicalRevisionInput,
+        string skillRegistryGenerationIdentity)
     {
         using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-monitor-session-detail-revision\0v1\0"));
         Append(session.SessionId); Append(session.AssignmentRevision); Append(session.ArchiveRevision);
         Append(session.AssignedRepositoryArchiveRevision ?? -1L); Append(session.Session);
-        Append(detail.CanonicalRevisionInput ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
-        Append(detail.SkillRegistryGenerationIdentity ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
+        Append(canonicalRevisionInput);
+        Append(skillRegistryGenerationIdentity);
         return Convert.ToHexStringLower(hash.GetHashAndReset());
         void Append(object value)
         {
@@ -261,7 +299,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || execution.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || execution.Status is not ("active" or "completed" or "failed" or "unknown")
                 || execution.ChildCount is < 0 or > 4096
-                || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds)
+                || !ValidTime(execution.Status, execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds)
                 || !ValidActivity(execution.Activity) || !ValidTokens(execution.Tokens))
             {
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
@@ -282,7 +320,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || node.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || node.Status is not ("active" or "completed" or "failed" or "unknown")
                 || node.ChildCount is < 0 or > 4096
-                || !ValidTime(node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds)
+                || !ValidTime(node.Status, node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds)
                 || !ValidActivity(node.Activity) || !ValidTokens(node.Tokens)
                 || !ValidKindMetadata(node) || !ValidReferences(node))
             {
@@ -349,9 +387,15 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     || content.RetentionOwnershipReceipt is not { Length: 32 } || content.RetentionOwnerToken is not { Length: 32 }))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
 
-        static bool ValidTime(string authority, long? start, long? end, long? duration) => authority switch
+        static bool ValidTime(string status, string authority, long? start, long? end, long? duration) => authority switch
         {
-            "recorded" => start is not null && ((end is null && duration is null) || (end >= start && duration == (end - start) / 10_000)),
+            "recorded" => start is not null && status switch
+            {
+                "active" => end is null && duration is null,
+                "completed" or "failed" => end >= start && duration == (end - start) / 10_000,
+                "unknown" => end is null && duration is null || end >= start && duration == (end - start) / 10_000,
+                _ => false,
+            },
             "missing" or "invalid" => start is null && end is null && duration is null,
             _ => false,
         };

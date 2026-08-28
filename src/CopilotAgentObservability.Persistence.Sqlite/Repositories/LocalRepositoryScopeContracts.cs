@@ -79,7 +79,8 @@ internal sealed record LocalRepositorySessionDetailRequest(
     LocalRepositoryTimelinePosition? After = null,
     int Limit = 100,
     string? NodeId = null,
-    string? ContentPart = null);
+    string? ContentPart = null,
+    string? ExpectedWorkspaceRevision = null);
 
 internal interface ILocalRepositorySessionSnapshotRow
 {

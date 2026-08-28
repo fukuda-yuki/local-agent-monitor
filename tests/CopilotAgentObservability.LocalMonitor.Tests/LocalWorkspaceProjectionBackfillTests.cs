@@ -547,6 +547,43 @@ public sealed class LocalWorkspaceProjectionBackfillTests
                 """));
     }
 
+    [Fact]
+    public void OtelToolWithCaseVariantDuplicateParentSpanOwnersUsesTheExecutionUnknownRelationGroup()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE monitor_spans SET parent_span_id='cccccccccccccccc'
+            WHERE trace_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND span_id='bbbbbbbbbbbbbbbb';
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000012','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','claude-code','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccc','otel.span','2026-08-24T00:00:00.5000000+00:00','not_captured');
+            INSERT INTO raw_records VALUES
+              (2,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.5000000+00:00','{}','{}',1,NULL),
+              (3,'otlp','AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','2026-08-24T00:00:00.7500000+00:00','{}','{}',1,NULL);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time) VALUES
+              (2,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','cccccccccccccccc',NULL,0,'chat','internal',NULL,'ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.5000000+00:00'),
+              (3,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','CCCCCCCCCCCCCCCC',NULL,0,'chat','internal',NULL,'ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.5000000+00:00');
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["unknown:unknown_relation_group:0:not_observed:"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT tool.relationship_authority||':'||parent.source_kind||':'||
+                       (SELECT COUNT(*) FROM local_workspace_node_edges edge WHERE edge.node_id=tool.node_id)||':'||
+                       metadata.caller_state||':'||COALESCE(metadata.caller_node_id,'')
+                FROM local_workspace_nodes tool
+                JOIN local_workspace_nodes parent ON parent.node_id=tool.parent_node_id
+                JOIN local_workspace_tool_metadata metadata ON metadata.node_id=tool.node_id
+                WHERE tool.source_kind='semantic_tool';
+                """));
+    }
+
     [Theory]
     [InlineData("error", null, "error", "2026-08-24T00:00:00.0000000+00:00", "2026-08-24T00:00:01.0000000+00:00", "failed", "failed", "recorded", "recorded", "not_observed", "recorded", 1000)]
     [InlineData("ok", "must-not-control-status", "tool_call", "2026-08-24T00:00:00.0000000+00:00", "2026-08-24T00:00:01.0000000+00:00", "completed", "completed", "recorded", "recorded", "recorded", "not_observed", 1000)]
