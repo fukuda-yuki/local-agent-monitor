@@ -26,7 +26,6 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         { "session_events.source_application_version", "UPDATE session_events SET source_application_version='matrix-event-v2' WHERE session_id=$session;", true },
         { "monitor_spans.status", "UPDATE monitor_spans SET status=CASE status WHEN 'ERROR' THEN 'OK' ELSE 'ERROR' END WHERE trace_id IN (SELECT trace_id FROM session_runs WHERE session_id=$session);", true },
         { "local_workspace_span_facts.retry_count", "UPDATE local_workspace_span_facts SET retry_count=COALESCE(retry_count,0)+1 WHERE raw_record_id IN (SELECT raw_record_id FROM monitor_spans WHERE trace_id IN (SELECT trace_id FROM session_runs WHERE session_id=$session));", false },
-        { "local_workspace_node_content_refs.revision_input", "UPDATE local_workspace_node_content_refs SET revision_input=revision_input||':matrix' WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session);", false },
     };
 
     public static TheoryData<string, string> PersistedProjectionCopyDrift => new()
@@ -34,6 +33,7 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         { "local_workspace_execution_headers.status", "UPDATE local_workspace_execution_headers SET status=CASE status WHEN 'completed' THEN 'failed' ELSE 'completed' END WHERE session_id=$session;" },
         { "local_workspace_nodes.status", "UPDATE local_workspace_nodes SET status=CASE status WHEN 'completed' THEN 'failed' ELSE 'completed' END WHERE session_id=$session;" },
         { "local_workspace_node_edges.source_ordinal", "UPDATE local_workspace_node_edges SET source_ordinal=source_ordinal+1 WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session);" },
+        { "local_workspace_node_content_refs.revision_input", "UPDATE local_workspace_node_content_refs SET revision_input=revision_input||':matrix' WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session);" },
     };
 
     [Theory]
@@ -216,13 +216,15 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         var before = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
 
         fixture.DriftSourceOwnerToken();
-        var drifted = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
-        Assert.NotEqual(before.WorkspaceRevision, drifted.WorkspaceRevision);
+        var drifted = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None));
+        Assert.Equal("local_monitor_ui_unavailable", drifted.Error);
         Assert.NotSame(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult.Deleted,
             await fixture.Adapter.DeleteAsync(fixture.Context));
 
-        var after = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
-        Assert.Equal(drifted.WorkspaceRevision, after.WorkspaceRevision);
+        var after = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None));
+        Assert.Equal("local_monitor_ui_unavailable", after.Error);
         Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM session_event_content WHERE event_id=$target;"));
         Assert.Equal("read_denied", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
     }
@@ -255,7 +257,7 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
 
         Assert.Equal(RetentionReadDisposition.LifecycleDenied, read.Disposition);
         Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
-        await fixture.AssertNodeContentStateAsync(after, "read_denied");
+        await fixture.AssertNodeContentStateAsync(after, "expired");
         await fixture.AssertStaleAsync(before);
     }
 
@@ -573,7 +575,10 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
             using var response = await routes.Client.GetAsync($"/api/local-monitor/v1/sessions/{inner.SessionId}/nodes/{binding[0]}?workspace_revision={snapshot.WorkspaceRevision}");
             var body = await response.Content.ReadAsStringAsync();
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.Contains($"\"{binding[1]}\":{{\"state\":\"{expected}\",\"available\":false}}", body, StringComparison.Ordinal);
+            using var document = System.Text.Json.JsonDocument.Parse(body);
+            var content = document.RootElement.GetProperty("content").GetProperty(binding[1]);
+            Assert.Equal(expected, content.GetProperty("state").GetString());
+            Assert.False(content.GetProperty("available").GetBoolean());
         }
 
         internal async Task AssertStaleAsync(LocalRepositorySessionDetailSnapshot old)
