@@ -99,6 +99,14 @@ AppHost/.aspire/
 /manifest.json
 /result.md
 
+# ============================================================
+# Understand Anything (project-local plugin discovery)
+# ============================================================
+/.copilot-plugin/
+/understand-anything-plugin/
+/.ua/
+/.understand-anything/
+
 *.db
 *.db-shm
 *.db-wal
