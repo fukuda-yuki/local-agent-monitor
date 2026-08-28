@@ -114,7 +114,7 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task RepositorySelectionOmitsRawContentWhileTraceListShowsOnlyThePromptLabel()
+    public async Task RepositorySelectionOmitsRawContentAndRetiredTraceListPublishesNoEntity()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
@@ -126,10 +126,10 @@ public class MonitorSecurityBoundaryTests
             Assert.DoesNotContain(marker, repositorySelection);
         }
 
-        var traces = await host.Client.GetStringAsync("/traces?period=all");
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", traces);
-        Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", traces);
-        Assert.DoesNotContain("leak-marker@example.com", traces);
+        using var traces = await host.Client.GetAsync("/traces?period=all");
+        Assert.Equal(HttpStatusCode.NotFound, traces.StatusCode);
+        Assert.True(traces.Headers.CacheControl?.NoStore);
+        Assert.Empty(await traces.Content.ReadAsByteArrayAsync());
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task TraceListCrossOriginIsForbiddenWhenRawPromptLabelsAreShown()
+    public async Task RetiredTraceListHasTheSameEmptyOutcomeForCrossOriginHeaders()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
@@ -159,27 +159,34 @@ public class MonitorSecurityBoundaryTests
         {
             using var crossSite = new HttpRequestMessage(HttpMethod.Get, path);
             crossSite.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
-            Assert.Equal(HttpStatusCode.Forbidden, (await host.Client.SendAsync(crossSite)).StatusCode);
+            using var crossSiteResponse = await host.Client.SendAsync(crossSite);
+            Assert.Equal(HttpStatusCode.NotFound, crossSiteResponse.StatusCode);
+            Assert.True(crossSiteResponse.Headers.CacheControl?.NoStore);
+            Assert.Empty(await crossSiteResponse.Content.ReadAsByteArrayAsync());
 
             using var foreignOrigin = new HttpRequestMessage(HttpMethod.Get, path);
             foreignOrigin.Headers.TryAddWithoutValidation("Origin", "http://evil.example.com");
-            Assert.Equal(HttpStatusCode.Forbidden, (await host.Client.SendAsync(foreignOrigin)).StatusCode);
+            using var foreignOriginResponse = await host.Client.SendAsync(foreignOrigin);
+            Assert.Equal(HttpStatusCode.NotFound, foreignOriginResponse.StatusCode);
+            Assert.True(foreignOriginResponse.Headers.CacheControl?.NoStore);
+            Assert.Empty(await foreignOriginResponse.Content.ReadAsByteArrayAsync());
         }
     }
 
     [Fact]
-    public async Task RepositorySelectionAndTraceListSetNoStore()
+    public async Task RepositorySelectionAndRetiredTraceListSetNoStore()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp);
 
-        foreach (var path in new[] { "/", "/traces" })
-        {
-            var response = await host.Client.GetAsync(path);
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.True(response.Headers.CacheControl?.NoStore, $"{path} must send Cache-Control: no-store when raw is shown.");
-        }
+        using var repositorySelection = await host.Client.GetAsync("/");
+        Assert.Equal(HttpStatusCode.OK, repositorySelection.StatusCode);
+        Assert.True(repositorySelection.Headers.CacheControl?.NoStore);
+
+        using var traceList = await host.Client.GetAsync("/traces");
+        Assert.Equal(HttpStatusCode.NotFound, traceList.StatusCode);
+        Assert.True(traceList.Headers.CacheControl?.NoStore);
     }
 
     [Fact]

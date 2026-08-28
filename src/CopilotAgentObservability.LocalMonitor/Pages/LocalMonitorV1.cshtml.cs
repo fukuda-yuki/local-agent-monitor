@@ -7,18 +7,24 @@ internal sealed record LocalMonitorV1PageModel(
     LocalMonitorV1PrimaryPathResult? Path,
     LocalMonitorV1PageQuery? Query,
     string? PageState,
-    string? RecoveryAction)
+    string? RecoveryAction,
+    string? ExplorerScope,
+    string? ExplorerHeading)
 {
-    internal static LocalMonitorV1PageModel Success(LocalMonitorV1PrimaryPathResult path, LocalMonitorV1PageQuery query) =>
-        new(path.RouteKind, path, query, null, null);
+    internal static LocalMonitorV1PageModel Success(
+        LocalMonitorV1PrimaryPathResult path,
+        LocalMonitorV1PageQuery query,
+        string? explorerScope = null,
+        string? explorerHeading = null) =>
+        new(path.RouteKind, path, query, null, null, explorerScope, explorerHeading);
 
     internal static LocalMonitorV1PageModel Error(string pageState, string recoveryAction) =>
-        new(null, null, null, pageState, recoveryAction);
+        new(null, null, null, pageState, recoveryAction, null, null);
 
     internal static LocalMonitorV1PageModel ResolvedError(
         LocalMonitorV1PrimaryPathResult path,
         LocalMonitorV1PageQuery query,
         string pageState,
         string recoveryAction) =>
-        new(path.RouteKind, path, query, pageState, recoveryAction);
+        new(path.RouteKind, path, query, pageState, recoveryAction, null, null);
 }

@@ -21,8 +21,8 @@
          data-trace-status="@(Model.Trace.TraceStatus ?? "")"
          data-error-trace="@(isErrorTrace ? "true" : "false")">
     <nav class="breadcrumb detail-breadcrumb" aria-label="パンくず">
-        <a href="/">概要</a><span class="breadcrumb-sep">›</span>
-        <a href="/traces">トレース</a><span class="breadcrumb-sep">›</span>
+        <a href="/">リポジトリ</a><span class="breadcrumb-sep">›</span>
+        <span>トレース</span><span class="breadcrumb-sep">›</span>
         <span class="breadcrumb-current">@title</span>
         <span class="breadcrumb-actions">
             <a class="nav-adjacent" id="trace-cost-link" href="/costs">Estimated cost</a>

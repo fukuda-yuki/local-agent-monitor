@@ -293,17 +293,19 @@ public class MonitorShellPlaywrightTests
             Assert.DoesNotContain("settings=storage", visibleText, StringComparison.Ordinal);
         }
 
-        var unavailablePage = await browser.NewPageAsync();
-        var unavailableResponse = await unavailablePage.GotoAsync(
+        var explorerPage = await browser.NewPageAsync();
+        var explorerResponse = await explorerPage.GotoAsync(
             $"{host.Url}/sessions?settings=ai",
             new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        Assert.Equal(503, unavailableResponse?.Status);
-        Assert.Equal("?settings=ai", await unavailablePage.EvaluateAsync<string>("() => location.search"));
-        Assert.True(await unavailablePage.EvaluateAsync<bool>("() => 'LocalMonitorV1History' in window"));
-        Assert.True(await unavailablePage.EvaluateAsync<bool>("() => 'LocalMonitorV1Paths' in window"));
-        await Expect(unavailablePage.Locator("script[src='/local-monitor-v1-shared.js']")).ToHaveCountAsync(1);
-        await Expect(unavailablePage.Locator("[data-route-kind='AllSessions']")).ToHaveCountAsync(1);
-        await Expect(unavailablePage.Locator("#settings-modal[data-requested-section='ai']")).ToBeVisibleAsync();
+        Assert.Equal(200, explorerResponse?.Status);
+        Assert.Equal("?settings=ai", await explorerPage.EvaluateAsync<string>("() => location.search"));
+        Assert.True(await explorerPage.EvaluateAsync<bool>("() => 'LocalMonitorV1History' in window"));
+        Assert.True(await explorerPage.EvaluateAsync<bool>("() => 'LocalMonitorV1Paths' in window"));
+        await Expect(explorerPage.Locator("script[src='/local-monitor-v1-shared.js']")).ToHaveCountAsync(1);
+        await Expect(explorerPage.Locator("script[src='/local-monitor-explorer.js']")).ToHaveCountAsync(1);
+        await Expect(explorerPage.Locator("[data-route-kind='AllSessions']")).ToHaveCountAsync(1);
+        await Expect(explorerPage.Locator("[data-session-explorer]")).ToHaveCountAsync(1);
+        await Expect(explorerPage.Locator("#settings-modal[data-requested-section='ai']")).ToBeVisibleAsync();
     }
 
     [Fact]

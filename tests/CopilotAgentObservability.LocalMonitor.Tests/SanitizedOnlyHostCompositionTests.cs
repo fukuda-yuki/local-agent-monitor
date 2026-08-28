@@ -55,7 +55,6 @@ public sealed class SanitizedOnlyHostCompositionTests
             { HttpMethod.Get, "/monitor-sanitized-import.js" },
             { HttpMethod.Get, "/monitor-shell.js" },
             { HttpMethod.Get, "/monitor-span-detail.js" },
-            { HttpMethod.Get, "/monitor-tracelist.js" },
             { HttpMethod.Get, "/monitor-waterfall.js" },
             { HttpMethod.Get, "/alert-center.js" },
             { HttpMethod.Head, "/costs.js" },

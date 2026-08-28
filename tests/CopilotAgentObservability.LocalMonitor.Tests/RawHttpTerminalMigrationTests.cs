@@ -64,7 +64,7 @@ public sealed class RawHttpTerminalMigrationTests
             foreach (var owner in new[]
                      {
                          "analysis-run", "raw-record", "span-detail", "prompt-label",
-                         "trace-list-page", "trace-detail-page",
+                         "trace-detail-page",
                      })
             {
                 data.Add(owner, (int)RetentionRawTerminalResult.Lost);
@@ -78,7 +78,6 @@ public sealed class RawHttpTerminalMigrationTests
     [InlineData("MonitorHost.cs", 5)]
     [InlineData("Sessions/SessionRoutes.cs", 2)]
     [InlineData("RawReplayRoutes.cs", 3)]
-    [InlineData("Pages/Traces.cshtml.cs", 1)]
     [InlineData("Pages/TraceDetail.cshtml.cs", 1)]
     [InlineData("Analysis/HistoricalEvidenceApplicationService.cs", 1)]
     [InlineData("Diagnostics/RepositoryMetadataDiagnosticsLoader.cs", 1)]
@@ -119,7 +118,7 @@ public sealed class RawHttpTerminalMigrationTests
             AssertZeroResponse(responseFeature);
         }
 
-        if (owner is "trace-list-page" or "trace-detail-page")
+        if (owner is "trace-detail-page")
         {
             var prepared = await PrepareRazorOwnerAsync(
                 owner,
@@ -381,7 +380,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_SealedTerminalPublishesOnlyAfterExactEntityIsBufferedAndReleasesAfterSend(string owner)
     {
@@ -425,8 +423,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("trace-list-page", (int)RetentionRawTerminalResult.Lost)]
-    [InlineData("trace-list-page", (int)RetentionRawTerminalResult.Busy)]
     [InlineData("trace-detail-page", (int)RetentionRawTerminalResult.Lost)]
     [InlineData("trace-detail-page", (int)RetentionRawTerminalResult.Busy)]
     public async Task RazorOwner_TerminalFailureDiscardsExactEntityAndReleasesAfterDiscard(string owner, int terminalValue)
@@ -469,7 +465,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_RenderFailureAbortsWithoutTerminalOrResponseAndReleasesAfterDiscard(string owner)
     {
@@ -492,7 +487,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_AllSourceTerminalsWinBeforeSendAndEachSourceReleasesAfterSend(string owner)
     {
@@ -586,7 +580,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_MapperReadsOnlyInsideUseReferenceAndRazorUsesClosedReferenceFreeProjection(string owner)
     {
@@ -625,7 +618,6 @@ public sealed class RawHttpTerminalMigrationTests
         string? projection = null;
         IActionResult result = owner switch
         {
-            "trace-list-page" => await ExecuteTraceListAsync(),
             "trace-detail-page" => await ExecuteTraceDetailAsync(),
             _ => throw new ArgumentOutOfRangeException(nameof(owner)),
         };
@@ -634,14 +626,6 @@ public sealed class RawHttpTerminalMigrationTests
         Assert.True(RawRazorPageLeaseTracker.TryTake(context, out var attached));
         Assert.Equal("raw-derived", projection);
         return (context, attached, store, projection!);
-
-        async Task<IActionResult> ExecuteTraceListAsync()
-        {
-            var model = new TracesModel { PageContext = pageContext };
-            var pageResult = await model.OnGetAsync();
-            projection = model.PromptFor(OwnerProjectionStore.TraceId);
-            return pageResult;
-        }
 
         async Task<IActionResult> ExecuteTraceDetailAsync()
         {

@@ -37,6 +37,16 @@ internal static class LocalMonitorV1HumanRoutes
     internal static bool IsPrimaryAsset(PathString path) =>
         path.Value is { } value && PrimaryAssets.Contains(value);
 
+    internal static bool IsRetiredTraceList(HttpContext context)
+    {
+        var rawPath = RawPath(context);
+        return string.Equals(rawPath, "/traces", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(rawPath, "/traces/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static Task RetireTraceListAsync(HttpContext context) =>
+        Empty(context, StatusCodes.Status404NotFound);
+
     internal static Task<bool> TryDispatchUnavailableAssetAsync(HttpContext context, IFileProvider webRootFileProvider)
     {
         if (context.Request.Path == SharedAsset) return Task.FromResult(false);
@@ -154,6 +164,12 @@ internal static class LocalMonitorV1HumanRoutes
             return true;
         }
 
+        if (MonitorHost.IsCrossSiteRequest(context))
+        {
+            await CrossOriginAsync(context);
+            return true;
+        }
+
         var resolution = await ResolveAsync(
             path,
             query!,
@@ -177,6 +193,18 @@ internal static class LocalMonitorV1HumanRoutes
             : context.Response.Body.WriteAsync(bytes, context.RequestAborted).AsTask();
     }
 
+    internal static Task CrossOriginAsync(HttpContext context)
+    {
+        var bytes = Encoding.UTF8.GetBytes("{\"error\":\"cross_origin_forbidden\"}");
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.ContentLength = bytes.Length;
+        return HttpMethods.IsHead(context.Request.Method)
+            ? Task.CompletedTask
+            : context.Response.Body.WriteAsync(bytes, context.RequestAborted).AsTask();
+    }
+
     private static async ValueTask<(LocalMonitorV1PageModel Model, int StatusCode)> ResolveAsync(
         LocalMonitorV1PrimaryPathResult path,
         LocalMonitorV1PageQuery query,
@@ -185,19 +213,20 @@ internal static class LocalMonitorV1HumanRoutes
         IRazorViewEngine viewEngine,
         CancellationToken cancellationToken)
     {
+        LocalRepositoryScopeSnapshot? scopeSnapshot = null;
         try
         {
             switch (path.RouteKind)
             {
                 case LocalMonitorV1PrimaryRouteKind.RepositorySelection:
                 case LocalMonitorV1PrimaryRouteKind.AllSessions:
-                    await scopeService.ReadAsync(new(LocalRepositoryScopeKind.All, null), cancellationToken);
+                    scopeSnapshot = await scopeService.ReadAsync(new(LocalRepositoryScopeKind.All, null), cancellationToken);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.UnassignedSessions:
-                    await scopeService.ReadAsync(new(LocalRepositoryScopeKind.Unassigned, null), cancellationToken);
+                    scopeSnapshot = await scopeService.ReadAsync(new(LocalRepositoryScopeKind.Unassigned, null), cancellationToken);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.RepositorySessions:
-                    await scopeService.ReadAsync(new(LocalRepositoryScopeKind.Repository, path.RepositoryId), cancellationToken);
+                    scopeSnapshot = await scopeService.ReadAsync(new(LocalRepositoryScopeKind.Repository, path.RepositoryId), cancellationToken);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.SessionDetail:
                     var snapshot = await detailService.ReadDetailAsync(
@@ -250,11 +279,23 @@ internal static class LocalMonitorV1HumanRoutes
             return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
         }
 
+        var explorer = ResolveExplorerPresentation(path, scopeSnapshot);
         return HasExactRenderer(viewEngine, path.RouteKind!.Value)
-            ? (LocalMonitorV1PageModel.Success(path, query), StatusCodes.Status200OK)
+            ? (LocalMonitorV1PageModel.Success(path, query, explorer.Scope, explorer.Heading), StatusCodes.Status200OK)
             : (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"),
                 StatusCodes.Status503ServiceUnavailable);
     }
+
+    private static (string? Scope, string? Heading) ResolveExplorerPresentation(
+        LocalMonitorV1PrimaryPathResult path,
+        LocalRepositoryScopeSnapshot? snapshot) => path.RouteKind switch
+    {
+        LocalMonitorV1PrimaryRouteKind.RepositorySessions =>
+            ("repository", snapshot!.Repositories.Single(item => item.RepositoryId == path.RepositoryId).DisplayName),
+        LocalMonitorV1PrimaryRouteKind.AllSessions => ("all", "すべてのセッション"),
+        LocalMonitorV1PrimaryRouteKind.UnassignedSessions => ("unassigned", "リポジトリ未設定のセッション"),
+        _ => (null, null),
+    };
 
     private static bool HasExactRenderer(IRazorViewEngine viewEngine, LocalMonitorV1PrimaryRouteKind routeKind)
     {

@@ -35,6 +35,12 @@ else
         {
             @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml")
         }
+        else if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+                 or LocalMonitorV1PrimaryRouteKind.AllSessions
+                 or LocalMonitorV1PrimaryRouteKind.UnassignedSessions)
+        {
+            @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_SessionExplorer.cshtml")
+        }
     </section>
 }
 
@@ -42,6 +48,15 @@ else
     @if (Model.RouteKind is not null)
     {
         <script src="/local-monitor-v1-shared.js" defer></script>
+    }
+    @if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.RepositorySelection)
+    {
         <script src="/local-monitor-repositories.js" defer></script>
+    }
+    else if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+             or LocalMonitorV1PrimaryRouteKind.AllSessions
+             or LocalMonitorV1PrimaryRouteKind.UnassignedSessions)
+    {
+        <script src="/local-monitor-explorer.js" defer></script>
     }
 }

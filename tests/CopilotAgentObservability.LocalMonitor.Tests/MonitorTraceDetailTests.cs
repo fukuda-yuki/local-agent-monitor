@@ -41,6 +41,9 @@ public class MonitorTraceDetailTests
         Assert.Contains("エラーのみ", body);
         Assert.Contains("キャッシュの観点", body);
         Assert.Contains("ターン別キャッシュ読取率", body);
+        Assert.Contains("<a href=\"/\">リポジトリ</a>", body, StringComparison.Ordinal);
+        Assert.Contains("<span>トレース</span>", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("href=\"/traces\"", body, StringComparison.Ordinal);
 
         // Raw body shown inline by default.
         Assert.Contains("Raw OTLP ペイロード", body);

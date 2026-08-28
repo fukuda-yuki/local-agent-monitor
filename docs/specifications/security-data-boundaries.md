@@ -428,21 +428,19 @@ Raw-bearing surfaces:
     single-record raw route by default).
   - `GET /traces/{rawRecordId}/raw` (server-rendered HTML, one raw record on
     demand by id from `raw_records`).
-  - the **dashboard page (`/`)** and the **trace-list page (`/traces`)** — they
-    render a single representative **user prompt per trace** (extracted
-    server-side from the trace's raw OTLP payload, truncated, escaped inert
-    text) so a trace is identifiable by what the user asked rather than by an
-    opaque id (D032). Only this short prompt label is raw; all other columns
-  stay sanitized metadata. This is installed raw-default pre-v1 behavior; the
-  receiver-only host registers neither page and provides no shortened-TraceId
-  fallback.
+  The former prompt-bearing dashboard and trace-list are not current raw
+  surfaces. `/` is the Repository-selection root, and exact one-segment
+  `/traces` or `/traces/` is retired as an empty no-store `404` for every
+  method, case variant and query. Retirement does not claim
+  `/traces/{traceId}` or any technical descendant and does not redirect or
+  infer a Session identity.
 - there is **no full-payload JSON raw API**; `/api/monitor/*` and the SSE
   stream **never** return raw / PII. The short prompt label route is the narrow
   raw-bearing JSON exception outside `/api/monitor/*` and may be fetched by
   same-origin / token-gated local UI code.
 - Update (D039 / D042 / D050): prompt labels are the narrow exception to the
-  older server-rendered-only wording. Local Monitor client-side overview /
-  trace-list code and Canvas helper routes may same-origin / token-gated fetch
+  older server-rendered-only wording. Retained technical Trace UI and Canvas
+  helper routes may same-origin / token-gated fetch
   `GET /traces/{traceId}/prompt-label` and render the short label as inert text.
   Full raw payloads still are not fetched by client-side JS, and
   `/api/monitor/*` plus SSE remain prompt-free.
@@ -450,7 +448,7 @@ Raw-bearing surfaces:
   required). Under Local Monitor v1, `--sanitized-only` composes a receiver-only
   host: Razor Pages, human static assets, human routes, and
   `/api/local-monitor/v1/*` are not registered. It does not retain the
-  installed sanitized tab shell, dashboard, trace list, or shortened-TraceId
+  installed sanitized tab shell or shortened-TraceId
   fallback. Accepted frozen machine APIs retain their contract.
 - **every raw-bearing route or page variant** enforces:
   - same-origin: a request whose `Sec-Fetch-Site` is cross-site / cross-origin
@@ -508,9 +506,9 @@ Mandatory negative tests:
   `/api/local-monitor/v1/*` are not registered; human GET/HEAD receives empty
   no-store `404`, PII/raw values are excluded, and no cacheable raw response is
   generated.
-- the installed raw-default dashboard and trace list may retain their frozen
-  prompt-label route until replacement, but the label never appears in
-  `/api/monitor/*` or SSE and those pages are not a sanitized-only fallback.
+- the retired `/traces` list returns an empty no-store `404` without consulting
+  prompt-label or raw stores, while exact Trace detail descendants retain their
+  owners; the label never appears in `/api/monitor/*` or SSE.
 - a cross-site / cross-origin request to any raw-bearing route / page variant is rejected with
   `403`.
 - `Cache-Control: no-store` is present on **all** raw-bearing routes / page
@@ -882,29 +880,30 @@ Sprint18 Local Monitor UI redesign (D042/D043/D044/D045):
   `createElement` / `textContent` only (no `innerHTML`), and sanitized-context
   pages never fetch raw-bearing routes.
 
-Sprint12 UX redesign (prompt identification + DOM views, boundary controls
-reused):
+Sprint12 UX redesign history (prompt identification + DOM views, superseded
+where noted):
 
-- **Prompt-identified dashboard / trace list (D032).** The dashboard (`/`) and
-  the trace-list page (`/traces`) join the raw-bearing surface set: each renders
+- **Superseded prompt-identified dashboard / trace list (D032).** The former
+  dashboard (`/`) and trace-list page (`/traces`) rendered
   one representative **user prompt per trace**, extracted server-side from the
   trace's raw OTLP payload, truncated, and emitted as escaped inert text (Razor
   default encoding; no `Html.Raw`). Only that short label is raw — every other
-  field stays sanitized metadata. Both pages enforce the same controls as the
-  existing raw-bearing routes: same-origin (`403` on cross-site), `Cache-Control:
-  no-store`, and removal under `--sanitized-only` (the label is dropped and a
-  shortened TraceId is shown). The prompt label may be server-rendered or
+  field stayed sanitized metadata. Both pages enforced the same controls as the
+  existing raw-bearing routes: same-origin (`403` on cross-site) and
+  `Cache-Control: no-store`. The prompt label could be server-rendered or
   fetched from the raw-bearing prompt-label route by same-origin local UI code;
-  the sanitized `/api/monitor/*` JSON and the SSE stream are unchanged and still
-  never carry it. No projection schema or API field is added
+  the sanitized `/api/monitor/*` JSON and the SSE stream were unchanged and
+  never carried it. No projection schema or API field was added
   **for the `/api/monitor/*` family** — updated by D039, which adds a
   narrowly-scoped new endpoint *outside* that family (see "Sprint15
   continuation" above); `/api/monitor/*` and SSE themselves remain unchanged
   and prompt-free. The
-  old `/ingestions` page is retired and its ingestion list is folded into the
-  dashboard.
-- **Prompt-label client fetch update (D039 / D042).** Sprint18's client-side
-  overview and trace-list may fetch the short prompt label route and insert it
+  old `/ingestions` page was retired and its ingestion list was folded into the
+  dashboard. Local Monitor v1 replaces `/` with Repository selection and
+  retires `/traces` as the exact empty no-store `404` above; this historical
+  paragraph does not authorize either removed prompt-bearing page.
+- **Prompt-label client fetch update (D039 / D042).** Retained technical Trace
+  UI and Canvas helpers may fetch the short prompt label route and insert it
   with `textContent`; this supersedes only the "server-rendered only" transport
   wording for prompt labels. It does not allow client-side fetching of full raw
   record payloads or adding prompt fields to `/api/monitor/*`.

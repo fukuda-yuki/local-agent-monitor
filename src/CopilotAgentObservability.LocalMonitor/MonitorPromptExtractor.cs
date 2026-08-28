@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.LocalMonitor;
 
 /// <summary>
 /// Extracts a single representative user-prompt label for a trace from its raw
-/// OTLP payload, for the dashboard / trace-list raw-bearing surfaces (D032). The
+/// OTLP payload, for the retained technical trace detail and prompt-label surfaces. The
 /// label is a short, whitespace-collapsed, truncated one-liner shown only on
 /// server-rendered pages, where Razor renders it as escaped inert text; it is
 /// never copied into the sanitized projection, <c>/api/monitor/*</c>, or the SSE

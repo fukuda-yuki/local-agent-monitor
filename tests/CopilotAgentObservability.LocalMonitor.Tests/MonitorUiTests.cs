@@ -11,7 +11,7 @@ public class MonitorUiTests
         EnsureSchema(temp);
         await using var host = await StartHostAsync(temp);
 
-        foreach (var path in new[] { "/", "/traces", "/diagnostics", "/retention/session/11111111-1111-7111-8111-111111111111", "/retention/item/item.synthetic" })
+        foreach (var path in new[] { "/", "/diagnostics", "/retention/session/11111111-1111-7111-8111-111111111111", "/retention/item/item.synthetic" })
         {
             var response = await host.Client.GetAsync(path);
             var body = await response.Content.ReadAsStringAsync();
@@ -259,23 +259,6 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task TracesPage_ShowsPromptByDefault_ButNotToolArgsOrPii()
-    {
-        using var temp = new MonitorTempDirectory();
-        SeedRawWithSensitiveMarkers(temp);
-        await using var host = await StartHostAsync(temp);
-
-        var traces = await host.Client.GetStringAsync("/traces?period=all");
-
-        // The trace id is still shown (shortened) and the prompt labels the row (D032),
-        // but only the prompt is surfaced — never tool arguments or PII.
-        Assert.Contains("trace-ui", traces);
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", traces);
-        Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", traces);
-        Assert.DoesNotContain("leak-marker@example.com", traces);
-    }
-
-    [Fact]
     public async Task TracesPage_IsClosedUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
@@ -287,21 +270,6 @@ public class MonitorUiTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
         Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
-    }
-
-    [Theory]
-    [InlineData("/traces?period=90d")]
-    [InlineData("/traces?sort=prompt")]
-    [InlineData("/traces?status=broken")]
-    public async Task TracesPage_RejectsInvalidFilterValuesWith400(string path)
-    {
-        using var temp = new MonitorTempDirectory();
-        EnsureSchema(temp);
-        await using var host = await StartHostAsync(temp);
-
-        var traces = await host.Client.GetAsync(path);
-
-        Assert.Equal(HttpStatusCode.BadRequest, traces.StatusCode);
     }
 
     [Fact]
@@ -473,27 +441,6 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task TracesPage_RendersMasterDetailTableWithToolbarAndPreview()
-    {
-        using var temp = new MonitorTempDirectory();
-        SeedRawWithSensitiveMarkers(temp);
-        await using var host = await StartHostAsync(temp);
-
-        var traces = await host.Client.GetStringAsync("/traces?period=all");
-
-        // Sprint18 §6.2: toolbar filters, grid table with token column, and the
-        // selection-driven preview panel.
-        Assert.Contains("trace-list-table", traces);
-        Assert.Contains("trace-search", traces);
-        Assert.Contains("tracelist-toolbar", traces);
-        Assert.Contains("trace-preview", traces);
-        Assert.Contains("trace-row", traces);
-        Assert.Contains("token-heat", traces);
-        // Default sort is tokens-descending (the sortable token header is marked).
-        Assert.Contains("data-sort-key=\"tokens\" aria-sort=\"descending\"", traces);
-    }
-
-    [Fact]
     public async Task Theme_VendorsFontsLocallyWithNoExternalCdn()
     {
         using var temp = new MonitorTempDirectory();
@@ -594,7 +541,7 @@ public class MonitorUiTests
             MonitorProjectionBuilder.Build(record),
             DateTimeOffset.UnixEpoch.AddMinutes(2));
         // Span projection links the raw record to the trace, which is what the
-        // dashboard / trace-list prompt extraction reads (ListRawRecordsByTraceId).
+        // retained technical trace prompt extraction reads (ListRawRecordsByTraceId).
         store.ApplySpanProjection(
             id,
             MonitorSpanProjectionBuilder.Build(record),
