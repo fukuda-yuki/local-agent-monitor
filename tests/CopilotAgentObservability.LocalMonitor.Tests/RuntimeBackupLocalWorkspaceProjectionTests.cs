@@ -1315,12 +1315,59 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     [Fact]
     public void CurrentBackupInventoryIncludesVersionAndAllV5RowCounts()
     {
-        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archivePath = fixture.Path("v5-inventory.zip");
+        var extractedDatabasePath = fixture.Path("v5-inventory-database.sqlite");
 
-        Assert.Equal(18, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
-        Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table =>
-            Assert.Equal([table], LocalWorkspaceProjectionSchemaTests.Strings(connection, $"SELECT name FROM sqlite_schema WHERE type='table' AND name='{table}';")));
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archivePath);
+        Assert.True(created.Success, created.ErrorCode);
+        var inspected = fixture.Service.Inspect(archivePath);
+        Assert.True(inspected.Success, inspected.ErrorCode);
+        var manifest = ReadManifest(archivePath);
+        using (var archive = ZipFile.OpenRead(archivePath))
+        {
+            Assert.Single(archive.Entries, static entry => entry.FullName == "database.sqlite")
+                .ExtractToFile(extractedDatabasePath);
+        }
+
+        Assert.Equal(5, manifest.ComponentVersions["local_workspace_projection"]);
+        Assert.Equal(5, inspected.ComponentVersions["local_workspace_projection"]);
+
+        var extractedWorkspaceRowCounts = new SortedDictionary<string, long>(StringComparer.Ordinal);
+        using (var connection = Open(extractedDatabasePath))
+        {
+            using (var version = connection.CreateCommand())
+            {
+                version.CommandText = "SELECT version FROM schema_version WHERE component='local_workspace_projection';";
+                Assert.Equal(5L, Convert.ToInt64(
+                    version.ExecuteScalar(),
+                    System.Globalization.CultureInfo.InvariantCulture));
+            }
+            foreach (var table in LocalWorkspaceProjectionSchemaV1.TableNames)
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"")}\";";
+                extractedWorkspaceRowCounts.Add(
+                    table,
+                    Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+
+        Assert.Equal(18, extractedWorkspaceRowCounts.Count);
+        Assert.Contains(extractedWorkspaceRowCounts, static item => item.Value == 0);
+        Assert.Contains(extractedWorkspaceRowCounts, static item => item.Value > 0);
+        Assert.Equal(
+            extractedWorkspaceRowCounts.ToArray(),
+            manifest.RowCounts
+                .Where(static item => item.Key.StartsWith("local_workspace_", StringComparison.Ordinal))
+                .OrderBy(static item => item.Key, StringComparer.Ordinal)
+                .ToArray());
+        Assert.Equal(
+            extractedWorkspaceRowCounts.ToArray(),
+            inspected.RowCounts
+                .Where(static item => item.Key.StartsWith("local_workspace_", StringComparison.Ordinal))
+                .OrderBy(static item => item.Key, StringComparer.Ordinal)
+                .ToArray());
     }
 
     [Fact]
