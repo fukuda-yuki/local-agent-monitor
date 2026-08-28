@@ -1870,7 +1870,6 @@ public sealed class RuntimeBackupArchiveTests
                         var table = attack.EndsWith("case-alias", StringComparison.Ordinal)
                             ? "RETENTION_LEGACY_BUNDLE_BLOCKERS"
                             : "retention_legacy_bundle_blockers";
-                        Execute(connection, $"CREATE TABLE \"{table}\" (root_locator TEXT PRIMARY KEY, classification TEXT NOT NULL CHECK(classification='legacy_bundle_unverifiable'), recorded_at TEXT NOT NULL);");
                         using var blocker = connection.CreateCommand();
                         blocker.CommandText = $"INSERT INTO \"{table}\"(root_locator,classification,recorded_at) VALUES($root,'legacy_bundle_unverifiable','2026-01-01T00:00:00.0000000+00:00');";
                         blocker.Parameters.AddWithValue("$root", Path.Combine(DirectoryPath, "legacy-no-retention-root"));
@@ -1967,7 +1966,7 @@ public sealed class RuntimeBackupArchiveTests
                         : "retention_legacy_bundle_blockers";
                     var parsed = RuntimeBackupJson.ParseManifest(manifest);
                     var rows = parsed.RowCounts.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
-                    rows.Add(table, 1);
+                    rows["retention_legacy_bundle_blockers"] = 1;
                     manifest = RuntimeBackupJson.WriteManifest(parsed with { RowCounts = rows });
                 }
                 if (attack == "captured-external-raw")

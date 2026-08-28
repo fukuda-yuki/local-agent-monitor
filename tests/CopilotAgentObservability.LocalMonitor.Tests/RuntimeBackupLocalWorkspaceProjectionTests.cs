@@ -1425,7 +1425,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');");
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE local_workspace_sessions SET label_state='recorded',label_text='x',label_source_identity='0198f5b8-0c00-7000-8000-000000000099',label_expires_at='2099-01-01T00:00:00.0000000+00:00'; INSERT INTO local_workspace_session_search_facts VALUES((SELECT session_id FROM local_workspace_sessions),'label','0198f5b8-0c00-7000-8000-000000000099','x','2099-01-01T00:00:00.0000000+00:00');");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE local_workspace_sessions SET label_state='recorded',label_text='x',label_source_identity='0198f5b8-0c00-7000-8000-000000000099',label_expires_at='2099-01-01T00:00:00.0000000+00:00',label_owner_revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',instruction_count=1; INSERT INTO local_workspace_session_search_facts VALUES((SELECT session_id FROM local_workspace_sessions),'label','0198f5b8-0c00-7000-8000-000000000099','x','2099-01-01T00:00:00.0000000+00:00');");
 
         using var transaction = connection.BeginTransaction(deferred: true);
         Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
