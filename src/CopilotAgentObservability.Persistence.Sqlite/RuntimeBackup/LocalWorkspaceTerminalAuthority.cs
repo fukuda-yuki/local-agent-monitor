@@ -43,12 +43,10 @@ internal sealed class LocalWorkspaceTerminalAuthority
                     AND x.source_identity=e.event_id))
                 """
             : string.Empty;
-        var readDeniedRevisionFilter = v5ContentShape
-            ? """
-                AND r.revision_input=e.content_state||'|'||i.captured_at||'|'||i.expires_at||'|'||
-                    i.item_id||'|'||i.store_instance_id||'|'||CAST(i.revision AS TEXT)||'|'||i.state||'|'
-                """
-            : string.Empty;
+        const string readDeniedRevisionFilter = """
+            AND r.revision_input=e.content_state||'|'||i.captured_at||'|'||i.expires_at||'|'||
+                i.item_id||'|'||i.store_instance_id||'|'||CAST(i.revision AS TEXT)||'|'||i.state||'|'
+            """;
         var readDeniedSourceFilter = includeSourceBackedReadDenied
             ? string.Empty
             : " AND NOT EXISTS(SELECT 1 FROM session_event_content c WHERE c.event_id=r.source_item_id)";
