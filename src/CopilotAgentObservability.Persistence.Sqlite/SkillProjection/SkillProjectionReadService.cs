@@ -542,10 +542,13 @@ internal sealed class SkillProjectionReadService
         if (hasTargetOtelFacts && !TableInstalled(connection, transaction, "source_trace_compatibility_revisions"))
             throw new InvalidOperationException("skill_projection_schema_unsupported");
         var otel = hasTargetOtelFacts ? ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds) : [];
-        var sdkObservations = sdkAuthorityInstalled
-            ? ReadPotentiallyCurrentSdkObservations(connection, transaction, sessionIds, new FixedProjectionTimeProvider(acceptedAt))
-            : [];
-        IReadOnlySet<string> unavailableSdkSessions = registryAuthority is null && sdkAuthorityInstalled
+        var sdkObservations = ReadPotentiallyCurrentSdkObservations(
+            connection,
+            transaction,
+            sessionIds,
+            new FixedProjectionTimeProvider(acceptedAt),
+            sdkAuthorityInstalled);
+        IReadOnlySet<string> unavailableSdkSessions = registryAuthority is null || !sdkAuthorityInstalled
             ? sdkObservations.Select(static observation => observation.SessionId).ToHashSet(StringComparer.Ordinal)
             : new HashSet<string>(StringComparer.Ordinal);
         var sdk = registryAuthority is null || !sdkAuthorityInstalled
@@ -808,6 +811,8 @@ internal sealed class SkillProjectionReadService
         var result = new List<InvocationFact>();
         var structurallyValidSnapshotIds = ownedCandidates.Where(static candidate => candidate.HasValidReceiptFingerprint())
             .Select(static candidate => candidate.SnapshotId).ToHashSet(StringComparer.Ordinal);
+        var structurallyValidClaimIds = ownedCandidates.Where(static candidate => candidate.HasValidReceiptFingerprint())
+            .Select(static candidate => candidate.ClaimId).ToHashSet(StringComparer.Ordinal);
         var authorizations = new Dictionary<SkillRegistryProducerTuple, SkillProjectionCurrentSdkClaimAuthorizationResult>();
         try
         {
@@ -834,8 +839,15 @@ internal sealed class SkillProjectionReadService
                     System.Text.Json.JsonSerializer.Serialize(candidate)));
             }
             foreach (var observation in observations)
-                if (!structurallyValidSnapshotIds.Contains(observation.SnapshotId))
+            {
+                var matchesCompleteGraph =
+                    (observation.SnapshotId is not null && observation.ClaimId is null &&
+                     structurallyValidSnapshotIds.Contains(observation.SnapshotId)) ||
+                    (observation.SnapshotId is null && observation.ClaimId is not null &&
+                     structurallyValidClaimIds.Contains(observation.ClaimId));
+                if (!matchesCompleteGraph)
                     unavailable.Add(observation.SessionId);
+            }
         }
         finally
         {
@@ -844,28 +856,50 @@ internal sealed class SkillProjectionReadService
         return result;
     }
 
-    private sealed record PotentialSdkObservation(string SessionId, string SnapshotId);
+    private sealed record PotentialSdkObservation(
+        string SessionId,
+        string? SnapshotId,
+        string? ClaimId);
 
     private static IReadOnlyList<PotentialSdkObservation> ReadPotentiallyCurrentSdkObservations(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        bool includeSnapshotOwners)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = """
-            SELECT s.session_id,s.snapshot_id
-            FROM skill_invocation_snapshots s
-            WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-              AND s.state='available' AND s.reason='none'
-            ORDER BY s.session_id COLLATE BINARY,s.snapshot_id COLLATE BINARY;
-            """;
+        command.CommandText = includeSnapshotOwners
+            ? """
+              WITH potential_sdk_observations(session_id,snapshot_id,claim_id) AS (
+                  SELECT s.session_id,s.snapshot_id,NULL
+                  FROM skill_invocation_snapshots s
+                  WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                    AND s.state='available' AND s.reason='none'
+                  UNION ALL
+                  SELECT k.session_id,NULL,k.claim_id
+                  FROM skill_projection_sdk_claims k
+                  WHERE k.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              )
+              SELECT session_id,snapshot_id,claim_id
+              FROM potential_sdk_observations
+              ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY,claim_id COLLATE BINARY;
+              """
+            : """
+              SELECT k.session_id,NULL,k.claim_id
+              FROM skill_projection_sdk_claims k
+              WHERE k.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              ORDER BY k.session_id COLLATE BINARY,k.claim_id COLLATE BINARY;
+              """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
         SqliteCommandExecutionObserver.Executing();
         using var reader = command.ExecuteReader();
         var result = new List<PotentialSdkObservation>();
-        while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1)));
+        while (reader.Read()) result.Add(new(
+            reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2)));
         return result;
     }
 

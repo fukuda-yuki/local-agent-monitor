@@ -1435,7 +1435,7 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
-    public void ValidSdkClaim_IsSchemaValidButRemainsNonCurrentWithoutRegistryAuthority()
+    public void SdkClaimWithoutSnapshotAuthority_IsUnavailable()
     {
         using var database = new TestDatabase();
         _ = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
@@ -1495,7 +1495,11 @@ public sealed class SkillProjectionGenerationTests
         using var transaction = validation.BeginTransaction(deferred: true);
         var projection = SkillProjectionReadService.ReadCurrentInvocationProjection(
             validation, transaction, [sessionId], ObservedAt, registryAuthority: null);
-        Assert.Empty(projection);
+        var unavailable = Assert.Single(projection);
+        Assert.Equal(sessionId, unavailable.Key);
+        Assert.Equal("unavailable", unavailable.Value.State);
+        Assert.Null(unavailable.Value.InvocationCount);
+        Assert.Empty(unavailable.Value.Invocations);
     }
 
     [Fact]
