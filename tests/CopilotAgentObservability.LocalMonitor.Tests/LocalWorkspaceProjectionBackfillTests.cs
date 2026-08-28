@@ -167,7 +167,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     }
 
     [Fact]
-    public void ClaudeHookWellFormedVersionAndFingerprintRemainRawWithoutSemanticPromotion()
+    public void ClaudeHookWellFormedVersionAndFingerprintPromoteOnlyTheExactCarrier()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
@@ -187,16 +187,25 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 
         Assert.Equal(["event", "event"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT kind FROM local_workspace_nodes WHERE source_kind='session_event' ORDER BY source_identity;"));
-        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
-            "SELECT node_id FROM local_workspace_semantic_receipts;"));
-        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
-            "SELECT node_id FROM local_workspace_nodes WHERE source_kind IN ('semantic_tool','semantic_subagent');"));
-        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection, """
-            SELECT node_id FROM local_workspace_tool_metadata
-            UNION ALL SELECT node_id FROM local_workspace_subagent_lifecycle
-            UNION ALL SELECT content.node_id FROM local_workspace_node_content_refs content
-              JOIN local_workspace_nodes node ON node.node_id=content.node_id
-              WHERE node.source_kind IN ('semantic_tool','semantic_subagent');
+        Assert.Equal(["tool:claude_hook:native_session:claude-code-hook|exact_hook_tool|v1"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT semantic_kind||':'||source_family||':'||scope_kind||':'||authority_receipt
+                FROM local_workspace_semantic_receipts;
+                """));
+        Assert.Equal(["tool:Read:completed:completed"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT kind||':'||name_text||':'||lifecycle||':'||status
+            FROM local_workspace_nodes WHERE source_kind='semantic_tool';
+            """));
+        Assert.Equal(["recorded:recorded:not_observed:2"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT metadata.started_state||':'||metadata.completed_state||':'||metadata.failed_state||':'||COUNT(reference.source_ordinal)
+            FROM local_workspace_tool_metadata metadata
+            JOIN local_workspace_node_source_references reference ON reference.node_id=metadata.node_id
+            GROUP BY metadata.node_id;
+            """));
+        Assert.Equal(["tool_input", "tool_result"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT content.part FROM local_workspace_node_content_refs content
+            JOIN local_workspace_nodes node ON node.node_id=content.node_id
+            WHERE node.source_kind='semantic_tool' ORDER BY content.part;
             """));
     }
 
@@ -222,6 +231,34 @@ public sealed class LocalWorkspaceProjectionBackfillTests
                 """));
         Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT node_id FROM local_workspace_nodes WHERE source_kind IN ('semantic_tool','semantic_subagent');"));
+    }
+
+    [Fact]
+    public void ClaudeHookSubagentPromotesOnlyMatchingExactNativeRunLifecycle()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('session-hook','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');
+            INSERT INTO session_native_ids VALUES('session-hook','claude-code','native-session','native','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-hook','session-hook','claude-code','native-agent',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version) VALUES
+              ('hook-agent-start','session-hook','run-hook','claude-code','claude-code-hook','agent-start','SubagentStart','2026-08-24T00:00:00.0000000+00:00','not_captured','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1'),
+              ('hook-agent-stop','session-hook','run-hook','claude-code','claude-code-hook','agent-stop','SubagentStop','2026-08-24T00:00:01.0000000+00:00','not_captured','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1');
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(["subagent:claude_hook:native_run"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT semantic_kind||':'||source_family||':'||scope_kind FROM local_workspace_semantic_receipts;
+            """));
+        Assert.Equal(["not_observed:recorded:recorded:not_observed:not_observed:2"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT lifecycle.selected_state||':'||lifecycle.started_state||':'||lifecycle.completed_state||':'||
+                       lifecycle.failed_state||':'||lifecycle.deselected_state||':'||COUNT(reference.source_ordinal)
+                FROM local_workspace_subagent_lifecycle lifecycle
+                JOIN local_workspace_node_source_references reference ON reference.node_id=lifecycle.node_id
+                GROUP BY lifecycle.node_id;
+                """));
     }
 
     [Theory]

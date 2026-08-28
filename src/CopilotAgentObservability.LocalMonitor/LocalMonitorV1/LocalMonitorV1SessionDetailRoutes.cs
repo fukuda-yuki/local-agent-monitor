@@ -33,8 +33,9 @@ internal static class LocalMonitorV1SessionDetailRoutes
             if(!snapshot.Detail.Nodes.Any(node=>node.NodeId==nodeId)){await Error(context,404,"node_not_found");return;}
             var locator=snapshot.Detail.Content.SingleOrDefault(c=>c.NodeId==nodeId&&c.Part==part);
             if(locator is null){await Error(context,404,"raw_content_not_captured");return;}
-            if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
+            if(locator.State=="invalid"){await Error(context,503,"local_monitor_ui_unavailable");return;}
             if(!StringComparer.Ordinal.Equals(revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}
+            if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant);
             var read=await reader.ReadAsync(sessionId!,nodeId!,locator,context.RequestAborted);
             if(read.Disposition!=LocalWorkspaceNodeContentReadDisposition.Granted){var mapped=read.Disposition switch{LocalWorkspaceNodeContentReadDisposition.Busy=>(503,"persistence_busy"),LocalWorkspaceNodeContentReadDisposition.Stale=>(409,"workspace_snapshot_stale"),LocalWorkspaceNodeContentReadDisposition.Expired=>(410,"raw_content_expired"),LocalWorkspaceNodeContentReadDisposition.Deleted=>(410,"raw_content_deleted"),LocalWorkspaceNodeContentReadDisposition.ReadDenied=>(403,"raw_content_read_denied"),_=>(503,"local_monitor_ui_unavailable")};await Error(context,mapped.Item1,mapped.Item2);return;}
@@ -75,6 +76,7 @@ internal static class LocalMonitorV1SessionDetailRoutes
         var nodeId=context.Request.RouteValues["nodeId"] as string;
         if(!CanonicalUuid(sessionId)||(kind==Kind.Node&&!CanonicalNode(nodeId))){await Error(context,400,"invalid_request");return;}
         if(!TryParse(context.Request.QueryString.Value??"",kind,out var query)){await Error(context,400,"invalid_request");return;}
+        if(MonitorHost.IsCrossSiteRequest(context)){await Error(context,403,"csrf_rejected");return;}
         try
         {
             LocalMonitorV1TimelinePosition decoded=default!; var cursorValid=true;

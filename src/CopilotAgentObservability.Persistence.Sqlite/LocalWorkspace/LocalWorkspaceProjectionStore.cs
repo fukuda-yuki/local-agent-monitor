@@ -770,8 +770,9 @@ internal static class LocalWorkspaceProjectionStore
                       AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
                       AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now))
                       AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json) BETWEEN 0 AND 1048576 THEN c.retention_owner_token END,
-                    CASE WHEN t.source_item_id IS NOT NULL AND (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id)) THEN 'deleted' WHEN c.event_id IS NOT NULL AND i.read_denied_at IS NOT NULL THEN 'read_denied'
-                         WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
+                    CASE WHEN t.source_item_id IS NOT NULL AND (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id)) THEN 'deleted'
+                         WHEN e.content_state='expired_pending_deletion' OR i.state='expired_pending_deletion' OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
+                         WHEN c.event_id IS NOT NULL AND (i.read_denied_at IS NOT NULL OR i.state IN ('deletion_queued','deleting','deletion_failed')) THEN 'read_denied'
                          WHEN e.content_state='available' AND c.event_id IS NOT NULL AND c.content_kind='application/json' COLLATE BINARY
                            AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)>1048576 THEN 'oversized'
                          WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured'
@@ -1204,9 +1205,9 @@ internal static class LocalWorkspaceProjectionStore
               SELECT receipt.node_id,
                      receipt.authority_count authority_count,
                      receipt.identity_count,COUNT(reference.event_id) reference_count,
-                     SUM(event.type='tool.execution_start' OR instr(reference.revision_input,'|otel.tool.started|')>0) started_count,
-                     SUM(event.type='tool.execution_complete' OR instr(reference.revision_input,'|otel.tool.completed|')>0) completed_count,
-                     SUM(instr(reference.revision_input,'|otel.tool.failed|')>0) failed_count
+                     SUM(event.type IN ('tool.execution_start','PreToolUse') OR instr(reference.revision_input,'|otel.tool.started|')>0) started_count,
+                     SUM(event.type IN ('tool.execution_complete','PostToolUse') OR instr(reference.revision_input,'|otel.tool.completed|')>0) completed_count,
+                     SUM(event.type='PostToolUseFailure' OR instr(reference.revision_input,'|otel.tool.failed|')>0) failed_count
               FROM local_workspace_merged_semantic_receipts receipt
               JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
               JOIN session_events event ON event.event_id=reference.event_id
@@ -1220,9 +1221,9 @@ internal static class LocalWorkspaceProjectionStore
               SELECT receipt.node_id,receipt.source_family,
                      receipt.authority_count authority_count,
                      receipt.identity_count,COUNT(reference.event_id) reference_count,
-                     SUM(event.type='tool.execution_start' OR instr(reference.revision_input,'|otel.tool.started|')>0) started_count,
-                     SUM(event.type='tool.execution_complete' OR instr(reference.revision_input,'|otel.tool.completed|')>0) completed_count,
-                     SUM(instr(reference.revision_input,'|otel.tool.failed|')>0) failed_count
+                     SUM(event.type IN ('tool.execution_start','PreToolUse') OR instr(reference.revision_input,'|otel.tool.started|')>0) started_count,
+                     SUM(event.type IN ('tool.execution_complete','PostToolUse') OR instr(reference.revision_input,'|otel.tool.completed|')>0) completed_count,
+                     SUM(event.type='PostToolUseFailure' OR instr(reference.revision_input,'|otel.tool.failed|')>0) failed_count
               FROM local_workspace_merged_semantic_receipts receipt
               JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
               JOIN session_events event ON event.event_id=reference.event_id
@@ -1244,8 +1245,8 @@ internal static class LocalWorkspaceProjectionStore
               SELECT receipt.node_id,
                      receipt.authority_count authority_count,
                      receipt.identity_count,COUNT(reference.event_id) reference_count,
-                     SUM(event.type='subagent.selected') selected_count,SUM(event.type='subagent.started') started_count,
-                     SUM(event.type='subagent.completed') completed_count,SUM(event.type='subagent.failed') failed_count,
+                     SUM(event.type='subagent.selected') selected_count,SUM(event.type IN ('subagent.started','SubagentStart')) started_count,
+                     SUM(event.type IN ('subagent.completed','SubagentStop')) completed_count,SUM(event.type='subagent.failed') failed_count,
                      SUM(event.type='subagent.deselected') deselected_count
               FROM local_workspace_merged_semantic_receipts receipt
               JOIN local_workspace_merged_semantic_references reference ON reference.node_id=receipt.node_id
@@ -1410,7 +1411,50 @@ internal static class LocalWorkspaceProjectionStore
               AND e.type IN ('subagent.selected','subagent.started','subagent.completed','subagent.failed','subagent.deselected')
               AND r.native_run_id IS NOT NULL AND length(r.native_run_id)>0
               AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=e.session_id AND binding.source_surface='copilot-sdk' COLLATE BINARY)=1
-              AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=r.native_run_id COLLATE BINARY)=1;
+              AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=r.native_run_id COLLATE BINARY)=1
+            UNION ALL
+            SELECT 'tool','claude_hook','native_session',
+                   local_workspace_semantic_digest('claude_hook_tool',native.native_session_id,json_extract(content.content_json,'$.tool_use_id')),
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,
+                   json_extract(content.content_json,'$.tool_name'),NULL,e.source_adapter||'|exact_hook_tool|v1'
+            FROM session_events e
+            JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
+            JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='claude-code' COLLATE BINARY
+            JOIN session_event_content content ON content.event_id=e.event_id
+            JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+            WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND e.source_surface='claude-code' COLLATE BINARY AND run.source_surface='claude-code' COLLATE BINARY
+              AND e.source_adapter='claude-code-hook' COLLATE BINARY
+              AND e.type IN ('PreToolUse','PostToolUse','PostToolUseFailure')
+              AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+              AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+              AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))
+              AND json_valid(content.content_json)=1
+              AND json_type(content.content_json,'$.tool_use_id')='text'
+              AND length(json_extract(content.content_json,'$.tool_use_id'))>0
+              AND json_type(content.content_json,'$.tool_name')='text'
+              AND length(json_extract(content.content_json,'$.tool_name'))>0
+              AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=e.session_id AND binding.source_surface='claude-code' COLLATE BINARY)=1
+            UNION ALL
+            SELECT 'subagent','claude_hook','native_run',
+                   local_workspace_semantic_digest('claude_hook_subagent',native.native_session_id,run.native_run_id),
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,
+                   e.source_adapter||'|exact_hook_subagent|v1'
+            FROM session_events e
+            JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
+            JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='claude-code' COLLATE BINARY
+            JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
+            WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND e.source_surface='claude-code' COLLATE BINARY AND run.source_surface='claude-code' COLLATE BINARY
+              AND e.source_adapter='claude-code-hook' COLLATE BINARY AND e.type IN ('SubagentStart','SubagentStop')
+              AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+              AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+              AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+              AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))
+              AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=e.session_id AND binding.source_surface='claude-code' COLLATE BINARY)=1
+              AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='claude-code' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1;
 
             """, ("$ids", idsJson));
 
@@ -1510,7 +1554,7 @@ internal static class LocalWorkspaceProjectionStore
                      (SELECT chosen.session_id FROM local_workspace_semantic_candidates chosen WHERE chosen.semantic_kind=c.semantic_kind AND chosen.source_family=c.source_family AND chosen.carrier_digest=c.carrier_digest ORDER BY chosen.event_id COLLATE BINARY LIMIT 1) session_id,
                      (SELECT chosen.run_id FROM local_workspace_semantic_candidates chosen WHERE chosen.semantic_kind=c.semantic_kind AND chosen.source_family=c.source_family AND chosen.carrier_digest=c.carrier_digest ORDER BY chosen.event_id COLLATE BINARY LIMIT 1) run_id,
                      MIN(c.authority_receipt) authority_receipt,COUNT(DISTINCT c.authority_receipt) authority_count,COUNT(DISTINCT c.event_id) reference_count,
-                     SUM(c.type IN ('PreToolUse','tool.execution_start','otel.tool.started')) started_count,SUM(c.type IN ('PostToolUse','tool.execution_complete','otel.tool.completed')) completed_count,SUM(c.type IN ('PostToolUseFailure','otel.tool.failed')) failed_count,
+                     SUM(c.type IN ('PreToolUse','SubagentStart','tool.execution_start','otel.tool.started')) started_count,SUM(c.type IN ('PostToolUse','SubagentStop','tool.execution_complete','otel.tool.completed')) completed_count,SUM(c.type IN ('PostToolUseFailure','otel.tool.failed')) failed_count,
                      COUNT(DISTINCT c.tool_name) tool_name_count,MIN(c.tool_name) tool_name,
                      COUNT(DISTINCT c.mcp_tool_name) mcp_tool_name_count,MIN(c.mcp_tool_name) mcp_tool_name
               FROM local_workspace_semantic_candidates c GROUP BY c.semantic_kind,c.source_family,c.scope_kind,c.carrier_digest),
@@ -1540,7 +1584,10 @@ internal static class LocalWorkspaceProjectionStore
                    'missing',NULL,'not_observed',
                    CASE semantic_kind WHEN 'tool' THEN 'recorded' ELSE 'not_observed' END,CASE semantic_kind WHEN 'tool' THEN 1 END,
                    CASE semantic_kind WHEN 'subagent' THEN 'recorded' ELSE 'not_observed' END,CASE semantic_kind WHEN 'subagent' THEN 1 END
-            FROM ranked WHERE existing_count+candidate_ordinal<=4097;
+            FROM ranked WHERE existing_count+candidate_ordinal<=4097
+              AND (source_family<>'claude_hook'
+                OR semantic_kind='tool' AND started_count=1 AND completed_count+failed_count=1
+                OR semantic_kind='subagent' AND started_count=1 AND completed_count=1 AND failed_count=0);
 
             INSERT INTO local_workspace_semantic_receipts(node_id,semantic_kind,source_family,scope_kind,carrier_digest,authority_receipt)
             SELECT local_workspace_node_id(CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest),semantic_kind,source_family,scope_kind,carrier_digest,MIN(authority_receipt)

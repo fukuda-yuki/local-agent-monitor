@@ -20,14 +20,15 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     private const string SessionId="018f0000-0000-7000-8000-000000000001";
 
     [Fact]
-    public async Task ProductionInstructionContentGetAndHeadReturnExactSelectedUtf8Bytes()
+    public async Task ProductionContentGetAndHeadMatchTheClosedV2GoldenExactly()
     {
         using var temp = new MonitorTempDirectory();
         SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
             sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
         StabilizeDeterministicContentOwner(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp);
-        RefreshDeterministicFullProjection(temp, stabilizeGolden: false);
+        using var host = await StartProductionDetailRouteAsync(temp);
+        RefreshDeterministicFullProjection(temp);
+        SeedDeterministicRepositoryAssignment(temp);
         string nodeId;
         using (var connection = Open(temp))
             nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
@@ -39,14 +40,25 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var get = await host.Client.GetAsync(path);
         using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
 
-        const string expected = "Review the retained instruction";
+        var expected = File.ReadAllBytes(Path.Combine(FindRepositoryRoot(), "tests",
+            "CopilotAgentObservability.LocalMonitor.Tests", "TestData", "LocalMonitorV1SessionDetail", "content-full.json"));
         Assert.Equal(HttpStatusCode.OK, get.StatusCode);
-        Assert.Equal(expected, (await ContentEntity(get)).GetProperty("text").GetString());
+        var actual = await get.Content.ReadAsByteArrayAsync();
+        Assert.True(expected.AsSpan().SequenceEqual(actual), System.Text.Encoding.UTF8.GetString(actual));
+        using (var entity = JsonDocument.Parse(actual))
+        {
+            Assert.Equal("local-monitor-node-content.response.v2", entity.RootElement.GetProperty("schema_version").GetString());
+            Assert.Equal("Review the retained instruction", entity.RootElement.GetProperty("text").GetString());
+            Assert.Equal(31, entity.RootElement.GetProperty("utf8_byte_length").GetInt32());
+            Assert.Equal(31, entity.RootElement.GetProperty("unicode_scalar_length").GetInt32());
+            Assert.False(entity.RootElement.GetProperty("truncation").GetBoolean());
+        }
+        Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
         Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
         Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
         Assert.Equal("local-monitor-node-content.response.v2", get.Headers.GetValues("X-Local-Monitor-Schema-Version").Single());
         Assert.Equal(HttpStatusCode.OK, head.StatusCode);
-        Assert.Equal(get.Content.Headers.ContentLength, head.Content.Headers.ContentLength);
+        Assert.Equal(expected.Length, head.Content.Headers.ContentLength);
         Assert.Empty(await head.Content.ReadAsByteArrayAsync());
     }
 
@@ -616,6 +628,13 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             if (state == "deleted")
             {
                 using var deletion = connection.BeginTransaction();
+                using (var remove = connection.CreateCommand())
+                {
+                    remove.Transaction = deletion;
+                    remove.CommandText = "DELETE FROM session_event_content WHERE event_id=$event;";
+                    remove.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
+                    Assert.Equal(1, remove.ExecuteNonQuery());
+                }
                 LocalWorkspaceProjectionStore.CompleteSessionEventContentDeletion(connection, deletion,
                     "018f0000-0000-7000-8000-000000000004", captured);
                 deletion.Commit();
@@ -635,7 +654,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
                 JOIN retention_items i ON i.source_item_id=e.event_id WHERE e.event_id=$session;
                 """, "018f0000-0000-7000-8000-000000000004"));
         }
-        if (state is "deleted" or "expired")
+        if (state is "deleted" or "expired" or "read_denied")
             revision = await Revision(host.Client);
         string nodeId;
         using (var connection = Open(temp))
@@ -643,6 +662,18 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction";
 
         await AssertContentErrorParity(host.Client, path, expectedStatus, expectedError);
+        if (state == "deleted")
+        {
+            using (var connection = Open(temp))
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = "UPDATE local_workspace_nodes SET source_identity='unrelated-drift' WHERE source_kind='session_event' AND source_identity='018f0000-0000-7000-8000-000000000005';";
+                Assert.Equal(1, command.ExecuteNonQuery());
+            }
+            using var corrupted = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, corrupted.StatusCode);
+            Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}"u8.ToArray(), await corrupted.Content.ReadAsByteArrayAsync());
+        }
     }
 
     [Fact]
@@ -676,7 +707,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             Assert.True(session.GetProperty("instruction").GetProperty("content_available").GetBoolean());
             Assert.Equal("complete", session.GetProperty("capture").GetProperty("state").GetString());
             foreach (var fact in new[] { "tool", "subagent", "error", "retry" })
-                Assert.Equal("recorded", session.GetProperty("activity").GetProperty(fact).GetProperty("state").GetString());
+                Assert.Equal("not_observed", session.GetProperty("activity").GetProperty(fact).GetProperty("state").GetString());
         }
         Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
         Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
@@ -1114,6 +1145,26 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.DoesNotContain("ETag", response.Headers.Select(header => header.Key));
         Assert.DoesNotContain("Location", response.Headers.Select(header => header.Key));
         Assert.DoesNotContain("Set-Cookie", response.Headers.Select(header => header.Key));
+    }
+
+    [Theory]
+    [InlineData("GET", "summary")]
+    [InlineData("HEAD", "summary")]
+    [InlineData("GET", "timeline")]
+    [InlineData("HEAD", "timeline")]
+    [InlineData("GET", "node")]
+    [InlineData("HEAD", "node")]
+    [InlineData("GET", "content")]
+    [InlineData("HEAD", "content")]
+    public async Task EveryDetailRouteRejectsCrossSiteAfterPathAndQueryValidation(string method,string route)
+    {
+        using var temp=new MonitorTempDirectory();await using var host=await MonitorTestHost.StartAsync(temp);
+        var revision=new string('0',64);var node="node-00000000000000000000000000000000";
+        var path=route switch{"summary"=>$"/api/local-monitor/v1/sessions/{SessionId}/summary","timeline"=>$"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={revision}","node"=>$"/api/local-monitor/v1/sessions/{SessionId}/nodes/{node}?workspace_revision={revision}",_=>$"/api/local-monitor/v1/sessions/{SessionId}/nodes/{node}/content?workspace_revision={revision}&part=instruction"};
+        using var request=new HttpRequestMessage(new HttpMethod(method),path);request.Headers.TryAddWithoutValidation("Origin","https://example.test");
+        using var response=await host.Client.SendAsync(request);var body=await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(HttpStatusCode.Forbidden,response.StatusCode);Assert.Equal(25,response.Content.Headers.ContentLength);Assert.Equal(["no-store"],response.Headers.GetValues("Cache-Control"));
+        Assert.Equal(method=="HEAD"?[]:"{\"error\":\"csrf_rejected\"}"u8.ToArray(),body);Assert.DoesNotContain("Access-Control-Allow-Origin",response.Headers.Select(header=>header.Key));
     }
 
     [Fact]

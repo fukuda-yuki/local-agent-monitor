@@ -123,6 +123,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
     private static void ValidateDurableSemanticGraph(SqliteConnection connection, SqliteTransaction transaction)
     {
         EnsureSkillOwnerCompileShapes(connection, transaction);
+        ValidateClaudeHookOwnerGraphs(connection, transaction);
         using (var monitorOwner = connection.CreateCommand())
         {
             monitorOwner.Transaction = transaction;
@@ -142,7 +143,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
               JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
               WHERE node.source_kind IS NOT CASE receipt.semantic_kind WHEN 'tool' THEN 'semantic_tool' WHEN 'subagent' THEN 'semantic_subagent' END
                   OR node.kind IS NOT receipt.semantic_kind
-                  OR receipt.source_family NOT IN ('session_sdk','otel')
+                  OR receipt.source_family NOT IN ('session_sdk','otel','claude_hook')
                   OR receipt.carrier_digest IS NOT node.source_identity
                   OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference WHERE reference.node_id=receipt.node_id) NOT BETWEEN 1 AND 16
                   OR receipt.source_family='session_sdk' AND (
@@ -346,6 +347,25 @@ internal static class LocalWorkspaceProjectionBackupValidation
             """;
         if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidOperationException();
+    }
+
+    private static void ValidateClaudeHookOwnerGraphs(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var sessions = connection.CreateCommand();
+        sessions.Transaction = transaction;
+        sessions.CommandText = "SELECT DISTINCT node.session_id FROM local_workspace_semantic_receipts receipt JOIN local_workspace_nodes node ON node.node_id=receipt.node_id WHERE receipt.source_family='claude_hook' ORDER BY node.session_id COLLATE BINARY;";
+        var sessionIds = new List<string>();
+        using (var reader = sessions.ExecuteReader())
+            while (reader.Read()) sessionIds.Add(reader.GetString(0));
+        foreach (var sessionId in sessionIds)
+        {
+            using var validation = connection.CreateCommand();
+            validation.Transaction = transaction;
+            validation.CommandText = LocalWorkspaceSessionDetailSnapshotContributor.ClaudeHookOwnerValidationSql;
+            validation.Parameters.AddWithValue("$session_id", sessionId);
+            if (Convert.ToInt64(validation.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException();
+        }
     }
 
     private static void EnsureSkillOwnerCompileShapes(SqliteConnection connection, SqliteTransaction transaction)

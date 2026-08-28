@@ -547,6 +547,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         if (await SemanticGraphInvalid(connection, transaction, sessionId, SdkSubagentOwnerValidationSql, token))
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        if (await SemanticGraphInvalid(connection, transaction, sessionId, ClaudeHookOwnerValidationSql, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
     }
 
     private static async Task ValidateCoreOwnerGraph(
@@ -1084,8 +1086,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
           WHERE node.session_id=$session_id AND node.source_kind IN ('semantic_tool','semantic_subagent') AND (
             receipt.node_id IS NULL OR receipt.carrier_digest<>node.source_identity
             OR receipt.semantic_kind<>CASE node.source_kind WHEN 'semantic_tool' THEN 'tool' ELSE 'subagent' END
-            OR receipt.source_family NOT IN ('otel','session_sdk')
-            OR node.source_kind='semantic_subagent' AND receipt.source_family<>'session_sdk'
+            OR receipt.source_family NOT IN ('otel','session_sdk','claude_hook')
+            OR node.source_kind='semantic_subagent' AND receipt.source_family NOT IN ('session_sdk','claude_hook')
             OR node.kind<>CASE node.source_kind WHEN 'semantic_tool' THEN 'tool' ELSE 'subagent' END
             OR node.skill_activity_state<>'not_observed' OR node.skill_activity_count IS NOT NULL
             OR node.tool_activity_state<>CASE node.source_kind WHEN 'semantic_tool' THEN 'recorded' ELSE 'not_observed' END
@@ -1512,6 +1514,87 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 AND receipt.carrier_digest=owner.carrier_digest)
         )
         SELECT EXISTS(SELECT 1 FROM invalid_persisted UNION ALL SELECT 1 FROM missing_persisted);
+        """;
+
+    internal const string ClaudeHookOwnerValidationSql = """
+        WITH owners AS (
+          SELECT receipt.*,node.session_id,node.execution_id,node.source_kind,node.kind,node.name_state,node.name_text,
+                 node.lifecycle,node.status,node.parent_node_id,node.relationship_authority,
+                 execution.source_identity run_id,run.native_run_id,native.native_session_id
+          FROM local_workspace_semantic_receipts receipt
+          JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+          JOIN local_workspace_execution_headers execution ON execution.execution_id=node.execution_id AND execution.session_id=node.session_id
+          JOIN session_runs run ON run.run_id=execution.source_identity AND run.session_id=node.session_id AND run.source_surface='claude-code' COLLATE BINARY
+          JOIN session_native_ids native ON native.session_id=node.session_id AND native.source_surface='claude-code' COLLATE BINARY
+          WHERE node.session_id=$session_id AND receipt.source_family='claude_hook'),
+        facts AS (
+          SELECT owner.*,COUNT(reference.source_ordinal) reference_count,
+                 SUM(event.type='PreToolUse') tool_started_count,SUM(event.type='PostToolUse') tool_completed_count,
+                 SUM(event.type='PostToolUseFailure') tool_failed_count,SUM(event.type='SubagentStart') subagent_started_count,
+                 SUM(event.type='SubagentStop') subagent_completed_count,
+                 SUM(reference.source_kind<>'session_event' OR reference.source_identity<>event.event_id OR reference.event_id<>event.event_id
+                   OR reference.trace_id IS NOT NULL OR reference.span_id IS NOT NULL
+                   OR event.session_id<>owner.session_id OR event.run_id<>owner.run_id
+                   OR event.source_surface<>'claude-code' COLLATE BINARY OR event.source_adapter<>'claude-code-hook' COLLATE BINARY
+                   OR event.adapter_version IS NULL OR trim(event.adapter_version)=''
+                   OR event.normalization_version IS NULL OR trim(event.normalization_version)=''
+                   OR NOT (event.source_application_version IS NOT NULL AND trim(event.source_application_version)<>''
+                     OR length(event.schema_fingerprint)=64 AND event.schema_fingerprint=lower(event.schema_fingerprint)
+                       AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')) invalid_reference_count
+          FROM owners owner
+          LEFT JOIN local_workspace_node_source_references reference ON reference.node_id=owner.node_id
+          LEFT JOIN session_events event ON event.event_id=reference.event_id
+          GROUP BY owner.node_id),
+        invalid AS (
+          SELECT 1 FROM facts owner
+          LEFT JOIN local_workspace_tool_metadata tool ON tool.node_id=owner.node_id
+          LEFT JOIN local_workspace_subagent_lifecycle subagent ON subagent.node_id=owner.node_id
+          WHERE (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=owner.session_id AND binding.source_surface='claude-code' COLLATE BINARY)<>1
+            OR (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=owner.session_id AND candidate.source_surface='claude-code' COLLATE BINARY AND candidate.native_run_id=owner.native_run_id COLLATE BINARY)<>1
+            OR owner.invalid_reference_count<>0 OR owner.reference_count<>2
+            OR owner.parent_node_id<>local_workspace_node_id('execution_root',owner.run_id) OR owner.relationship_authority<>'exact'
+            OR owner.semantic_kind='tool' AND (
+              owner.scope_kind<>'native_session' OR owner.authority_receipt<>'claude-code-hook|exact_hook_tool|v1'
+              OR owner.source_kind<>'semantic_tool' OR owner.kind<>'tool'
+              OR owner.node_id<>local_workspace_node_id('semantic_tool',owner.carrier_digest)
+              OR owner.tool_started_count<>1 OR owner.tool_completed_count+owner.tool_failed_count<>1
+              OR owner.tool_completed_count>0 AND owner.tool_failed_count>0
+              OR owner.name_state NOT IN ('recorded','not_observed') OR owner.name_state='recorded' AND owner.name_text IS NULL
+              OR owner.name_state='not_observed' AND owner.name_text IS NOT NULL
+              OR owner.lifecycle<>CASE WHEN owner.tool_completed_count=1 THEN 'completed' ELSE 'failed' END
+              OR owner.status<>CASE WHEN owner.tool_completed_count=1 THEN 'completed' ELSE 'failed' END
+              OR tool.node_id IS NULL OR tool.started_state<>'recorded'
+              OR tool.completed_state<>CASE WHEN owner.tool_completed_count=1 THEN 'recorded' ELSE 'not_observed' END
+              OR tool.failed_state<>CASE WHEN owner.tool_failed_count=1 THEN 'recorded' ELSE 'not_observed' END)
+            OR owner.semantic_kind='subagent' AND (
+              owner.scope_kind<>'native_run' OR owner.authority_receipt<>'claude-code-hook|exact_hook_subagent|v1'
+              OR owner.source_kind<>'semantic_subagent' OR owner.kind<>'subagent'
+              OR owner.carrier_digest<>local_workspace_semantic_digest('claude_hook_subagent',owner.native_session_id,owner.native_run_id)
+              OR owner.node_id<>local_workspace_node_id('semantic_subagent',owner.carrier_digest)
+              OR owner.subagent_started_count<>1 OR owner.subagent_completed_count<>1
+              OR owner.name_state<>'not_observed' OR owner.name_text IS NOT NULL OR owner.lifecycle<>'unknown' OR owner.status<>'unknown'
+              OR subagent.node_id IS NULL OR subagent.selected_state<>'not_observed' OR subagent.started_state<>'recorded'
+              OR subagent.completed_state<>'recorded' OR subagent.failed_state<>'not_observed'
+              OR subagent.deselected_state<>'not_observed' OR subagent.input_state<>'source_unsupported')),
+        expected_subagent AS (
+          SELECT local_workspace_semantic_digest('claude_hook_subagent',native.native_session_id,run.native_run_id) carrier_digest
+          FROM session_events event
+          JOIN session_runs run ON run.session_id=event.session_id AND run.run_id=event.run_id AND run.source_surface='claude-code' COLLATE BINARY
+          JOIN session_native_ids native ON native.session_id=event.session_id AND native.source_surface='claude-code' COLLATE BINARY
+          WHERE event.session_id=$session_id AND event.source_surface='claude-code' COLLATE BINARY
+            AND event.source_adapter='claude-code-hook' COLLATE BINARY AND event.type IN ('SubagentStart','SubagentStop')
+            AND run.native_run_id IS NOT NULL AND length(run.native_run_id)>0
+            AND event.adapter_version IS NOT NULL AND trim(event.adapter_version)<>''
+            AND event.normalization_version IS NOT NULL AND trim(event.normalization_version)<>''
+            AND (event.source_application_version IS NOT NULL AND trim(event.source_application_version)<>''
+              OR length(event.schema_fingerprint)=64 AND event.schema_fingerprint=lower(event.schema_fingerprint) AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')
+            AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=event.session_id AND binding.source_surface='claude-code' COLLATE BINARY)=1
+            AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=event.session_id AND candidate.source_surface='claude-code' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+          GROUP BY carrier_digest HAVING SUM(event.type='SubagentStart')=1 AND SUM(event.type='SubagentStop')=1),
+        missing AS (
+          SELECT 1 FROM expected_subagent expected WHERE NOT EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
+            JOIN local_workspace_nodes node ON node.node_id=receipt.node_id WHERE node.session_id=$session_id AND receipt.source_family='claude_hook' AND receipt.semantic_kind='subagent' AND receipt.carrier_digest=expected.carrier_digest))
+        SELECT EXISTS(SELECT 1 FROM invalid UNION ALL SELECT 1 FROM missing);
         """;
 
     private static async Task ValidateCurrentSkillOwnerGraph(
@@ -2167,6 +2250,29 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                          AND n.source_identity=local_workspace_semantic_digest('session_sdk_subagent',native.native_session_id,run.native_run_id)
                          AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=e.session_id AND binding.source_surface='copilot-sdk' COLLATE BINARY)=1
                          AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
+                         AND instr(r.revision_input,e.source_adapter||'|'||e.source_event_id||'|'||e.type||'|'||e.type||'|1|')=1
+                         AND substr(r.revision_input,-length(receipt.authority_receipt)-1)='|'||receipt.authority_receipt) THEN 1
+                    WHEN n.source_kind IN ('semantic_tool','semantic_subagent') AND r.source_kind='session_event'
+                     AND EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
+                       JOIN session_events e ON e.event_id=r.event_id AND e.session_id=n.session_id
+                       JOIN session_runs run ON run.run_id=e.run_id AND run.session_id=e.session_id
+                       JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='claude-code' COLLATE BINARY
+                       JOIN local_workspace_execution_headers h ON h.execution_id=n.execution_id AND h.session_id=n.session_id AND h.source_identity=e.run_id
+                       WHERE receipt.node_id=n.node_id AND receipt.source_family='claude_hook'
+                         AND receipt.carrier_digest=n.source_identity AND e.source_surface='claude-code' COLLATE BINARY
+                         AND e.source_adapter='claude-code-hook' COLLATE BINARY AND run.source_surface='claude-code' COLLATE BINARY
+                         AND r.source_identity=e.event_id AND r.event_id=e.event_id
+                         AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>''
+                         AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
+                         AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
+                           OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))
+                         AND ((receipt.semantic_kind='tool' AND n.source_kind='semantic_tool'
+                               AND e.type IN ('PreToolUse','PostToolUse','PostToolUseFailure'))
+                           OR (receipt.semantic_kind='subagent' AND n.source_kind='semantic_subagent'
+                               AND e.type IN ('SubagentStart','SubagentStop')
+                               AND n.source_identity=local_workspace_semantic_digest('claude_hook_subagent',native.native_session_id,run.native_run_id)))
+                         AND (SELECT COUNT(*) FROM session_native_ids binding WHERE binding.session_id=e.session_id AND binding.source_surface='claude-code' COLLATE BINARY)=1
+                         AND (SELECT COUNT(*) FROM session_runs candidate WHERE candidate.session_id=e.session_id AND candidate.source_surface='claude-code' COLLATE BINARY AND candidate.native_run_id=run.native_run_id COLLATE BINARY)=1
                          AND instr(r.revision_input,e.source_adapter||'|'||e.source_event_id||'|'||e.type||'|'||e.type||'|1|')=1
                          AND substr(r.revision_input,-length(receipt.authority_receipt)-1)='|'||receipt.authority_receipt) THEN 1
                     WHEN n.source_kind='skill_invocation' AND r.source_kind='skill_claim'

@@ -946,6 +946,42 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Fact]
+    public void BackupValidationAuthenticatesExactClaudeHookSubagentGraphAndRejectsDrift()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('session-hook','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');
+            INSERT INTO session_native_ids VALUES('session-hook','claude-code','native-session','native','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-hook','session-hook','claude-code','native-agent',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version) VALUES
+              ('hook-agent-start','session-hook','run-hook','claude-code','claude-code-hook','agent-start','SubagentStart','2026-08-24T00:00:00.0000000+00:00','not_captured','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1'),
+              ('hook-agent-stop','session-hook','run-hook','claude-code','claude-code-hook','agent-stop','SubagentStop','2026-08-24T00:00:01.0000000+00:00','not_captured','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        using (var control = connection.BeginTransaction(deferred: true))
+        {
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, control);
+            control.Rollback();
+        }
+        using (var missing = connection.BeginTransaction())
+        {
+            using var delete = connection.CreateCommand();
+            delete.Transaction = missing;
+            delete.CommandText = "DELETE FROM local_workspace_semantic_receipts WHERE source_family='claude_hook';";
+            Assert.Equal(1, delete.ExecuteNonQuery());
+            Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.Validate(connection, missing)).Message);
+            missing.Rollback();
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,
+            "UPDATE session_events SET source_event_id='drifted' WHERE event_id='hook-agent-stop';");
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+    }
+
+    [Fact]
     public void PublicationRefreshRollsBackWhenTheFinalWorkspaceStampCannotBeWritten()
     {
         using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
@@ -1765,7 +1801,7 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         {
             Execute(connection, transaction, $"""
                 UPDATE retention_items
-                SET state='expired_pending_deletion',revision=4,
+                SET state='deletion_queued',revision=4,
                     read_denied_at='{deniedAt}',queued_at='{deniedAt}'
                 WHERE item_id='{TerminalItemId}';
                 """);

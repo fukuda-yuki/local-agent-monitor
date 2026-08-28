@@ -194,6 +194,14 @@ public sealed class SessionEventContentRetentionAdapterTests
                 var intent = await catalog.EnsureDeleteIntentAsync(claim.Fence, 0, now, CancellationToken.None);
                 Assert.Equal(RetentionIntentDisposition.Committed, intent.Disposition);
                 deleteContext = new(claim.Fence.ItemId, claim.StoreInstanceId, claim.StoreKind, claim.Fence.ExpectedRevision, claim.Fence.LeaseOwner, claim.Fence.LeaseGeneration, claim.SourceIdentity, null, intent.IntentCursor, CancellationToken.None);
+                if (refreshAfterQueue)
+                {
+                    using var connection = Open(path);
+                    using var transaction = connection.BeginTransaction();
+                    new LocalWorkspaceProjectionTransactionParticipant(authority).RefreshSessions(
+                        connection, transaction, [batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant()], now);
+                    transaction.Commit();
+                }
             }
 
             Execute(path, "INSERT INTO session_projection_state(projector_key,projection_cursor,unsupported_event_version_count,updated_at) VALUES('preserved',7,0,$now);", ("$now", now.ToString("O")));
