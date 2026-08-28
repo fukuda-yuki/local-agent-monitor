@@ -425,12 +425,31 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
             using(var c=Open(temp.DatabasePath))
             {
                 InstallRetainedContent(c, id);
+                InstallExactSpanAuthority(c, id);
                 LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);
                 using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;
                 q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR REPLACE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes WHERE session_id=$session AND parent_node_id IS NOT NULL AND relationship_authority='exact' ORDER BY node_id LIMIT 1;";
                 q.Parameters.AddWithValue("$session",id);Assert.True(q.ExecuteNonQuery()>0,"revision fixture did not seed an exact parent edge");t.Commit();
             }
             return new(temp,host,id);
+        }
+        private static void InstallExactSpanAuthority(SqliteConnection connection, string sessionId)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,trace_id,status,source_adapter,
+                    source_event_id,type,occurred_at,content_state,source_application_version,
+                    adapter_version,normalization_version)
+                SELECT '018f0000-0000-7000-8000-000000000099',$session,run_id,source_surface,
+                       trace_id,'completed','otel-exact',trace_id||'/'||span_id,'otel.span',
+                       '2026-08-26T00:00:00.0000000+00:00','not_captured','1.0.4',
+                       'monitor-projection-v1','session-normalization-v1'
+                FROM session_runs JOIN monitor_spans USING(trace_id)
+                WHERE session_id=$session ORDER BY raw_record_id,span_ordinal LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$session", sessionId);
+            Assert.Equal(1, command.ExecuteNonQuery());
         }
         private static void InstallRetainedContent(SqliteConnection connection, string sessionId)
         {

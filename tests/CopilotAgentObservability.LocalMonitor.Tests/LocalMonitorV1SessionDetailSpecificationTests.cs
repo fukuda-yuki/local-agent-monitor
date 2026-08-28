@@ -256,7 +256,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     [Fact]
     public void TimelineCursorHasFrozen119ByteFrameAndLiteralFixtureBinding()
     {
-        const string Golden = "AXWrRERKYTr8mQ2zxlNktkhCH0-lEz3EXvSo85b3-r58AAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2Ws4416xXJQUGivmYvJ6I3UN4Vq5pzFGEgjfWLdNLRfU";
+        const string Golden = "AcGFFpclIvgKEhG_4KyVHae7--c1l26HAP6fbHwrcy3jAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ26pzvOZELTKvWOcoymJTTQFBGuBK8Ch6G-z8FaSvUnjg";
         using var fixture = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "timeline-page.json")));
         Assert.Equal(Golden, fixture.RootElement.GetProperty("next_cursor").GetString());
         var bytes = DecodeBase64Url(Golden);
@@ -272,7 +272,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
         var filterFrame = TimelineFilterFrame(
             "018f0000-0000-7000-8000-000000000001",
-            "1c7c02a91a78545be2c236f9218f32a8673a1678e71aee566ed2bf33f1526695",
+            "123f43a996e323544c67c74cbedeb64c6121b2cdf1455c2947ef56aa654cde76",
             "9a5590c8-46e3-7069-af48-3844d2bf17a4",
             null,
             1);
