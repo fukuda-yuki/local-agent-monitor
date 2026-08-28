@@ -59,8 +59,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         await ValidateBounds(connection, transaction, sessionId, materializableSkillNodeIds, token);
         await ValidateCurrentSkillOwnerGraph(
             connection, transaction, sessionId, acceptedAt, skillProjection, pinnedRegistry.CanonicalIdentity, token);
-        await ValidateCoreOwnerGraph(connection, transaction, sessionId, token);
         await ValidateSemanticOwnerGraphs(connection, transaction, sessionId, token);
+        await ValidateCoreOwnerGraph(connection, transaction, sessionId, token);
         var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
             && !syntheticSkillTarget)
@@ -533,16 +533,26 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             AND event.run_id=header.source_identity COLLATE BINARY
           WHERE header.session_id=$session_id
           GROUP BY header.execution_id
+        ),
+        otel_tool_facts AS (
+          SELECT node.execution_id,COUNT(*) tool_count
+          FROM local_workspace_semantic_receipts receipt
+          JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+          JOIN local_workspace_execution_headers header ON header.execution_id=node.execution_id
+            AND header.session_id=node.session_id
+          WHERE node.session_id=$session_id AND receipt.source_family='otel' AND receipt.semantic_kind='tool'
+          GROUP BY node.execution_id
         )
         SELECT EXISTS(
           SELECT 1
           FROM local_workspace_execution_headers header
           JOIN event_facts event ON event.execution_id=header.execution_id
+          LEFT JOIN otel_tool_facts otel_tool ON otel_tool.execution_id=header.execution_id
           LEFT JOIN chosen_tokens token ON token.session_id=header.session_id
             AND token.execution_id=header.source_identity COLLATE BINARY
           WHERE header.session_id=$session_id AND (
-            header.tool_activity_state<>CASE WHEN event.tool_count=0 THEN 'not_observed' ELSE 'recorded' END
-            OR header.tool_activity_count IS NOT CASE WHEN event.tool_count=0 THEN NULL ELSE event.tool_count END
+            header.tool_activity_state<>CASE WHEN event.tool_count=0 AND otel_tool.tool_count IS NULL THEN 'not_observed' ELSE 'recorded' END
+            OR header.tool_activity_count IS NOT CASE WHEN event.tool_count=0 THEN otel_tool.tool_count ELSE event.tool_count END
             OR header.subagent_activity_state<>CASE WHEN event.subagent_count=0 THEN 'not_observed' ELSE 'recorded' END
             OR header.subagent_activity_count IS NOT CASE WHEN event.subagent_count=0 THEN NULL ELSE event.subagent_count END
             OR header.error_activity_state<>CASE WHEN event.error_count=0 THEN 'not_observed' ELSE 'recorded' END
