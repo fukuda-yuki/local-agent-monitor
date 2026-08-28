@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -1150,41 +1151,66 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
 
         public async Task DrainAsync()
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var progressAt = Stopwatch.GetTimestamp();
+            var priorBacklog = long.MaxValue;
             while (true)
             {
-                timeout.Token.ThrowIfCancellationRequested();
-                await projectionWorker.RunProjectionPassAsync(timeout.Token);
+                using var operationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                await projectionWorker.RunProjectionPassAsync(operationTimeout.Token);
                 try
                 {
-                    if (projectionStore.GetProjectionStatus().Backlog == 0
-                        && projectionStore.GetSpanProjectionStatus().Backlog == 0)
+                    var backlog = checked(projectionStore.GetProjectionStatus().Backlog
+                        + projectionStore.GetSpanProjectionStatus().Backlog);
+                    if (backlog == 0)
                     {
                         break;
                     }
+                    ObserveDrainProgress(backlog, ref priorBacklog, ref progressAt);
                 }
                 catch (PersistenceBusyException)
                 {
+                    AssertDrainProgress(progressAt, priorBacklog);
                 }
                 await Task.Yield();
             }
 
+            progressAt = Stopwatch.GetTimestamp();
+            priorBacklog = long.MaxValue;
             while (true)
             {
-                timeout.Token.ThrowIfCancellationRequested();
                 try
                 {
-                    if (enricher.CountBacklog() == 0)
+                    var backlog = enricher.CountBacklog();
+                    if (backlog == 0)
                     {
                         break;
                     }
+                    ObserveDrainProgress(backlog, ref priorBacklog, ref progressAt);
                     _ = enricher.ProcessNextBatch();
                 }
                 catch (Microsoft.Data.Sqlite.SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
                 {
+                    AssertDrainProgress(progressAt, priorBacklog);
                 }
                 await Task.Yield();
             }
+        }
+
+        private static void ObserveDrainProgress(long backlog, ref long priorBacklog, ref long progressAt)
+        {
+            if (backlog < priorBacklog)
+            {
+                priorBacklog = backlog;
+                progressAt = Stopwatch.GetTimestamp();
+                return;
+            }
+            AssertDrainProgress(progressAt, backlog);
+        }
+
+        private static void AssertDrainProgress(long progressAt, long backlog)
+        {
+            if (Stopwatch.GetElapsedTime(progressAt) >= TimeSpan.FromSeconds(30))
+                throw new TimeoutException($"Monitor drain made no progress for 30 seconds; backlog={backlog}.");
         }
 
         public Task ProjectOnlyAsync() => projectionWorker.RunProjectionPassAsync();
