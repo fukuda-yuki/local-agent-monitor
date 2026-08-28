@@ -48,10 +48,16 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         ArgumentNullException.ThrowIfNull(archiveContributor);
         if (busyTimeoutMilliseconds is < 1 or > 60_000)
             throw new ArgumentOutOfRangeException(nameof(busyTimeoutMilliseconds));
+        var acceptedTimeProvider = timeProvider
+            ?? (detailContributor as LocalWorkspaceSessionDetailSnapshotContributor)?.TimeProvider
+            ?? (sessionContributor as LocalWorkspaceSessionSnapshotContributor)?.TimeProvider
+            ?? TimeProvider.System;
         this.databasePath = Path.GetFullPath(databasePath);
         this.sessionContributor = sessionContributor;
         this.archiveContributor = archiveContributor;
-        this.detailContributor = detailContributor ?? new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: skillRegistryAuthority);
+        this.detailContributor = detailContributor ?? new LocalWorkspaceSessionDetailSnapshotContributor(
+            registryAuthority: skillRegistryAuthority,
+            timeProvider: acceptedTimeProvider);
         this.busyTimeoutMilliseconds = busyTimeoutMilliseconds;
         this.compositionObserver = compositionObserver;
         this.capabilityEntryObserver = capabilityEntryObserver;
@@ -64,10 +70,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         this.skillRegistryAuthority = skillRegistryAuthority
             ?? (this.detailContributor as LocalWorkspaceSessionDetailSnapshotContributor)?.RegistryAuthority
             ?? (sessionContributor as LocalWorkspaceSessionSnapshotContributor)?.RegistryAuthority;
-        this.timeProvider = timeProvider
-            ?? (this.detailContributor as LocalWorkspaceSessionDetailSnapshotContributor)?.TimeProvider
-            ?? (sessionContributor as LocalWorkspaceSessionSnapshotContributor)?.TimeProvider
-            ?? TimeProvider.System;
+        this.timeProvider = acceptedTimeProvider;
     }
 
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(

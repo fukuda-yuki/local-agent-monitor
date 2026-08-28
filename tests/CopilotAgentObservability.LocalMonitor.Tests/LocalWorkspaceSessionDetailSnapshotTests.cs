@@ -1626,8 +1626,18 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     public async Task NodeReadRejectsAnAncestryCycleAsUnavailableInsteadOfTooLarge()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER,retention_owner_token BLOB);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,parent_span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,tool_type TEXT,mcp_tool_name TEXT,mcp_server_hash TEXT,agent_name TEXT,request_model TEXT,response_model TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER,status TEXT,error_type TEXT,finish_reasons TEXT,conversation_id TEXT,duration_ms REAL,start_time TEXT,end_time TEXT,projected_at TEXT);
+            INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');
+            """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        using (var schemaTransaction = connection.BeginTransaction())
+        {
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, schemaTransaction);
+            schemaTransaction.Commit();
+        }
         var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Single();
         using (var command = connection.CreateCommand())
         {

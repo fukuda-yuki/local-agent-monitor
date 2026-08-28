@@ -1936,7 +1936,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
             "kind" => "UPDATE local_workspace_nodes SET kind='event' WHERE session_id=$session AND source_kind='skill_invocation';",
             "name" => "UPDATE local_workspace_nodes SET name_text='forged-skill' WHERE session_id=$session AND source_kind='skill_invocation';",
             "lifecycle" => "UPDATE local_workspace_nodes SET lifecycle='started' WHERE session_id=$session AND source_kind='skill_invocation';",
-            "status" => "UPDATE local_workspace_nodes SET status='active' WHERE session_id=$session AND source_kind='skill_invocation';",
+            "status" => "UPDATE local_workspace_nodes SET status='active',end_utc_ticks=NULL,duration_ms=NULL WHERE session_id=$session AND source_kind='skill_invocation';",
             "time" => "UPDATE local_workspace_nodes SET time_authority='missing',start_utc_ticks=NULL,end_utc_ticks=NULL,duration_ms=NULL WHERE session_id=$session AND source_kind='skill_invocation';",
             "carrier" => "UPDATE local_workspace_nodes SET event_id=$foreign_event,trace_id=$foreign_trace,span_id=$foreign_span WHERE session_id=$session AND source_kind='skill_invocation';",
             _ => throw new ArgumentOutOfRangeException(nameof(mutation)),

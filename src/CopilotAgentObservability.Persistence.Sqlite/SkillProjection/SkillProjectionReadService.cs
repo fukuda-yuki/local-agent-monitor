@@ -529,6 +529,8 @@ internal sealed class SkillProjectionReadService
         ArgumentNullException.ThrowIfNull(sessionIds);
         if (sessionIds.Count == 0)
             return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
+        if (!HasAnyTargetInvocationFacts(connection, transaction, sessionIds))
+            return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
 
         var skillProjectionInstalled = RequireCurrentSkillProjectionComponent(connection, transaction);
         var sdkAuthorityInstalled = RequireCurrentSdkAuthorityComponent(connection, transaction);
@@ -613,6 +615,27 @@ internal sealed class SkillProjectionReadService
                     .ToArray());
         }
         return result;
+    }
+
+    private static bool HasAnyTargetInvocationFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds)
+    {
+        var arms = new List<string>();
+        if (TableInstalled(connection, transaction, "skill_projection_invocations"))
+            arms.Add("SELECT 1 FROM skill_projection_invocations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))");
+        if (TableInstalled(connection, transaction, "skill_projection_sdk_claims"))
+            arms.Add("SELECT 1 FROM skill_projection_sdk_claims WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))");
+        if (TableInstalled(connection, transaction, "skill_invocation_snapshots"))
+            arms.Add("SELECT 1 FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))");
+        if (arms.Count == 0) return false;
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(" + string.Join(" UNION ALL ", arms) + ");";
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        SqliteCommandExecutionObserver.Executing();
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private sealed record InvocationFact(

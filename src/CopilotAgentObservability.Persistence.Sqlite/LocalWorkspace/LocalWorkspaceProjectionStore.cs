@@ -365,37 +365,18 @@ internal static class LocalWorkspaceProjectionStore
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        var otelArm = TableExists(connection, transaction, "monitor_spans")
-            ? """
-              UNION ALL
-              SELECT 1 FROM monitor_spans span
-              JOIN session_runs run ON run.trace_id=span.trace_id
-              WHERE run.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-                AND span.category='skill'
-            """
+        var sdkArm = TableExists(connection, transaction, "skill_projection_sdk_claims")
+            ? "UNION ALL SELECT 1 FROM skill_projection_sdk_claims WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))"
             : string.Empty;
-        var sdkClaimArm = TableExists(connection, transaction, "skill_projection_sdk_claims")
-            ? """
-              UNION ALL
-              SELECT 1 FROM skill_projection_sdk_claims claim
-              WHERE claim.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-              """
-            : string.Empty;
-        var projectedOtelArm = TableExists(connection, transaction, "monitor_skill_invocations")
-            ? """
-              UNION ALL
-              SELECT 1 FROM monitor_skill_invocations invocation
-              WHERE invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-              """
+        var otelArm = TableExists(connection, transaction, "skill_projection_invocations")
+            ? "UNION ALL SELECT 1 FROM skill_projection_invocations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))"
             : string.Empty;
         command.CommandText = $"""
             SELECT EXISTS(
-              SELECT 1 FROM session_events event
-              WHERE event.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-                AND event.type='skill.invoked'
-              {otelArm}
-              {sdkClaimArm}
-              {projectedOtelArm});
+              SELECT 1 FROM session_events
+              WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND type='skill.invoked'
+              {sdkArm}
+              {otelArm});
             """;
         command.Parameters.AddWithValue("$ids", idsJson);
         SqliteCommandExecutionObserver.Executing();

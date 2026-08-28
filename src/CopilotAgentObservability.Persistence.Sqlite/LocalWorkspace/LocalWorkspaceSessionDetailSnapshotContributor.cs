@@ -1295,7 +1295,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  COUNT(DISTINCT authority_receipt) authority_count,MIN(authority_receipt) authority_receipt,
                  COUNT(DISTINCT event_id) reference_count,
                  SUM(type='tool.execution_start') started_count,SUM(type='tool.execution_complete') completed_count,
-                 SUM(trace_id IS NOT NULL) technical_identity_count,
+                 COUNT(DISTINCT trace_id) technical_identity_count,
                  MIN(CASE WHEN type='tool.execution_start' THEN event_id END) start_event_id,
                  MIN(CASE WHEN type='tool.execution_start' THEN parent_event_id END) start_parent_event_id,
                  MIN(CASE WHEN type='tool.execution_start' THEN source_adapter END) start_adapter
@@ -1327,7 +1327,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
           WHERE node.session_id=$session_id AND receipt.semantic_kind='tool' AND receipt.source_family='session_sdk'
             AND (
               owner.carrier_digest IS NULL OR owner.session_count<>1 OR owner.run_count<>1 OR owner.authority_count<>1
-              OR owner.reference_count>4096
+              OR owner.reference_count>4096 OR owner.technical_identity_count<>0
               OR receipt.scope_kind<>'native_run' OR receipt.authority_receipt<>owner.authority_receipt
               OR node.source_kind<>'semantic_tool' OR node.kind<>'tool' OR node.source_identity<>owner.carrier_digest
               OR node.node_id<>local_workspace_node_id('semantic_tool',owner.carrier_digest)
@@ -1806,7 +1806,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                WHERE n.node_id IS NULL
                    OR n.node_id IS NOT NULL AND (e.execution_id IS NULL
                   OR metadata.node_id IS NULL
-                  OR metadata.current_valid_state IS NOT e.current_valid_state
+                  OR NOT (metadata.current_valid_state IS e.current_valid_state
+                    OR e.current_valid_state='current' AND metadata.current_valid_state='certification_pending')
                   OR metadata.inventory_reference_state<>'unavailable' OR metadata.inventory_reference IS NOT NULL
                   OR n.execution_id IS NOT e.execution_id
                  OR n.source_ordinal IS NOT e.expected_ordinal
@@ -1825,9 +1826,11 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  OR n.event_id IS NOT e.expected_event
                  OR n.otel_source_identity IS NOT e.persisted_otel_source_identity
                  OR n.sdk_source_identity IS NOT e.persisted_sdk_source_identity
-                 OR n.skill_activity_state IS NOT CASE e.current_valid_state
+                 OR NOT (n.skill_activity_state IS CASE e.current_valid_state
                       WHEN 'current' THEN 'recorded' ELSE 'certification_pending' END
-                 OR n.skill_activity_count IS NOT CASE e.current_valid_state WHEN 'current' THEN 1 END
+                    AND n.skill_activity_count IS CASE e.current_valid_state WHEN 'current' THEN 1 END
+                    OR e.current_valid_state='current' AND metadata.current_valid_state='certification_pending'
+                      AND n.skill_activity_state='certification_pending' AND n.skill_activity_count IS NULL)
                  OR n.tool_activity_state<>'not_observed' OR n.tool_activity_count IS NOT NULL
                  OR n.subagent_activity_state<>'not_observed' OR n.subagent_activity_count IS NOT NULL
                  OR n.error_activity_state<>'not_observed' OR n.error_activity_count IS NOT NULL
@@ -1913,7 +1916,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     }
 
     private static bool MetadataMatches(PersistedSkillProof proof, SkillProjectionCanonicalInvocation invocation) =>
-        string.Equals(proof.CurrentValidState, invocation.CurrentValidState, StringComparison.Ordinal)
+        (string.Equals(proof.CurrentValidState, invocation.CurrentValidState, StringComparison.Ordinal)
+         || invocation.CurrentValidState == "current" && proof.CurrentValidState == "certification_pending")
         && proof.InventoryState == "unavailable" && proof.InventoryReference is null
         && string.Equals(proof.SourceState, invocation.SkillSource is null ? "not_observed" : "recorded", StringComparison.Ordinal)
         && string.Equals(proof.Source, invocation.SkillSource, StringComparison.Ordinal)
