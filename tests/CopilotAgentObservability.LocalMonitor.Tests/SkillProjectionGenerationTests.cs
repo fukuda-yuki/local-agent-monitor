@@ -1527,70 +1527,23 @@ public sealed class SkillProjectionGenerationTests
     [Fact]
     public void CurrentInvocationProjection_CountsAndSearchesOtelFromTheSameAuthority()
     {
-        using var database = new TestDatabase();
-        using var connection = Open(database.Path);
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE schema_version(component TEXT,version INTEGER);
-            INSERT INTO schema_version(component,version) VALUES('skill_projection',1);
-            CREATE TABLE source_trace_compatibility_revisions(trace_id TEXT PRIMARY KEY,current_revision INTEGER,current_effective_state TEXT,current_exact_version TEXT);
-            CREATE TABLE skill_projection_generations(generation_id INTEGER PRIMARY KEY,compatibility_revision INTEGER,lifecycle TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
-            CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
-            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT,skill_source TEXT,invocation_trigger TEXT);
-            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
-            INSERT INTO source_trace_compatibility_revisions(trace_id,current_revision,current_effective_state,current_exact_version) VALUES('trace-1',7,'resolved','1.0.0');
-            INSERT INTO skill_projection_generations VALUES(1,7,'current');
-            INSERT INTO skill_projection_trace_heads VALUES('trace-1',1);
-            INSERT INTO skill_projection_invocations VALUES(11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0',NULL,NULL);
-            INSERT INTO raw_records VALUES(41);
-            INSERT INTO retention_items VALUES('raw_record','41','retained_by_policy',NULL,NULL,NULL,'9999-12-31T23:59:59.9999999+00:00');
-            """;
-        command.ExecuteNonQuery();
-        using var transaction = connection.BeginTransaction(deferred: true);
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedOtelOnly("otel-current", "safe-skill", "71", "81");
 
-        var result = SkillProjectionReadService.ReadCurrentInvocationProjection(
-            connection, transaction, ["77777777-7777-7777-7777-777777777777"],
-            DateTimeOffset.Parse("2026-08-26T00:00:00Z"), registryAuthority: null);
+        var result = fixture.ReadAll();
 
-        var session = Assert.Single(result);
-        Assert.Equal("current", session.Value.State);
-        Assert.Equal(1, session.Value.InvocationCount);
-        Assert.Equal(["safe-skill"], session.Value.SearchFacts.Select(static fact => fact.SkillName));
-        Assert.Equal(["otel:41:3"], session.Value.SearchFacts.Select(static fact => fact.SourceIdentity));
+        fixture.AssertCurrent(result, "otel-current", 1, "safe-skill");
+        Assert.StartsWith("otel:", Assert.Single(result[fixture.SessionId("otel-current")].SearchFacts).SourceIdentity);
     }
 
     [Fact]
     public void CurrentInvocationProjection_DeduplicatesExactOtelPairAndSurvivesRawExpiry()
     {
-        using var database = new TestDatabase();
-        using var connection = Open(database.Path);
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE schema_version(component TEXT,version INTEGER);
-            INSERT INTO schema_version VALUES('skill_projection',1);
-            CREATE TABLE source_trace_compatibility_revisions(trace_id TEXT PRIMARY KEY,current_revision INTEGER,current_effective_state TEXT,current_exact_version TEXT);
-            CREATE TABLE skill_projection_generations(generation_id INTEGER PRIMARY KEY,compatibility_revision INTEGER,lifecycle TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
-            CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
-            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT,skill_source TEXT,invocation_trigger TEXT);
-            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
-            INSERT INTO source_trace_compatibility_revisions VALUES('trace-1',7,'resolved','1.0.0');
-            INSERT INTO skill_projection_generations VALUES(1,7,'current');
-            INSERT INTO skill_projection_trace_heads VALUES('trace-1',1);
-            INSERT INTO skill_projection_invocations VALUES
-              (11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0',NULL,NULL),
-              (12,1,'otel_trace_span',42,4,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0',NULL,NULL);
-            """;
-        command.ExecuteNonQuery();
-        using var transaction = connection.BeginTransaction(deferred: true);
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedExactPair("deduplicated", "safe-skill", "72", "82", duplicateObservations: 2);
 
-        var result = SkillProjectionReadService.ReadCurrentInvocationProjection(connection, transaction,
-            ["77777777-7777-7777-7777-777777777777"], DateTimeOffset.Parse("2026-08-26T00:00:00Z"), null);
+        var session = fixture.ReadAll()[fixture.SessionId("deduplicated")];
 
-        var session = Assert.Single(result).Value;
         Assert.Equal(1, session.InvocationCount);
         Assert.Equal(["safe-skill"], session.SearchFacts.Select(static fact => fact.SkillName).Distinct());
     }

@@ -1065,7 +1065,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     }
 
     [Fact]
-    public async Task SemanticReceiptMutationChangesRevisionWhileRawCarrierBytesRemainExcluded()
+    public async Task SemanticReceiptMutationFailsClosedWhileRawCarrierBytesRemainExcludedFromRevision()
     {
         using var connection = OpenSdkToolContentFixture(
             "0198f5b8-0c00-7000-8000-000000000001", "0198f5b8-0c00-7000-8000-000000000010",
@@ -1079,14 +1079,15 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         var before = await contributor.ReadAsync(new TestReadTransaction(connection), request, CancellationToken.None);
 
         LocalWorkspaceProjectionSchemaTests.Execute(connection,
-            "UPDATE local_workspace_semantic_receipts SET authority_receipt=authority_receipt||'|revision-2';");
-        var receiptChanged = await contributor.ReadAsync(new TestReadTransaction(connection), request, CancellationToken.None);
-        Assert.NotEqual(before.CanonicalRevisionInput, receiptChanged.CanonicalRevisionInput);
-
-        LocalWorkspaceProjectionSchemaTests.Execute(connection,
             "UPDATE session_event_content SET content_json=json_set(content_json,'$.raw_only_revision',1);");
         var rawChanged = await contributor.ReadAsync(new TestReadTransaction(connection), request, CancellationToken.None);
-        Assert.Equal(receiptChanged.CanonicalRevisionInput, rawChanged.CanonicalRevisionInput);
+        Assert.Equal(before.CanonicalRevisionInput, rawChanged.CanonicalRevisionInput);
+
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,
+            "UPDATE local_workspace_semantic_receipts SET authority_receipt=authority_receipt||'|revision-2';");
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await contributor.ReadAsync(new TestReadTransaction(connection), request, CancellationToken.None));
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
     }
 
     [Theory]
@@ -1710,11 +1711,6 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             CREATE TABLE IF NOT EXISTS monitor_spans(raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT);
             CREATE TABLE IF NOT EXISTS raw_records(id INTEGER,source TEXT,trace_id TEXT,received_at TEXT,schema_version INTEGER,retention_owner_token BLOB);
-            CREATE TABLE IF NOT EXISTS skill_projection_invocations(session_id TEXT,generation_id INTEGER,invocation_id TEXT);
-            CREATE TABLE IF NOT EXISTS skill_projection_sdk_claims(session_id TEXT,claim_id TEXT);
-            CREATE TABLE IF NOT EXISTS skill_invocation_snapshots(session_id TEXT,snapshot_id TEXT);
-            CREATE TABLE IF NOT EXISTS skill_invocation_snapshot_receipts(snapshot_id TEXT);
-            CREATE TABLE IF NOT EXISTS skill_projection_trace_heads(trace_id TEXT);
             """);
 
     private static Microsoft.Data.Sqlite.SqliteConnection OpenSdkToolFixture(

@@ -26,10 +26,14 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         { "session_events.source_application_version", "UPDATE session_events SET source_application_version='matrix-event-v2' WHERE session_id=$session;", true },
         { "monitor_spans.status", "UPDATE monitor_spans SET status=CASE status WHEN 'ERROR' THEN 'OK' ELSE 'ERROR' END WHERE trace_id IN (SELECT trace_id FROM session_runs WHERE session_id=$session);", true },
         { "local_workspace_span_facts.retry_count", "UPDATE local_workspace_span_facts SET retry_count=COALESCE(retry_count,0)+1 WHERE raw_record_id IN (SELECT raw_record_id FROM monitor_spans WHERE trace_id IN (SELECT trace_id FROM session_runs WHERE session_id=$session));", false },
-        { "local_workspace_execution_headers.status", "UPDATE local_workspace_execution_headers SET status=CASE status WHEN 'completed' THEN 'failed' ELSE 'completed' END WHERE session_id=$session;", false },
-        { "local_workspace_nodes.status", "UPDATE local_workspace_nodes SET status=CASE status WHEN 'completed' THEN 'failed' ELSE 'completed' END WHERE session_id=$session;", false },
-        { "local_workspace_node_edges.source_ordinal", "UPDATE local_workspace_node_edges SET source_ordinal=source_ordinal+1 WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session);", false },
         { "local_workspace_node_content_refs.revision_input", "UPDATE local_workspace_node_content_refs SET revision_input=revision_input||':matrix' WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session);", false },
+    };
+
+    public static TheoryData<string, string> PersistedProjectionCopyDrift => new()
+    {
+        { "local_workspace_execution_headers.status", "UPDATE local_workspace_execution_headers SET status=CASE status WHEN 'completed' THEN 'failed' ELSE 'completed' END WHERE session_id=$session;" },
+        { "local_workspace_nodes.status", "UPDATE local_workspace_nodes SET status=CASE status WHEN 'completed' THEN 'failed' ELSE 'completed' END WHERE session_id=$session;" },
+        { "local_workspace_node_edges.source_ordinal", "UPDATE local_workspace_node_edges SET source_ordinal=source_ordinal+1 WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session);" },
     };
 
     [Theory]
@@ -40,6 +44,19 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         var before = await fixture.ReadSummaryAsync();
         Assert.True(fixture.Execute(mutation, refresh) > 0, $"{source} did not mutate a real row");
         Assert.NotEqual(before.WorkspaceRevision, (await fixture.ReadSummaryAsync()).WorkspaceRevision);
+    }
+
+    [Theory]
+    [MemberData(nameof(PersistedProjectionCopyDrift))]
+    public async Task PersistedProjectionCopyDriftFailsClosed(string source, string mutation)
+    {
+        using var fixture = await RealFixture.CreateAsync();
+        Assert.True(fixture.Execute(mutation, refresh: false) > 0, $"{source} did not mutate a real row");
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await fixture.ReadSummaryAsync());
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
     }
 
     [Fact]
@@ -610,7 +627,7 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         {
             this.temp = temp;
             this.projection = projection;
-            var registryAuthority = FixedSkillRegistryGenerationAuthority.Load();
+            var registryAuthority = projection.RegistryAuthority;
             service = new SqliteLocalRepositoryScopeSnapshotService(
                 temp.DatabasePath,
                 new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider,
