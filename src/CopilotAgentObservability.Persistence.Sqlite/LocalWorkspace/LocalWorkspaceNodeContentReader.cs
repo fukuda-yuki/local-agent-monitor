@@ -723,19 +723,21 @@ internal sealed class LocalWorkspaceNodeContentReader(
 
     private static byte[]? ReadWholeEvent(Stream stream)
     {
-        using var result = new MemoryStream(MaximumBytes + 1);
+        using var result = new MemoryStream(Math.Min(MaximumEncodedStringBytes + 1, 8192));
         var buffer = new byte[8192];
         while (true)
         {
-            var read = stream.Read(buffer, 0, Math.Min(buffer.Length, MaximumBytes + 1 - (int)result.Length));
+            var read = stream.Read(buffer, 0, Math.Min(buffer.Length, MaximumEncodedStringBytes + 1 - (int)result.Length));
             if (read == 0) break;
             result.Write(buffer, 0, read);
-            if (result.Length > MaximumBytes) return null;
+            if (result.Length > MaximumEncodedStringBytes) return null;
         }
         var bytes = result.ToArray();
         _ = StrictUtf8.GetString(bytes);
-        using (JsonDocument.Parse(bytes)) { }
-        return bytes;
+        using var document = JsonDocument.Parse(bytes);
+        return document.RootElement.ValueKind == JsonValueKind.String
+            ? StrictUtf8.GetBytes(document.RootElement.GetString()!)
+            : bytes;
     }
 
     private sealed record SelectedTopLevelJsonValue(byte[] Bytes, JsonValueKind Kind);

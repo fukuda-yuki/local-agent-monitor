@@ -26,7 +26,8 @@ internal static class LocalMonitorV1SessionDetailApplication
         w.WriteString("source_item_id", locator.SourceItemId);
         w.WriteNumber("revision", locator.RetentionRevision!.Value);
         w.WriteEndObject();
-        w.WriteString("text", value);
+        w.WritePropertyName("text");
+        w.WriteRawValue(JsonString(value), skipInputValidation: true);
         w.WriteNumber("utf8_byte_length", text.Length);
         w.WriteNumber("unicode_scalar_length", value.EnumerateRunes().Count());
         w.WriteBoolean("truncation", false);
@@ -147,6 +148,21 @@ internal static class LocalMonitorV1SessionDetailApplication
     private static void Nullable(Utf8JsonWriter w,string n,string? v){if(v is null)w.WriteNull(n);else w.WriteString(n,v);}private static void Number(Utf8JsonWriter w,string n,long? v){if(v is null)w.WriteNull(n);else w.WriteNumber(n,v.Value);}
     private static string Snake<T>(T value)where T:Enum=>value.ToString().Replace("ExplicitlyUnassigned","explicitly_unassigned",StringComparison.Ordinal).ToLowerInvariant();
     private static string InstructionState(string state)=>state switch{"recorded"=>"recorded","not_captured"=>"not_captured","expired"=>"expired","invalid" or "projection_invalid"=>"invalid",_=>"not_observed"};private static string CaptureState(string value)=>value switch{"full"=>"complete","rich" or "partial"=>"partial","unbound"=>"not_observed",_=>"invalid"};
+    private static string JsonString(string value)
+    {
+        var result=new StringBuilder(value.Length+2);result.Append('"');
+        foreach(var rune in value.EnumerateRunes())
+        {
+            switch(rune.Value)
+            {
+                case '"':result.Append("\\\"");break;case '\\':result.Append("\\\\");break;
+                case '\b':result.Append("\\b");break;case '\f':result.Append("\\f");break;
+                case '\n':result.Append("\\n");break;case '\r':result.Append("\\r");break;case '\t':result.Append("\\t");break;
+                default:if(rune.Value<0x20)result.Append("\\u").Append(rune.Value.ToString("x4",CultureInfo.InvariantCulture));else result.Append(rune);break;
+            }
+        }
+        return result.Append('"').ToString();
+    }
     private static byte[] Write(Action<Utf8JsonWriter> action){using var stream=new MemoryStream();using(var writer=new Utf8JsonWriter(stream,new(){Indented=false,Encoder=System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping}))action(writer);var bytes=stream.ToArray();if(bytes.Length>MaximumResponseBytes)throw new LocalMonitorV1SessionDetailException("workspace_too_large");return bytes;}
 }
 

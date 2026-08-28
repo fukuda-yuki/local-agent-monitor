@@ -1979,7 +1979,10 @@ internal static class LocalWorkspaceProjectionStore
         try
         {
             using var document = JsonDocument.Parse(json);
-            if (pointer is null) return Encoding.UTF8.GetByteCount(json);
+            if (pointer is null)
+                return document.RootElement.ValueKind == JsonValueKind.String
+                    ? Encoding.UTF8.GetByteCount(document.RootElement.GetString()!)
+                    : Encoding.UTF8.GetByteCount(json);
             var property = pointer[1..];
             if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty(property, out var value)) return null;
             return Encoding.UTF8.GetByteCount(value.ValueKind == JsonValueKind.String ? value.GetString()! : value.GetRawText());

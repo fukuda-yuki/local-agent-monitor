@@ -23,34 +23,38 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     public async Task ProductionContentGetAndHeadMatchTheClosedV2GoldenExactly()
     {
         using var temp = new MonitorTempDirectory();
-        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
-            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        SeedDeterministicSession(temp, full: true, contentJson: "\"A😀é\\n\"");
         StabilizeDeterministicContentOwner(temp);
         using var host = await StartProductionDetailRouteAsync(temp);
-        RefreshDeterministicFullProjection(temp);
+        RefreshContentProjection(temp);
         SeedDeterministicRepositoryAssignment(temp);
         string nodeId;
         using (var connection = Open(temp))
-            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE part='instruction';", SessionId);
+            nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND part='event_content' AND availability_state='available';", SessionId);
         using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
         using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());
         var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
-        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction";
+        var projected = await CreateProductionDetailService(temp).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Content, SessionId, NodeId: nodeId,
+                ContentPart: "event_content", ExpectedWorkspaceRevision: revision), CancellationToken.None);
+        Assert.Contains(projected.Detail.Content, item => item.NodeId == nodeId && item.Part == "event_content");
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=event_content";
 
         using var get = await host.Client.GetAsync(path);
         using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
 
         var expected = File.ReadAllBytes(Path.Combine(FindRepositoryRoot(), "tests",
             "CopilotAgentObservability.LocalMonitor.Tests", "TestData", "LocalMonitorV1SessionDetail", "content-full.json"));
-        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.True(get.StatusCode == HttpStatusCode.OK, await get.Content.ReadAsStringAsync());
         var actual = await get.Content.ReadAsByteArrayAsync();
         Assert.True(expected.AsSpan().SequenceEqual(actual), System.Text.Encoding.UTF8.GetString(actual));
+        Assert.DoesNotContain("\"text\":\"\\\"", System.Text.Encoding.UTF8.GetString(actual), StringComparison.Ordinal);
         using (var entity = JsonDocument.Parse(actual))
         {
             Assert.Equal("local-monitor-node-content.response.v2", entity.RootElement.GetProperty("schema_version").GetString());
-            Assert.Equal("Review the retained instruction", entity.RootElement.GetProperty("text").GetString());
-            Assert.Equal(31, entity.RootElement.GetProperty("utf8_byte_length").GetInt32());
-            Assert.Equal(31, entity.RootElement.GetProperty("unicode_scalar_length").GetInt32());
+            Assert.Equal("A😀é\n", entity.RootElement.GetProperty("text").GetString());
+            Assert.Equal(8, entity.RootElement.GetProperty("utf8_byte_length").GetInt32());
+            Assert.Equal(4, entity.RootElement.GetProperty("unicode_scalar_length").GetInt32());
             Assert.False(entity.RootElement.GetProperty("truncation").GetBoolean());
         }
         Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
@@ -244,9 +248,9 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var temp = new MonitorTempDirectory();
         var wholeEvent = locatorKind == "whole_event";
         var contentJson = wholeEvent
-            ? "\"" + new string('x', size - 2) + "\""
+            ? "\"" + new string('x', size) + "\""
             : "{\"prompt\":\"" + new string('x', size) + "\"}";
-        Assert.Equal(wholeEvent ? size : size + 13, System.Text.Encoding.UTF8.GetByteCount(contentJson));
+        Assert.Equal(wholeEvent ? size + 2 : size + 13, System.Text.Encoding.UTF8.GetByteCount(contentJson));
         SeedDeterministicSession(temp, full: true, contentJson: contentJson,
             eventType: wholeEvent ? "tool.completed" : "UserPromptSubmit",
             sourceAdapter: wholeEvent ? "github-copilot-vscode-otel" : "claude-code-hook",
@@ -1549,7 +1553,6 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         public ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(LocalRepositorySessionDetailRequest request, CancellationToken cancellationToken) =>
             ValueTask.FromResult(snapshot);
     }
-
     private sealed class SqliteContributorDetailService(string databasePath, string sessionId, string revision)
         : ILocalRepositorySessionDetailSnapshotService
     {

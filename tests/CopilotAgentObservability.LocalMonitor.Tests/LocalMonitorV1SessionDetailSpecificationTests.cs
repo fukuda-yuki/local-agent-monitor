@@ -161,9 +161,9 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertFixture("node-nested.json", NodeToken, AssertNodeOrder);
         AssertFixture("node-related-serializer-only.json", NodeToken, AssertNodeOrder);
         AssertFixture("content-full.json", ContentToken, AssertContentOrder);
-        const string ContentGolden = "{\"schema_version\":\"local-monitor-node-content.response.v2\",\"workspace_revision\":\"8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"node_id\":\"node-a8a773d6614d5030f505ff195b452dd6\",\"part\":\"instruction\",\"state\":\"available\",\"source_reference\":{\"store_kind\":\"session_event_content\",\"source_item_id\":\"018f0000-0000-7000-8000-000000000004\",\"revision\":1},\"text\":\"Review the retained instruction\",\"utf8_byte_length\":31,\"unicode_scalar_length\":31,\"truncation\":false}";
+        const string ContentGolden = "{\"schema_version\":\"local-monitor-node-content.response.v2\",\"workspace_revision\":\"042185c18a85d8f24d175a99ae9946f08c770af039ffde6150077cff16eeacf6\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"node_id\":\"node-a8a773d6614d5030f505ff195b452dd6\",\"part\":\"event_content\",\"state\":\"available\",\"source_reference\":{\"store_kind\":\"session_event_content\",\"source_item_id\":\"018f0000-0000-7000-8000-000000000004\",\"revision\":1},\"text\":\"A😀é\\n\",\"utf8_byte_length\":8,\"unicode_scalar_length\":4,\"truncation\":false}";
         Assert.Equal(Encoding.UTF8.GetBytes(ContentGolden), File.ReadAllBytes(Path.Combine(FixtureRoot, "content-full.json")));
-        Assert.Equal(526, Encoding.UTF8.GetByteCount(ContentGolden));
+        Assert.Equal(504, Encoding.UTF8.GetByteCount(ContentGolden));
         using var nested = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "node-nested.json")));
         Assert.NotEmpty(nested.RootElement.GetProperty("parent_path").EnumerateArray());
         Assert.All(nested.RootElement.GetProperty("related").EnumerateObject(), property => Assert.Empty(property.Value.EnumerateArray()));
@@ -555,9 +555,9 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     {
         AssertProperties(root, "schema_version", "workspace_revision", "session_id", "node_id", "part", "state", "source_reference", "text", "utf8_byte_length", "unicode_scalar_length", "truncation");
         AssertProperties(root.GetProperty("source_reference"), "store_kind", "source_item_id", "revision");
-        Assert.Equal("Review the retained instruction", root.GetProperty("text").GetString());
-        Assert.Equal(31, root.GetProperty("utf8_byte_length").GetInt32());
-        Assert.Equal(31, root.GetProperty("unicode_scalar_length").GetInt32());
+        Assert.Equal("A😀é\n", root.GetProperty("text").GetString());
+        Assert.Equal(8, root.GetProperty("utf8_byte_length").GetInt32());
+        Assert.Equal(4, root.GetProperty("unicode_scalar_length").GetInt32());
         Assert.False(root.GetProperty("truncation").GetBoolean());
     }
 
