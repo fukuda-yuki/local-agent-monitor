@@ -611,6 +611,8 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             command.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
             command.Parameters.AddWithValue("$at", captured.ToString("O"));
             command.ExecuteNonQuery();
+            if (state == "expired")
+                RefreshDeterministicContentReceipt(connection, captured);
             if (state == "deleted")
             {
                 using var deletion = connection.BeginTransaction();
@@ -620,6 +622,21 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             }
         }
         if (state is not ("not_captured" or "oversized")) RefreshContentProjection(temp);
+        if (state == "expired")
+        {
+            using var proof = Open(temp);
+            Assert.Equal("expired", Scalar(proof,
+                "SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$session LIMIT 1;",
+                "018f0000-0000-7000-8000-000000000004"));
+            LocalWorkspaceProjectionStore.RegisterProjectionFunctions(proof);
+            Assert.Equal("1", Scalar(proof, """
+                SELECT CAST(local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token,i.ownership_receipt) AS TEXT)
+                FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
+                JOIN retention_items i ON i.source_item_id=e.event_id WHERE e.event_id=$session;
+                """, "018f0000-0000-7000-8000-000000000004"));
+        }
+        if (state is "deleted" or "expired")
+            revision = await Revision(host.Client);
         string nodeId;
         using (var connection = Open(temp))
             nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId);
@@ -1819,6 +1836,24 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         update.Parameters.AddWithValue("$receipt", receipt);
         update.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
         update.ExecuteNonQuery();
+    }
+
+    private static void RefreshDeterministicContentReceipt(SqliteConnection connection, DateTimeOffset expires)
+    {
+        var token = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
+        var captured = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
+        var storeId = Scalar(connection,
+            "SELECT store_instance_id FROM retention_store_instances WHERE id=1;", SessionId);
+        var receipt = RetentionOwnershipReceipt.CreateSession(new(storeId,
+            "018f0000-0000-7000-8000-000000000004", "application/json", captured.ToString("O"), captured.UtcTicks,
+            expires.ToString("O"), expires.UtcTicks, SessionId, "018f0000-0000-7000-8000-000000000003",
+            Scalar(connection, "SELECT source_adapter FROM session_events WHERE event_id=$execution;", SessionId,
+                "018f0000-0000-7000-8000-000000000004"), "event-detail-golden", token));
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE retention_items SET ownership_receipt=$receipt WHERE source_item_id=$event;";
+        command.Parameters.AddWithValue("$receipt", receipt);
+        command.Parameters.AddWithValue("$event", "018f0000-0000-7000-8000-000000000004");
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     private static void RefreshDeterministicFullProjection(MonitorTempDirectory temp, bool stabilizeGolden = true)

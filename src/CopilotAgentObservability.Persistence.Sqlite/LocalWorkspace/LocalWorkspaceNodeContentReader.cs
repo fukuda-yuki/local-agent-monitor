@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Data;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
@@ -297,6 +298,24 @@ internal static class LocalWorkspaceContentAuthority
     private static bool ValidateTerminalSessionGraph(SqliteConnection connection, SqliteTransaction transaction,
         string sessionId, DateTimeOffset acceptedAt)
     {
+        using (var deleted = connection.CreateCommand())
+        {
+            deleted.Transaction = transaction;
+            deleted.CommandText = "SELECT EXISTS(SELECT 1 FROM local_workspace_node_content_refs r JOIN local_workspace_nodes n ON n.node_id=r.node_id WHERE n.session_id=$session_id AND r.availability_state='deleted');";
+            deleted.Parameters.AddWithValue("$session_id", sessionId);
+            if (Convert.ToInt64(deleted.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0)
+            {
+                try
+                {
+                    _ = LocalWorkspaceTerminalAuthority.Capture(
+                        connection, transaction, includeSourceBackedReadDenied: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    return false;
+                }
+            }
+        }
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -304,42 +323,21 @@ internal static class LocalWorkspaceContentAuthority
               SELECT 1 FROM local_workspace_node_content_refs r
               JOIN local_workspace_nodes n ON n.node_id=r.node_id
               JOIN session_events e ON e.event_id=r.source_item_id AND e.session_id=n.session_id
-              JOIN retention_items i ON i.item_id=r.retention_item_id AND i.source_item_id=r.source_item_id
-              WHERE n.session_id=$session_id AND r.availability_state IN ('deleted','expired','read_denied'))
-            AND NOT EXISTS(
-              SELECT 1 FROM local_workspace_node_content_refs r
-              JOIN local_workspace_nodes n ON n.node_id=r.node_id
-              JOIN session_events e ON e.event_id=r.source_item_id AND e.session_id=n.session_id
-              LEFT JOIN session_event_content c ON c.event_id=e.event_id
-              LEFT JOIN retention_items i ON i.item_id=r.retention_item_id
-              LEFT JOIN retention_tombstones terminal ON terminal.item_id=i.item_id
               LEFT JOIN local_workspace_content_tombstones tombstone
                 ON tombstone.store_kind=r.store_kind AND tombstone.source_item_id=r.source_item_id AND tombstone.part=r.part
+              LEFT JOIN session_event_content content ON content.event_id=e.event_id
+              LEFT JOIN retention_items item ON item.item_id=r.retention_item_id
               WHERE n.session_id=$session_id AND (
-                NOT (n.source_kind='session_event' AND n.source_identity=r.source_item_id
-                  OR n.source_kind='semantic_tool' AND EXISTS(SELECT 1 FROM local_workspace_node_source_references source
-                    WHERE source.node_id=n.node_id AND source.event_id=r.source_item_id))
-                OR r.availability_state='deleted' AND NOT (
-                  i.state='deleted' AND i.deleted_at IS NOT NULL AND c.event_id IS NULL
-                  AND terminal.item_id=i.item_id AND terminal.receipt_at=i.deleted_at AND terminal.deleted_at=i.deleted_at
-                  AND tombstone.source_item_id=r.source_item_id AND tombstone.deleted_at=i.deleted_at
-                  AND tombstone.retention_item_id=i.item_id AND tombstone.retention_revision=i.revision
-                  AND r.retention_item_id=i.item_id AND r.retention_revision=i.revision
-                  AND r.retention_store_instance_id IS NULL AND r.retention_ownership_receipt IS NULL AND r.retention_owner_token IS NULL)
-                OR r.availability_state='expired' AND NOT (
-                  i.state IN ('expiring','expired_pending_deletion') AND c.event_id=e.event_id
-                  AND i.store_instance_id=r.retention_store_instance_id AND i.revision=r.retention_revision
-                  AND i.ownership_receipt=r.retention_ownership_receipt AND c.retention_owner_token=r.retention_owner_token
-                  AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,
-                    e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token,i.ownership_receipt)=1)
-                OR r.availability_state='read_denied' AND NOT (
-                  i.read_denied_at IS NOT NULL AND c.event_id=e.event_id
-                  AND i.store_instance_id=r.retention_store_instance_id AND i.revision=r.retention_revision
-                  AND i.ownership_receipt=r.retention_ownership_receipt AND c.retention_owner_token=r.retention_owner_token
-                  AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,
-                    e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token,i.ownership_receipt)=1)
-                OR r.availability_state NOT IN ('deleted','expired','read_denied','not_captured')
-                OR r.availability_state='not_captured' AND NOT (e.content_state='not_captured' AND c.event_id IS NULL AND r.retention_item_id IS NULL)));
+                r.availability_state='deleted' AND tombstone.source_item_id=r.source_item_id
+                OR r.availability_state IN ('expired','read_denied')
+                  AND content.event_id=e.event_id
+                  AND local_workspace_retention_receipt_matches(
+                    item.store_instance_id,e.event_id,content.content_kind,content.captured_at,content.expires_at,
+                    e.session_id,e.run_id,e.source_adapter,e.source_event_id,content.retention_owner_token,item.ownership_receipt)=1)
+                AND (n.source_kind='session_event' AND n.source_identity=r.source_item_id
+                  OR n.source_kind='semantic_tool' AND EXISTS(
+                    SELECT 1 FROM local_workspace_node_source_references source
+                    WHERE source.node_id=n.node_id AND source.event_id=r.source_item_id)));
             """;
         command.Parameters.AddWithValue("$session_id", sessionId);
         command.Parameters.AddWithValue("$now", acceptedAt.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture));

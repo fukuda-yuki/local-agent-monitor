@@ -136,20 +136,45 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             if (terminalContent is not null)
                 content = [terminalContent];
             var selectedContent = content.SingleOrDefault(item => item.NodeId == request.NodeId && item.Part == request.ContentPart);
-            if (contentGraphValid && !revisionMatches)
-                throw new LocalWorkspaceSessionDetailException("workspace_snapshot_stale");
-            if (!contentGraphValid && selectedContent?.State is not ("invalid" or "expired" or "deleted" or "read_denied"))
-                throw new LocalWorkspaceSessionDetailException(!revisionMatches ? "workspace_snapshot_stale" : "local_monitor_ui_unavailable");
+            var projectedState = await ReadProjectedContentState(
+                connection, transaction, request.NodeId!, request.ContentPart!, token);
+            if (contentGraphValid && selectedContent is not null
+                && projectedState is "expired" or "deleted" or "read_denied")
+            {
+                selectedContent = selectedContent with { State = projectedState };
+                content = [selectedContent];
+            }
+            var authoritativeTerminal = selectedContent?.State is "invalid" or "expired" or "deleted" or "read_denied"
+                && (string.Equals(selectedContent.State, projectedState, StringComparison.Ordinal)
+                    || contentGraphValid && projectedState is "expired" or "deleted" or "read_denied");
+            if (!authoritativeTerminal)
+            {
+                if (!revisionMatches)
+                    throw new LocalWorkspaceSessionDetailException("workspace_snapshot_stale");
+                if (!contentGraphValid)
+                    throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            }
         }
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+    }
+
+    private static async Task<string?> ReadProjectedContentState(
+        SqliteConnection connection, SqliteTransaction transaction, string nodeId, string part, CancellationToken token)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT availability_state FROM local_workspace_node_content_refs WHERE node_id=$node_id AND part=$part;";
+        command.Parameters.AddWithValue("$node_id", nodeId);
+        command.Parameters.AddWithValue("$part", part);
+        return await command.ExecuteScalarAsync(token) as string;
     }
 
     private async Task<LocalWorkspaceContentAvailability?> ReadTerminalContent(SqliteConnection c, SqliteTransaction t,
         string nodeId, string part, DateTimeOffset acceptedAt, CancellationToken token)
     {
         using var command=c.CreateCommand();command.Transaction=t;
-        command.CommandText=$"SELECT c.node_id,c.part,{LocalWorkspaceContentAuthority.EffectiveAvailabilitySql},c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id AND e.session_id=n.session_id LEFT JOIN session_event_content s ON s.event_id=e.event_id LEFT JOIN retention_items i ON i.item_id=c.retention_item_id LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id WHERE c.node_id=$node_id AND c.part=$part;";
+        command.CommandText=$"SELECT c.node_id,c.part,CASE WHEN tombstone.source_item_id=c.source_item_id AND i.state='deleted' AND i.deleted_at=tombstone.deleted_at THEN 'deleted' ELSE {LocalWorkspaceContentAuthority.EffectiveAvailabilitySql} END,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id AND e.session_id=n.session_id LEFT JOIN session_event_content s ON s.event_id=e.event_id LEFT JOIN retention_items i ON i.item_id=c.retention_item_id LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id LEFT JOIN local_workspace_content_tombstones tombstone ON tombstone.store_kind=c.store_kind AND tombstone.source_item_id=c.source_item_id AND tombstone.part=c.part WHERE c.node_id=$node_id AND c.part=$part;";
         command.Parameters.AddWithValue("$now",Canonical(acceptedAt));command.Parameters.AddWithValue("$node_id",nodeId);command.Parameters.AddWithValue("$part",part);
         using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var value=Content(reader);return value.State is "deleted" or "expired" or "read_denied"?value:null;
     }
