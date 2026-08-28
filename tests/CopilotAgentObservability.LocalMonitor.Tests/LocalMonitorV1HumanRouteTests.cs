@@ -66,6 +66,16 @@ public sealed class LocalMonitorV1HumanRouteTests
         }
     }
 
+    public static TheoryData<string> UnintegratedPrimaryPaths
+    {
+        get
+        {
+            var data = new TheoryData<string>();
+            foreach (var path in ExactPrimaryPathValues.Where(path => path != "/")) data.Add(path);
+            return data;
+        }
+    }
+
     public static TheoryData<string> NearPaths
     {
         get
@@ -111,7 +121,7 @@ public sealed class LocalMonitorV1HumanRouteTests
     };
 
     [Theory]
-    [MemberData(nameof(ExactPrimaryPaths))]
+    [MemberData(nameof(UnintegratedPrimaryPaths))]
     public async Task UnintegratedOwnerRoutesReturnClosedUnavailableInsteadOfPlaceholderSuccess(string path)
     {
         using var temp = new MonitorTempDirectory();

@@ -64,7 +64,7 @@ public sealed class RawHttpTerminalMigrationTests
             foreach (var owner in new[]
                      {
                          "analysis-run", "raw-record", "span-detail", "prompt-label",
-                         "overview-page", "trace-list-page", "trace-detail-page",
+                         "trace-list-page", "trace-detail-page",
                      })
             {
                 data.Add(owner, (int)RetentionRawTerminalResult.Lost);
@@ -78,7 +78,6 @@ public sealed class RawHttpTerminalMigrationTests
     [InlineData("MonitorHost.cs", 5)]
     [InlineData("Sessions/SessionRoutes.cs", 2)]
     [InlineData("RawReplayRoutes.cs", 3)]
-    [InlineData("Pages/Index.cshtml.cs", 1)]
     [InlineData("Pages/Traces.cshtml.cs", 1)]
     [InlineData("Pages/TraceDetail.cshtml.cs", 1)]
     [InlineData("Analysis/HistoricalEvidenceApplicationService.cs", 1)]
@@ -120,7 +119,7 @@ public sealed class RawHttpTerminalMigrationTests
             AssertZeroResponse(responseFeature);
         }
 
-        if (owner is "overview-page" or "trace-list-page" or "trace-detail-page")
+        if (owner is "trace-list-page" or "trace-detail-page")
         {
             var prepared = await PrepareRazorOwnerAsync(
                 owner,
@@ -382,7 +381,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("overview-page")]
     [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_SealedTerminalPublishesOnlyAfterExactEntityIsBufferedAndReleasesAfterSend(string owner)
@@ -427,8 +425,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("overview-page", (int)RetentionRawTerminalResult.Lost)]
-    [InlineData("overview-page", (int)RetentionRawTerminalResult.Busy)]
     [InlineData("trace-list-page", (int)RetentionRawTerminalResult.Lost)]
     [InlineData("trace-list-page", (int)RetentionRawTerminalResult.Busy)]
     [InlineData("trace-detail-page", (int)RetentionRawTerminalResult.Lost)]
@@ -473,7 +469,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("overview-page")]
     [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_RenderFailureAbortsWithoutTerminalOrResponseAndReleasesAfterDiscard(string owner)
@@ -497,7 +492,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("overview-page")]
     [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_AllSourceTerminalsWinBeforeSendAndEachSourceReleasesAfterSend(string owner)
@@ -592,7 +586,6 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("overview-page")]
     [InlineData("trace-list-page")]
     [InlineData("trace-detail-page")]
     public async Task RazorOwner_MapperReadsOnlyInsideUseReferenceAndRazorUsesClosedReferenceFreeProjection(string owner)
@@ -632,7 +625,6 @@ public sealed class RawHttpTerminalMigrationTests
         string? projection = null;
         IActionResult result = owner switch
         {
-            "overview-page" => await ExecuteOverviewAsync(),
             "trace-list-page" => await ExecuteTraceListAsync(),
             "trace-detail-page" => await ExecuteTraceDetailAsync(),
             _ => throw new ArgumentOutOfRangeException(nameof(owner)),
@@ -642,14 +634,6 @@ public sealed class RawHttpTerminalMigrationTests
         Assert.True(RawRazorPageLeaseTracker.TryTake(context, out var attached));
         Assert.Equal("raw-derived", projection);
         return (context, attached, store, projection!);
-
-        async Task<IActionResult> ExecuteOverviewAsync()
-        {
-            var model = new IndexModel { PageContext = pageContext };
-            var pageResult = await model.OnGetAsync();
-            projection = model.PromptFor(OwnerProjectionStore.TraceId);
-            return pageResult;
-        }
 
         async Task<IActionResult> ExecuteTraceListAsync()
         {

@@ -374,7 +374,7 @@ public sealed class CostPagePlaywrightTests
     }
 
     [Fact(Timeout = 60_000)]
-    public async Task ContextualCostLinks_DoNotAddPermanentProductNavigation()
+    public async Task TraceAndDiagnosticsCostLinks_DoNotAddPermanentProductNavigation()
     {
         using var temp = new MonitorTempDirectory();
         MonitorRichTrace.Seed(temp);
@@ -403,11 +403,6 @@ public sealed class CostPagePlaywrightTests
         await Expect(diagnosticsPage.Locator(".monitor-shell-header a")).ToHaveCountAsync(0);
         await diagnosticsPage.CloseAsync();
 
-        var overviewPage = await browser.NewPageAsync();
-        await overviewPage.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(overviewPage.Locator("#overview-cost-link")).ToHaveAttributeAsync("href", "/costs");
-        await Expect(overviewPage.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
-        await Expect(overviewPage.Locator(".monitor-shell-header a")).ToHaveCountAsync(0);
     }
 
     [Fact(Timeout = 60_000)]

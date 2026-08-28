@@ -680,132 +680,6 @@ public sealed class AlertCenterPlaywrightTests
         Assert.Equal(4, calls);
     }
 
-    [Fact(Timeout = 60_000)]
-    public async Task Overview_UsesSameCriticalAlertDtoAndLinksExactSelection()
-    {
-        using var temp = NewTemp();
-        var critical = Alert(AlertA, "session-a", "trace-a", "span-a", "open");
-        var warning = Alert(AlertB, "session-b", "trace-b", "span-b", "open") with
-        {
-            Severity = "warning",
-            Source = new("claude-code", "1.0.4", "supported_at_evaluation"),
-        };
-        var readModel = new FilteringFixtureReadModel([critical, warning], [Recurring()])
-        {
-            SnapshotState = "incomplete",
-        };
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readModel));
-        PlaywrightBrowserPath.ConfigureDefault();
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
-
-        await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("open 2");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("critical 1");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("warning 1");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("github-copilot-vscode@1.0.4 1");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("claude-code@1.0.4 1");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("top recurring rule は確定できません");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("High tool failure ratio");
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("critical");
-        await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("今日");
-        await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("最新とは断定できません");
-        await Expect(page.Locator("#overview-alert-body a")).ToHaveAttributeAsync("href", $"/alerts?alert={AlertA}&period=today");
-
-        readModel.Alerts = [];
-        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("0 件とは断定できません");
-
-        readModel.Alerts = [critical, warning];
-        readModel.SnapshotState = "complete";
-        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#overview-alert-card")).ToContainTextAsync("top recurring · high-tool-failure-ratio@1 · 2 Sessions");
-        await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("latest critical");
-        await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("最終観測");
-
-        await page.RouteAsync("**/api/monitor/overview?period=7d", route => route.FulfillAsync(new RouteFulfillOptions
-        {
-            Status = 503,
-            ContentType = "application/json",
-            Body = "{}",
-        }));
-        readModel.Alerts = [critical with { AlertId = AlertC }];
-        await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
-        await Expect(page.Locator("#overview-alert-body a")).ToHaveAttributeAsync("href", $"/alerts?alert={AlertC}&period=7d");
-        await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
-        await Expect(page.Locator("#overview-alert-card .panel-link")).ToHaveAttributeAsync("href", "/alerts?state=open&period=7d");
-    }
-
-    [Fact(Timeout = 60_000)]
-    public async Task Overview_OlderPeriodAlertResponsesCannotOverwriteTheCurrentPeriodCard()
-    {
-        using var temp = NewTemp();
-        var readModel = new FixtureReadModel(Snapshot([], [], []));
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readModel));
-        PlaywrightBrowserPath.ConfigureDefault();
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
-        var stale = Alert(AlertA, "session-stale", "trace-stale", "span-stale", "open");
-        var fresh = Alert(AlertB, "session-fresh", "trace-fresh", "span-fresh", "open") with
-        {
-            Rule = stale.Rule with { RuleId = "fresh-seven-day-rule", Title = "Fresh seven-day alert" },
-        };
-        var staleStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var staleFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseStale = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await page.RouteAsync("**/api/alert-center/v1/alerts?*", async route =>
-        {
-            var query = new Uri(route.Request.Url).Query;
-            var alert = query.Contains("period=7d", StringComparison.Ordinal) ? fresh : stale;
-            var items = query.Contains("severity=warning", StringComparison.Ordinal)
-                ? Array.Empty<AlertCenterAlert>()
-                : [alert];
-            var response = Snapshot(items, [], [], totalCount: items.Length);
-            if (query.Contains("period=today", StringComparison.Ordinal))
-            {
-                staleStarted.TrySetResult();
-                await releaseStale.Task;
-                try
-                {
-                    await route.FulfillAsync(JsonResponse(response));
-                }
-                catch (PlaywrightException)
-                {
-                    // The newer period aborts every old-period request.
-                }
-                finally
-                {
-                    staleFinished.TrySetResult();
-                }
-                return;
-            }
-            await route.FulfillAsync(JsonResponse(response));
-        });
-
-        try
-        {
-            await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-            await staleStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
-            await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("Fresh seven-day alert");
-            await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
-            await Expect(page.Locator("#overview-alert-body a")).ToHaveAttributeAsync("href", $"/alerts?alert={AlertB}&period=7d");
-            releaseStale.TrySetResult();
-            await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
-
-            await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("Fresh seven-day alert");
-            await Expect(page.Locator("#overview-alert-body")).Not.ToContainTextAsync("High tool failure ratio");
-            await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
-        }
-        finally
-        {
-            releaseStale.TrySetResult();
-        }
-    }
-
     private const string AlertA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string AlertB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const string AlertC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -825,13 +699,6 @@ public sealed class AlertCenterPlaywrightTests
         StartSessionOtelEnrichment = false,
         StartRetentionCleanupWorker = false,
         UseUserSecrets = false,
-    };
-
-    private static RouteFulfillOptions JsonResponse(AlertCenterSnapshot value) => new()
-    {
-        Status = 200,
-        ContentType = "application/json",
-        Body = JsonSerializer.Serialize(value, AlertCenterJson),
     };
 
     private static RouteFulfillOptions JsonResponseV2(AlertCenterSnapshot value)
@@ -1079,52 +946,6 @@ public sealed class AlertCenterPlaywrightTests
                         ? null
                         : $"/costs?session_id={Uri.EscapeDataString(member.SessionId)}&estimate_id={Uri.EscapeDataString(member.EstimateId)}"))
                     .ToArray());
-    }
-
-    private sealed class FilteringFixtureReadModel(
-        IReadOnlyList<AlertCenterAlert> alerts,
-        IReadOnlyList<AlertCenterRecurringGroup> recurring) : IAlertCenterReadModel
-    {
-        internal IReadOnlyList<AlertCenterAlert> Alerts { get; set; } = alerts;
-        internal IReadOnlyList<AlertCenterRecurringGroup> Recurring { get; set; } = recurring;
-        internal string SnapshotState { get; set; } = "complete";
-
-        public AlertCenterReadResult Read(AlertCenterQuery query)
-        {
-            var filtered = Alerts
-                .Where(item => query.State is null || item.Lifecycle.State == query.State)
-                .Where(item => query.Severity is null || item.Severity == query.Severity)
-                .Where(item => query.RuleId is null || item.Rule.RuleId == query.RuleId)
-                .Where(item => query.SourceSurface is null || item.Source.Surface == query.SourceSurface)
-                .ToArray();
-            var snapshot = Snapshot(
-                filtered.Skip(query.Offset).Take(query.Limit).ToArray(),
-                query.Severity is null ? Recurring : [],
-                [],
-                SnapshotState,
-                SnapshotState == "incomplete" ? null : 0,
-                query.Offset,
-                query.Limit,
-                filtered.LongLength);
-            return new(AlertCenterReadStatus.Success, snapshot with
-            {
-                Query = new(
-                    query.AlertId,
-                    query.SessionId,
-                    query.TraceId,
-                    query.Severity,
-                    query.State,
-                    query.RuleId,
-                    query.SourceSurface,
-                    query.Repository,
-                    query.Workspace,
-                    query.Completeness,
-                    query.From.ToString("yyyy-MM-dd"),
-                    query.To.ToString("yyyy-MM-dd"),
-                    query.Offset,
-                    query.Limit),
-            });
-        }
     }
 
     private sealed class PagingFixtureReadModel : IAlertCenterReadModel
