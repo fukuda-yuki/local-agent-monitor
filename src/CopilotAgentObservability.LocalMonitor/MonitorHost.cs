@@ -80,7 +80,6 @@ internal static class MonitorHost
         "/monitor-sanitized-import.js",
         "/monitor-shell.js",
         "/monitor-span-detail.js",
-        "/monitor-tracelist.js",
         "/monitor-waterfall.js",
         "/local-monitor-v1-shared.js",
         "/local-monitor-repositories.js",
@@ -776,10 +775,11 @@ internal static class MonitorHost
             var localMonitorV1DetailPath = LocalMonitorV1SessionDetailRoutes.IsPath(context.Request.Path);
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
+            var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
                 || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath
-                || localMonitorV1HumanPath || localMonitorV1HumanAsset)
+                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -848,7 +848,7 @@ internal static class MonitorHost
                 {
                     await LocalMonitorV1SessionDetailRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
-                else if (!options.SanitizedOnly && localMonitorV1HumanPath)
+                else if (!options.SanitizedOnly && (localMonitorV1HumanPath || retiredTraceListPath))
                 {
                     await LocalMonitorV1HumanRoutes.InvalidHostAsync(context);
                 }
@@ -883,6 +883,11 @@ internal static class MonitorHost
             var humanDetailService = app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>();
             app.Use(async (context, next) =>
             {
+                if (LocalMonitorV1HumanRoutes.IsRetiredTraceList(context))
+                {
+                    await LocalMonitorV1HumanRoutes.RetireTraceListAsync(context);
+                    return;
+                }
                 if (await LocalMonitorV1HumanRoutes.TryDispatchUnavailableAssetAsync(
                         context,
                         app.Environment.WebRootFileProvider)) return;

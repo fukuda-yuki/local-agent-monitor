@@ -1,0 +1,127 @@
+@model CopilotAgentObservability.LocalMonitor.Pages.LocalMonitorV1PageModel
+@{
+    var repositoryId = Model.ExplorerScope == "repository" ? Model.Path?.RepositoryId : null;
+}
+<section class="local-monitor-session-explorer"
+         id="local-monitor-session-explorer"
+         data-session-explorer
+         data-explorer-scope="@Model.ExplorerScope"
+         @if (repositoryId is not null)
+         {
+             <text>data-repository-id="@repositoryId"</text>
+         }
+         aria-labelledby="session-explorer-title">
+    <header class="local-monitor-session-explorer-header">
+        <div>
+            <h1 id="session-explorer-title">@Model.ExplorerHeading</h1>
+            <p><span id="session-result-count">読み込み中</span></p>
+        </div>
+        <button type="button" id="session-compare-mode">比較を作成</button>
+    </header>
+
+    <form id="session-explorer-filters" class="local-monitor-session-explorer-filters" role="search">
+        <label>検索 <input id="session-search" type="search" autocomplete="off" /></label>
+        <label>モデル（1行1件） <textarea id="session-model" rows="1" autocomplete="off"></textarea></label>
+        <details class="local-monitor-session-filter-menu">
+            <summary>期間</summary>
+            <div>
+                <label>開始 (UTC) <input id="session-from" type="text" autocomplete="off" placeholder="2026-01-01T00:00:00.0000000+00:00" /></label>
+                <label>終了 (UTC) <input id="session-to" type="text" autocomplete="off" placeholder="2026-02-01T00:00:00.0000000+00:00" /></label>
+            </div>
+        </details>
+        <details class="local-monitor-session-filter-menu">
+            <summary>取得元</summary>
+            <div>
+                <label for="session-source">取得元を選択</label>
+                <select id="session-source" multiple size="5">
+                    <option value="claude-code">Claude Code</option>
+                    <option value="copilot-cli">Copilot CLI</option>
+                    <option value="copilot-sdk">Copilot SDK</option>
+                    <option value="hook-unknown">Hook (不明)</option>
+                    <option value="vscode">VS Code</option>
+                </select>
+            </div>
+        </details>
+        <details class="local-monitor-session-filter-menu">
+            <summary>状態</summary>
+            <div>
+                <label for="session-status">状態を選択</label>
+                <select id="session-status" multiple size="4">
+                <option value="active">実行中</option>
+                <option value="completed">完了</option>
+                <option value="failed">失敗</option>
+                <option value="unknown">不明</option>
+                </select>
+            </div>
+        </details>
+        <details class="local-monitor-session-filter-menu local-monitor-session-presence-menu">
+            <summary>記録の有無</summary>
+            <div>
+                <label>スキル <select id="session-has-skill"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
+                <label>サブエージェント <select id="session-has-subagent"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
+                <label>エラー <select id="session-has-error"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
+                <label>再試行 <select id="session-has-retry"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
+            </div>
+        </details>
+        <label>表示件数
+            <select id="session-limit">
+                <option value="">50</option>
+                <option value="25">25</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+            </select>
+        </label>
+        <label><input id="session-include-archived" type="checkbox" /> アーカイブ済みを含む</label>
+        <button type="submit">絞り込む</button>
+    </form>
+
+    <p id="session-explorer-status" role="status" aria-live="polite">セッションを読み込んでいます。</p>
+    <div class="local-monitor-session-table-region" tabindex="0" aria-label="セッション一覧">
+        <table>
+            <thead>
+                <tr>
+                    <th scope="col" data-compare-column hidden>比較対象</th>
+                    <th scope="col">セッション</th>
+                    <th scope="col">状態</th>
+                    <th scope="col">要約</th>
+                    <th scope="col">トークン合計</th>
+                    <th scope="col">開始</th>
+                    <th scope="col" class="local-monitor-session-actions-heading"><span class="visually-hidden">操作</span></th>
+                </tr>
+            </thead>
+            <tbody id="session-explorer-rows"></tbody>
+        </table>
+    </div>
+    <div class="local-monitor-session-pagination">
+        <button type="button" id="session-load-more" hidden>次のページ</button>
+    </div>
+
+    <aside id="session-compare-bar" class="local-monitor-session-compare-bar" hidden aria-label="比較対象の選択">
+        <p><span data-cohort-count="a">基準 0件</span> / <span data-cohort-count="b">比較対象 0件</span></p>
+        <div id="session-compare-validation" class="local-monitor-session-compare-validation" role="status" aria-live="polite">
+            <span data-compare-validation-primary>基準と比較対象を1件以上選択してください。</span>
+            <details data-compare-validation-details hidden>
+                <summary>選択条件を確認</summary>
+                <ul data-compare-validation-list></ul>
+            </details>
+        </div>
+        <button type="button" id="session-compare-cancel">キャンセル</button>
+        <button type="button" id="session-compare-preview" aria-disabled="true" aria-describedby="session-compare-validation">比較を確認</button>
+    </aside>
+
+    <dialog id="session-assignment-dialog" class="local-monitor-session-assignment-dialog" aria-labelledby="session-assignment-title">
+        <form id="session-assignment-form" autocomplete="off">
+            <h2 id="session-assignment-title">リポジトリを割り当てる</h2>
+            <p id="session-assignment-status" role="status" aria-live="polite"></p>
+            <fieldset>
+                <legend>割り当て先</legend>
+                <div id="session-assignment-choices" class="local-monitor-session-assignment-choices"></div>
+            </fieldset>
+            <button type="button" id="session-assignment-load-more" hidden>候補をさらに読み込む</button>
+            <div class="local-monitor-session-assignment-actions">
+                <button type="button" id="session-assignment-cancel">キャンセル</button>
+                <button type="submit" id="session-assignment-submit" disabled>割り当てる</button>
+            </div>
+        </form>
+    </dialog>
+</section>

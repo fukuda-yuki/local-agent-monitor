@@ -43,12 +43,12 @@
     },
     {
       "surface_id": "monitor-ui-prompt-boundary",
-      "operations": ["GET /", "GET /traces", "GET /traces/{traceId}", "prompt label rendering", "diagnostics UI"],
+        "operations": ["GET / Repository selection", "GET Session Explorer scopes", "retired /traces list", "GET /traces/{traceId}", "prompt label rendering", "diagnostics UI"],
       "owner": "Local Monitor UI / D032 D039 D042",
       "requirement_level": "required",
       "applicability": "applicable",
       "profiles": ["raw-default", "content-disabled", "content-enabled", "sanitized-only"],
-      "automated_test_filters": ["MonitorRawViewTests", "MonitorTraceListPlaywrightTests", "MonitorTraceDetailTests", "MonitorOverviewPlaywrightTests", "SourceDiagnosticsPlaywrightTests"]
+        "automated_test_filters": ["MonitorRawViewTests", "LocalMonitorV1RepositorySelectionPlaywrightTests", "LocalMonitorV1SessionExplorerPlaywrightTests", "LocalMonitorV1RetiredTraceListRouteTests", "MonitorTraceDetailTests", "SourceDiagnosticsPlaywrightTests"]
     },
     {
       "surface_id": "monitor-raw-routes",

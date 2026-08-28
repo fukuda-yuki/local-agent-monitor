@@ -487,12 +487,12 @@ Raw / PII exposure follows the Local Ingestion Monitor boundary in
 prompt) and PII (`user.id` / `user.email`) are shown **by default**
 (server-rendered, inert text) on raw-bearing surfaces. The trace-detail page
 renders a bounded inline raw preview and links to `GET /traces/{rawRecordId}/raw`
-for the full single-record payload by default. The dashboard (`/`) and trace-list
-(`/traces`) pages additionally render a single representative user-prompt label
-per trace (server-side extracted from the trace's raw OTLP payload, truncated,
-inert text) so a trace is identifiable by what the user asked (D032); only that
-short label is raw and `/api/monitor/*` / SSE still never carry it. The Sprint12
-Flow Chart / Span Tree views are plain DOM over the sanitized spans API (the
+for the full single-record payload by default. The former prompt-bearing
+dashboard and trace-list are retired: `/` is Repository selection, while exact
+one-segment `/traces` and `/traces/` return empty no-store `404` for every
+method, case variant and query. Technical `/traces/{traceId}` descendants and
+the frozen `/api/monitor/trace-list` remain. The Sprint12 Flow Chart / Span Tree
+views are plain DOM over the sanitized spans API (the
 Cytoscape / dagre vendored dependency is removed, D033). `/api/monitor/*` and SSE
 never carry raw / PII. The installed metadata-only tab shell and shortened
 TraceId fallback are pre-v1 history. Under Local Monitor v1,

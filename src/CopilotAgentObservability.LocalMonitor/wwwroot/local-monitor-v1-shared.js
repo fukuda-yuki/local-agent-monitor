@@ -220,14 +220,19 @@
     closeSettings: (replace = false) => change({ settings: null }, replace),
   });
 
+  const formatCount = value => value.toLocaleString("ja-JP");
   const factText = Object.freeze({
-    observed_positive: value => [`${value}件を記録`, null, true],
+    observed_positive: value => [`${formatCount(value)}件を記録`, null, true],
     observed_zero: () => ["0件", null, true],
     not_observed: () => ["今回の記録にはありません", "この記録では呼び出しを確認できませんでした。実際に使われなかったとは断定できません。", false],
     unsupported: () => ["この取得元では記録できません", null, false],
     capture_gap: () => ["記録が一部欠けています", null, false],
     projection_invalid: () => ["記録が一部欠けています", null, false],
-    certification_pending: value => [`${value}件を記録`, "安定して取得できるか未確認です。", true],
+    certification_pending: value => [
+      value === null || value === undefined ? "安定して取得できるか未確認です" : `${formatCount(value)}件を記録`,
+      value === null || value === undefined ? null : "安定して取得できるか未確認です。",
+      value !== null && value !== undefined,
+    ],
     raw_not_captured: () => ["内容は記録されていません", null, false],
     raw_expired: () => ["保存期間を過ぎたため表示できません", null, false],
     raw_deleted: () => ["保存期間を過ぎたため表示できません", null, false],
@@ -289,9 +294,14 @@
     const proof = fact.hasCompleteCoverageProof;
     if (proof !== undefined && typeof proof !== "boolean") throw new TypeError("invalid fact state");
     if (fact.state !== "observed_zero" && proof === true) throw new TypeError("invalid fact state");
-    if ((fact.state === "observed_positive" || fact.state === "certification_pending")
-        && (!Number.isSafeInteger(count) || count <= 0)) throw new TypeError("invalid fact state");
-    if (fact.state === "observed_zero" && (!Number.isSafeInteger(count) || count !== 0)) {
+    const isCount = value => typeof value === "bigint" ? value >= 0n : Number.isSafeInteger(value) && value >= 0;
+    const isPositiveCount = value => isCount(value) && value !== 0 && value !== 0n;
+    if (fact.state === "observed_positive" && !isPositiveCount(count)) {
+      throw new TypeError("invalid fact state");
+    }
+    if (fact.state === "certification_pending" && count !== null && count !== undefined
+        && !isPositiveCount(count)) throw new TypeError("invalid fact state");
+    if (fact.state === "observed_zero" && (!isCount(count) || count !== 0 && count !== 0n)) {
       throw new TypeError("invalid fact state");
     }
     if (fact.state === "observed_zero" && proof !== true) {
@@ -305,6 +315,7 @@
     if (["not_observed", "unsupported", "capture_gap", "projection_invalid", "raw_not_captured", "raw_expired", "raw_deleted", "raw_read_denied", "inconsistent"].includes(fact.state)
         && count !== null && count !== undefined) throw new TypeError("invalid fact state");
     const [primary, fixedDetail, allowsDerivedVisualization] = factText[fact.state](count);
+    target.dataset.factState = fact.state.replaceAll("_", "-");
     const details = [];
     if (fixedDetail) details.push(sentence(fixedDetail));
     if (source) details.push(`取得元: ${sentence(source)}`);
@@ -323,14 +334,79 @@
     return Object.freeze({ primaryText: primary, detailText: detail, allowsDerivedVisualization });
   }
 
+  function sessionCollectionPresentation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).length !== 2 || Object.keys(value)[0] !== "state"
+        || Object.keys(value)[1] !== "count") throw new TypeError("invalid session fact");
+    const base = { recordedCount: null, sourceText: null, reasonText: null };
+    switch (value.state) {
+      case "recorded":
+        if (typeof value.count !== "bigint" || value.count < 0n) throw new TypeError("invalid session fact");
+        return value.count > 0n
+          ? { ...base, state: "observed_positive", recordedCount: value.count }
+          : {
+              ...base, state: "observed_zero", recordedCount: 0n, hasCompleteCoverageProof: true,
+              sourceText: "セッション記録", reasonText: "対象の記録範囲は完了しています",
+            };
+      case "not_observed": return { ...base, state: "not_observed" };
+      case "source_unsupported":
+        return { ...base, state: "unsupported", sourceText: "セッション取得元", reasonText: "この項目は取得元で記録されません" };
+      case "capture_gap": return { ...base, state: "capture_gap", reasonText: "この項目の記録が一部欠けています" };
+      case "certification_pending": return { ...base, state: "certification_pending" };
+      case "not_captured": return { ...base, state: "raw_not_captured", reasonText: "この項目は記録されていません" };
+      case "expired": return { ...base, state: "raw_expired", reasonText: "この項目は保存期間を過ぎています" };
+      case "redacted": return { ...base, state: "raw_not_captured", reasonText: "この項目は表示用に記録されていません" };
+      case "malformed": return { ...base, state: "projection_invalid", reasonText: "記録された形式を安全に確認できません" };
+      case "oversized": return { ...base, state: "projection_invalid", reasonText: "記録が表示可能な範囲を超えています" };
+      case "projection_invalid": return { ...base, state: "projection_invalid", reasonText: "この項目の記録を検証できません" };
+      case "inconsistent": return { ...base, state: "inconsistent", reasonText: "この項目の値を確定できません" };
+      default: throw new TypeError("invalid session fact");
+    }
+  }
+
+  const captureNotePresentations = Object.freeze({
+    raw_content_not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "内容は記録されていません" },
+    raw_content_expired: { state: "raw_expired", recordedCount: null, reasonText: "内容の保存期間は終了しています" },
+    source_unsupported: { state: "unsupported", recordedCount: null, sourceText: "セッション取得元", reasonText: "この記録は取得元で提供されません" },
+    capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "この記録が一部欠けています" },
+    certification_pending: { state: "certification_pending", recordedCount: null },
+    projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "この記録を検証できません" },
+    token_inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "トークン値に整合しない項目があります" },
+    cache_inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "キャッシュ値に整合しない項目があります" },
+  });
+
+  const sessionSourceLabels = Object.freeze({
+    "copilot-sdk": "Copilot SDK",
+    "copilot-cli": "Copilot CLI",
+    vscode: "VS Code",
+    "hook-unknown": "Hook（不明）",
+    "claude-code": "Claude Code",
+  });
+
   if (routeKind) {
     history.replaceState({ localMonitorV1: initialState() }, "", buildUrl(initialState()));
     window.addEventListener("popstate", () => {
+      document.dispatchEvent(new Event("cao-route-popstate"));
       document.dispatchEvent(new CustomEvent("cao-route-state", { detail: current() }));
     });
     window.LocalMonitorV1History = api;
     window.LocalMonitorV1Paths = pathApi;
     document.dispatchEvent(new CustomEvent("cao-route-state", { detail: current() }));
   }
-  window.LocalMonitorV1FactState = Object.freeze({ render: renderFactState });
+  window.LocalMonitorV1FactState = Object.freeze({
+    render: renderFactState,
+    renderSessionCollection(target, value) {
+      return renderFactState(target, sessionCollectionPresentation(value));
+    },
+    renderSessionCaptureNote(target, note) {
+      const presentation = captureNotePresentations[note];
+      if (!presentation) throw new TypeError("invalid session capture note");
+      return renderFactState(target, presentation);
+    },
+    sessionSourceLabel(source) {
+      const label = sessionSourceLabels[source];
+      if (!label) throw new TypeError("invalid session source");
+      return label;
+    },
+  });
 })();

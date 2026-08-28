@@ -408,11 +408,11 @@ Raw access (default-on):
   links to the full single-record view, while `GET /traces/{rawRecordId}/raw`
   renders one full raw record. Both are server-rendered as inert text. There is
   no JSON raw API.
-- the dashboard (`/`) and trace-list (`/traces`) pages also render a single
-  representative **user-prompt label per trace** by default (extracted
-  server-side from the trace's raw OTLP payload, truncated, inert text) so a
-  trace is identifiable by what the user asked (D032); only this short label is
-  raw, all other columns stay sanitized metadata.
+- the former prompt-bearing dashboard and trace-list do not remain raw-store
+  readers. `/` is Repository selection; exact one-segment `/traces` and
+  `/traces/` are empty no-store `404` for every method, case variant and query.
+  `/traces/{traceId}` and its exact technical descendants retain their owners,
+  and `/api/monitor/trace-list` remains a frozen sanitized machine endpoint.
 - the installed metadata-only dashboard / trace-list fallback is pre-v1
   history. Local Monitor v1 `--sanitized-only` composes a receiver-only host:
   no Razor Pages, human static assets, human routes, or

@@ -71,7 +71,9 @@ public sealed class LocalMonitorV1HumanRouteTests
         get
         {
             var data = new TheoryData<string>();
-            foreach (var path in ExactPrimaryPathValues.Where(path => path != "/")) data.Add(path);
+            foreach (var path in ExactPrimaryPathValues.Where(path =>
+                         path == $"/sessions/{SessionId}"
+                         || path == $"/repositories/{RepositoryId}/comparisons/{ComparisonId}")) data.Add(path);
             return data;
         }
     }
@@ -448,17 +450,21 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     [Fact]
-    public async Task RawDefault_ServesOnlyThePhysicalSharedAssetWithNoStore()
+    public async Task RawDefault_ServesIntegratedPhysicalAssetsWithNoStore()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
 
         using var shared = await host.Client.GetAsync("/local-monitor-v1-shared.js");
-        using var future = await host.Client.GetAsync("/local-monitor-explorer.js");
+        using var explorer = await host.Client.GetAsync("/local-monitor-explorer.js");
+        using var future = await host.Client.GetAsync("/local-monitor-future.js");
 
         Assert.Equal(HttpStatusCode.OK, shared.StatusCode);
         Assert.Equal("no-store", shared.Headers.CacheControl?.ToString());
         Assert.Contains("LocalMonitorV1History", await shared.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, explorer.StatusCode);
+        Assert.Equal("no-store", explorer.Headers.CacheControl?.ToString());
+        Assert.Contains("local-monitor-session-search.request.v1", await explorer.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.NotFound, future.StatusCode);
         Assert.Equal(0, future.Content.Headers.ContentLength);
         Assert.Null(future.Content.Headers.ContentType);
@@ -688,8 +694,13 @@ public sealed class LocalMonitorV1HumanRouteTests
     {
         public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
             LocalRepositoryScopeRequest request,
-            CancellationToken cancellationToken) =>
-            ValueTask.FromResult(new LocalRepositoryScopeSnapshot(request, [], []));
+            CancellationToken cancellationToken)
+        {
+            IReadOnlyList<LocalRepositoryCatalogSnapshot> repositories = request.ScopeKind == LocalRepositoryScopeKind.Repository
+                ? [new(request.RepositoryId!, "対象リポジトリ", 0, null, 0, LocalArchiveState.Active, 0)]
+                : [];
+            return ValueTask.FromResult(new LocalRepositoryScopeSnapshot(request, repositories, []));
+        }
     }
 
     private sealed class ThrowingScopeService(string error) : ILocalRepositoryScopeSnapshotService
