@@ -30,11 +30,11 @@ internal static class LocalMonitorV1SessionDetailRoutes
         try
         {
             var snapshot=await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Content,sessionId!,NodeId:nodeId!,ContentPart:part,ExpectedWorkspaceRevision:revision),context.RequestAborted);
-            if(!StringComparer.Ordinal.Equals(revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}
             if(!snapshot.Detail.Nodes.Any(node=>node.NodeId==nodeId)){await Error(context,404,"node_not_found");return;}
             var locator=snapshot.Detail.Content.SingleOrDefault(c=>c.NodeId==nodeId&&c.Part==part);
             if(locator is null){await Error(context,404,"raw_content_not_captured");return;}
             if(locator.State!="available"){await Error(context,locator.State switch{"expired" or "deleted"=>410,"read_denied"=>403,"oversized"=>413,"invalid"=>503,_=>404},locator.State switch{"expired"=>"raw_content_expired","deleted"=>"raw_content_deleted","read_denied"=>"raw_content_read_denied","oversized"=>"raw_content_too_large","invalid"=>"local_monitor_ui_unavailable",_=>"raw_content_not_captured"});return;}
+            if(!StringComparer.Ordinal.Equals(revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.BeforeRetentionGrant);
             var read=await reader.ReadAsync(sessionId!,nodeId!,locator,context.RequestAborted);
             if(read.Disposition!=LocalWorkspaceNodeContentReadDisposition.Granted){var mapped=read.Disposition switch{LocalWorkspaceNodeContentReadDisposition.Busy=>(503,"persistence_busy"),LocalWorkspaceNodeContentReadDisposition.Stale=>(409,"workspace_snapshot_stale"),LocalWorkspaceNodeContentReadDisposition.Expired=>(410,"raw_content_expired"),LocalWorkspaceNodeContentReadDisposition.Deleted=>(410,"raw_content_deleted"),LocalWorkspaceNodeContentReadDisposition.ReadDenied=>(403,"raw_content_read_denied"),_=>(503,"local_monitor_ui_unavailable")};await Error(context,mapped.Item1,mapped.Item2);return;}
@@ -48,8 +48,9 @@ internal static class LocalMonitorV1SessionDetailRoutes
             var terminal=lease.TrySealRawResponse();
             if(terminal!=LocalWorkspaceNodeContentTerminalResult.Sealed){await Error(context,terminal==LocalWorkspaceNodeContentTerminalResult.Lost?409:503,terminal==LocalWorkspaceNodeContentTerminalResult.Lost?"raw_content_lease_lost":"persistence_busy");return;}
             checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.AfterSuccessfulSealBeforeWrite);
-            context.Response.StatusCode=200;context.Response.ContentType="text/plain; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.Headers["X-Local-Monitor-Schema-Version"]="local-monitor-node-content.response.v1";context.Response.ContentLength=bytes.Length;
-            if(!HttpMethods.IsHead(context.Request.Method)){checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.DuringResponseWrite);await context.Response.Body.WriteAsync(bytes,context.RequestAborted);}
+            var entity=LocalMonitorV1SessionDetailApplication.SerializeContent(snapshot,nodeId!,part,locator,bytes);
+            context.Response.StatusCode=200;context.Response.ContentType="application/json; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.Headers["X-Local-Monitor-Schema-Version"]="local-monitor-node-content.response.v2";context.Response.ContentLength=entity.Length;
+            if(!HttpMethods.IsHead(context.Request.Method)){checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.DuringResponseWrite);await context.Response.Body.WriteAsync(entity,context.RequestAborted);}
         }
         catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error switch{"session_not_found"=>404,"workspace_too_large" or "workspace_snapshot_stale"=>409,_=>503},e.Error);}
         catch(LocalRepositoryScopeSnapshotException){await Error(context,503,"persistence_busy");}

@@ -74,22 +74,23 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var registryIdentity = pinnedRegistry.CanonicalIdentity;
         var revision = await ReadCanonicalRevisionInput(
             connection, transaction, sessionId, acceptedAt, skillProjection, registryIdentity, token);
-        if (request.ExpectedWorkspaceRevision is not null)
-        {
-            if (revisionSession is null || !string.Equals(
-                    request.ExpectedWorkspaceRevision,
-                    SqliteLocalRepositoryScopeSnapshotService.ComputeRevisionForTest(revisionSession, revision, registryIdentity),
-                    StringComparison.Ordinal))
-                throw new LocalWorkspaceSessionDetailException("workspace_snapshot_stale");
-        }
         var materializableSkillNodeIds = await ReadMaterializableCurrentSkillNodeIds(
             connection, transaction, sessionId, skillProjection, token);
         await ValidateBounds(connection, transaction, sessionId, materializableSkillNodeIds, token);
+        var revisionMatches = request.ExpectedWorkspaceRevision is null || revisionSession is not null && string.Equals(
+            request.ExpectedWorkspaceRevision,
+            SqliteLocalRepositoryScopeSnapshotService.ComputeRevisionForTest(revisionSession, revision, registryIdentity),
+            StringComparison.Ordinal);
+        if (!revisionMatches && request.Kind != LocalRepositorySessionDetailRequestKind.Content)
+        {
+            throw new LocalWorkspaceSessionDetailException("workspace_snapshot_stale");
+        }
         await ValidateCurrentSkillOwnerGraph(
             connection, transaction, sessionId, acceptedAt, skillProjection, pinnedRegistry.CanonicalIdentity, token);
         await ValidateSemanticOwnerGraphs(connection, transaction, sessionId, token);
         await ValidateCoreOwnerGraph(connection, transaction, sessionId, token);
-        if (!LocalWorkspaceContentAuthority.ValidateSessionGraph(connection, transaction, sessionId, acceptedAt))
+        var contentGraphValid = LocalWorkspaceContentAuthority.ValidateSessionGraph(connection, transaction, sessionId, acceptedAt);
+        if (!contentGraphValid && request.Kind != LocalRepositorySessionDetailRequestKind.Content)
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
@@ -129,8 +130,28 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
             ? await ReadSummaryContent(connection, transaction, sessionId, acceptedAt, token)
             : await ReadContent(connection, transaction, nodeIds, acceptedAt, token);
+        if (request.Kind == LocalRepositorySessionDetailRequestKind.Content)
+        {
+            var terminalContent = await ReadTerminalContent(connection, transaction, request.NodeId!, request.ContentPart!, acceptedAt, token);
+            if (terminalContent is not null)
+                content = [terminalContent];
+            var selectedContent = content.SingleOrDefault(item => item.NodeId == request.NodeId && item.Part == request.ContentPart);
+            if (contentGraphValid && !revisionMatches)
+                throw new LocalWorkspaceSessionDetailException("workspace_snapshot_stale");
+            if (!contentGraphValid && selectedContent?.State is not ("invalid" or "expired" or "deleted" or "read_denied"))
+                throw new LocalWorkspaceSessionDetailException(!revisionMatches ? "workspace_snapshot_stale" : "local_monitor_ui_unavailable");
+        }
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+    }
+
+    private async Task<LocalWorkspaceContentAvailability?> ReadTerminalContent(SqliteConnection c, SqliteTransaction t,
+        string nodeId, string part, DateTimeOffset acceptedAt, CancellationToken token)
+    {
+        using var command=c.CreateCommand();command.Transaction=t;
+        command.CommandText=$"SELECT c.node_id,c.part,{LocalWorkspaceContentAuthority.EffectiveAvailabilitySql},c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id AND e.session_id=n.session_id LEFT JOIN session_event_content s ON s.event_id=e.event_id LEFT JOIN retention_items i ON i.item_id=c.retention_item_id LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id WHERE c.node_id=$node_id AND c.part=$part;";
+        command.Parameters.AddWithValue("$now",Canonical(acceptedAt));command.Parameters.AddWithValue("$node_id",nodeId);command.Parameters.AddWithValue("$part",part);
+        using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var value=Content(reader);return value.State is "deleted" or "expired" or "read_denied"?value:null;
     }
 
     private static bool IsCurrentSkillNode(string? nodeId, SkillProjectionCurrentInvocationProjection? projection) =>

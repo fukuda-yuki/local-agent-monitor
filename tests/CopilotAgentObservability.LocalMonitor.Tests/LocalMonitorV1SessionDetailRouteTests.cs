@@ -39,15 +39,14 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var get = await host.Client.GetAsync(path);
         using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
 
-        var expected = System.Text.Encoding.UTF8.GetBytes("Review the retained instruction");
+        const string expected = "Review the retained instruction";
         Assert.Equal(HttpStatusCode.OK, get.StatusCode);
-        Assert.Equal(expected, await get.Content.ReadAsByteArrayAsync());
-        Assert.Equal("text/plain; charset=utf-8", get.Content.Headers.ContentType?.ToString());
-        Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
+        Assert.Equal(expected, (await ContentEntity(get)).GetProperty("text").GetString());
+        Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
         Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
-        Assert.Equal("local-monitor-node-content.response.v1", get.Headers.GetValues("X-Local-Monitor-Schema-Version").Single());
+        Assert.Equal("local-monitor-node-content.response.v2", get.Headers.GetValues("X-Local-Monitor-Schema-Version").Single());
         Assert.Equal(HttpStatusCode.OK, head.StatusCode);
-        Assert.Equal(expected.Length, head.Content.Headers.ContentLength);
+        Assert.Equal(get.Content.Headers.ContentLength, head.Content.Headers.ContentLength);
         Assert.Empty(await head.Content.ReadAsByteArrayAsync());
     }
 
@@ -81,12 +80,12 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
         using var response = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part={part}");
 
-        var expected = System.Text.Encoding.UTF8.GetBytes(expectedText);
         var actual = await response.Content.ReadAsByteArrayAsync();
         Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode}: {System.Text.Encoding.UTF8.GetString(actual)}");
-        Assert.Equal(expected, actual);
+        using var entity = JsonDocument.Parse(actual);
+        Assert.Equal(expectedText, entity.RootElement.GetProperty("text").GetString());
         using var verification = Open(temp);
-        Assert.Equal(expected.Length, long.Parse(Scalar(verification,
+        Assert.Equal(System.Text.Encoding.UTF8.GetByteCount(expectedText), long.Parse(Scalar(verification,
             "SELECT CAST(selected_utf8_bytes AS TEXT) FROM local_workspace_node_content_refs WHERE part=$execution AND source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId, part), System.Globalization.CultureInfo.InvariantCulture));
     }
 
@@ -115,7 +114,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=event_content");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(contentJson, await response.Content.ReadAsStringAsync());
+        Assert.Equal(contentJson, (await ContentEntity(response)).GetProperty("text").GetString());
     }
 
     [Fact]
@@ -248,8 +247,12 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var summaryResponse=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");using var summary=JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());var revision=summary.RootElement.GetProperty("workspace_revision").GetString();
         using var response=await host.Client.SendAsync(new(new HttpMethod(method), $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part={part}"));
         Assert.Equal(expectedStatus,response.StatusCode);
-        Assert.Equal(expectedStatus == HttpStatusCode.OK ? size : 33, response.Content.Headers.ContentLength);
-        if(expectedStatus==HttpStatusCode.OK)Assert.Equal(method == "HEAD" ? 0 : size,(await response.Content.ReadAsByteArrayAsync()).Length);else Assert.Equal(method == "HEAD" ? "" : "{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
+        if(expectedStatus==HttpStatusCode.OK)
+        {
+            if(method=="HEAD") Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+            else Assert.Equal(size,System.Text.Encoding.UTF8.GetByteCount((await ContentEntity(response)).GetProperty("text").GetString()!));
+        }
+        else Assert.Equal(method == "HEAD" ? "" : "{\"error\":\"raw_content_too_large\"}",await response.Content.ReadAsStringAsync());
     }
 
     [Theory]
@@ -386,10 +389,9 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
         releaseWrite.Set();
         using var response = await responseTask;
-        var expected = System.Text.Encoding.UTF8.GetBytes(marker);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(expected.Length, response.Content.Headers.ContentLength);
-        Assert.Equal(method == "HEAD" ? [] : expected, await response.Content.ReadAsByteArrayAsync());
+        if(method == "HEAD") Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        else Assert.Equal(marker, (await ContentEntity(response)).GetProperty("text").GetString());
         Assert.True(SpinWait.SpinUntil(() =>
         {
             using var proof = Open(temp);
@@ -589,6 +591,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         EnsureProductionProjectionSchemas(temp);
         RefreshContentProjection(temp);
         await using var host = await MonitorTestHost.StartAsync(temp);
+        var revision = await Revision(host.Client);
         if (state is not ("not_captured" or "oversized"))
         {
             using var connection = Open(temp);
@@ -620,7 +623,6 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         string nodeId;
         using (var connection = Open(temp))
             nodeId = Scalar(connection, "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId);
-        var revision = await Revision(host.Client);
         var path = $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction";
 
         await AssertContentErrorParity(host.Client, path, expectedStatus, expectedError);
@@ -630,7 +632,8 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     public async Task ProductionSummaryGetAndHeadMatchTheNonemptyGoldenExactly()
     {
         using var temp = new MonitorTempDirectory();
-        SeedDeterministicSession(temp, full: true);
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
         StabilizeDeterministicContentOwner(temp);
         using var host = await StartProductionDetailRouteAsync(temp);
         RefreshDeterministicFullProjection(temp);
@@ -856,7 +859,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Equal(["no-store"],response.Headers.GetValues("Cache-Control"));
         var bytes=await response.Content.ReadAsByteArrayAsync();
         Assert.Equal(bytes.Length,response.Content.Headers.ContentLength);
-        Assert.Contains("\"schema_version\":\"local-monitor-session-summary.response.v1\"",System.Text.Encoding.UTF8.GetString(bytes),StringComparison.Ordinal);
+        Assert.Contains("\"schema_version\":\"local-monitor-session-summary.response.v2\"",System.Text.Encoding.UTF8.GetString(bytes),StringComparison.Ordinal);
     }
 
     [Fact]
@@ -902,6 +905,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using (var connection = Open(temp))
         using (var transaction = connection.BeginTransaction())
         {
+            LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
             using (var schema = connection.CreateCommand())
             {
                 schema.Transaction = transaction;
@@ -952,9 +956,11 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var fixture = new CurrentInvocationProjectionFixture(databasePath: temp.DatabasePath);
         fixture.SeedMismatchedPair("route-crossing", "Needle-Skill", "91", "a1", "92", "a2");
         fixture.RefreshWorkspace();
-        using var host = await StartProductionDetailRouteAsync(temp, null, null, ensureSchemas: false);
-
         clock.Advance(TimeSpan.FromDays(91));
+        fixture.AdvancePastLatestSdkExpiry("route-crossing");
+        fixture.RefreshWorkspace();
+        using var host = await StartProductionDetailRouteAsync(
+            temp, null, null, ensureSchemas: false, registryAuthority: fixture.RegistryAuthority);
         var sessionId = fixture.SessionId("route-crossing");
         using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary");
         using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());
@@ -1137,10 +1143,9 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
 
         Assert.Equal(HttpStatusCode.OK, get.StatusCode);
-        Assert.Equal(marker, await get.Content.ReadAsStringAsync());
-        Assert.Equal(marker.Length, get.Content.Headers.ContentLength);
+        Assert.Equal(marker, (await ContentEntity(get)).GetProperty("text").GetString());
         Assert.Equal(HttpStatusCode.OK, head.StatusCode);
-        Assert.Equal(marker.Length, head.Content.Headers.ContentLength);
+        Assert.Equal(get.Content.Headers.ContentLength, head.Content.Headers.ContentLength);
         Assert.Empty(await head.Content.ReadAsByteArrayAsync());
     }
 
@@ -1485,10 +1490,12 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         {
             using var connection = new SqliteConnection($"Data Source={databasePath}");
             await connection.OpenAsync(cancellationToken);
+            LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
             using var transaction = connection.BeginTransaction(deferred: true);
+            var contributorRequest = request with { ExpectedWorkspaceRevision = null };
             var detail = await new LocalWorkspaceSessionDetailSnapshotContributor(
                 registryAuthority: FixedSkillRegistryGenerationAuthority.Load()).ReadAsync(
-                    new DirectReadTransaction(connection, transaction), request, cancellationToken);
+                    new DirectReadTransaction(connection, transaction), contributorRequest, cancellationToken);
             return Snapshot(sessionId, detail, revision);
         }
     }
@@ -1515,10 +1522,11 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         MonitorTempDirectory temp,
         Action<LocalMonitorNodeContentRoutePhase>? contentCheckpoint,
         ISessionStore? sessionStore,
-        bool ensureSchemas = true)
+        bool ensureSchemas = true,
+        ISkillRegistryGenerationAuthority? registryAuthority = null)
     {
         if (ensureSchemas) EnsureProductionProjectionSchemas(temp);
-        var service = CreateProductionDetailService(temp);
+        var service = CreateProductionDetailService(temp, registryAuthority);
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
@@ -1528,14 +1536,20 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
 
-    private static SqliteLocalRepositoryScopeSnapshotService CreateProductionDetailService(MonitorTempDirectory temp) =>
+    private static SqliteLocalRepositoryScopeSnapshotService CreateProductionDetailService(
+        MonitorTempDirectory temp,
+        ISkillRegistryGenerationAuthority? registryAuthority = null)
+    {
+        registryAuthority ??= FixedSkillRegistryGenerationAuthority.Load();
+        return
         new(
             temp.DatabasePath,
             new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
             SqliteLocalArchiveFactSnapshotContributor.Instance,
             new LocalWorkspaceSessionDetailSnapshotContributor(
-                registryAuthority: FixedSkillRegistryGenerationAuthority.Load(), timeProvider: temp.TimeProvider),
-            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+                registryAuthority: registryAuthority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: registryAuthority);
+    }
 
     public class CountingSessionStoreProxy : System.Reflection.DispatchProxy
     {
@@ -1618,39 +1632,27 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
     private static void SeedAntiCorrelatedExecutionRoots(SqliteConnection connection, string sessionId, int total)
     {
-        var baseExecution = Scalar(connection, "SELECT execution_id FROM local_workspace_execution_headers WHERE session_id=$session LIMIT 1;", sessionId);
-        var baseRoot = Scalar(connection, "SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND execution_id=$execution LIMIT 1;", sessionId, baseExecution);
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
         using var transaction = connection.BeginTransaction();
         for (var index = 1; index < total; index++)
         {
             var reverse = total - index;
-            var executionId = $"00000000-0000-7000-8000-{reverse:D12}";
             var sourceIdentity = $"anti-{reverse:D4}";
-            var nodeId = LocalWorkspaceProjectionStore.StableNodeId("execution_root", sourceIdentity);
-            var ticks = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(index).UtcTicks;
+            var startedAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(index).ToString("O");
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
-                INSERT INTO local_workspace_execution_headers
-                SELECT $execution,session_id,source_kind,$source,$ordinal,lifecycle,status,model,trace_id,'recorded',$ticks,$ticks,0,
-                       skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
-                       token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points
-                FROM local_workspace_execution_headers WHERE execution_id=$base_execution;
-                INSERT INTO local_workspace_nodes
-                SELECT $node,session_id,$execution,source_kind,$source,$ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,'recorded',$ticks,$ticks,0,
-                       skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
-                       token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,retry_relation_state,recovery_relation_state,trace_id,span_id,event_id,otel_source_identity,sdk_source_identity
-                FROM local_workspace_nodes WHERE node_id=$base_root;
+                INSERT INTO session_runs(run_id,session_id,source_surface,started_at,status)
+                VALUES($source,$session,'copilot-sdk',$started_at,'active');
                 """;
-            command.Parameters.AddWithValue("$execution", executionId);
             command.Parameters.AddWithValue("$source", sourceIdentity);
-            command.Parameters.AddWithValue("$ordinal", index);
-            command.Parameters.AddWithValue("$ticks", ticks);
-            command.Parameters.AddWithValue("$node", nodeId);
-            command.Parameters.AddWithValue("$base_execution", baseExecution);
-            command.Parameters.AddWithValue("$base_root", baseRoot);
+            command.Parameters.AddWithValue("$session", sessionId);
+            command.Parameters.AddWithValue("$started_at", startedAt);
             command.ExecuteNonQuery();
         }
+        LocalWorkspaceProjectionStore.RefreshSessions(
+            connection, transaction, [sessionId], new DateTimeOffset(2026, 1, 1, 1, 0, 0, TimeSpan.Zero),
+            FixedSkillRegistryGenerationAuthority.Load());
         transaction.Commit();
     }
 
@@ -1679,6 +1681,15 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var response = await client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary");
         using var document = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
         return document.RootElement.GetProperty("workspace_revision").GetString()!;
+    }
+
+    private static async Task<JsonElement> ContentEntity(HttpResponseMessage response)
+    {
+        using var document = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        var root = document.RootElement.Clone();
+        Assert.Equal("local-monitor-node-content.response.v2", root.GetProperty("schema_version").GetString());
+        Assert.False(root.GetProperty("truncation").GetBoolean());
+        return root;
     }
 
     private static async Task AssertContentErrorParity(HttpClient client, string path, int status, string error)
@@ -1750,7 +1761,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
                     eventId, sessionId, runId, SessionSourceSurface.VisualStudioCode, ParentEventId: null,
                     TraceId: "00000000000000000000000000000001", Status: "completed",
                     SourceAdapter: sourceAdapter, SourceEventId: "event-detail-golden",
-                    Type: eventType, OccurredAt: observed, SessionContentState.Available,
+                    Type: eventType, OccurredAt: observed, full ? SessionContentState.Available : SessionContentState.NotCaptured,
                     SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
                     SchemaFingerprint: schemaFingerprint, NormalizationVersion: "session-normalization-v1"),
                  new ObservedSessionEvent(
@@ -1908,35 +1919,34 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 
     private static string InsertClonedNodes(SqliteConnection connection, string sessionId, string executionId, string rootId, int childCount)
     {
-        var columns = new List<string>();
-        using (var pragma = connection.CreateCommand())
-        {
-            pragma.CommandText = "PRAGMA table_info(local_workspace_nodes);";
-            using var reader = pragma.ExecuteReader();
-            while (reader.Read()) columns.Add(reader.GetString(1));
-        }
-        var parentId = LocalWorkspaceProjectionStore.StableNodeId("session_event", "late-parent");
+        var runId = Scalar(connection,
+            "SELECT source_identity FROM local_workspace_execution_headers WHERE session_id=$session AND execution_id=$execution;",
+            sessionId, executionId);
+        var parentEventId = "late-parent";
+        var parentId = LocalWorkspaceProjectionStore.StableNodeId("session_event", parentEventId);
         using var transaction = connection.BeginTransaction();
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        var expressions = columns.Select(column => column switch
-        {
-            "node_id" => "$node_id", "session_id" => "$session", "execution_id" => "$execution",
-            "source_kind" => "'session_event'", "source_identity" => "$identity", "source_ordinal" => "$ordinal",
-            "parent_node_id" => "$parent", "relationship_authority" => "'exact'", "kind" => "'event'",
-            "time_authority" => "$time", "start_utc_ticks" or "end_utc_ticks" or "duration_ms" => "NULL",
-            _ => column,
-        });
-        command.CommandText = $"INSERT INTO local_workspace_nodes({string.Join(',', columns)}) SELECT {string.Join(',', expressions)} FROM local_workspace_nodes WHERE node_id=$root;";
-        command.Parameters.AddWithValue("$session", sessionId); command.Parameters.AddWithValue("$execution", executionId); command.Parameters.AddWithValue("$root", rootId);
-        var node = command.Parameters.Add("$node_id", SqliteType.Text); var identity = command.Parameters.Add("$identity", SqliteType.Text);
-        var ordinal = command.Parameters.Add("$ordinal", SqliteType.Integer); var parent = command.Parameters.Add("$parent", SqliteType.Text); var time = command.Parameters.Add("$time", SqliteType.Text);
-        node.Value = parentId; identity.Value = "late-parent"; ordinal.Value = childCount + 10; parent.Value = rootId; time.Value = "invalid"; command.ExecuteNonQuery();
+        command.CommandText = """
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state)
+            VALUES($event,$session,$run,'copilot-sdk',$parent,'synthetic',$event,'event',$at,'not_captured');
+            """;
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$run", runId);
+        var eventId = command.Parameters.Add("$event", SqliteType.Text);
+        var parent = command.Parameters.Add("$parent", SqliteType.Text);
+        var occurredAt = command.Parameters.Add("$at", SqliteType.Text);
+        eventId.Value = parentEventId; parent.Value = DBNull.Value; occurredAt.Value = "invalid"; command.ExecuteNonQuery();
         for (var index = 0; index < childCount; index++)
         {
-            var value = $"child-{index:D3}"; node.Value = LocalWorkspaceProjectionStore.StableNodeId("session_event", value);
-            identity.Value = value; ordinal.Value = index; parent.Value = parentId; time.Value = index < 200 ? "missing" : "invalid"; command.ExecuteNonQuery();
+            eventId.Value = $"child-{index:D3}";
+            parent.Value = parentEventId;
+            occurredAt.Value = index < 200 ? "" : "invalid";
+            command.ExecuteNonQuery();
         }
+        LocalWorkspaceProjectionStore.RefreshSessions(
+            connection, transaction, [sessionId], DateTimeOffset.UnixEpoch,
+            FixedSkillRegistryGenerationAuthority.Load());
         transaction.Commit();
         return parentId;
     }
@@ -2151,7 +2161,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction"));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(method == "HEAD" ? string.Empty : selected, await response.Content.ReadAsStringAsync());
-        Assert.Equal(selected.Length, response.Content.Headers.ContentLength);
+        if(method == "HEAD") Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        else Assert.Equal(selected, (await ContentEntity(response)).GetProperty("text").GetString());
     }
 }
