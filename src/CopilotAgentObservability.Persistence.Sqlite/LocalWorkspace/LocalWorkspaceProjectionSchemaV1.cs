@@ -361,14 +361,26 @@ internal static class LocalWorkspaceProjectionSchemaV1
             CHECK((locator_kind='whole_event' AND json_pointer IS NULL AND part='event_content') OR (locator_kind='json_pointer' AND json_pointer IS NOT NULL AND part<>'event_content'))
         );
         """);
-    private static readonly SqliteOwnedSchemaDefinition V5Nodes = new("table", "local_workspace_nodes", "local_workspace_nodes",
-        V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes").Sql.Replace(
-            "source_kind IN ('execution_root','session_event','skill_invocation','unknown_relation_group')",
-            "source_kind IN ('execution_root','session_event','skill_invocation','semantic_tool','semantic_subagent','unknown_relation_group')",
+    private static readonly SqliteOwnedSchemaDefinition V5ExecutionHeaders = new("table", "local_workspace_execution_headers", "local_workspace_execution_headers",
+        V4Definitions.Single(static definition => definition.Name == "local_workspace_execution_headers").Sql.Replace(
+            "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
+            "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
             StringComparison.Ordinal));
+    private static readonly SqliteOwnedSchemaDefinition V5Nodes = new("table", "local_workspace_nodes", "local_workspace_nodes",
+        V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes").Sql
+            .Replace(
+                "source_kind IN ('execution_root','session_event','skill_invocation','unknown_relation_group')",
+                "source_kind IN ('execution_root','session_event','skill_invocation','semantic_tool','semantic_subagent','unknown_relation_group')",
+                StringComparison.Ordinal)
+            .Replace(
+                "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
+                "CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (end_utc_ticks IS NOT NULL AND duration_ms IS NOT NULL AND time_authority='recorded' AND start_utc_ticks IS NOT NULL AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))",
+                StringComparison.Ordinal));
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
     [
-        .. V4Definitions.Where(static definition => definition.Name is not ("local_workspace_nodes" or "local_workspace_nodes_by_parent" or "local_workspace_node_edges" or "local_workspace_content_tombstones" or "local_workspace_node_content_refs")),
+        .. V4Definitions.Where(static definition => definition.Name is not ("local_workspace_execution_headers" or "local_workspace_executions_by_session" or "local_workspace_nodes" or "local_workspace_nodes_by_parent" or "local_workspace_node_edges" or "local_workspace_content_tombstones" or "local_workspace_node_content_refs")),
+        V5ExecutionHeaders,
+        V4Definitions.Single(static definition => definition.Name == "local_workspace_executions_by_session"),
         V5Nodes,
         V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes_by_parent"),
         V4Definitions.Single(static definition => definition.Name == "local_workspace_node_edges"),
@@ -605,8 +617,11 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 DROP TABLE local_workspace_node_content_refs;
                 DROP TABLE local_workspace_node_edges;
                 DROP TABLE local_workspace_nodes;
+                DROP TABLE local_workspace_execution_headers;
                 DROP TABLE local_workspace_content_tombstones;
                 """);
+            Execute(connection, transaction, V5ExecutionHeaders.Sql);
+            Execute(connection, transaction, V4Definitions.Single(static definition => definition.Name == "local_workspace_executions_by_session").Sql);
             Execute(connection, transaction, V5Nodes.Sql);
             Execute(connection, transaction, V4Definitions.Single(static definition => definition.Name == "local_workspace_nodes_by_parent").Sql);
             Execute(connection, transaction, V4Definitions.Single(static definition => definition.Name == "local_workspace_node_edges").Sql);
@@ -713,25 +728,32 @@ internal static class LocalWorkspaceProjectionSchemaV1
         var spanFactValidation = TableExists(connection, transaction, "monitor_spans")
             ? "OR EXISTS(SELECT 1 FROM local_workspace_span_facts f LEFT JOIN monitor_spans s ON s.raw_record_id=f.raw_record_id AND s.span_ordinal=f.span_ordinal WHERE s.raw_record_id IS NULL)"
             : "OR EXISTS(SELECT 1 FROM local_workspace_span_facts)";
-        var retentionValidation = ColumnExists(connection, transaction, "local_workspace_node_content_refs", "store_kind")
-            && ColumnExists(connection, transaction, "local_workspace_content_tombstones", "store_kind")
-            && TableExists(connection, transaction, "retention_items") && TableExists(connection, transaction, "retention_store_instances") && TableExists(connection, transaction, "retention_tombstones")
+        var contentStoreKindInstalled = ColumnExists(connection, transaction, "local_workspace_node_content_refs", "store_kind");
+        var tombstoneStoreKindInstalled = ColumnExists(connection, transaction, "local_workspace_content_tombstones", "store_kind");
+        var retentionAuthorityInstalled = TableExists(connection, transaction, "retention_items")
+            && TableExists(connection, transaction, "retention_store_instances")
+            && TableExists(connection, transaction, "retention_tombstones");
+        var retentionValidation = contentStoreKindInstalled && tombstoneStoreKindInstalled && retentionAuthorityInstalled
             ? """
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
                      LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
-                     WHERE c.retention_item_id IS NOT NULL AND (i.item_id IS NULL OR i.store_kind<>c.store_kind OR i.source_item_id<>c.source_item_id
-                       OR i.store_instance_id<>c.retention_store_instance_id OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt))
+                     WHERE c.retention_item_id IS NOT NULL AND c.availability_state<>'deleted'
+                       AND (i.item_id IS NULL OR i.store_kind IS NOT c.store_kind OR i.source_item_id IS NOT c.source_item_id
+                         OR i.store_instance_id IS NOT c.retention_store_instance_id OR i.revision IS NOT c.retention_revision
+                         OR i.ownership_receipt IS NOT c.retention_ownership_receipt))
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
                      LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
                      LEFT JOIN local_workspace_content_tombstones x ON x.store_kind=c.store_kind AND x.source_item_id=c.source_item_id AND x.part=c.part
                      WHERE c.availability_state='deleted' AND (c.retention_owner_token IS NOT NULL OR i.item_id IS NULL
+                       OR c.retention_item_id IS NOT x.retention_item_id OR c.retention_revision IS NOT x.retention_revision
                        OR x.source_item_id IS NULL OR x.locator_kind<>c.locator_kind OR NOT (x.json_pointer IS c.json_pointer)
                        OR NOT (x.selected_utf8_bytes IS c.selected_utf8_bytes)
                        OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))))
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
-                     JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id JOIN session_event_content s ON s.event_id=e.event_id
+                     JOIN local_workspace_nodes n ON n.node_id=c.node_id LEFT JOIN session_events e ON e.event_id=c.source_item_id LEFT JOIN session_event_content s ON s.event_id=e.event_id
                      LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
-                     WHERE c.availability_state='available' AND (i.store_instance_id<>c.retention_store_instance_id OR i.store_instance_id<>(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
+                     WHERE c.availability_state='available' AND (e.event_id IS NULL OR s.event_id IS NULL
+                       OR i.store_instance_id<>c.retention_store_instance_id OR i.store_instance_id<>(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
                        OR i.store_kind<>'session_event_content' OR i.source_item_id<>c.source_item_id OR i.captured_at<>c.source_captured_at OR i.expires_at<>c.source_expires_at
                        OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt OR s.captured_at<>c.source_captured_at OR s.expires_at<>c.source_expires_at
                        OR s.retention_owner_token<>c.retention_owner_token OR local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,s.content_kind,s.captured_at,s.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,s.retention_owner_token,i.ownership_receipt)<>1
@@ -746,21 +768,67 @@ internal static class LocalWorkspaceProjectionSchemaV1
                        OR NOT (c.json_pointer IS x.json_pointer) OR NOT (c.selected_utf8_bytes IS x.selected_utf8_bytes)
                        OR c.retention_owner_token IS NOT NULL)
               """
+            : contentStoreKindInstalled && !tombstoneStoreKindInstalled && retentionAuthorityInstalled
+            ? """
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     WHERE c.retention_item_id IS NOT NULL AND c.availability_state<>'deleted'
+                       AND (i.item_id IS NULL OR i.store_kind IS NOT c.store_kind OR i.source_item_id IS NOT c.source_item_id
+                         OR i.store_instance_id IS NOT c.retention_store_instance_id OR i.revision IS NOT c.retention_revision
+                         OR i.ownership_receipt IS NOT c.retention_ownership_receipt))
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     LEFT JOIN local_workspace_content_tombstones x ON x.source_item_id=c.source_item_id AND x.part=c.part
+                     WHERE c.availability_state='deleted' AND (c.store_kind<>'session_event_content' OR c.retention_owner_token IS NOT NULL OR i.item_id IS NULL
+                       OR c.retention_item_id IS NOT x.retention_item_id OR c.retention_revision IS NOT x.retention_revision
+                       OR x.source_item_id IS NULL OR x.locator_kind<>c.locator_kind OR NOT (x.json_pointer IS c.json_pointer)
+                       OR NOT (x.selected_utf8_bytes IS c.selected_utf8_bytes)
+                       OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))))
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     JOIN local_workspace_nodes n ON n.node_id=c.node_id LEFT JOIN session_events e ON e.event_id=c.source_item_id LEFT JOIN session_event_content s ON s.event_id=e.event_id
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     WHERE c.availability_state='available' AND (c.store_kind<>'session_event_content' OR e.event_id IS NULL OR s.event_id IS NULL OR i.item_id IS NULL
+                       OR i.store_instance_id<>c.retention_store_instance_id OR i.store_instance_id<>(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
+                       OR i.store_kind<>'session_event_content' OR i.source_item_id<>c.source_item_id OR i.captured_at<>c.source_captured_at OR i.expires_at<>c.source_expires_at
+                       OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt OR s.captured_at<>c.source_captured_at OR s.expires_at<>c.source_expires_at
+                       OR s.retention_owner_token<>c.retention_owner_token OR local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,s.content_kind,s.captured_at,s.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,s.retention_owner_token,i.ownership_receipt)<>1
+                       OR i.read_denied_at IS NOT NULL OR i.deleted_at IS NOT NULL OR i.error_code IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)))
+              OR EXISTS(SELECT 1 FROM local_workspace_content_tombstones x
+                     LEFT JOIN session_events e ON e.event_id=x.source_item_id
+                     LEFT JOIN retention_items i ON i.item_id=x.retention_item_id AND i.store_kind='session_event_content' AND i.source_item_id=x.source_item_id
+                     LEFT JOIN local_workspace_node_content_refs c ON c.store_kind='session_event_content' AND c.source_item_id=x.source_item_id AND c.part=x.part
+                     WHERE e.event_id IS NULL OR i.item_id IS NULL OR i.revision<>x.retention_revision
+                       OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id))
+                       OR c.node_id IS NULL OR c.availability_state<>'deleted' OR c.locator_kind<>x.locator_kind
+                       OR NOT (c.json_pointer IS x.json_pointer) OR NOT (c.selected_utf8_bytes IS x.selected_utf8_bytes)
+                       OR c.retention_owner_token IS NOT NULL)
+              """
             : "OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs WHERE availability_state='available')";
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"""
             SELECT
               EXISTS(SELECT 1 FROM local_workspace_execution_headers h
-                     WHERE h.execution_id<>local_workspace_execution_id(h.source_kind,h.source_identity))
+                     WHERE h.execution_id<>local_workspace_execution_id(h.source_kind,h.source_identity)
+                        OR (h.end_utc_ticks IS NULL)<>(h.duration_ms IS NULL)
+                        OR (h.end_utc_ticks IS NOT NULL AND (h.duration_ms IS NULL OR h.time_authority<>'recorded' OR h.start_utc_ticks IS NULL
+                          OR h.end_utc_ticks<h.start_utc_ticks OR h.duration_ms<>(h.end_utc_ticks-h.start_utc_ticks)/10000)))
               OR EXISTS(SELECT 1 FROM local_workspace_nodes n
                      WHERE n.node_id<>local_workspace_node_id(n.source_kind,n.source_identity)
                         OR NOT EXISTS(SELECT 1 FROM local_workspace_execution_headers h WHERE h.execution_id=n.execution_id AND h.session_id=n.session_id)
-                        OR (n.parent_node_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=n.parent_node_id AND p.execution_id=n.execution_id)))
+                        OR (n.parent_node_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=n.parent_node_id AND p.execution_id=n.execution_id))
+                        OR (n.end_utc_ticks IS NULL)<>(n.duration_ms IS NULL)
+                        OR (n.end_utc_ticks IS NOT NULL AND (n.duration_ms IS NULL OR n.time_authority<>'recorded' OR n.start_utc_ticks IS NULL
+                          OR n.end_utc_ticks<n.start_utc_ticks OR n.duration_ms<>(n.end_utc_ticks-n.start_utc_ticks)/10000)))
               OR EXISTS(SELECT 1 FROM local_workspace_node_edges e
                      WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id)
-                        OR (e.relation_kind='parent' AND (e.related_node_id<>(SELECT n.parent_node_id FROM local_workspace_nodes n WHERE n.node_id=e.node_id)
-                          OR e.relationship_authority<>(SELECT n.relationship_authority FROM local_workspace_nodes n WHERE n.node_id=e.node_id))))
+                        OR (e.relation_kind='parent' AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes n WHERE n.node_id=e.node_id
+                          AND n.parent_node_id=e.related_node_id AND n.relationship_authority=e.relationship_authority)))
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes n
+                     WHERE n.parent_node_id IS NOT NULL AND n.relationship_authority IN ('exact','explicit')
+                       AND NOT EXISTS(SELECT 1 FROM local_workspace_node_edges e WHERE e.node_id=n.node_id
+                         AND e.related_node_id=n.parent_node_id AND e.relation_kind='parent'
+                         AND e.relationship_authority=n.relationship_authority))
               {contentBindingValidation}
               {retentionValidation}
               OR EXISTS(SELECT 1 FROM local_workspace_nodes WHERE source_kind='skill_invocation' AND otel_source_identity IS NULL AND sdk_source_identity IS NULL)

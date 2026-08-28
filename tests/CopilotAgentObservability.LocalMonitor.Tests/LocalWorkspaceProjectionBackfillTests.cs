@@ -335,6 +335,46 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             "SELECT kind FROM local_workspace_nodes WHERE source_kind='session_event' ORDER BY source_identity;"));
     }
 
+    [Fact]
+    public void StandaloneSessionSdkToolStartRemainsAnOrdinaryEvent()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-run',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','copilot-sdk-stream','sdk-start','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','not_captured');
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
+        Assert.Equal(["event"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT kind FROM local_workspace_nodes WHERE source_kind='session_event';"));
+    }
+
+    [Fact]
+    public void SessionSdkToolRefreshRejectsAStalePreservedNodeWithoutItsExactCompletionParentEdge()
+    {
+        using var connection = OpenSdkToolFixture(
+            "session-a", "run-a", "event-start", "native-run", "sdk-source-start");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,
+            "DELETE FROM session_events WHERE event_id='event-start-complete';");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(
+                connection, transaction, ["session-a"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
+        Assert.Equal(["event"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT kind FROM local_workspace_nodes WHERE source_kind='session_event';"));
+    }
+
     [Theory]
     [InlineData("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "recorded")]
     [InlineData("0123456789abcdef", "not_observed")]
@@ -368,6 +408,64 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             "SELECT mcp_server_identity_state||':'||COALESCE(mcp_server_identity,'')||':'||mcp_server_name_state||':'||mcp_tool_name_state||':'||mcp_tool_name FROM local_workspace_tool_metadata;"));
         Assert.Equal(["recorded:recorded:not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT started_state||':'||completed_state||':'||failed_state FROM local_workspace_tool_metadata;"));
+        Assert.Equal(["recorded:1:recorded:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT header.tool_activity_state||':'||COALESCE(CAST(header.tool_activity_count AS TEXT),'null')||':'||root.tool_activity_state||':'||COALESCE(CAST(root.tool_activity_count AS TEXT),'null')
+            FROM local_workspace_execution_headers header
+            JOIN local_workspace_nodes root ON root.execution_id=header.execution_id AND root.source_kind='execution_root';
+            """));
+    }
+
+    [Theory]
+    [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "bbbbbbbbbbbbbbbb")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "BBBBBBBBBBBBBBBB")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbb")]
+    public void OtelToolRejectsNonCanonicalTraceOrSpanIdentity(string traceId, string spanId)
+    {
+        using var connection = OpenOtelToolAdmissionFixture(traceId, spanId, duplicateSpanOwner: false);
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
+        Assert.Equal(["event"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT kind FROM local_workspace_nodes WHERE source_kind='session_event';"));
+        Assert.Equal(["not_observed:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT state||':'||COALESCE(CAST(count AS TEXT),'null') FROM local_workspace_session_activity WHERE kind='tool';"));
+    }
+
+    [Fact]
+    public void OtelToolRejectsConflictingDuplicateNormalizedSpanOwner()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: true);
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
+        Assert.Equal(["not_observed:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT state||':'||COALESCE(CAST(count AS TEXT),'null') FROM local_workspace_session_activity WHERE kind='tool';"));
+    }
+
+    [Fact]
+    public void OtelToolRefreshRejectsAConflictingCaseVariantOfTheNormalizedSpanOwner()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO raw_records VALUES(2,'otlp','AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','2026-08-24T00:00:01.0000000+00:00','{}','{}',1,NULL);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time)
+              VALUES(2,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','BBBBBBBBBBBBBBBB',NULL,0,'execute_tool','tool_call','Other','ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
+        Assert.Equal(["not_observed:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT state||':'||COALESCE(CAST(count AS TEXT),'null') FROM local_workspace_session_activity WHERE kind='tool';"));
     }
 
     [Theory]
@@ -522,10 +620,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     {
         using var connection = OpenSdkToolContentFixture(
             "0198f5b8-0c00-7000-8000-000000000001", "0198f5b8-0c00-7000-8000-000000000010",
-            "0198f5b8-0c00-7000-8000-000000000011", "native-run");
+            "0198f5b8-0c00-7000-8000-000000000999", "native-run");
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             UPDATE retention_items SET read_denied_at='2026-08-25T00:00:00.0000000+00:00',revision=2
-              WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';
+              WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000999';
             """);
         var terminalIds = new List<string>();
         for (var index = 0; index < 16; index++)
@@ -534,7 +632,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             terminalIds.Add(eventId);
             LocalWorkspaceProjectionSchemaTests.Execute(connection, $$$"""
                 INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state)
-                  VALUES('{{{eventId}}}','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','0198f5b8-0c00-7000-8000-000000000011','copilot-sdk-stream','source-complete-{{{index:D2}}}','tool.execution_complete','2026-08-24T00:01:{{{index:D2}}}.0000000+00:00','available');
+                  VALUES('{{{eventId}}}','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','0198f5b8-0c00-7000-8000-000000000999','copilot-sdk-stream','source-complete-{{{index:D2}}}','tool.execution_complete','2026-08-24T00:01:{{{index:D2}}}.0000000+00:00','available');
                 INSERT INTO session_event_content VALUES('{{{eventId}}}','application/json','{"tool_name":"Read","tool_input":{},"tool_use_id":"stable-carrier","tool_response":{"ok":true}}','2026-08-24T00:01:{{{index:D2}}}.0000000+00:00','2026-09-01T00:01:{{{index:D2}}}.0000000+00:00',randomblob(32));
                 """);
         }
@@ -556,9 +654,11 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             GROUP BY metadata.node_id;
             """);
         Assert.Single(first);
-        Assert.EndsWith(":recorded:inconsistent:unknown:unknown:16", first[0], StringComparison.Ordinal);
+        Assert.EndsWith(":inconsistent:inconsistent:unknown:unknown:16", first[0], StringComparison.Ordinal);
         var firstReferences = LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT event_id||':'||revision_input FROM local_workspace_node_source_references WHERE node_id IN (SELECT node_id FROM local_workspace_semantic_receipts) ORDER BY source_ordinal;");
+        Assert.Contains(firstReferences, reference =>
+            reference.StartsWith("0198f5b8-0c00-7000-8000-000000000999:", StringComparison.Ordinal));
 
         using (var transaction = connection.BeginTransaction())
         {
@@ -702,14 +802,14 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
             INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-run',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
-              VALUES('0198f5b8-0c00-7000-8000-000000000099','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','copilot-sdk-stream','sdk-source-start','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','available');
-            INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000099','application/json','{"tool_input":{}}','2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
+              VALUES('0198f5b8-0c00-7000-8000-000000000999','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','copilot-sdk-stream','sdk-source-start','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','available');
+            INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000999','application/json','{"tool_input":{}}','2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
             """);
         for (var index = 0; index < 17; index++)
         {
             LocalWorkspaceProjectionSchemaTests.Execute(connection, $$"""
                 INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state)
-                  VALUES('0198f5b8-0c00-7000-8000-{{index + 100:D12}}','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','0198f5b8-0c00-7000-8000-000000000099','copilot-sdk-stream','sdk-source-complete-{{index:D2}}','tool.execution_complete','2026-08-24T00:00:{{index:D2}}.0000000+00:00','available');
+                  VALUES('0198f5b8-0c00-7000-8000-{{index + 100:D12}}','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','0198f5b8-0c00-7000-8000-000000000999','copilot-sdk-stream','sdk-source-complete-{{index:D2}}','tool.execution_complete','2026-08-24T00:00:{{index:D2}}.0000000+00:00','available');
                 INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-{{index + 100:D12}}','application/json','{"tool_name":"Read","tool_input":{},"tool_use_id":"same-carrier"}','2026-08-24T00:00:{{index:D2}}.0000000+00:00','2026-09-01T00:00:{{index:D2}}.0000000+00:00',randomblob(32));
                 """);
         }
@@ -717,13 +817,78 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
-        Assert.Equal(["16:recorded:inconsistent:1:invalid"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+        Assert.Equal(["16:inconsistent:inconsistent:1:invalid"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
             SELECT (SELECT COUNT(*) FROM local_workspace_node_source_references r WHERE r.node_id=m.node_id)||':'||m.started_state||':'||
                    m.completed_state||':'||
                    (SELECT COUNT(*) FROM local_workspace_node_content_refs c WHERE c.node_id=m.node_id AND c.part='event_content')||':'||
                    (SELECT availability_state FROM local_workspace_node_content_refs c WHERE c.node_id=m.node_id AND c.part='event_content')
             FROM local_workspace_tool_metadata m;
             """));
+        Assert.Contains("0198f5b8-0c00-7000-8000-000000000999", LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT event_id FROM local_workspace_node_source_references WHERE node_id IN (SELECT node_id FROM local_workspace_tool_metadata);"));
+    }
+
+    [Fact]
+    public void UnknownRelationGroupIsBoundedBeforeTheFourThousandNinetyEighthNode()
+    {
+        using var connection = OpenNodeCapacityFixture("unknown_relation");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(connection, transaction, ["session-a"], DateTimeOffset.UnixEpoch);
+            transaction.Commit();
+        }
+
+        AssertNodeCapacityClosed(connection, "unknown_relation_group");
+        Assert.Equal(["1:unknown"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT (parent_node_id IS NULL)||':'||relationship_authority
+            FROM local_workspace_nodes WHERE source_kind='session_event' AND source_identity='event-0001';
+            """));
+    }
+
+    [Fact]
+    public void SemanticToolIsBoundedBeforeTheFourThousandNinetyEighthNode()
+    {
+        using var connection = OpenNodeCapacityFixture("semantic_tool");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(connection, transaction, ["session-a"], DateTimeOffset.UnixEpoch);
+            transaction.Commit();
+        }
+
+        AssertNodeCapacityClosed(connection, "semantic_tool");
+    }
+
+    [Fact]
+    public void SkillInvocationIsBoundedBeforeTheFourThousandNinetyEighthNode()
+    {
+        using var connection = OpenNodeCapacityFixture("skill");
+        using (var seed = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(connection, seed, ["session-a"], DateTimeOffset.UnixEpoch);
+            seed.Commit();
+        }
+        var invocation = new SkillProjectionCanonicalInvocation(
+            "capacity-skill", "session-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb",
+            "otel-source", "skill", "sdk-source", "skill", null,
+            "session_run", "run-a", "event-skill-otel", "event-skill-sdk");
+        var projections = new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal)
+        {
+            ["session-a"] = new("current", [invocation]),
+        };
+        var method = typeof(LocalWorkspaceProjectionStore).GetMethod("RefreshDetailProjection",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            method.Invoke(null, [connection, transaction, new[] { "session-a" }, projections,
+                DateTimeOffset.UnixEpoch, "registry"]);
+            transaction.Commit();
+        }
+
+        AssertNodeCapacityClosed(connection, "skill_invocation");
     }
 
     [Theory]
@@ -753,6 +918,114 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             """));
         Assert.Equal([state], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT availability_state FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.source_kind='semantic_tool' AND c.part='event_content';"));
+    }
+
+    [Fact]
+    public void OrdinaryRefreshPreservesAuthenticatedReadDeniedReferencesAfterSourceBytesAreRemoved()
+    {
+        const string sessionId = "0198f5b8-0c00-7000-8000-000000000001";
+        const string eventId = "0198f5b8-0c00-7000-8000-000000000011";
+        using var connection = OpenSdkToolContentFixture(
+            sessionId, "0198f5b8-0c00-7000-8000-000000000010", eventId, "native-run");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE retention_items
+            SET read_denied_at='2026-08-25T00:00:00.0000000+00:00',revision=2
+            WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';
+            """);
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(
+                connection, transaction, [sessionId], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,
+            "DELETE FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';");
+        foreach (var refreshedAt in new[]
+                 {
+                     DateTimeOffset.Parse("2026-08-25T00:00:02Z"),
+                     DateTimeOffset.Parse("2026-08-25T00:00:03Z"),
+                 })
+        {
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(
+                connection, transaction, refreshedAt, new StructuralRegistryAuthority());
+            transaction.Commit();
+        }
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT event_id FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';"));
+        Assert.Equal(
+            [
+                "semantic_tool:event_content:whole_event:<null>:17:read_denied:1:1:1:1:1:1:1:1:1",
+                "session_event:event_content:whole_event:<null>:17:read_denied:1:1:1:1:1:1:1:1:1",
+            ],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT n.source_kind||':'||c.part||':'||c.locator_kind||':'||COALESCE(c.json_pointer,'<null>')||':'||
+                       CAST(c.selected_utf8_bytes AS TEXT)||':'||c.availability_state||':'||
+                       (c.retention_item_id=i.item_id)||':'||(c.retention_store_instance_id=i.store_instance_id)||':'||
+                       (c.source_captured_at=i.captured_at)||':'||(c.source_expires_at=i.expires_at)||':'||
+                       (c.retention_revision=i.revision)||':'||(c.retention_ownership_receipt=i.ownership_receipt)||':'||
+                       (c.retention_owner_token IS NULL)||':'||
+                       (c.revision_input=e.content_state||'|'||i.captured_at||'|'||i.expires_at||'|'||i.item_id||'|'||i.store_instance_id||'|'||CAST(i.revision AS TEXT)||'|'||i.state||'|')||':'||
+                       EXISTS(SELECT 1 FROM local_workspace_node_source_references r
+                         WHERE r.node_id=n.node_id AND r.source_kind='session_event' AND r.source_identity=e.event_id AND r.event_id=e.event_id)
+                FROM local_workspace_node_content_refs c
+                JOIN local_workspace_nodes n ON n.node_id=c.node_id
+                JOIN session_events e ON e.event_id=c.source_item_id
+                JOIN retention_items i ON i.item_id=c.retention_item_id
+                WHERE c.source_item_id='0198f5b8-0c00-7000-8000-000000000011'
+                ORDER BY n.source_kind COLLATE BINARY;
+                """));
+    }
+
+    [Theory]
+    [InlineData("DELETE FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE retention_items SET revision=3 WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE retention_items SET ownership_receipt=randomblob(32) WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("DELETE FROM local_workspace_node_source_references WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE source_kind='session_event' AND source_identity='0198f5b8-0c00-7000-8000-000000000011');")]
+    [InlineData("UPDATE local_workspace_node_content_refs SET availability_state='invalid' WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE source_kind='session_event' AND source_identity='0198f5b8-0c00-7000-8000-000000000011');")]
+    public void OrdinaryRefreshDoesNotPreserveReadDeniedWithoutExactCurrentAuthority(string authorityMutation)
+    {
+        const string sessionId = "0198f5b8-0c00-7000-8000-000000000001";
+        using var connection = OpenSdkToolContentFixture(
+            sessionId, "0198f5b8-0c00-7000-8000-000000000010",
+            "0198f5b8-0c00-7000-8000-000000000011", "native-run");
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE retention_items
+            SET read_denied_at='2026-08-25T00:00:00.0000000+00:00',revision=2
+            WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';
+            """);
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(
+                connection, transaction, [sessionId], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"""
+            DELETE FROM session_event_content
+            WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';
+            {authorityMutation}
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(
+                connection, transaction, DateTimeOffset.Parse("2026-08-25T00:00:02Z"),
+                new StructuralRegistryAuthority());
+            transaction.Commit();
+        }
+
+        Assert.Equal(
+            ["semantic_tool:not_captured:1:1", "session_event:not_captured:1:1"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT n.source_kind||':'||c.availability_state||':'||
+                       (c.retention_item_id IS NULL)||':'||(c.retention_owner_token IS NULL)
+                FROM local_workspace_node_content_refs c
+                JOIN local_workspace_nodes n ON n.node_id=c.node_id
+                WHERE c.source_item_id='0198f5b8-0c00-7000-8000-000000000011'
+                ORDER BY n.source_kind COLLATE BINARY;
+                """));
     }
 
     [Fact]
@@ -835,14 +1108,14 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 
     public static TheoryData<string, string> DurableSemanticProvenanceTamperCases => new()
     {
-        { "read_denied", "UPDATE session_events SET source_adapter='other';" },
-        { "read_denied", "UPDATE session_events SET source_surface='claude-code';" },
-        { "read_denied", "UPDATE session_events SET source_event_id='';" },
+        { "read_denied", "UPDATE session_events SET source_adapter='other' WHERE type='tool.execution_start';" },
+        { "read_denied", "UPDATE session_events SET source_surface='claude-code' WHERE type='tool.execution_start';" },
+        { "read_denied", "UPDATE session_events SET source_event_id='' WHERE type='tool.execution_start';" },
         { "read_denied", "UPDATE session_runs SET native_run_id=NULL;" },
         { "read_denied", "UPDATE session_runs SET source_surface='claude-code';" },
-        { "deleted", "UPDATE session_events SET source_adapter='other';" },
-        { "deleted", "UPDATE session_events SET source_surface='claude-code';" },
-        { "deleted", "UPDATE session_events SET source_event_id='';" },
+        { "deleted", "UPDATE session_events SET source_adapter='other' WHERE type='tool.execution_start';" },
+        { "deleted", "UPDATE session_events SET source_surface='claude-code' WHERE type='tool.execution_start';" },
+        { "deleted", "UPDATE session_events SET source_event_id='' WHERE type='tool.execution_start';" },
         { "deleted", "UPDATE session_runs SET native_run_id=NULL;" },
         { "deleted", "UPDATE session_runs SET source_surface='claude-code';" },
     };
@@ -1324,7 +1597,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             INSERT INTO sessions VALUES('{{sessionId}}','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
             INSERT INTO session_runs VALUES('{{runId}}','{{sessionId}}','copilot-sdk','{{nativeRunId}}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
-              VALUES('{{eventId}}','{{sessionId}}','{{runId}}','copilot-sdk','copilot-sdk-stream','sdk-source-start','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','available');
+              VALUES
+                ('{{eventId}}','{{sessionId}}','{{runId}}','copilot-sdk','copilot-sdk-stream','sdk-source-start','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','available'),
+                ('{{eventId}}-complete','{{sessionId}}','{{runId}}','copilot-sdk','copilot-sdk-stream','sdk-source-complete','tool.execution_complete','2026-08-24T00:00:01.0000000+00:00','not_captured');
+            UPDATE session_events SET parent_event_id='{{eventId}}' WHERE event_id='{{eventId}}-complete';
             INSERT INTO session_event_content VALUES('{{eventId}}','application/json',json_object('tool_input',json(char(123)||char(125))),'2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
             """);
         InstallCurrentRetentionRows(connection);
@@ -1354,6 +1630,82 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         return connection;
     }
 
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenOtelToolAdmissionFixture(
+        string traceId,
+        string spanId,
+        bool duplicateSpanOwner)
+    {
+        var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $$"""
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER,retention_owner_token BLOB);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,parent_span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,tool_type TEXT,mcp_tool_name TEXT,mcp_server_hash TEXT,agent_name TEXT,request_model TEXT,response_model TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER,status TEXT,error_type TEXT,finish_reasons TEXT,conversation_id TEXT,duration_ms REAL,start_time TEXT,end_time TEXT,projected_at TEXT);
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','claude-code','native-run',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','claude-code','{{traceId}}','otel-exact','{{traceId}}/{{spanId}}','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
+            INSERT INTO raw_records VALUES(1,'otlp','{{traceId}}','2026-08-24T00:00:00.0000000+00:00','{}','{}',1,NULL);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time)
+              VALUES(1,'{{traceId}}','{{spanId}}',NULL,0,'execute_tool','tool_call','Read','ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');
+            {{(duplicateSpanOwner ? $"INSERT INTO raw_records VALUES(2,'otlp','{traceId}','2026-08-24T00:00:01.0000000+00:00','{{}}','{{}}',1,NULL); INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time) VALUES(2,'{traceId}','{spanId}',NULL,0,'execute_tool','tool_call','Other','ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');" : string.Empty)}}
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        return connection;
+    }
+
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenNodeCapacityFixture(string scenario)
+    {
+        var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"""
+            INSERT INTO sessions VALUES('session-a','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','session-a','copilot-sdk','native-run-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            {(scenario == "unknown_relation" ? "INSERT INTO session_runs VALUES('run-b','session-a','copilot-sdk','native-run-b',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active'); INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('event-parent','session-a','run-b','copilot-sdk','synthetic','source-parent','event','2026-08-24T00:00:00.0000000+00:00','not_captured');" : string.Empty)}
+            """);
+        var ordinaryCount = scenario == "unknown_relation" ? 4094 : 4094;
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"""
+            WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<{ordinaryCount})
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state)
+            SELECT printf('event-%04d',value),'session-a','run-a','copilot-sdk',
+                   {(scenario == "unknown_relation" ? "CASE value WHEN 1 THEN 'event-parent' END" : "NULL")},
+                   'synthetic',printf('source-%04d',value),'event','2026-08-24T00:00:00.0000000+00:00','not_captured'
+            FROM n;
+            """);
+        if (scenario == "semantic_tool")
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,parent_event_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES
+                  ('event-sdk-start','session-a','run-a','copilot-sdk',NULL,'copilot-sdk-stream','sdk-start','tool.execution_start','2026-08-24T00:00:01.0000000+00:00','not_captured'),
+                  ('event-sdk-complete','session-a','run-a','copilot-sdk','event-sdk-start','copilot-sdk-stream','sdk-complete','tool.execution_complete','2026-08-24T00:00:02.0000000+00:00','not_captured');
+                """);
+        }
+        else if (scenario == "skill")
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES
+                  ('event-skill-otel','session-a','run-a','copilot-sdk','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','skill.invoked','2026-08-24T00:00:01.0000000+00:00','not_captured'),
+                  ('event-skill-sdk','session-a','run-a','copilot-sdk',NULL,'copilot-sdk-stream','sdk-source','skill.invoked','2026-08-24T00:00:02.0000000+00:00','not_captured');
+                """);
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TRIGGER local_workspace_capacity_before_insert BEFORE INSERT ON local_workspace_nodes
+            WHEN (SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=NEW.session_id)>=4097
+            BEGIN SELECT RAISE(ABORT,'workspace_intermediate_node_overflow'); END;
+            """);
+        return connection;
+    }
+
+    private static void AssertNodeCapacityClosed(
+        Microsoft.Data.Sqlite.SqliteConnection connection,
+        string excludedSourceKind)
+    {
+        Assert.Equal(4097, LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE session_id='session-a';").Length);
+        Assert.Equal(["1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT CAST(node_overflow AS TEXT) FROM local_workspace_sessions WHERE session_id='session-a';"));
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            $"SELECT node_id FROM local_workspace_nodes WHERE source_kind='{excludedSourceKind}';"));
+    }
+
     private static void InstallDetailRevisionSupportTables(Microsoft.Data.Sqlite.SqliteConnection connection) =>
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             CREATE TABLE IF NOT EXISTS monitor_spans(raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT);
@@ -1377,7 +1729,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             INSERT INTO sessions VALUES('{sessionId}','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
             INSERT INTO session_runs VALUES('{runId}','{sessionId}','copilot-sdk','{nativeRunId}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
-              VALUES('{eventId}','{sessionId}','{runId}','copilot-sdk','copilot-sdk-stream','{sourceEventId}','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','not_captured');
+              VALUES
+                ('{eventId}','{sessionId}','{runId}','copilot-sdk','copilot-sdk-stream','{sourceEventId}','tool.execution_start','2026-08-24T00:00:00.0000000+00:00','not_captured'),
+                ('{eventId}-complete','{sessionId}','{runId}','copilot-sdk','copilot-sdk-stream','{sourceEventId}-complete','tool.execution_complete','2026-08-24T00:00:01.0000000+00:00','not_captured');
+            UPDATE session_events SET parent_event_id='{eventId}' WHERE event_id='{eventId}-complete';
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
         return connection;

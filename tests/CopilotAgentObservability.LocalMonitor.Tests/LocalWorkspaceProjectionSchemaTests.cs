@@ -189,6 +189,134 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void ExactV4AvailableRetentionReferenceMigratesWithItsExactAuthorityProof()
+    {
+        using var connection = OpenExactV4AvailableRetentionFixture();
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(["5"], Strings(connection,
+            "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(["session_event_content:0198f5b8-0c00-7000-8000-000000000011:event_content:available:item-event-a:1:1:1"], Strings(connection, """
+            SELECT store_kind||':'||source_item_id||':'||part||':'||availability_state||':'||retention_item_id||':'||retention_revision||':'||
+                   (retention_ownership_receipt IS NOT NULL)||':'||(retention_owner_token IS NOT NULL)
+            FROM local_workspace_node_content_refs;
+            """));
+    }
+
+    [Fact]
+    public void ExactV4DeletedRetentionReferenceMigratesWithTheConstantSessionContentTombstoneStore()
+    {
+        using var connection = OpenExactV4AvailableRetentionFixture();
+        Execute(connection, """
+            UPDATE retention_items SET state='deleted',deleted_at='2026-08-25T00:00:00.0000000+00:00',revision=2
+              WHERE item_id='item-event-a';
+            INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at)
+              VALUES('item-event-a','2026-08-25T00:00:00.0000000+00:00','2026-08-25T00:00:00.0000000+00:00');
+            INSERT INTO local_workspace_content_tombstones(source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision)
+              SELECT source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,'2026-08-25T00:00:00.0000000+00:00','item-event-a',2
+              FROM local_workspace_node_content_refs;
+            UPDATE local_workspace_node_content_refs SET
+              revision_input=revision_input||'|deleted|2',retention_store_instance_id=NULL,source_captured_at=NULL,source_expires_at=NULL,
+              retention_revision=2,retention_ownership_receipt=NULL,retention_owner_token=NULL,availability_state='deleted';
+            DELETE FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+
+        Assert.Equal(["session_event_content:0198f5b8-0c00-7000-8000-000000000011:event_content:deleted:2"], Strings(connection, """
+            SELECT store_kind||':'||source_item_id||':'||part||':'||availability_state||':'||retention_revision
+            FROM local_workspace_node_content_refs;
+            """));
+        Assert.Equal(["session_event_content:0198f5b8-0c00-7000-8000-000000000011:event_content:2"], Strings(connection, """
+            SELECT store_kind||':'||source_item_id||':'||part||':'||retention_revision
+            FROM local_workspace_content_tombstones;
+            """));
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_workspace_node_content_refs SET retention_item_id='missing-item';")]
+    [InlineData("UPDATE local_workspace_node_content_refs SET retention_ownership_receipt=zeroblob(32);")]
+    [InlineData("UPDATE local_workspace_node_content_refs SET retention_owner_token=zeroblob(32);")]
+    [InlineData("UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE item_id='item-event-a';")]
+    [InlineData("DELETE FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';")]
+    [InlineData("UPDATE local_workspace_node_content_refs SET availability_state='read_denied',retention_owner_token=NULL,retention_revision=NULL;")]
+    public void ExactV4RetentionAuthorityDriftFailsBeforeMutationAndLeavesBytesIdentical(string mutation)
+    {
+        using var connection = OpenExactV4AvailableRetentionFixture();
+        Execute(connection, mutation);
+        var before = WorkspaceDigest(connection);
+
+        Assert.Equal("local_workspace_projection_semantic_validation_failed", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"))).Message);
+
+        Assert.Equal(before, WorkspaceDigest(connection));
+        Assert.Equal(["4"], Strings(connection,
+            "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+    }
+
+    [Fact]
+    public void SemanticValidationRejectsParentEdgeWhenTheNodeHasNoParent()
+    {
+        using var connection = OpenPopulatedCurrentProjection();
+        Execute(connection, """
+            INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
+            SELECT node_id,node_id,'parent','exact',0 FROM local_workspace_nodes WHERE source_kind='execution_root';
+            """);
+
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.Equal("local_workspace_projection_semantic_validation_failed", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionSchemaV1.ValidateSemanticRows(connection, transaction)).Message);
+    }
+
+    [Fact]
+    public void ExactV4MissingExactParentEdgeFailsBeforeMutation()
+    {
+        using var connection = OpenPopulatedExactV4Projection();
+        Execute(connection, "DELETE FROM local_workspace_node_edges WHERE relation_kind='parent';");
+        var before = WorkspaceDigest(connection);
+
+        Assert.Equal("local_workspace_projection_semantic_validation_failed", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
+
+        Assert.Equal(before, WorkspaceDigest(connection));
+        Assert.Equal(["4"], Strings(connection,
+            "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+    }
+
+    [Theory]
+    [InlineData("local_workspace_execution_headers", "end_utc_ticks=start_utc_ticks+10000,duration_ms=NULL")]
+    [InlineData("local_workspace_execution_headers", "end_utc_ticks=NULL,duration_ms=1")]
+    [InlineData("local_workspace_nodes", "end_utc_ticks=start_utc_ticks+10000,duration_ms=NULL")]
+    [InlineData("local_workspace_nodes", "end_utc_ticks=NULL,duration_ms=1")]
+    public void CurrentSchemaRejectsHalfPopulatedTimingPairs(string table, string assignment)
+    {
+        using var connection = OpenPopulatedCurrentProjection();
+
+        Assert.Throws<SqliteException>(() => Execute(connection,
+            $"UPDATE {table} SET {assignment} WHERE time_authority='recorded';"));
+    }
+
+    [Theory]
+    [InlineData("local_workspace_execution_headers", "end_utc_ticks=start_utc_ticks+10000,duration_ms=NULL")]
+    [InlineData("local_workspace_execution_headers", "end_utc_ticks=NULL,duration_ms=1")]
+    [InlineData("local_workspace_nodes", "end_utc_ticks=start_utc_ticks+10000,duration_ms=NULL")]
+    [InlineData("local_workspace_nodes", "end_utc_ticks=NULL,duration_ms=1")]
+    public void ExactV4HalfPopulatedTimingFailsBeforeMutation(string table, string assignment)
+    {
+        using var connection = OpenPopulatedExactV4Projection();
+        Execute(connection, $"UPDATE {table} SET {assignment} WHERE time_authority='recorded';");
+        var before = WorkspaceDigest(connection);
+
+        Assert.Equal("local_workspace_projection_semantic_validation_failed", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
+
+        Assert.Equal(before, WorkspaceDigest(connection));
+        Assert.Equal(["4"], Strings(connection,
+            "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+    }
+
+    [Fact]
     public void DataBearingExactV3MigrationRollsBackBeforeStampAndRetriesWithStableCanonicalRows()
     {
         var path = Path.Combine(Path.GetTempPath(), $"workspace-v3-v4-{Guid.NewGuid():N}.sqlite");
@@ -434,6 +562,35 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void TargetedRefreshBatchesTwoHundredOneSessionsUnderOnePinnedAuthorityAndSqliteLengthLimit()
+    {
+        using var connection = OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Execute(connection, """
+            WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<201)
+            INSERT INTO sessions
+            SELECT printf('0198f5b8-0c00-7000-8000-%012d',value),'active','partial',NULL,NULL,NULL,NULL,
+                   '2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'
+            FROM n;
+            """);
+        var ids = Strings(connection, "SELECT session_id FROM sessions ORDER BY session_id COLLATE BINARY;");
+        var authority = new CountingGenerationAuthority();
+        var previousLimit = sqlite3_limit(connection.Handle!.DangerousGetHandle(), 0, 7820);
+        Assert.True(previousLimit > 7820);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, ids, DateTimeOffset.UnixEpoch, authority);
+            transaction.Commit();
+        }
+
+        Assert.Equal(201, Strings(connection, "SELECT session_id FROM local_workspace_sessions;").Length);
+        Assert.Equal(1, authority.CaptureCount);
+        Assert.Equal(1, authority.LeaseCount);
+        Assert.Equal(1, authority.DisposeCount);
+    }
+
+    [Fact]
     public void NativeStatementObserverCountsEveryRepeatedTopLevelExecution()
     {
         using var connection = OpenSessionDatabase();
@@ -545,6 +702,105 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         foreach (var sql in statements) Execute(connection, sql);
     }
 
+    private static SqliteConnection OpenPopulatedCurrentProjection()
+    {
+        var connection = OpenSessionDatabase();
+        Execute(connection, """
+            INSERT INTO sessions VALUES('session-a','active','partial',NULL,NULL,'2026-08-24T00:00:00.0000000+00:00',NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','session-a','copilot-sdk','native-run-a',NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00',NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('event-a','session-a','run-a','copilot-sdk','copilot-sdk-stream','source-a','event','2026-08-24T00:00:01.0000000+00:00','not_captured');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        return connection;
+    }
+
+    private static SqliteConnection OpenPopulatedExactV4Projection()
+    {
+        var connection = OpenSessionDatabase();
+        Execute(connection, """
+            INSERT INTO sessions VALUES('session-a','active','partial',NULL,NULL,'2026-08-24T00:00:00.0000000+00:00',NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','session-a','copilot-sdk','native-run-a',NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00',NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('event-a','session-a','run-a','copilot-sdk','copilot-sdk-stream','source-a','event','2026-08-24T00:00:01.0000000+00:00','not_captured');
+            """);
+        InstallExactV4(connection);
+        Execute(connection, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',4);");
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(connection, transaction, ["session-a"], DateTimeOffset.UnixEpoch);
+            transaction.Commit();
+        }
+        return connection;
+    }
+
+    private static SqliteConnection OpenExactV4AvailableRetentionFixture()
+    {
+        var connection = OpenSessionDatabase();
+        var capturedAt = "2026-08-24T00:00:00.0000000+00:00";
+        var expiresAt = "2026-09-01T00:00:00.0000000+00:00";
+        var ownerToken = Enumerable.Repeat((byte)0x2a, 32).ToArray();
+        Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','native-run-a',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','copilot-sdk-stream','source-a','event','2026-08-24T00:00:00.0000000+00:00','available');
+            """);
+        using (var content = connection.CreateCommand())
+        {
+            content.CommandText = "INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000011','application/json','{}',$captured,$expires,$token);";
+            content.Parameters.AddWithValue("$captured", capturedAt);
+            content.Parameters.AddWithValue("$expires", expiresAt);
+            content.Parameters.AddWithValue("$token", ownerToken);
+            content.ExecuteNonQuery();
+        }
+        string storeInstanceId;
+        using (var transaction = connection.BeginTransaction())
+        {
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, transaction);
+            using var store = connection.CreateCommand();
+            store.Transaction = transaction;
+            store.CommandText = "SELECT store_instance_id FROM retention_store_instances WHERE id=1;";
+            storeInstanceId = Assert.IsType<string>(store.ExecuteScalar());
+            var receipt = CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateSession(new(
+                storeInstanceId, "0198f5b8-0c00-7000-8000-000000000011", "application/json", capturedAt,
+                DateTimeOffset.Parse(capturedAt).UtcTicks, expiresAt, DateTimeOffset.Parse(expiresAt).UtcTicks,
+                "0198f5b8-0c00-7000-8000-000000000001", "0198f5b8-0c00-7000-8000-000000000010", "copilot-sdk-stream", "source-a", ownerToken));
+            using var item = connection.CreateCommand();
+            item.Transaction = transaction;
+            item.CommandText = """
+                INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version)
+                VALUES('item-event-a',$store,'session_event_content','0198f5b8-0c00-7000-8000-000000000011',1,$receipt,$captured,$expires,'raw-default-90d',1,'expiring',1,1);
+                """;
+            item.Parameters.AddWithValue("$store", storeInstanceId);
+            item.Parameters.AddWithValue("$receipt", receipt);
+            item.Parameters.AddWithValue("$captured", capturedAt);
+            item.Parameters.AddWithValue("$expires", expiresAt);
+            item.ExecuteNonQuery();
+            transaction.Commit();
+        }
+        InstallExactV4(connection);
+        Execute(connection, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',4);");
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            transaction.Commit();
+        }
+        Execute(connection, """
+            UPDATE local_workspace_node_content_refs SET
+              retention_item_id=(SELECT item_id FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011'),
+              retention_store_instance_id=(SELECT store_instance_id FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011'),
+              source_captured_at=(SELECT captured_at FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'),
+              source_expires_at=(SELECT expires_at FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'),
+              retention_revision=(SELECT revision FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011'),
+              retention_ownership_receipt=(SELECT ownership_receipt FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011'),
+              retention_owner_token=(SELECT retention_owner_token FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'),
+              availability_state='available';
+            """);
+        Assert.Equal(["available"], Strings(connection, "SELECT availability_state FROM local_workspace_node_content_refs;"));
+        return connection;
+    }
+
     private static string WorkspaceDigest(SqliteConnection connection)
     {
         var rows = new List<string>();
@@ -650,4 +906,50 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         [DllImport("e_sqlite3", CallingConvention = CallingConvention.Cdecl)]
         private static extern int sqlite3_trace_v2(IntPtr database, uint mask, TraceCallback? callback, IntPtr context);
     }
+
+    private sealed class CountingGenerationAuthority : ISkillRegistryGenerationAuthority
+    {
+        private readonly Capture generation = new();
+        internal int CaptureCount { get; private set; }
+        internal int LeaseCount { get; private set; }
+        internal int DisposeCount { get; private set; }
+
+        public ISkillRegistryGenerationCapture CaptureGeneration()
+        {
+            CaptureCount++;
+            return generation;
+        }
+
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture capture,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            if (!ReferenceEquals(capture, generation))
+            {
+                lease = null;
+                return false;
+            }
+            LeaseCount++;
+            lease = new Lease(this);
+            return true;
+        }
+
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
+            ReferenceEquals(capture, generation) && lease is Lease;
+
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => false;
+
+        private sealed class Capture : ISkillRegistryGenerationCapture { }
+        private sealed class Lease(CountingGenerationAuthority owner) : ISkillRegistryGenerationLease
+        {
+            private int disposed;
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref disposed, 1) == 0) owner.DisposeCount++;
+            }
+        }
+    }
+
+    [DllImport("e_sqlite3", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_limit(IntPtr database, int id, int newValue);
 }

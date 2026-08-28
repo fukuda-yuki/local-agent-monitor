@@ -109,6 +109,55 @@ public sealed class RawRecordRetentionAdapterTests
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM raw_records WHERE id=$target;"));
     }
 
+    [Theory]
+    [InlineData("partial")]
+    [InlineData("v4")]
+    [InlineData("future")]
+    public async Task RawAdapter_UnboundDeletionRejectsUnsupportedWorkspaceBeforeAnyMutation(string state)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.InstallUnsupportedWorkspace(state);
+        var before = fixture.RawAndWorkspaceMutationSnapshot();
+
+        var result = await new RawRecordRetentionAdapter(fixture.Catalog).DeleteAsync(fixture.Context);
+
+        Assert.Equal(RetentionAdapterDisposition.TransientFailure, result.Disposition);
+        Assert.Equal(RetentionErrorCode.DeleteIoFailed, result.ErrorCode);
+        Assert.Equal(before, fixture.RawAndWorkspaceMutationSnapshot());
+    }
+
+    [Fact]
+    public async Task RawAdapter_BatchesTwoHundredOneAffectedSessionsInBinaryOrder()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.AddAffectedSessions(201);
+        var participant = new RecordingBatchParticipant();
+
+        var result = await new RawRecordRetentionAdapter(fixture.Catalog, participant: participant)
+            .DeleteAsync(fixture.Context);
+
+        Assert.Same(RetentionAdapterResult.Deleted, result);
+        Assert.Equal([200, 1], participant.BatchSizes);
+        Assert.Equal(1, participant.PreflightCount);
+        Assert.Equal(201, participant.SessionIds.Count);
+        Assert.Equal(participant.SessionIds.Order(StringComparer.Ordinal), participant.SessionIds);
+        Assert.Equal(201, participant.SessionIds.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public async Task RawAdapter_RefreshesTheCanonicalSessionWhenDeletingACaseVariantOtelOwner()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.AddNormalizedOtelOwnerConflict();
+        var participant = new RecordingBatchParticipant();
+
+        var result = await new RawRecordRetentionAdapter(fixture.Catalog, participant: participant)
+            .DeleteAsync(fixture.Context);
+
+        Assert.Same(RetentionAdapterResult.Deleted, result);
+        Assert.Equal(["session-canonical"], participant.SessionIds);
+    }
+
     private static int CountRows(SqliteCommand command)
     {
         using var reader = command.ExecuteReader();
@@ -186,11 +235,114 @@ public sealed class RawRecordRetentionAdapterTests
         internal void AddWorkspaceFactsForTargetRawRecord()
         {
             Execute(Path,
-                "CREATE TABLE session_events(session_id TEXT NOT NULL,source_adapter TEXT NOT NULL,source_event_id TEXT NOT NULL);" +
+                "CREATE TABLE session_events(session_id TEXT NOT NULL,trace_id TEXT NULL,source_adapter TEXT NOT NULL,source_event_id TEXT NOT NULL);" +
                 "CREATE TABLE local_workspace_session_search_facts(session_id TEXT NOT NULL,kind TEXT NOT NULL);" +
-                "INSERT INTO session_events(session_id,source_adapter,source_event_id) VALUES('session-1','otel-exact','target-trace/span-1');" +
+                "INSERT INTO session_events(session_id,trace_id,source_adapter,source_event_id) VALUES('session-1','target-trace','otel-exact','target-trace/span-1');" +
                 "INSERT INTO local_workspace_session_search_facts(session_id,kind) VALUES('session-1','skill'),('session-1','tool');");
         }
+
+        internal void AddAffectedSessions(int count)
+        {
+            using var connection = Open(Path);
+            using (var transaction = connection.BeginTransaction())
+            {
+                CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore.InitializeSchema(
+                    connection, transaction, DateTimeOffset.UnixEpoch);
+                transaction.Commit();
+            }
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<{count})
+                INSERT INTO sessions
+                SELECT printf('session-%03d',value),'active','partial',NULL,NULL,NULL,NULL,
+                       '2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'
+                FROM n;
+                WITH RECURSIVE n(value) AS (SELECT 2 UNION ALL SELECT value+1 FROM n WHERE value<{count})
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,total_tokens,projected_at)
+                SELECT $target,'target-trace',printf('span-%03d',value),value-1,'tool.call',17,'2026-08-24T00:00:00.0000000+00:00' FROM n;
+                WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<{count})
+                INSERT INTO session_events(event_id,session_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+                SELECT printf('event-%03d',value),printf('session-%03d',value),'copilot-sdk','target-trace','otel-exact',
+                       CASE value WHEN 1 THEN 'target-trace/span-1' ELSE 'target-trace/'||printf('span-%03d',value) END,
+                       'otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured'
+                FROM n;
+                """;
+            command.Parameters.AddWithValue("$target", Target);
+            command.ExecuteNonQuery();
+        }
+
+        internal void AddNormalizedOtelOwnerConflict()
+        {
+            const string trace = "0123456789abcdef0123456789abcdef";
+            const string span = "0123456789abcdef";
+            using var connection = Open(Path);
+            using (var transaction = connection.BeginTransaction())
+            {
+                CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore.InitializeSchema(
+                    connection, transaction, DateTimeOffset.UnixEpoch);
+                transaction.Commit();
+            }
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                UPDATE monitor_spans SET trace_id='{trace.ToUpperInvariant()}',span_id='{span.ToUpperInvariant()}',operation='execute_tool',category='tool_call'
+                  WHERE raw_record_id=$target;
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,projected_at)
+                  VALUES($sibling,'{trace}','{span}',0,'execute_tool','tool_call','2026-08-24T00:00:00.0000000+00:00');
+                INSERT INTO sessions VALUES('session-canonical','active','partial',NULL,NULL,NULL,NULL,
+                  '2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+                INSERT INTO session_runs VALUES('run-canonical','session-canonical','claude-code','native-run','{trace}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+                  VALUES('event-canonical','session-canonical','run-canonical','claude-code','{trace}','otel-exact','{trace}/{span}',
+                    'otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
+                """;
+            command.Parameters.AddWithValue("$target", Target);
+            command.Parameters.AddWithValue("$sibling", Sibling);
+            command.ExecuteNonQuery();
+        }
+
+        internal void InstallUnsupportedWorkspace(string state)
+        {
+            using var connection = Open(Path);
+            using (var transaction = connection.BeginTransaction())
+            {
+                CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore.InitializeSchema(
+                    connection, transaction, DateTimeOffset.UnixEpoch);
+                transaction.Commit();
+            }
+            if (state == "v4")
+            {
+                foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV4SchemaSql)
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = sql;
+                    command.ExecuteNonQuery();
+                }
+                using var stamp = connection.CreateCommand();
+                stamp.CommandText = "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',4);";
+                stamp.ExecuteNonQuery();
+            }
+            else
+            {
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+                using var mutation = connection.CreateCommand();
+                mutation.CommandText = state == "partial"
+                    ? "DROP TABLE local_workspace_node_edges;"
+                    : "UPDATE schema_version SET version=6 WHERE component='local_workspace_projection';";
+                mutation.ExecuteNonQuery();
+            }
+            using var fact = connection.CreateCommand();
+            fact.CommandText = "INSERT OR REPLACE INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens) VALUES($target,0,7,17);";
+            fact.Parameters.AddWithValue("$target", Target);
+            fact.ExecuteNonQuery();
+        }
+
+        internal string[] RawAndWorkspaceMutationSnapshot() =>
+        [
+            Snapshot("SELECT * FROM raw_records WHERE id=$target;"),
+            Snapshot("SELECT * FROM local_workspace_span_facts WHERE raw_record_id=$target;"),
+            Snapshot("SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$item;"),
+            Snapshot("SELECT state,revision,error_code FROM retention_items WHERE item_id=$item;")
+        ];
 
         internal long Scalar(string sql) => Convert.ToInt64(ScalarValue(sql));
         internal string Text(string sql) => (string)ScalarValue(sql)!;
@@ -211,6 +363,7 @@ public sealed class RawRecordRetentionAdapterTests
             using var command = connection.CreateCommand();
             command.CommandText = sql;
             command.Parameters.AddWithValue("$target", Target);
+            command.Parameters.AddWithValue("$item", Context.ItemId);
             using var reader = command.ExecuteReader();
             var values = new List<string>();
             while (reader.Read())
@@ -301,5 +454,30 @@ public sealed class RawRecordRetentionAdapterTests
         }
 
         public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now) { }
+    }
+
+    private sealed class RecordingBatchParticipant : ILocalWorkspaceProjectionTransactionParticipant
+    {
+        internal int PreflightCount { get; private set; }
+        internal List<int> BatchSizes { get; } = [];
+        internal List<string> SessionIds { get; } = [];
+
+        public void ValidateInstallationState(SqliteConnection connection, SqliteTransaction transaction) => PreflightCount++;
+
+        public void RefreshSessions(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            IReadOnlyCollection<string> sessionIds,
+            DateTimeOffset now)
+        {
+            BatchSizes.Add(sessionIds.Count);
+            SessionIds.AddRange(sessionIds);
+        }
+
+        public void CompleteSessionEventContentDeletion(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            string sourceItemId,
+            DateTimeOffset now) { }
     }
 }
