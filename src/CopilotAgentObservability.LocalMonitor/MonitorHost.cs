@@ -38,6 +38,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using GitHub.Copilot;
 
 namespace CopilotAgentObservability.LocalMonitor;
@@ -598,6 +599,10 @@ internal static class MonitorHost
         testOptions?.AdditionalServices?.Invoke(builder.Services);
 
         var app = builder.Build();
+        if (testOptions?.PrimaryAssetFileProvider is not null)
+        {
+            app.Environment.WebRootFileProvider = testOptions.PrimaryAssetFileProvider;
+        }
         if (skillHostShutdownGate is not null)
         {
             _ = app.Services.GetRequiredService<SkillHostShutdownCoordinatorV1>();
@@ -878,7 +883,9 @@ internal static class MonitorHost
             var humanDetailService = app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>();
             app.Use(async (context, next) =>
             {
-                if (await LocalMonitorV1HumanRoutes.TryDispatchUnavailableAssetAsync(context)) return;
+                if (await LocalMonitorV1HumanRoutes.TryDispatchUnavailableAssetAsync(
+                        context,
+                        app.Environment.WebRootFileProvider)) return;
                 if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService)) return;
                 await next(context);
             });
@@ -2657,6 +2664,8 @@ internal sealed record LocalRepositoryCatalogCompositionSnapshot(
 
 internal sealed class MonitorHostTestOptions
 {
+    public IFileProvider? PrimaryAssetFileProvider { get; init; }
+
     public Action<SessionRawContentRoutePhase>? SessionRawContentRouteCheckpoint { get; init; }
     public Action<LocalMonitorNodeContentRoutePhase>? LocalMonitorNodeContentRouteCheckpoint { get; init; }
 
