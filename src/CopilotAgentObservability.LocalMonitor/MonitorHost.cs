@@ -81,6 +81,11 @@ internal static class MonitorHost
         "/monitor-span-detail.js",
         "/monitor-tracelist.js",
         "/monitor-waterfall.js",
+        "/local-monitor-v1-shared.js",
+        "/local-monitor-repositories.js",
+        "/local-monitor-explorer.js",
+        "/local-monitor-compare.js",
+        "/local-monitor-workspace.js",
         "/monitor.css",
         "/monitor.js",
     };
@@ -764,9 +769,12 @@ internal static class MonitorHost
             var localArchivePath = LocalArchiveRoutes.IsPath(context);
             var localMonitorV1CollectionPath = LocalMonitorV1CollectionRoutes.IsPath(context.Request.Path);
             var localMonitorV1DetailPath = LocalMonitorV1SessionDetailRoutes.IsPath(context.Request.Path);
+            var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
+            var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
-                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath)
+                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath
+                || localMonitorV1HumanPath || localMonitorV1HumanAsset)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -835,6 +843,10 @@ internal static class MonitorHost
                 {
                     await LocalMonitorV1SessionDetailRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
+                else if (!options.SanitizedOnly && localMonitorV1HumanPath)
+                {
+                    await LocalMonitorV1HumanRoutes.InvalidHostAsync(context);
+                }
                 else
                 {
                     await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
@@ -847,11 +859,14 @@ internal static class MonitorHost
                     || localArchivePath
                     || localMonitorV1CollectionPath
                     || localMonitorV1DetailPath
+                    || ((HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
+                        && localMonitorV1HumanPath)
                     || RuntimeBackupRoutes.IsPath(context.Request.Path)
                     || IsKnownHumanRequest(context.Request)))
             {
                 context.Response.Headers.CacheControl = "no-store";
                 context.Response.StatusCode = StatusCodes.Status404NotFound;
+                context.Response.ContentLength = 0;
                 return;
             }
 
@@ -859,6 +874,14 @@ internal static class MonitorHost
         });
         if (!options.SanitizedOnly)
         {
+            var humanScopeService = app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>();
+            var humanDetailService = app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>();
+            app.Use(async (context, next) =>
+            {
+                if (await LocalMonitorV1HumanRoutes.TryDispatchUnavailableAssetAsync(context)) return;
+                if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService)) return;
+                await next(context);
+            });
             LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);
             LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(),
                 contentReader: new LocalWorkspaceNodeContentReader(retentionContext, timeProvider),
