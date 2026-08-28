@@ -90,7 +90,13 @@ internal static class LocalMonitorV1HumanRoutes
             return true;
         }
 
-        var resolution = await ResolveAsync(path, query!, scopeService, detailService, context.RequestAborted);
+        var resolution = await ResolveAsync(
+            path,
+            query!,
+            scopeService,
+            detailService,
+            context.RequestServices.GetRequiredService<IRazorViewEngine>(),
+            context.RequestAborted);
         await Page(context, resolution.Model, resolution.StatusCode);
         return true;
     }
@@ -112,6 +118,7 @@ internal static class LocalMonitorV1HumanRoutes
         LocalMonitorV1PageQuery query,
         ILocalRepositoryScopeSnapshotService scopeService,
         ILocalRepositorySessionDetailSnapshotService detailService,
+        IRazorViewEngine viewEngine,
         CancellationToken cancellationToken)
     {
         try
@@ -179,8 +186,47 @@ internal static class LocalMonitorV1HumanRoutes
             return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
         }
 
-        return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
+        return HasExactRenderer(viewEngine, path.RouteKind!.Value)
+            ? (LocalMonitorV1PageModel.Success(path, query), StatusCodes.Status200OK)
+            : (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"),
+                StatusCodes.Status503ServiceUnavailable);
     }
+
+    private static bool HasExactRenderer(IRazorViewEngine viewEngine, LocalMonitorV1PrimaryRouteKind routeKind)
+    {
+        var viewPath = routeKind switch
+        {
+            LocalMonitorV1PrimaryRouteKind.RepositorySelection =>
+                "/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml",
+            LocalMonitorV1PrimaryRouteKind.RepositorySessions or
+            LocalMonitorV1PrimaryRouteKind.AllSessions or
+            LocalMonitorV1PrimaryRouteKind.UnassignedSessions =>
+                "/Pages/Shared/LocalMonitorV1/_SessionExplorer.cshtml",
+            LocalMonitorV1PrimaryRouteKind.SessionDetail =>
+                "/Pages/Shared/LocalMonitorV1/_SessionWorkspace.cshtml",
+            LocalMonitorV1PrimaryRouteKind.ComparisonDetail =>
+                "/Pages/Shared/LocalMonitorV1/_RepositoryCompare.cshtml",
+            _ => throw new ArgumentOutOfRangeException(nameof(routeKind)),
+        };
+
+        try
+        {
+            var result = viewEngine.GetView(null, viewPath, false);
+            return result.Success
+                && result.View is not null
+                && string.Equals(result.View.Path, viewPath, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (IsNonFatalRendererLookupFailure(exception))
+        {
+            return false;
+        }
+    }
+
+    private static bool IsNonFatalRendererLookupFailure(Exception exception) =>
+        exception is not OperationCanceledException
+            and not OutOfMemoryException
+            and not StackOverflowException
+            and not AccessViolationException;
 
     private static string RecoveryForInvalidQuery(LocalMonitorV1PrimaryRouteKind kind) => kind switch
     {
