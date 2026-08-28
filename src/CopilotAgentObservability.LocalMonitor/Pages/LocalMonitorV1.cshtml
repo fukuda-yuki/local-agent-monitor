@@ -31,6 +31,10 @@ else
                 <p>状態を確認して、もう一度お試しください。</p>
             </div>
         }
+        else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.RepositorySelection)
+        {
+            @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml")
+        }
     </section>
 }
 
@@ -38,5 +42,6 @@ else
     @if (Model.RouteKind is not null)
     {
         <script src="/local-monitor-v1-shared.js" defer></script>
+        <script src="/local-monitor-repositories.js" defer></script>
     }
 }

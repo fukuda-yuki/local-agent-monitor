@@ -1,0 +1,35 @@
+<section class="local-monitor-repository-selection"
+         id="local-monitor-repository-selection"
+         aria-labelledby="repository-selection-title">
+    <header class="local-monitor-repository-selection-header">
+        <div>
+            <h1 id="repository-selection-title">リポジトリを選択</h1>
+            <p>確認するセッションの範囲を選んでください。</p>
+        </div>
+        <button type="button" id="add-repository-action">リポジトリを追加</button>
+    </header>
+
+    <p id="repository-selection-status" aria-live="polite">リポジトリを読み込んでいます。</p>
+
+    <nav class="local-monitor-repository-virtual-scopes" aria-label="セッションの範囲">
+        <a id="all-sessions-entry" href="/sessions">
+            <span>すべてのセッション</span>
+            <span data-all-session-count aria-label="セッション数">読み込み中</span>
+        </a>
+        <a id="unassigned-sessions-entry" href="/sessions/unassigned" hidden>
+            <span>リポジトリ未設定のセッション</span>
+            <span data-unassigned-session-count aria-label="セッション数"></span>
+        </a>
+    </nav>
+
+    <div id="repository-grid" class="local-monitor-repository-grid"></div>
+
+    <div class="local-monitor-repository-selection-actions">
+        <button type="button" id="repository-load-more" hidden>さらに読み込む</button>
+        <button type="button" id="archived-repositories-action">
+            アーカイブ済みリポジトリ
+            <span data-archived-repository-count aria-label="アーカイブ済みリポジトリ数">読み込み中</span>
+        </button>
+    </div>
+
+</section>

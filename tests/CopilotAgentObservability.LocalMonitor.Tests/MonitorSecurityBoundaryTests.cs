@@ -92,9 +92,9 @@ public class MonitorSecurityBoundaryTests
     [Fact]
     public async Task SanitizedSurfaces_NeverReturnRawOrPii_EvenWithRawShownByDefault()
     {
-        // The JSON APIs, the SSE stream, and diagnostics carry sanitized metadata
-        // only — never raw or PII — even with raw shown by default. (The dashboard
-        // and trace list surface the prompt label by design; see the D032 tests.)
+        // The JSON APIs, the SSE stream, diagnostics, and Repository selection
+        // carry sanitized metadata only. The trace list alone keeps its accepted
+        // raw-default prompt label.
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp);
@@ -114,28 +114,26 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task DashboardAndTraceList_ShowPromptByDefault_ButNeverToolArgsOrPii()
+    public async Task RepositorySelectionOmitsRawContentWhileTraceListShowsOnlyThePromptLabel()
     {
-        // D032: the dashboard and trace list label traces with the user prompt by
-        // default (raw-bearing), surfacing ONLY the prompt — never tool arguments
-        // or PII, and never via /api/monitor/* (server-rendered pages only).
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp);
 
-        // period=all keeps the epoch-seeded fixture rows visible on the Sprint18
-        // trace list (its default period filter is "today").
-        foreach (var path in new[] { "/", "/traces?period=all" })
+        var repositorySelection = await host.Client.GetStringAsync("/");
+        foreach (var marker in Markers)
         {
-            var body = await host.Client.GetStringAsync(path);
-            Assert.Contains("SECRET_PROMPT_TEXT_MARKER", body);
-            Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", body);
-            Assert.DoesNotContain("leak-marker@example.com", body);
+            Assert.DoesNotContain(marker, repositorySelection);
         }
+
+        var traces = await host.Client.GetStringAsync("/traces?period=all");
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", traces);
+        Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", traces);
+        Assert.DoesNotContain("leak-marker@example.com", traces);
     }
 
     [Fact]
-    public async Task DashboardAndTraceList_AreClosedUnderSanitizedOnly()
+    public async Task RepositorySelectionAndTraceListAreClosedUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
@@ -151,13 +149,13 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task DashboardAndTraceList_CrossOriginIsForbidden_WhenRawShown()
+    public async Task TraceListCrossOriginIsForbiddenWhenRawPromptLabelsAreShown()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp);
 
-        foreach (var path in new[] { "/", "/traces" })
+        foreach (var path in new[] { "/traces" })
         {
             using var crossSite = new HttpRequestMessage(HttpMethod.Get, path);
             crossSite.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
@@ -170,7 +168,7 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task DashboardAndTraceList_SetNoStore_WhenRawShown()
+    public async Task RepositorySelectionAndTraceListSetNoStore()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);

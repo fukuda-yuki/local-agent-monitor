@@ -35,23 +35,60 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task Overview_ShowsPromptByDefault_ButNotToolArgsOrPii()
+    public async Task RepositorySelection_RendersClosedSkeletonWithoutLegacyOverviewOrRawPrompt()
     {
-        // D032: the overview labels traces with the user prompt by default
-        // (raw-bearing), but surfaces ONLY the prompt — never tool arguments or PII.
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp);
 
-        var overview = await host.Client.GetStringAsync("/");
+        using var response = await host.Client.GetAsync("/");
+        var page = await response.Content.ReadAsStringAsync();
 
-        Assert.Contains("概要", overview);
-        Assert.Contains("高コスト trace TOP5", overview);
-        Assert.Contains("最近のトレース", overview);
-        Assert.Contains("時間帯別トークン", overview);
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", overview);
-        Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", overview);
-        Assert.DoesNotContain("leak-marker@example.com", overview);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Contains("id=\"local-monitor-repository-selection\"", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"repository-selection-title\"", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"repository-selection-status\" aria-live=\"polite\"", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"all-sessions-entry\" href=\"/sessions\"", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"repository-grid\"", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"add-repository-action\"", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"archived-repositories-action\"", page, StringComparison.Ordinal);
+        Assert.Contains("/local-monitor-repositories.js", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"overview-root\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("高コスト trace TOP5", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("/monitor-overview.js", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("SECRET_TOOL_ARGS_MARKER", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("leak-marker@example.com", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RepositoryController_UsesOnlyOwnedAuthoritiesAndInertBrowserSurfaces()
+    {
+        using var temp = new MonitorTempDirectory();
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp);
+
+        var script = await host.Client.GetStringAsync("/local-monitor-repositories.js");
+
+        Assert.Contains("window.LocalMonitorV1Paths.repositorySessions", script, StringComparison.Ordinal);
+        Assert.Contains("\"active_only\"", script, StringComparison.Ordinal);
+        Assert.Contains("\"include_archived\"", script, StringComparison.Ordinal);
+        Assert.Contains("/api/local-monitor/v1/archive-actions", script, StringComparison.Ordinal);
+        Assert.Contains("/locators", script, StringComparison.Ordinal);
+        Assert.Contains("x-monitor-csrf", script, StringComparison.Ordinal);
+        Assert.Contains("Idempotency-Key", script, StringComparison.Ordinal);
+        Assert.Contains("crypto.getRandomValues", script, StringComparison.Ordinal);
+        Assert.Contains("crypto.subtle.digest(\"SHA-256\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("operationKey(\"create\", body)", script, StringComparison.Ordinal);
+        Assert.Contains("textContent", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("innerHTML", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("localStorage", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("sessionStorage", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("console.", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("/api/monitor/", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("/api/session-workspace/", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("session-repository-actions", script, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -184,18 +221,41 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task Overview_ShowsPromptByDefault()
+    public async Task RepositorySelection_IsAbsentUnderSanitizedOnly()
     {
-        // D032/D042: the overview's prompt labels are server-rendered raw-bearing
-        // content. The raw record link moved off this page in the Sprint18 redesign
-        // and is reached from the trace-detail page.
         using var temp = new MonitorTempDirectory();
-        SeedRawWithSensitiveMarkers(temp);
+        EnsureSchema(temp);
+        await using var host = await StartHostAsync(temp, sanitizedOnly: true);
 
-        await using var defaultHost = await StartHostAsync(temp);
-        var defaultOverview = await defaultHost.Client.GetStringAsync("/");
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultOverview);
-        Assert.DoesNotContain("leak-marker@example.com", defaultOverview);
+        foreach (var path in new[]
+                 {
+                     "/",
+                     "/local-monitor-repositories.js",
+                     "/api/local-monitor/v1/repositories?archive_scope=active_only&limit=50",
+                     "/api/local-monitor/v1/archived-items?target_kind=repository&limit=50",
+                 })
+        {
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+            Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
+        }
+
+        foreach (var request in new[]
+                 {
+                     new HttpRequestMessage(HttpMethod.Post, "/api/local-monitor/v1/repositories"),
+                     new HttpRequestMessage(HttpMethod.Patch, "/api/local-monitor/v1/repositories/018f0000-0000-7000-8000-000000000101"),
+                     new HttpRequestMessage(HttpMethod.Post, "/api/local-monitor/v1/archive-actions"),
+                 })
+        {
+            using (request)
+            using (var response = await host.Client.SendAsync(request))
+            {
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+                Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+                Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
+            }
+        }
     }
 
     [Fact]

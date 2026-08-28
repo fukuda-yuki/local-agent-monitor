@@ -57,14 +57,16 @@ public sealed class RuntimeBackupSurfaceTests
     }
 
     [Fact]
-    public async Task Overview_exposes_raw_mode_backup_affordance_and_sanitized_mode_has_no_page()
+    public async Task Repository_selection_omits_backup_affordance_while_raw_backup_page_remains_available()
     {
         using var rawTemp = new MonitorTempDirectory();
         await using var rawHost = await MonitorTestHost.StartAsync(rawTemp, testOptions: DisabledWorkers());
         var rawHtml = await rawHost.Client.GetStringAsync("/");
+        using var rawBackupPage = await rawHost.Client.GetAsync("/backup-restore");
 
-        Assert.Contains("id=\"runtime-backup-link\"", rawHtml, StringComparison.Ordinal);
-        Assert.Contains("href=\"/backup-restore\"", rawHtml, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"runtime-backup-link\"", rawHtml, StringComparison.Ordinal);
+        Assert.DoesNotContain("href=\"/backup-restore\"", rawHtml, StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, rawBackupPage.StatusCode);
 
         using var sanitizedTemp = new MonitorTempDirectory();
         await using var sanitizedHost = await MonitorTestHost.StartAsync(

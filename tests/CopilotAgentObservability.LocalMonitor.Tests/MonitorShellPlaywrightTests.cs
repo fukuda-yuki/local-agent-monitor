@@ -474,7 +474,9 @@ public class MonitorShellPlaywrightTests
         await Expect(modal).ToHaveAttributeAsync("aria-labelledby", "settings-modal-title");
         await Expect(modal.Locator("[data-settings-navigation-host]")).ToHaveCountAsync(1);
         await Expect(modal.Locator("[data-settings-content-host]")).ToHaveCountAsync(1);
-        await Expect(modal.Locator("[data-settings-navigation-host] > *, [data-settings-content-host] > *")).ToHaveCountAsync(0);
+        await Expect(modal.Locator("[data-repository-settings-navigation]")).ToHaveCountAsync(2);
+        await Expect(modal.Locator("[data-repository-settings-section]")).ToHaveCountAsync(2);
+        await Expect(modal.Locator("#repository-management-result")).ToHaveCountAsync(1);
 
         await page.Locator("#receiver-status-action").ClickAsync();
 
@@ -558,6 +560,10 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("#settings-extension-last")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#settings-modal-close")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("[data-repository-settings-navigation='repositories']")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("[data-repository-settings-navigation='archive']")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#settings-extension-first")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
