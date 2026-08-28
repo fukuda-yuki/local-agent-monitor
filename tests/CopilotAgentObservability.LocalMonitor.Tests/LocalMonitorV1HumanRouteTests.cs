@@ -1,7 +1,12 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Pages;
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Razor;
+using Microsoft.AspNetCore.Mvc.Rendering;
+using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -13,6 +18,10 @@ public sealed class LocalMonitorV1HumanRouteTests
     private const string RepositoryId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071";
     private const string SessionId = "018f2b4e-7c1a-7f1a-9a2b-6c3d4e5f6072";
     private const string ComparisonId = "018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073";
+    private const string RepositorySelectionRenderer = "/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml";
+    private const string SessionExplorerRenderer = "/Pages/Shared/LocalMonitorV1/_SessionExplorer.cshtml";
+    private const string SessionWorkspaceRenderer = "/Pages/Shared/LocalMonitorV1/_SessionWorkspace.cshtml";
+    private const string RepositoryCompareRenderer = "/Pages/Shared/LocalMonitorV1/_RepositoryCompare.cshtml";
 
     private static readonly string[] ExactPrimaryPathValues =
     {
@@ -92,6 +101,13 @@ public sealed class LocalMonitorV1HumanRouteTests
         { $"/repositories/{RepositoryId}/comparisons/{ComparisonId}?unknown=secret", "open_repository_selection" },
     };
 
+    public static TheoryData<string, string[]> RendererOwnership => new()
+    {
+        { RepositorySelectionRenderer, ["/"] },
+        { SessionExplorerRenderer, [$"/repositories/{RepositoryId}/sessions", "/sessions", "/sessions/unassigned"] },
+        { SessionWorkspaceRenderer, [$"/sessions/{SessionId}"] },
+    };
+
     [Theory]
     [MemberData(nameof(ExactPrimaryPaths))]
     public async Task UnintegratedOwnerRoutesReturnClosedUnavailableInsteadOfPlaceholderSuccess(string path)
@@ -111,6 +127,123 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.Contains("data-route-kind", html, StringComparison.Ordinal);
         Assert.DoesNotContain("data-requested-section", html, StringComparison.Ordinal);
         Assert.Contains("/local-monitor-v1-shared.js", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(RendererOwnership))]
+    public async Task ExactRendererWithSuccessfulResourceResolutionUpgradesOnlyItsOwnedRoutes(
+        string renderer,
+        string[] ownedRoutes)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(renderer));
+
+        foreach (var path in ExactPrimaryPathValues)
+        {
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(ownedRoutes.Contains(path) ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        }
+    }
+
+    [Theory]
+    [InlineData(RendererLookupOutcome.Missing)]
+    [InlineData(RendererLookupOutcome.Failed)]
+    [InlineData(RendererLookupOutcome.Ambiguous)]
+    public async Task MissingFailedOrAmbiguousRendererRemainsClosedUnavailable(RendererLookupOutcome outcome)
+    {
+        using var temp = new MonitorTempDirectory();
+        var viewEngine = new ControlledRazorViewEngine(RepositorySelectionRenderer, outcome);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(viewEngine));
+
+        using var response = await host.Client.GetAsync("/");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(1, viewEngine.RendererLookupCount);
+    }
+
+    [Theory]
+    [InlineData(typeof(ArgumentException))]
+    [InlineData(typeof(FormatException))]
+    [InlineData(typeof(NotSupportedException))]
+    public async Task NonFatalRendererLookupFailureRemainsClosedUnavailableWithoutLeaking(Type exceptionType)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string exceptionMessage = "controlled_nonfatal_renderer_lookup_failure";
+        var exception = (Exception)Activator.CreateInstance(exceptionType, exceptionMessage)!;
+        var viewEngine = new ControlledRazorViewEngine(
+            RepositorySelectionRenderer,
+            RendererLookupOutcome.Available,
+            exception);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(viewEngine));
+
+        using var response = await host.Client.GetAsync("/");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.DoesNotContain(exceptionMessage, body, StringComparison.Ordinal);
+        Assert.Equal(1, viewEngine.RendererLookupCount);
+    }
+
+    [Theory]
+    [InlineData("repository_not_found", "/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/sessions", 404)]
+    [InlineData("scope_unavailable", "/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/sessions", 503)]
+    [InlineData("session_not_found", "/sessions/018f2b4e-7c1a-7f1a-9a2b-6c3d4e5f6072", 404)]
+    [InlineData("local_monitor_ui_unavailable", "/sessions/018f2b4e-7c1a-7f1a-9a2b-6c3d4e5f6072", 503)]
+    public async Task ExactRendererCannotUpgradeAMissingOrUnavailableResource(string error, string path, int status)
+    {
+        using var temp = new MonitorTempDirectory();
+        var scopeService = path.StartsWith("/repositories/", StringComparison.Ordinal)
+            ? new ThrowingScopeService(error)
+            : null;
+        var detailService = path.StartsWith("/sessions/", StringComparison.Ordinal)
+            ? new ThrowingDetailService(error)
+            : null;
+        var renderer = path.StartsWith("/repositories/", StringComparison.Ordinal)
+            ? SessionExplorerRenderer
+            : SessionWorkspaceRenderer;
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(renderer, scopeService: scopeService, detailService: detailService));
+
+        using var response = await host.Client.GetAsync(path);
+
+        Assert.Equal(status, (int)response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ComparisonRendererRemainsUnavailableUntilItsResourceResolverExists()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(RepositoryCompareRenderer));
+
+        using var response = await host.Client.GetAsync($"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SuccessfulRendererHeadMatchesTheGetRepresentationWithoutWritingABody()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(RepositorySelectionRenderer));
+        using var get = await host.Client.GetAsync("/");
+        using var head = await host.Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/"));
+
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal(get.StatusCode, head.StatusCode);
+        Assert.Equal(get.Content.Headers.ContentLength, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
     }
 
     [Fact]
@@ -391,12 +524,41 @@ public sealed class LocalMonitorV1HumanRouteTests
         },
     };
 
+    private static MonitorHostTestOptions RendererOptions(
+        string renderer,
+        RendererLookupOutcome outcome = RendererLookupOutcome.Available,
+        ILocalRepositoryScopeSnapshotService? scopeService = null,
+        ILocalRepositorySessionDetailSnapshotService? detailService = null) =>
+        RendererOptions(new ControlledRazorViewEngine(renderer, outcome), scopeService, detailService);
+
+    private static MonitorHostTestOptions RendererOptions(
+        ControlledRazorViewEngine viewEngine,
+        ILocalRepositoryScopeSnapshotService? scopeService = null,
+        ILocalRepositorySessionDetailSnapshotService? detailService = null) => new()
+    {
+        AdditionalServices = services =>
+        {
+            services.AddSingleton(scopeService ?? new ReadyScopeService());
+            services.AddSingleton(detailService ?? new ReadyDetailService());
+            services.AddSingleton<IRazorViewEngine>(viewEngine);
+        },
+    };
+
     private sealed class ReadyScopeService : ILocalRepositoryScopeSnapshotService
     {
         public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
             LocalRepositoryScopeRequest request,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(new LocalRepositoryScopeSnapshot(request, [], []));
+    }
+
+    private sealed class ThrowingScopeService(string error) : ILocalRepositoryScopeSnapshotService
+    {
+        public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
+            LocalRepositoryScopeRequest request,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                error == "repository_not_found" ? "local_repository_scope_repository_not_found" : error);
     }
 
     private sealed class ReadyDetailService : ILocalRepositorySessionDetailSnapshotService
@@ -436,6 +598,58 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     private sealed record SessionRow(string SessionId) : ILocalRepositorySessionSnapshotRow;
+
+    public enum RendererLookupOutcome
+    {
+        Available,
+        Missing,
+        Failed,
+        Ambiguous,
+    }
+
+    private sealed class ControlledRazorViewEngine(
+        string renderer,
+        RendererLookupOutcome outcome,
+        Exception? lookupException = null) : IRazorViewEngine
+    {
+        public int RendererLookupCount { get; private set; }
+
+        public ViewEngineResult FindView(ActionContext context, string viewName, bool isMainPage) =>
+            GetView(null, viewName, isMainPage);
+
+        public ViewEngineResult GetView(string? executingFilePath, string viewPath, bool isMainPage)
+        {
+            if (viewPath == "/Pages/LocalMonitorV1.cshtml")
+                return ViewEngineResult.Found(viewPath, new ControlledView(viewPath));
+            RendererLookupCount++;
+            if (viewPath != renderer || outcome == RendererLookupOutcome.Missing)
+                return ViewEngineResult.NotFound(viewPath, [viewPath]);
+            if (lookupException is not null)
+                throw lookupException;
+            if (outcome == RendererLookupOutcome.Failed)
+                throw new InvalidOperationException("controlled_renderer_failure");
+
+            var resolvedPath = outcome == RendererLookupOutcome.Ambiguous
+                ? viewPath + "|duplicate"
+                : viewPath;
+            return ViewEngineResult.Found(viewPath, new ControlledView(resolvedPath));
+        }
+
+        public RazorPageResult FindPage(ActionContext context, string pageName) =>
+            new(pageName, [pageName]);
+
+        public RazorPageResult GetPage(string? executingFilePath, string pagePath) =>
+            new(pagePath, [pagePath]);
+
+        public string? GetAbsolutePath(string? executingFilePath, string? pagePath) => pagePath;
+    }
+
+    private sealed class ControlledView(string path) : IView
+    {
+        public string Path { get; } = path;
+
+        public Task RenderAsync(ViewContext context) => context.Writer.WriteAsync("<main data-controlled-view></main>");
+    }
 
     private static async Task<RawResponse> SendRawAsync(string hostUrl, string method, string rawTarget)
     {
