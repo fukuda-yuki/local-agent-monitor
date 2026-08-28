@@ -24,6 +24,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Comparison\local_comparison.schema.v1.sql"
+                      LogicalName="local_comparison.schema.v1.sql" />
     <EmbeddedResource Include="LocalArchive\local_archive.schema.v1.sql"
                       LogicalName="local_archive.schema.v1.sql" />
     <EmbeddedResource Include="SkillInvocationSnapshot\skill-invocation-snapshot.schema.v1.sql" LogicalName="skill-invocation-snapshot.schema.v1.sql" />
