@@ -15,6 +15,22 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 {
     [Fact]
+    public async Task DetailRequestPinsOneRegistryGenerationAcrossSessionAndDetailContributors()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("detail-pin", "shared-skill");
+        fixture.RefreshWorkspace();
+        fixture.ResetRegistryObservations();
+
+        var detail = await fixture.ReadDetailAsync("detail-pin", LocalRepositorySessionDetailRequestKind.Summary);
+
+        Assert.NotNull(detail.Detail.SkillRegistryGenerationIdentity);
+        Assert.Equal(1, fixture.RegistryCaptureCount);
+        Assert.Equal(1, fixture.RegistryLeaseCount);
+        Assert.Equal(1, fixture.RegistryVerifyCount);
+    }
+
+    [Fact]
     public void GlobalWorkspaceRefreshPinsOneRegistryGenerationAcrossSessionBatches()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
@@ -185,16 +201,14 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     }
 
     [Fact]
-    public void PersistedSqliteMatrix_RegistryUnavailableFailsClosed()
+    public void PersistedSqliteMatrix_RegistryUnavailableAbortsTheLiveWorkspaceRefresh()
     {
         using var fixture = new CurrentInvocationProjectionFixture(registryAvailable: false);
-        fixture.SeedSdkOnly("unavailable", "unavailable-skill");
 
-        var session = fixture.Read("unavailable");
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            fixture.SeedSdkOnly("unavailable", "unavailable-skill"));
 
-        Assert.Equal("unavailable", session.State);
-        Assert.Null(session.InvocationCount);
-        Assert.Empty(session.SearchFacts);
+        Assert.Equal("skill_registry_generation_unavailable", error.Message);
     }
 
     [Fact]
@@ -534,6 +548,44 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         var root = Assert.Single(summary.Detail.Nodes, static node => node.SourceKind == "execution_root");
         Assert.Equal(fixture.PersistedRootChildCount("pending-count"), execution.ChildCount);
         Assert.Equal(fixture.PersistedRootChildCount("pending-count"), root.ChildCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProductionCoordinatorRejectsAMissingExpectedSkillNode(bool pending)
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        if (pending)
+            fixture.SeedMismatchedPair("skill-node-missing", "pending-skill", "b1", "c1", "b2", "c2");
+        else
+            fixture.SeedExactPair("skill-node-missing", "current-skill", "b1", "c1", 1);
+        fixture.RefreshWorkspace();
+        fixture.DeleteSkillNode("skill-node-missing", pending ? "certification_pending" : "current");
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await fixture.ReadDetailAsync("skill-node-missing", LocalRepositorySessionDetailRequestKind.Summary));
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProductionCoordinatorRejectsMissingExpectedSkillMetadata(bool pending)
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        if (pending)
+            fixture.SeedMismatchedPair("metadata-missing", "pending-skill", "b1", "c1", "b2", "c2");
+        else
+            fixture.SeedExactPair("metadata-missing", "current-skill", "b1", "c1", 1);
+        fixture.RefreshWorkspace();
+        fixture.DeleteSkillMetadata("metadata-missing");
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await fixture.ReadDetailAsync("metadata-missing", LocalRepositorySessionDetailRequestKind.Summary));
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
     }
 
     [Fact]
@@ -1330,6 +1382,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
 
     internal int RegistryCaptureCount => authority.CaptureCount;
     internal int RegistryLeaseCount => authority.LeaseCount;
+    internal void ResetRegistryObservations() => authority.ResetObservations();
     internal int RegistryVerifyCount => authority.VerifyCount;
     internal int RegistryTupleAuthorizationCount => authority.TupleAuthorizationCount;
 
@@ -2156,6 +2209,37 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.CommandText = "DELETE FROM local_workspace_nodes WHERE session_id=$session AND source_kind='session_event' AND source_identity IN (SELECT event_id FROM session_events WHERE session_id=$session AND type='skill.invoked');";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         Assert.True(command.ExecuteNonQuery() > 0);
+    }
+
+    internal void DeleteSkillNode(string sessionKey, string currentValidState)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM local_workspace_nodes
+            WHERE node_id=(
+               SELECT node.node_id FROM local_workspace_nodes node
+               JOIN local_workspace_skill_metadata metadata ON metadata.node_id=node.node_id
+               WHERE node.session_id=$session AND metadata.current_valid_state=$state
+               ORDER BY node.node_id LIMIT 1);
+            """;
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        command.Parameters.AddWithValue("$state", currentValidState);
+        Assert.Equal(1, command.ExecuteNonQuery());
+    }
+
+    internal void DeleteSkillMetadata(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM local_workspace_skill_metadata
+            WHERE node_id=(SELECT node_id FROM local_workspace_nodes
+              WHERE session_id=$session AND source_kind='skill_invocation'
+              ORDER BY node_id LIMIT 1);
+            """;
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     internal void RefreshWorkspaceProjection(string sessionKey)

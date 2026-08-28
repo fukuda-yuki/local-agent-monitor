@@ -29,7 +29,7 @@ internal static class LocalMonitorV1SessionDetailRoutes
         if(MonitorHost.IsCrossSiteRequest(context)){await Error(context,403,"csrf_rejected");return;}
         try
         {
-            var snapshot=await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Content,sessionId!,NodeId:nodeId!,ContentPart:part),context.RequestAborted);
+            var snapshot=await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Content,sessionId!,NodeId:nodeId!,ContentPart:part,ExpectedWorkspaceRevision:revision),context.RequestAborted);
             if(!StringComparer.Ordinal.Equals(revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}
             if(!snapshot.Detail.Nodes.Any(node=>node.NodeId==nodeId)){await Error(context,404,"node_not_found");return;}
             var locator=snapshot.Detail.Content.SingleOrDefault(c=>c.NodeId==nodeId&&c.Part==part);
@@ -51,7 +51,7 @@ internal static class LocalMonitorV1SessionDetailRoutes
             context.Response.StatusCode=200;context.Response.ContentType="text/plain; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.Headers["X-Local-Monitor-Schema-Version"]="local-monitor-node-content.response.v1";context.Response.ContentLength=bytes.Length;
             if(!HttpMethods.IsHead(context.Request.Method)){checkpoint?.Invoke(LocalMonitorNodeContentRoutePhase.DuringResponseWrite);await context.Response.Body.WriteAsync(bytes,context.RequestAborted);}
         }
-        catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error switch{"session_not_found"=>404,"workspace_too_large"=>409,_=>503},e.Error);}
+        catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error switch{"session_not_found"=>404,"workspace_too_large" or "workspace_snapshot_stale"=>409,_=>503},e.Error);}
         catch(LocalRepositoryScopeSnapshotException){await Error(context,503,"persistence_busy");}
         catch(Exception e) when(e is InvalidOperationException or JsonException){await Error(context,503,"local_monitor_ui_unavailable");}
     }
@@ -83,8 +83,9 @@ internal static class LocalMonitorV1SessionDetailRoutes
             {
                 Kind.Summary=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Summary,sessionId!),
                 Kind.Timeline=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Timeline,sessionId!,query.ExecutionId,query.ParentNodeId,
-                    cursorValid&&query.After is not null?new(decoded.TimeGroup,decoded.UtcTicks,decoded.SourceOrdinal,decoded.NodeId):null,query.Limit),
-                _=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Node,sessionId!,NodeId:nodeId!)
+                    cursorValid&&query.After is not null?new(decoded.TimeGroup,decoded.UtcTicks,decoded.SourceOrdinal,decoded.NodeId):null,query.Limit,
+                    ExpectedWorkspaceRevision:query.Revision),
+                _=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Node,sessionId!,NodeId:nodeId!,ExpectedWorkspaceRevision:query.Revision)
             };
             var snapshot=await service.ReadDetailAsync(request,context.RequestAborted);
             if(query.Revision is not null&&!StringComparer.Ordinal.Equals(query.Revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}

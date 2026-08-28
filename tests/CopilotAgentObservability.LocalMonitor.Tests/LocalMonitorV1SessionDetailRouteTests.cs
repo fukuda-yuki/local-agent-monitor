@@ -59,7 +59,6 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
     [InlineData("tool_result", "PostToolUse", "{\"tool_response\":1.2300}", "1.2300")]
     [InlineData("instruction", "UserPromptSubmit", "{\"prompt\":\"line\\nquote: \\\"ok\\\"\"}", "line\nquote: \"ok\"")]
     [InlineData("error_message", "PostToolUseFailure", "{\"error\":\"failed\"}", "failed")]
-    [InlineData("subagent_input", "SubagentStart", "{\"agent_id\":\"agent-1\"}", "agent-1")]
     [InlineData("event_content", "tool.completed", "{\"number\":1,\"boolean\":true,\"nil\":null}", "{\"number\":1,\"boolean\":true,\"nil\":null}")]
     public async Task ProductionContentFixturePublishesAllSixPartsAsExactInertUtf8(
         string part, string eventType, string contentJson, string expectedText)
@@ -89,6 +88,134 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var verification = Open(temp);
         Assert.Equal(expected.Length, long.Parse(Scalar(verification,
             "SELECT CAST(selected_utf8_bytes AS TEXT) FROM local_workspace_node_content_refs WHERE part=$execution AND source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId, part), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    [Theory]
+    [InlineData("{\"other\":\"safe\"}")]
+    [InlineData("{\"prompt\":{}}")]
+    public async Task SupportedClaudeCarrierWithoutTheExactStringPropertyServesOnlyTheWholeEvent(string contentJson)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, contentJson: contentJson, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        using var host = await StartProductionDetailRouteAsync(temp, null, null, ensureSchemas: false);
+        string nodeId;
+        using (var connection = Open(temp))
+        {
+            nodeId = Scalar(connection,
+                "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND part='event_content';", SessionId);
+            Assert.Equal("whole_event", Scalar(connection,
+                "SELECT locator_kind FROM local_workspace_node_content_refs WHERE node_id=$session AND part='event_content';", nodeId));
+        }
+
+        using var response = await host.Client.GetAsync(
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={await Revision(host.Client)}&part=event_content");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(contentJson, await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task ExactPointerCarrierCannotBeDowngradedToWholeEventAfterRetentionAdmission()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "pointer-downgrade-must-not-publish";
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"prompt\":\"" + marker + "\",\"secret\":\"hidden\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+        using (var command = connection.CreateCommand())
+        {
+            nodeId = Scalar(connection,
+                "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId);
+            command.CommandText = """
+                UPDATE local_workspace_node_content_refs
+                SET part='event_content',locator_kind='whole_event',json_pointer=NULL,
+                    selected_utf8_bytes=(SELECT length(CAST(content_json AS BLOB)) FROM session_event_content WHERE event_id=source_item_id)
+                WHERE node_id=$node AND part='instruction';
+                """;
+            command.Parameters.AddWithValue("$node", nodeId);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+        var service = CreateProductionDetailService(temp);
+        var snapshot = await service.ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Content, SessionId, NodeId: nodeId, ContentPart: "event_content"),
+            CancellationToken.None);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        var postGrantFailureObserved = false;
+        LocalMonitorV1SessionDetailRoutes.Map(app, new FixedDetailService(snapshot), new byte[32],
+            new LocalWorkspaceNodeContentReader(temp.RetentionContext, temp.TimeProvider,
+                () => postGrantFailureObserved = true));
+        await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+
+        using var response = await client.GetAsync(
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={snapshot.WorkspaceRevision}&part=event_content");
+
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}", System.Text.Encoding.UTF8.GetString(bytes));
+        Assert.DoesNotContain(marker, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+        Assert.True(postGrantFailureObserved);
+        using var proof = Open(temp);
+        Assert.Equal("0", Scalar(proof,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
+    }
+
+    [Theory]
+    [InlineData("{\"prompt\":\"selected-marker\",\"other\":\"\\q\"}")]
+    [InlineData("{\"prompt\":\"selected-marker\",\"other\":01}")]
+    [InlineData("{\"prompt\":\"selected-marker\",\"other\":{\"nested\":[true,]}}")]
+    public async Task PointerReadRejectsMalformedUnrelatedJsonAfterCommittedAdmission(string malformedJson)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string marker = "selected-marker";
+        SeedDeterministicSession(temp, full: true,
+            contentJson: "{\"prompt\":\"" + marker + "\",\"other\":\"valid\"}",
+            eventType: "UserPromptSubmit", sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string nodeId;
+        using (var connection = Open(temp))
+            nodeId = Scalar(connection,
+                "SELECT node_id FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND part='instruction';", SessionId);
+        var postGrantFailureObserved = false;
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, CreateProductionDetailService(temp), new byte[32],
+            new LocalWorkspaceNodeContentReader(temp.RetentionContext, temp.TimeProvider,
+                () => postGrantFailureObserved = true));
+        await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+        var revision = await Revision(client);
+        using (var connection = Open(temp))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE session_event_content SET content_json=$content WHERE event_id='018f0000-0000-7000-8000-000000000004';";
+            command.Parameters.AddWithValue("$content", malformedJson);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        using var response = await client.GetAsync(
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{nodeId}/content?workspace_revision={revision}&part=instruction");
+
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.True(postGrantFailureObserved);
+        Assert.DoesNotContain(marker, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+        using var proof = Open(temp);
+        Assert.Equal("0", Scalar(proof,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM retention_leases WHERE lease_kind='access';", SessionId));
     }
 
     [Theory]
@@ -1198,6 +1325,41 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             $"{basePath}?workspace_revision={revision}&part=tool_input", 404, "raw_content_not_captured");
     }
 
+    [Fact]
+    public async Task StaleTimelineAndNodeRevisionPrecedesMissingExecutionParentNodeAndCursorPosition()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, eventType: "UserPromptSubmit",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+        RefreshContentProjection(temp);
+        string executionId;
+        using (var connection = Open(temp))
+            executionId = Scalar(connection,
+                "SELECT execution_id FROM local_workspace_execution_headers WHERE session_id=$session LIMIT 1;", SessionId);
+        using var host = await StartProductionDetailRouteAsync(temp, null, null, ensureSchemas: false);
+        var staleRevision = new string('f', 64);
+        var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
+        var cursor = LocalMonitorV1TimelineCursor.Encode(key,
+            new(SessionId, staleRevision, null, null, 100),
+            new(0, 0, 1, "node-00000000000000000000000000000000"));
+        var paths = new[]
+        {
+            $"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={staleRevision}&execution_id=018f0000-0000-7000-8000-000000000099&limit=100",
+            $"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={staleRevision}&execution_id={executionId}&parent_node_id=node-00000000000000000000000000000000&limit=100",
+            $"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={staleRevision}&after={cursor}&limit=100",
+            $"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-00000000000000000000000000000000?workspace_revision={staleRevision}",
+        };
+
+        foreach (var path in paths)
+        {
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            Assert.Equal("{\"error\":\"workspace_snapshot_stale\"}", await response.Content.ReadAsStringAsync());
+        }
+    }
+
     [Theory]
     [InlineData("GET")]
     [InlineData("HEAD")]
@@ -1262,6 +1424,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         Assert.Equal("node-00000000000000000000000000000001", request.ParentNodeId);
         Assert.Equal(17, request.Limit);
         Assert.Null(request.After);
+        Assert.Equal(new string('1', 64), request.ExpectedWorkspaceRevision);
     }
 
     private static void RestoreRuntimeBackupOverSource(MonitorTempDirectory temp)
@@ -1355,13 +1518,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         bool ensureSchemas = true)
     {
         if (ensureSchemas) EnsureProductionProjectionSchemas(temp);
-        var service = new SqliteLocalRepositoryScopeSnapshotService(
-            temp.DatabasePath,
-            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
-            SqliteLocalArchiveFactSnapshotContributor.Instance,
-            new LocalWorkspaceSessionDetailSnapshotContributor(
-                registryAuthority: FixedSkillRegistryGenerationAuthority.Load(), timeProvider: temp.TimeProvider),
-            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+        var service = CreateProductionDetailService(temp);
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
@@ -1370,6 +1527,15 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         await app.StartAsync();
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
+
+    private static SqliteLocalRepositoryScopeSnapshotService CreateProductionDetailService(MonitorTempDirectory temp) =>
+        new(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(
+                registryAuthority: FixedSkillRegistryGenerationAuthority.Load(), timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
 
     public class CountingSessionStoreProxy : System.Reflection.DispatchProxy
     {
@@ -1791,6 +1957,22 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
             "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_nodes WHERE session_id=$session AND event_id='018f0000-0000-7000-8000-000000000004';", SessionId));
         Assert.Equal("0", Scalar(connection,
             "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.session_id=$session AND c.source_item_id='018f0000-0000-7000-8000-000000000004';", SessionId));
+    }
+
+    [Fact]
+    public void ProjectionDoesNotPublishClaudeAgentIdAsSubagentInput()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp, full: true, contentJson: "{\"agent_id\":\"agent-1\"}", eventType: "SubagentStart",
+            sourceAdapter: "claude-code-hook", schemaFingerprint: new string('0', 64));
+        StabilizeDeterministicContentOwner(temp);
+        EnsureProductionProjectionSchemas(temp);
+
+        RefreshContentProjection(temp);
+
+        using var connection = Open(temp);
+        Assert.Equal("0", Scalar(connection,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM local_workspace_node_content_refs WHERE source_item_id='018f0000-0000-7000-8000-000000000004' AND part='subagent_input';", SessionId));
     }
 
     [Theory]

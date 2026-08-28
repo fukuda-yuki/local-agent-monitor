@@ -470,12 +470,29 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     [InlineData("timing_state='recorded',ended_at='2026-08-24T00:00:01.0000000+00:00',duration_ms=NULL")]
     [InlineData("timing_state='recorded',ended_at=NULL,duration_ms=1")]
     [InlineData("timing_state='not_observed',duration_ms=1")]
+    [InlineData("status='active',timing_state='recorded',started_at='2026-08-24T00:00:00.0000000+00:00',ended_at='2026-08-24T00:00:01.0000000+00:00',last_seen_at='2026-08-24T00:00:01.0000000+00:00',last_seen_epoch_ms=1787529601000,duration_ms=1000")]
+    [InlineData("status='completed',timing_state='recorded',started_at='2026-08-24T00:00:00.0000000+00:00',ended_at=NULL,last_seen_at='2026-08-24T00:00:01.0000000+00:00',last_seen_epoch_ms=1787529601000,duration_ms=NULL")]
     public void CurrentSessionSchemaRejectsClosedStateAndTimingCorruption(string assignment)
     {
         using var connection = OpenPopulatedCurrentProjection();
 
         Assert.Throws<SqliteException>(() => Execute(connection,
             $"UPDATE local_workspace_sessions SET {assignment} WHERE session_id='session-a';"));
+    }
+
+    [Theory]
+    [InlineData("status='active',timing_state='recorded',started_at='2026-08-24T00:00:00.0000000+00:00',ended_at='2026-08-24T00:00:01.0000000+00:00',last_seen_at='2026-08-24T00:00:01.0000000+00:00',last_seen_epoch_ms=1787529601000,duration_ms=1000")]
+    [InlineData("status='completed',timing_state='recorded',started_at='2026-08-24T00:00:00.0000000+00:00',ended_at=NULL,last_seen_at='2026-08-24T00:00:01.0000000+00:00',last_seen_epoch_ms=1787529601000,duration_ms=NULL")]
+    public void CurrentSemanticValidationRejectsStatusTimingContradictions(string assignment)
+    {
+        using var connection = OpenPopulatedCurrentProjection();
+        Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+        Execute(connection, $"UPDATE local_workspace_sessions SET {assignment} WHERE session_id='session-a';");
+        Execute(connection, "PRAGMA ignore_check_constraints=OFF;");
+
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.Equal("local_workspace_projection_semantic_validation_failed", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionSchemaV1.ValidateSemanticRows(connection, transaction)).Message);
     }
 
     [Fact]

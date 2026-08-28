@@ -149,6 +149,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
                     receipt.scope_kind IS NOT 'native_run'
                     OR receipt.semantic_kind NOT IN ('tool','subagent')
                     OR receipt.authority_receipt IS NOT CASE receipt.semantic_kind WHEN 'tool' THEN 'copilot-sdk-stream|exact_sdk_tool|v1' ELSE 'copilot-sdk-stream|native_run|v1' END
+                    OR (SELECT COUNT(*) FROM session_native_ids native
+                          WHERE native.session_id=node.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY)<>1
                     OR EXISTS(
                       SELECT 1 FROM local_workspace_node_source_references reference
                       LEFT JOIN session_events event ON event.event_id=reference.event_id
@@ -169,7 +171,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         OR (SELECT COUNT(*) FROM session_runs candidate
                               WHERE candidate.session_id=event.session_id AND candidate.source_surface='copilot-sdk' COLLATE BINARY
                                 AND candidate.native_run_id=run.native_run_id COLLATE BINARY)<>1
-                        OR reference.revision_input IS NOT event.source_adapter||'|'||event.source_event_id||'|'||event.type||'|'||event.type||'|1|'||event.occurred_at||'|'||receipt.authority_receipt))
+                        OR reference.revision_input IS NOT event.source_adapter||'|'||event.source_event_id||'|'||event.type||'|'||event.type||'|1|'||COALESCE(event.occurred_at,'')||'|'||receipt.authority_receipt))
                     OR receipt.semantic_kind='tool' AND (
                       (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id
                          WHERE reference.node_id=receipt.node_id AND event.type='tool.execution_start')<>1
@@ -181,10 +183,12 @@ internal static class LocalWorkspaceProjectionBackupValidation
                              JOIN session_events start ON start.event_id=anchor.event_id
                              WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start'))
                       OR receipt.carrier_digest IS NOT (
-                         SELECT local_workspace_semantic_digest('session_sdk_tool',run.native_run_id,start.source_event_id)
+                         SELECT local_workspace_semantic_digest('session_sdk_tool',native.native_session_id,
+                                  local_workspace_semantic_digest('session_sdk_tool_run',run.native_run_id,start.source_event_id))
                          FROM local_workspace_node_source_references anchor
                          JOIN session_events start ON start.event_id=anchor.event_id
-                          JOIN session_runs run ON run.session_id=start.session_id AND run.run_id=start.run_id
+                         JOIN session_runs run ON run.session_id=start.session_id AND run.run_id=start.run_id
+                         JOIN session_native_ids native ON native.session_id=start.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
                           WHERE anchor.node_id=receipt.node_id AND start.type='tool.execution_start')
                       OR NOT EXISTS(SELECT 1 FROM local_workspace_tool_metadata metadata WHERE metadata.node_id=receipt.node_id)
                       OR EXISTS(SELECT 1 FROM local_workspace_tool_metadata metadata WHERE metadata.node_id=receipt.node_id AND (
@@ -244,8 +248,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
                       OR EXISTS(SELECT 1 FROM local_workspace_subagent_lifecycle lifecycle WHERE lifecycle.node_id=receipt.node_id AND (
                         lifecycle.selected_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.selected')>1 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.selected')=1 THEN 'recorded' ELSE 'not_observed' END
                         OR lifecycle.started_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.started')>1 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.started')=1 THEN 'recorded' ELSE 'not_observed' END
-                        OR lifecycle.completed_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.completed')>1 OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.completed')>0 AND (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.failed')>0 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.completed')=1 THEN 'recorded' ELSE 'not_observed' END
-                        OR lifecycle.failed_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.failed')>1 OR (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.failed')>0 AND (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.completed')>0 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.failed')=1 THEN 'recorded' ELSE 'not_observed' END
+                        OR lifecycle.completed_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.completed')>1 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.completed')=1 THEN 'recorded' ELSE 'not_observed' END
+                        OR lifecycle.failed_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.failed')>1 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.failed')=1 THEN 'recorded' ELSE 'not_observed' END
                         OR lifecycle.deselected_state IS NOT CASE WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.deselected')>1 THEN 'inconsistent' WHEN (SELECT COUNT(*) FROM local_workspace_node_source_references reference JOIN session_events event ON event.event_id=reference.event_id WHERE reference.node_id=receipt.node_id AND event.type='subagent.deselected')=1 THEN 'recorded' ELSE 'not_observed' END
                         OR lifecycle.input_state IS NOT 'source_unsupported'))))
                   OR receipt.source_family='otel' AND (
@@ -283,7 +287,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                             ELSE CASE WHEN local_workspace_ticks(span.start_time) IS NOT NULL THEN 'otel.tool.started|otel.tool.started|1' ELSE 'otel.tool.observed|otel.tool.observed|1' END END
                           FROM monitor_spans span WHERE span.trace_id=reference.trace_id COLLATE BINARY AND span.span_id=reference.span_id COLLATE BINARY
                             AND span.operation='execute_tool' COLLATE BINARY AND span.category IN ('tool_call','error') LIMIT 1)
-                          ||'|'||event.occurred_at||'|'||receipt.authority_receipt)))
+                          ||'|'||COALESCE(event.occurred_at,'')||'|'||receipt.authority_receipt)))
             );
             """;
         if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)

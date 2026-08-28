@@ -324,8 +324,8 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
-        Assert.Equal(["completed:2"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
-            SELECT n.lifecycle||':'||COUNT(r.source_ordinal) FROM local_workspace_nodes n
+        Assert.Equal(["completed:unknown:2"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT n.lifecycle||':'||n.status||':'||COUNT(r.source_ordinal) FROM local_workspace_nodes n
             JOIN local_workspace_node_source_references r ON r.node_id=n.node_id
             WHERE n.source_kind='semantic_tool' GROUP BY n.node_id;
             """));
@@ -466,6 +466,122 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
         Assert.Equal(["not_observed:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT state||':'||COALESCE(CAST(count AS TEXT),'null') FROM local_workspace_session_activity WHERE kind='tool';"));
+    }
+
+    [Fact]
+    public void OtelToolRefreshRequiresTheExactOtelSpanEventType()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,
+            "UPDATE session_events SET type='event' WHERE source_adapter='otel-exact';");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT node_id FROM local_workspace_nodes WHERE source_kind='semantic_tool';"));
+        Assert.Equal(["event"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT kind FROM local_workspace_nodes WHERE source_kind='session_event';"));
+        Assert.Equal(["not_observed:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT state||':'||COALESCE(CAST(count AS TEXT),'null') FROM local_workspace_session_activity WHERE kind='tool';"));
+    }
+
+    [Fact]
+    public void OtelToolDoesNotExposeGenericToolNameAsMcpToolIdentity()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE monitor_spans SET tool_name='GenericTool',mcp_tool_name=NULL
+            WHERE trace_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND span_id='bbbbbbbbbbbbbbbb';
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["recorded:GenericTool:not_observed:"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT node.name_state||':'||COALESCE(node.name_text,'')||':'||
+                       metadata.mcp_tool_name_state||':'||COALESCE(metadata.mcp_tool_name,'')
+                FROM local_workspace_nodes node
+                JOIN local_workspace_tool_metadata metadata ON metadata.node_id=node.node_id
+                WHERE node.source_kind='semantic_tool';
+                """));
+    }
+
+    [Fact]
+    public void OtelToolWithUnresolvedExactParentUsesTheExecutionUnknownRelationGroup()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE monitor_spans SET parent_span_id='cccccccccccccccc'
+            WHERE trace_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND span_id='bbbbbbbbbbbbbbbb';
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["unknown:unknown_relation_group:0:not_observed:"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT tool.relationship_authority||':'||parent.source_kind||':'||
+                       (SELECT COUNT(*) FROM local_workspace_node_edges edge WHERE edge.node_id=tool.node_id)||':'||
+                       metadata.caller_state||':'||COALESCE(metadata.caller_node_id,'')
+                FROM local_workspace_nodes tool
+                JOIN local_workspace_nodes parent ON parent.node_id=tool.parent_node_id
+                JOIN local_workspace_tool_metadata metadata ON metadata.node_id=tool.node_id
+                WHERE tool.source_kind='semantic_tool';
+                """));
+    }
+
+    [Fact]
+    public void OtelToolWithCaseVariantDuplicateParentSpanOwnersUsesTheExecutionUnknownRelationGroup()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE monitor_spans SET parent_span_id='cccccccccccccccc'
+            WHERE trace_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND span_id='bbbbbbbbbbbbbbbb';
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000012','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','claude-code','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccc','otel.span','2026-08-24T00:00:00.5000000+00:00','not_captured');
+            INSERT INTO raw_records VALUES
+              (2,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.5000000+00:00','{}','{}',1,NULL),
+              (3,'otlp','AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','2026-08-24T00:00:00.7500000+00:00','{}','{}',1,NULL);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time) VALUES
+              (2,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','cccccccccccccccc',NULL,0,'chat','internal',NULL,'ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.5000000+00:00'),
+              (3,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','CCCCCCCCCCCCCCCC',NULL,0,'chat','internal',NULL,'ok','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.5000000+00:00');
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["unknown:unknown_relation_group:0:not_observed:"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+                SELECT tool.relationship_authority||':'||parent.source_kind||':'||
+                       (SELECT COUNT(*) FROM local_workspace_node_edges edge WHERE edge.node_id=tool.node_id)||':'||
+                       metadata.caller_state||':'||COALESCE(metadata.caller_node_id,'')
+                FROM local_workspace_nodes tool
+                JOIN local_workspace_nodes parent ON parent.node_id=tool.parent_node_id
+                JOIN local_workspace_tool_metadata metadata ON metadata.node_id=tool.node_id
+                WHERE tool.source_kind='semantic_tool';
+                """));
     }
 
     [Theory]
@@ -1188,6 +1304,57 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     }
 
     [Theory]
+    [InlineData("refresh", "capture", "skill_registry_generation_unavailable", 0)]
+    [InlineData("refresh", "lease", "skill_registry_generation_unavailable", 0)]
+    [InlineData("refresh", "verify", "skill_registry_generation_not_current", 1)]
+    [InlineData("sessions", "capture", "skill_registry_generation_unavailable", 0)]
+    [InlineData("batches", "capture", "skill_registry_generation_unavailable", 0)]
+    public void RegistryAwareRefreshFailsBeforeChangingWorkspaceRows(
+        string entryPoint,
+        string failure,
+        string expectedError,
+        int expectedDisposedLeases)
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        var before = WorkspaceProjectionDigest(connection);
+        var authority = new FailingRegistryAuthority(failure);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            var error = Assert.Throws<InvalidOperationException>(() =>
+            {
+                switch (entryPoint)
+                {
+                    case "refresh":
+                        LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                            DateTimeOffset.Parse("2026-08-25T00:00:01Z"), authority);
+                        break;
+                    case "sessions":
+                        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction,
+                            ["0198f5b8-0c00-7000-8000-000000000001"],
+                            DateTimeOffset.Parse("2026-08-25T00:00:01Z"), authority);
+                        break;
+                    case "batches":
+                        LocalWorkspaceProjectionStore.RefreshSessionBatches(connection, transaction,
+                            [["0198f5b8-0c00-7000-8000-000000000001"]],
+                            DateTimeOffset.Parse("2026-08-25T00:00:01Z"), authority);
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(entryPoint));
+                }
+            });
+            Assert.Equal(expectedError, error.Message);
+        }
+
+        Assert.Equal(expectedDisposedLeases, authority.DisposedLeaseCount);
+        Assert.Equal(before, WorkspaceProjectionDigest(connection));
+    }
+
+    [Theory]
     [InlineData(4)]
     [InlineData(6)]
     public void ProjectionParticipantsRejectInstalledNonV5BeforeMutation(int installedVersion)
@@ -1371,10 +1538,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
             INSERT INTO session_events VALUES
               ('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,'synthetic','prompt-1','user.message','2026-08-24T00:00:00.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
-              ('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,'trace-1','span-1',NULL,'otel-exact','trace-1/span-1','tool.execution_start','2026-08-24T00:00:01.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+              ('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:01.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
             INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000002','application/json','{"value":"Pinned label"}','2026-08-24T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00',randomblob(32));
-            INSERT INTO raw_records VALUES(41,'otlp','trace-1','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1);
-            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(41,'trace-1','span-1',3,'execute_tool','tool_call','PinnedTool');
+            INSERT INTO raw_records VALUES(41,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(41,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',3,'execute_tool','tool_call','PinnedTool');
             INSERT INTO retention_items VALUES
               ('session_event_content','0198f5b8-0c00-7000-8000-000000000002','retained_by_policy',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00'),
               ('raw_record','41','retained_by_policy',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00');
@@ -1529,16 +1696,75 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 
     private sealed class StructuralRegistryAuthority : ISkillRegistryGenerationAuthority
     {
-        public ISkillRegistryGenerationCapture? CaptureGeneration() => null;
+        public ISkillRegistryGenerationCapture CaptureGeneration() => new Capture();
         public bool TryAcquireGenerationReadLease(
             ISkillRegistryGenerationCapture capture,
             [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
         {
-            lease = null;
-            return false;
+            lease = new Lease();
+            return true;
         }
-        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) => false;
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
+            capture is Capture && lease is Lease;
+        public string GetCanonicalGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) => "structural-registry";
         public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => false;
+        private sealed class Capture : ISkillRegistryGenerationCapture { }
+        private sealed class Lease : ISkillRegistryGenerationLease { public void Dispose() { } }
+    }
+
+    private sealed class FailingRegistryAuthority(string failure) : ISkillRegistryGenerationAuthority
+    {
+        internal int DisposedLeaseCount { get; private set; }
+
+        public ISkillRegistryGenerationCapture? CaptureGeneration() =>
+            failure == "capture" ? null : new Capture();
+
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture capture,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            lease = failure == "lease" ? null : new Lease(this);
+            return lease is not null;
+        }
+
+        public bool VerifyGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) => failure != "verify";
+
+        public string GetCanonicalGenerationIdentity(
+            ISkillRegistryGenerationCapture capture,
+            ISkillRegistryGenerationLease lease) => "failing-registry";
+
+        public bool IsProducerTupleAccepted(
+            ISkillRegistryGenerationLease lease,
+            SkillRegistryProducerTuple tuple) => false;
+
+        private sealed class Capture : ISkillRegistryGenerationCapture { }
+
+        private sealed class Lease(FailingRegistryAuthority owner) : ISkillRegistryGenerationLease
+        {
+            public void Dispose() => owner.DisposedLeaseCount++;
+        }
+    }
+
+    private static string WorkspaceProjectionDigest(Microsoft.Data.Sqlite.SqliteConnection connection)
+    {
+        var rows = new List<string>();
+        foreach (var table in LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                     "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'local_workspace_%' ORDER BY name;"))
+        {
+            var escapedTable = table.Replace("'", "''", StringComparison.Ordinal);
+            var quotedTable = table.Replace("\"", "\"\"", StringComparison.Ordinal);
+            var columns = LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                $"SELECT name FROM pragma_table_xinfo('{escapedTable}') WHERE hidden=0 ORDER BY cid;");
+            var projection = columns.Select(static column =>
+                $"COALESCE(quote(\"{column.Replace("\"", "\"\"", StringComparison.Ordinal)}\"),'NULL')");
+            rows.AddRange(LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                $"SELECT '{escapedTable}|'||{string.Join("||'|'||", projection)} FROM \"{quotedTable}\" ORDER BY {string.Join(',', columns.Select(static column => $"\"{column.Replace("\"", "\"\"", StringComparison.Ordinal)}\""))};"));
+        }
+        return string.Join('\n', rows);
     }
 
     private static void InstallCurrentRetentionRows(
