@@ -833,11 +833,16 @@ Archive has two distinct ensure insertion points. `MigrateStaging` runs the
 archive ensure after catalog ensure and any conditional legacy restored-lease
 normalization, but before Retention initialization, in the same staging
 non-deferred transaction. `EnsureCurrentBackupTail` runs archive ensure after
-catalog ensure and before runtime-backup/pricing ensure in the current-database
-transaction; that path performs neither restored-lease normalization nor
-Retention initialization. Component-shape validation holds one supplied
-deferred transaction across catalog and archive validation, so the D081
-Repository proof observes that exact source or staging database.
+catalog ensure and before Retention, Skill projection, Skill snapshot, and
+Workspace ensure in the current-database transaction. An exact current
+Retention v1 shape is validated without adoption or reclassification. An
+absent or supported older Retention shape is installed through the production
+writable initializer, including its deterministic raw-record and Session-
+content ownership backfill, before dependent Skill and Workspace components
+are installed or refreshed. That path performs no restored-lease
+normalization. Component-shape validation holds one supplied deferred
+transaction across catalog and archive validation, so the D081 Repository
+proof observes that exact source or staging database.
 
 There is no archive ZIP member, merge, overlay, target remap, orphan drop,
 repair mode, queue, lease normalization, collision resolver, or synthesized
