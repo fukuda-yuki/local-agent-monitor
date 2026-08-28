@@ -77,6 +77,48 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task ProductionCoordinatorValidatesExactOtelToolExecutionActivity()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string otelRunId = "018f0000-0000-7000-8000-000000000010";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, otelRunId,
+            "018f0000-0000-7000-8000-000000000020");
+
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+
+        var execution = Assert.Single(detail.Detail.Executions, value => value.SourceIdentity == otelRunId);
+        Assert.Equal("recorded", execution.Activity.Tool.State);
+        Assert.Equal(1, execution.Activity.Tool.Value);
+    }
+
+    [Fact]
+    public async Task ProductionCoordinatorRejectsCoherentOtelToolExecutionActivityDrift()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string otelRunId = "018f0000-0000-7000-8000-000000000010";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, otelRunId,
+            "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $$"""
+                UPDATE local_workspace_execution_headers
+                SET tool_activity_state='not_observed',tool_activity_count=NULL
+                WHERE session_id='{{sessionId}}' AND source_identity='{{otelRunId}}';
+                UPDATE local_workspace_nodes
+                SET tool_activity_state='not_observed',tool_activity_count=NULL
+                WHERE session_id='{{sessionId}}' AND source_kind='execution_root' AND source_identity='{{otelRunId}}';
+                """);
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() =>
+            CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+                new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None).AsTask());
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
+    [Fact]
     public async Task ProductionCoordinatorReadsAuthorizedOtelToolAndSdkSubagentAcrossEveryDetailShape()
     {
         using var temp = new MonitorTempDirectory();
