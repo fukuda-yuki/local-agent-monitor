@@ -20,6 +20,43 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var response = await page.GotoAsync(host.Url + $"/sessions/{SessionId}?execution=8a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6"); Assert.Equal(404, response!.Status);
     }
 
+    [Fact]
+    public async Task ToolInspectorReadsRawContentOnlyAfterExplicitActionAndRestoresFocus()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>();
+        var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null;
+        var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision; node["node"]!["kind"] = "tool";
+        node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"tool","caller":{"state":"recorded","node_id":"node-2db4028cf76015c954848d7dcbb5deca"},"lifecycle":{"state":"recorded","value":"completed"},"status":{"state":"recorded","value":"completed"},"exit":{"state":"not_observed"},"mcp_server_identity":{"state":"not_observed","value":null},"mcp_server_name":{"state":"recorded","value":"sample-server"},"mcp_tool_name":{"state":"recorded","value":"sample-tool"},"input":{"state":"available","available":true},"result":{"state":"available","available":true},"error":{"state":"not_captured","available":false},"retry":{"state":"recorded","node_ids":[]},"recovery":{"state":"recorded","node_ids":[]},"child_activity":{"skill":{"state":"not_observed","count":null},"tool":{"state":"recorded","count":0},"subagent":{"state":"not_observed","count":null},"error":{"state":"not_observed","count":null},"retry":{"state":"not_observed","count":null}},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"018f0000-0000-7000-8000-000000000004","trace_id":null,"span_id":null,"event_id":"018f0000-0000-7000-8000-000000000004"}]}}""");
+        node["content"]!["tool_input"] = JsonNode.Parse("""{"state":"available","available":true}"""); node["content"]!["tool_result"] = JsonNode.Parse("""{"state":"available","available":true}""");
+        var raw = "<img src=x onerror=window.__rawExecuted=true> \ud83d\ude80"; var requests = new List<string>();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        var content = JsonNode.Parse("""{"schema_version":"local-monitor-node-content.response.v2","workspace_revision":"REVISION","session_id":"018f0000-0000-7000-8000-000000000001","node_id":"node-a8a773d6614d5030f505ff195b452dd6","part":"tool_input","state":"available","source_reference":{"store_kind":"session_event_content","source_item_id":"synthetic","revision":1},"text":"TEXT","utf8_byte_length":0,"unicode_scalar_length":0,"truncation":false}""")!.AsObject(); content["workspace_revision"] = revision; content["text"] = raw; content["utf8_byte_length"] = System.Text.Encoding.UTF8.GetByteCount(raw); content["unicode_scalar_length"] = raw.EnumerateRunes().Count();
+        await page.RouteAsync("**/content?*", r => { requests.Add(r.Request.Url); return r.FulfillAsync(Json(content.ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
+        await Expect(page.Locator("[data-inspector-kind=tool]")).ToContainTextAsync("sample-tool"); Assert.Empty(requests);
+        var trigger = page.GetByRole(AriaRole.Button, new() { Name = "Tool input を表示" }); await trigger.ClickAsync();
+        await Expect(page.GetByRole(AriaRole.Dialog)).ToBeVisibleAsync(); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync(raw);
+        Assert.False(await page.EvaluateAsync<bool>("() => Boolean(window.__rawExecuted)")); Assert.DoesNotContain(raw, page.Url); Assert.False(await page.EvaluateAsync<bool>("raw => [...document.querySelectorAll('*')].some(e => [...e.attributes].some(a => a.name.startsWith('data-') && a.value.includes(raw)))", raw));
+        await page.Keyboard.PressAsync("Escape"); await Expect(page.GetByRole(AriaRole.Dialog)).ToBeHiddenAsync(); await Expect(trigger).ToBeFocusedAsync(); Assert.Single(requests);
+    }
+
+    [Fact]
+    public async Task SkillInspectorUsesOnlyHistoricalAndCurrentFileRoutesWithoutGenericFallback()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null;
+        var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision; node["node"]!["kind"] = "skill"; node["node"]!["content_parts"] = new JsonArray();
+        node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"skill","current_valid_state":"stale","source":{"state":"recorded","value":"copilot-sdk"},"trigger":{"state":"recorded","value":"explicit"},"inventory_reference":{"state":"recorded","value":"inventory-1"},"historical_snapshot_reference":{"state":"recorded","value":"018f0000-0000-7000-8000-000000000099"}}""");
+        var requests = new List<string>(); await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/skill-invocations/**", r => { requests.Add($"{r.Request.Method} {r.Request.Url}"); return r.Request.Method == "POST" ? r.FulfillAsync(Json("""{"schema_version":"local-skill-current-file-read.response.v1","snapshot_id":"018f0000-0000-7000-8000-000000000099","content_kind":"current_file","comparison":"changed","historical_body_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","current_body_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","current_body_utf8_bytes":7,"body":"current","read_at":"2026-08-29T01:02:03.0000000+00:00"}""")) : r.FulfillAsync(Json("""{"schema_version":"local-skill-invocation-snapshot.content.v1","snapshot_id":"018f0000-0000-7000-8000-000000000099","content_kind":"historical_snapshot","body":"historical","definition_path":"SKILL.md","body_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","definition_path_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","captured_at":"2026-08-29T01:02:03.0000000+00:00"}""")); });
+        await page.RouteAsync("**/content?*", r => { requests.Add($"GENERIC {r.Request.Url}"); return r.AbortAsync(); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" }).ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync("履歴スナップショット"); await page.Keyboard.PressAsync("Escape");
+        await page.GetByRole(AriaRole.Button, new() { Name = "現在のファイルを読み取る" }).ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync("現在のファイル"); Assert.DoesNotContain(requests, request => request.StartsWith("GENERIC", StringComparison.Ordinal)); Assert.Contains(requests, request => request.StartsWith("GET", StringComparison.Ordinal)); Assert.Contains(requests, request => request.StartsWith("POST", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]

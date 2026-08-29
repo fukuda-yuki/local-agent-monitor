@@ -19,6 +19,8 @@
   const CONTENT_PARTS = ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"];
   const ITEM_KEYS = ["node_id", "execution_id", "parent_node_id", "relationship_authority", "kind", "name", "lifecycle", "status", "timing", "activity", "tokens", "child_count", "has_more_children", "collapsed_children", "content_parts", "source_references"];
   const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map(), ignoreRouteEvent: false };
+  const rawDialog = document.querySelector("[data-raw-content-dialog]");
+  let rawDialogTrigger = null;
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -319,6 +321,71 @@
 
   const requestUrl = (path, parameters) => `${path}?${new URLSearchParams(parameters)}`;
 
+  const CONTENT_LABELS = { instruction: "Instruction", tool_input: "Tool input", tool_result: "Tool result", error_message: "Error message", subagent_input: "Sub-agent input", event_content: "Event content" };
+  const CONTENT_STATE_LABELS = { not_captured: "Raw content was not captured", expired: "Raw content has expired", deleted: "Raw content was deleted", read_denied: "Raw content read was denied", oversized: "Raw content is too large", invalid: "Raw content is invalid" };
+  const HTTP_CONTENT_LABELS = { 403: "Raw content read was denied", 404: "Raw content was not captured", 410: "Raw content is no longer retained", 413: "Raw content is too large", 409: "Raw content changed while it was being read", 503: "Raw content is temporarily unavailable" };
+
+  function closeRawDialog() {
+    if (!rawDialog?.open) return;
+    rawDialog.close();
+    const trigger = rawDialogTrigger; rawDialogTrigger = null;
+    trigger?.focus();
+  }
+
+  function showRawDialog(trigger, title) {
+    rawDialogTrigger = trigger;
+    rawDialog.querySelector("[data-raw-content-title]").textContent = title;
+    rawDialog.querySelector("[data-raw-content-status]").textContent = "読み込んでいます";
+    rawDialog.querySelector("[data-raw-content-text]").textContent = "";
+    rawDialog.showModal();
+    rawDialog.querySelector("[data-raw-content-close]").focus();
+  }
+
+  function publishRawText(text, status) {
+    rawDialog.querySelector("[data-raw-content-status]").textContent = status;
+    rawDialog.querySelector("[data-raw-content-text]").textContent = text;
+  }
+
+  function validateContent(document, nodeId, part) {
+    const text = document?.text;
+    if (!exact(document, ["schema_version", "workspace_revision", "session_id", "node_id", "part", "state", "source_reference", "text", "utf8_byte_length", "unicode_scalar_length", "truncation"])
+        || document.schema_version !== "local-monitor-node-content.response.v2" || document.workspace_revision !== state.revision
+        || document.session_id !== root.dataset.sessionId || document.node_id !== nodeId || document.part !== part
+        || document.state !== "available" || document.truncation !== false || typeof text !== "string"
+        || document.utf8_byte_length !== new TextEncoder().encode(text).length || document.unicode_scalar_length !== [...text].length
+        || document.utf8_byte_length > 1048576 || document.unicode_scalar_length > 1048576
+        || !exact(document.source_reference, ["store_kind", "source_item_id", "revision"])
+        || !["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"].includes(document.source_reference.store_kind)
+        || typeof document.source_reference.source_item_id !== "string" || !document.source_reference.source_item_id.length
+        || !nonnegative(document.source_reference.revision)) throw new TypeError("invalid content document");
+    return document;
+  }
+
+  async function readGenericContent(trigger, nodeId, part) {
+    showRawDialog(trigger, `${CONTENT_LABELS[part]} raw content`);
+    try {
+      const response = await fetch(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part }), { headers: { Accept: "application/json" } });
+      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "Raw content could not be read"); return; }
+      const document = validateContent(JSON.parse(await response.text()), nodeId, part);
+      publishRawText(document.text, `${format(document.utf8_byte_length)} bytes · ${format(document.unicode_scalar_length)} scalars`);
+    } catch { publishRawText("", "Raw content could not be read"); }
+  }
+
+  async function readSkillContent(trigger, snapshotId, current) {
+    const title = current ? "現在のファイル" : "履歴スナップショット";
+    showRawDialog(trigger, title);
+    const path = `/api/local-monitor/v1/sessions/${root.dataset.sessionId}/skill-invocations/${snapshotId}/${current ? "current-file-read" : "content"}`;
+    try {
+      const response = await fetch(path, current ? { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: '{"schema_version":"local-skill-current-file-read.request.v1"}' } : { headers: { Accept: "application/json" } });
+      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "Skill content could not be read"); return; }
+      const document = JSON.parse(await response.text());
+      const validHistorical = !current && exact(document, ["schema_version", "snapshot_id", "content_kind", "body", "definition_path", "body_sha256", "definition_path_sha256", "captured_at"]) && document.schema_version === "local-skill-invocation-snapshot.content.v1" && document.content_kind === "historical_snapshot";
+      const validCurrent = current && exact(document, ["schema_version", "snapshot_id", "content_kind", "comparison", "historical_body_sha256", "current_body_sha256", "current_body_utf8_bytes", "body", "read_at"]) && document.schema_version === "local-skill-current-file-read.response.v1" && document.content_kind === "current_file" && ["same", "changed"].includes(document.comparison);
+      if ((!validHistorical && !validCurrent) || document.snapshot_id !== snapshotId || typeof document.body !== "string") throw new TypeError("invalid Skill document");
+      publishRawText(document.body, current ? `${title} · ${document.comparison}` : `${title} · ${document.captured_at}`);
+    } catch { publishRawText("", "Skill content could not be read"); }
+  }
+
   async function requestJson(urlFactory, attempted = false) {
     const response = await fetch(urlFactory(), { headers: { Accept: "application/json" } });
     if (response.status === 409 && !attempted) {
@@ -447,6 +514,54 @@
     }
   }
 
+  function appendInspectorFact(section, label, fact, key = "value") {
+    const row = el("p"); row.append(el("strong", null, `${label}: `));
+    row.append(document.createTextNode(fact?.state === "recorded" ? String(fact[key]) : fact?.state ?? "not_observed")); section.append(row);
+  }
+
+  function appendContentAction(section, detail, part) {
+    const content = detail.content[part]; const row = el("p"); row.append(el("strong", null, `${CONTENT_LABELS[part]}: `));
+    if (content.available) { const button = el("button", null, `${CONTENT_LABELS[part]} を表示`); button.type = "button"; button.addEventListener("click", () => readGenericContent(button, detail.node.node_id, part)); row.append(button); }
+    else row.append(document.createTextNode(CONTENT_STATE_LABELS[content.state] ?? content.state)); section.append(row);
+  }
+
+  function appendRelated(section, title, items) {
+    if (!items.length) return; section.append(el("h3", null, title)); const list = el("ul");
+    for (const item of items) { const button = el("button", null, item.name.state === "recorded" ? item.name.text : item.kind); button.type = "button"; button.addEventListener("click", () => selectNode(item.execution_id, item.node_id, true)); const li = el("li"); li.append(button); list.append(li); }
+    section.append(list);
+  }
+
+  function renderInspector(detail) {
+    const node = detail.node; const metadata = node.metadata; const inspector = root.querySelector("[data-session-overview]"); inspector.replaceChildren();
+    const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
+    section.append(el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+    if (node.kind === "tool") {
+      appendInspectorFact(section, "MCP server", metadata.mcp_server_name); appendInspectorFact(section, "Tool", metadata.mcp_tool_name); appendInspectorFact(section, "Caller", metadata.caller, "node_id");
+    } else if (node.kind === "skill") {
+      section.append(el("p", null, `Current valid state: ${metadata.current_valid_state}`)); appendInspectorFact(section, "Source", metadata.source); appendInspectorFact(section, "Trigger", metadata.trigger); appendInspectorFact(section, "Inventory reference", metadata.inventory_reference);
+      if (metadata.historical_snapshot_reference.state === "recorded") {
+        const snapshotId = metadata.historical_snapshot_reference.value; const historical = el("button", null, "履歴スナップショットを表示"); historical.type = "button"; historical.addEventListener("click", () => readSkillContent(historical, snapshotId, false));
+        const current = el("button", null, "現在のファイルを読み取る"); current.type = "button"; current.addEventListener("click", () => readSkillContent(current, snapshotId, true)); section.append(historical, current);
+      } else section.append(el("p", null, "履歴スナップショットはありません"));
+    } else if (node.kind === "subagent") {
+      for (const key of ["selected", "started", "completed", "failed", "deselected"]) appendInspectorFact(section, key, metadata.lifecycle[key]);
+      appendInspectorFact(section, "Children", metadata.children, "count");
+    } else if (node.kind === "error") {
+      appendInspectorFact(section, "Error code", metadata.error_code); appendInspectorFact(section, "Status", metadata.status);
+    } else if (node.kind === "permission") {
+      appendInspectorFact(section, "Decision", metadata.decision); appendInspectorFact(section, "Wait", metadata.wait);
+    } else if (node.kind === "event") {
+      appendInspectorFact(section, "Event", metadata.event_name); appendInspectorFact(section, "Source time", metadata.source_time);
+    } else if (node.kind === "retry") {
+      appendInspectorFact(section, "Attempt", metadata.attempt); appendInspectorFact(section, "Target", metadata.target, "node_id"); appendInspectorFact(section, "Recovered", metadata.recovered);
+    }
+    if (node.kind !== "skill") for (const part of CONTENT_PARTS) appendContentAction(section, detail, part);
+    if (detail.parent_path.length) { section.append(el("h3", null, "Parent path")); const path = el("ol"); for (const item of detail.parent_path) path.append(el("li", null, item.name.state === "recorded" ? item.name.text : item.kind)); section.append(path); }
+    appendRelated(section, "Retry", detail.related.retry); appendRelated(section, "Recovery", detail.related.recovery); appendRelated(section, "Children", detail.related.children);
+    const refs = node.technical_references; const technical = el("details"); technical.append(el("summary", null, "Technical references")); for (const key of ["source_kind", "source_identity", "trace_id", "span_id", "event_id"]) if (refs[key] !== null) technical.append(el("p", null, `${key}: ${refs[key]}`)); section.append(technical);
+    inspector.append(section);
+  }
+
   async function selectNode(executionId, nodeId, push, attempted = false) {
     const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
     const rawDetail = await requestJson(urlFactory, attempted);
@@ -458,9 +573,7 @@
     for (const parent of path) memory.expanded.add(parent.node_id);
     if (!memory.pages.has("root")) await loadTimeline(executionId);
     for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id)) await loadTimeline(executionId, parent.node_id);
-    const inspector = root.querySelector("[data-session-overview]");
-    inspector.replaceChildren(el("h2", null, detail.node.name?.state === "recorded" ? detail.node.name.text : detail.node.kind),
-      el("p", null, `${detail.node.kind} · ${detail.node.status} · ${timingLabel(detail.node)}`));
+    renderInspector(detail);
     if (push) { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: executionId, node: nodeId }); }
     else if (!window.LocalMonitorV1History.current().execution) window.LocalMonitorV1History.replace({ execution: executionId, node: nodeId });
     renderExecutions();
@@ -572,6 +685,12 @@
   document.addEventListener("cao-route-state", event => {
     if (state.ignoreRouteEvent) { state.ignoreRouteEvent = false; return; }
     applyRoute(event.detail);
+  });
+  rawDialog?.querySelector("[data-raw-content-close]")?.addEventListener("click", closeRawDialog);
+  rawDialog?.addEventListener("cancel", event => { event.preventDefault(); closeRawDialog(); });
+  rawDialog?.addEventListener("keydown", event => {
+    if (event.key !== "Tab") return; const focusable = [...rawDialog.querySelectorAll("button, [tabindex]:not([tabindex='-1'])")]; if (!focusable.length) return;
+    const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   load();
 })();

@@ -4167,3 +4167,9 @@ a.kpi-card:hover {
     overflow: auto;
   }
 }
+.local-monitor-contextual-inspector > button { margin: .25rem .5rem .25rem 0; }
+.local-monitor-raw-dialog { width: min(52rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); border: 1px solid var(--border-color, #777); border-radius: .5rem; padding: 0; }
+.local-monitor-raw-dialog::backdrop { background: rgb(0 0 0 / .55); }
+.local-monitor-raw-dialog-frame { display: grid; grid-template-rows: auto auto minmax(8rem, 1fr); max-height: calc(100vh - 3rem); padding: 1rem; }
+.local-monitor-raw-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.local-monitor-raw-dialog pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
