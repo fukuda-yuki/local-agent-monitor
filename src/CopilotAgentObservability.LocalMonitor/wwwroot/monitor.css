@@ -23,6 +23,13 @@
 .local-monitor-session-execution-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 380px); gap: 16px; min-height: 0; padding: 8px 16px; }
 .local-monitor-session-executions, .local-monitor-session-inspector { overflow: auto; min-width: 0; }
 .local-monitor-session-execution { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+.local-monitor-session-execution-toggle, .local-monitor-session-timeline-node { display: grid; width: 100%; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }
+.local-monitor-session-execution-toggle { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 4px; }
+.local-monitor-session-timeline-entry { margin-left: calc(var(--timeline-depth, 0) * 20px); }
+.local-monitor-session-timeline-node { grid-template-columns: minmax(160px, .8fr) minmax(0, 1.2fr); gap: 12px; margin-top: 6px; padding: 7px 9px; border-left: 3px solid var(--accent, #526de8); background: var(--surface-muted, rgb(127 127 127 / 8%)); }
+.local-monitor-session-timeline-node span { color: var(--muted, #777); }
+.local-monitor-session-unknown-group { margin-top: 8px; padding: 8px; border: 1px dashed var(--border, #aaa); }
+.local-monitor-session-load-more { margin: 8px 0 0 20px; }
 @media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--surface, white); } }
 
 /* Issue #95: contextual estimated-cost surface. */

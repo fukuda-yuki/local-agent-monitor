@@ -14,7 +14,7 @@
   const TOKEN_KEYS = ["authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points"];
   const ACTIVITY_KEYS = ["skill", "tool", "subagent", "error", "retry"];
   const SOURCES = new Set(["copilot-sdk", "copilot-cli", "vscode", "hook-unknown", "claude-code"]);
-  const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null };
+  const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map(), staleAttempted: false };
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -191,6 +191,138 @@
     bar.append(a, b); card.append(bar);
   }
 
+  const requestUrl = (path, parameters) => `${path}?${new URLSearchParams(parameters)}`;
+
+  async function requestJson(url, exactTarget) {
+    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    if (response.status === 409 && !state.staleAttempted) {
+      state.staleAttempted = true;
+      await load(true);
+      state.executionState.clear();
+      return exactTarget();
+    }
+    if (!response.ok) throw new Error("Session detail unavailable");
+    return JSON.parse(await response.text());
+  }
+
+  function executionMemory(executionId) {
+    if (!state.executionState.has(executionId)) state.executionState.set(executionId, {
+      open: false, pages: new Map(), expanded: new Set(), scrollTop: 0,
+    });
+    return state.executionState.get(executionId);
+  }
+
+  async function loadTimeline(executionId, parentNodeId = null, after = null) {
+    const parameters = { workspace_revision: state.revision, execution_id: executionId };
+    if (parentNodeId) parameters.parent_node_id = parentNodeId;
+    if (after) parameters.after = after;
+    parameters.limit = "100";
+    const exactTarget = () => loadTimeline(executionId, parentNodeId, after);
+    const page = await requestJson(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/timeline`, parameters), exactTarget);
+    if (page.workspace_revision !== state.revision || page.execution_id !== executionId || page.parent_node_id !== parentNodeId
+        || !Array.isArray(page.items)) throw new TypeError("invalid timeline");
+    const memory = executionMemory(executionId);
+    const key = parentNodeId ?? "root";
+    const existing = after ? memory.pages.get(key)?.items ?? [] : [];
+    memory.pages.set(key, { items: [...existing, ...page.items], nextCursor: page.next_cursor });
+    renderExecutions();
+  }
+
+  function timingLabel(node) {
+    if (node.timing?.state !== "recorded") return node.timing?.state === "invalid" ? "時刻が無効" : "時刻なし";
+    return node.timing.duration_ms === null ? node.timing.started_at : `${format(node.timing.duration_ms)} ms`;
+  }
+
+  function renderNodes(execution, memory, parentNodeId, depth) {
+    const fragment = document.createDocumentFragment();
+    const page = memory.pages.get(parentNodeId ?? "root");
+    if (!page) return fragment;
+    const known = page.items.filter(item => ["exact", "explicit"].includes(item.relationship_authority));
+    const unknown = page.items.filter(item => !["exact", "explicit"].includes(item.relationship_authority));
+    const appendRow = (node, target = fragment) => {
+      const wrapper = el("div", "local-monitor-session-timeline-entry");
+      const row = el("button", "local-monitor-session-timeline-node");
+      row.type = "button"; row.dataset.timelineNode = node.node_id; row.style.setProperty("--timeline-depth", depth);
+      row.setAttribute("aria-expanded", node.child_count > 0 ? String(memory.expanded.has(node.node_id)) : "false");
+      const label = node.name?.state === "recorded" ? node.name.text : node.kind;
+      row.append(el("strong", null, label), el("span", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+      row.addEventListener("click", async () => {
+        if (node.child_count > 0) {
+          if (memory.expanded.has(node.node_id)) memory.expanded.delete(node.node_id);
+          else { memory.expanded.add(node.node_id); if (!memory.pages.has(node.node_id)) await loadTimeline(execution.execution_id, node.node_id); }
+        }
+        await selectNode(execution.execution_id, node.node_id, true);
+        renderExecutions();
+      });
+      wrapper.append(row);
+      if (memory.expanded.has(node.node_id)) wrapper.append(renderNodes(execution, memory, node.node_id, depth + 1));
+      target.append(wrapper);
+    };
+    known.forEach(node => appendRow(node));
+    if (unknown.length) {
+      const group = el("div", "local-monitor-session-unknown-group");
+      group.append(el("strong", null, "親子関係不明"));
+      const holder = el("div"); unknown.forEach(node => appendRow(node, holder));
+      group.append(holder); fragment.append(group);
+    }
+    if (page.nextCursor) {
+      const more = el("button", "local-monitor-session-load-more", "さらに読み込む");
+      more.type = "button"; more.dataset.timelineLoadMore = parentNodeId ?? "root";
+      more.addEventListener("click", () => loadTimeline(execution.execution_id, parentNodeId, page.nextCursor));
+      fragment.append(more);
+    }
+    return fragment;
+  }
+
+  function renderExecutions() {
+    const executions = root.querySelector("[data-session-executions]"); executions.replaceChildren();
+    for (const execution of state.summary.executions) {
+      const memory = executionMemory(execution.execution_id);
+      const section = el("section", "local-monitor-session-execution"); section.dataset.executionId = execution.execution_id;
+      const toggle = el("button", "local-monitor-session-execution-toggle"); toggle.type = "button"; toggle.dataset.executionToggle = "";
+      toggle.setAttribute("aria-expanded", String(memory.open));
+      toggle.append(el("strong", null, `実行 ${execution.source ?? "不明"} · ${execution.status}`), el("span", null, `${format(execution.child_count)} activity · ${timingLabel(execution)}`));
+      toggle.addEventListener("click", async () => {
+        memory.open = !memory.open;
+        if (memory.open && !memory.pages.has("root")) await loadTimeline(execution.execution_id);
+        renderExecutions();
+      });
+      section.append(toggle);
+      if (memory.open) section.append(renderNodes(execution, memory, null, 0));
+      executions.append(section);
+    }
+  }
+
+  async function selectNode(executionId, nodeId, push) {
+    const exactTarget = () => selectNode(executionId, nodeId, false);
+    const detail = await requestJson(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`,
+      { workspace_revision: state.revision }), exactTarget);
+    if (detail.workspace_revision !== state.revision || detail.node?.node_id !== nodeId
+        || detail.node.execution_id !== executionId) return fallbackSelection(push);
+    state.selectedExecutionId = executionId; state.selectedNodeId = nodeId;
+    const memory = executionMemory(executionId); memory.open = true;
+    const path = (detail.parent_path ?? []).filter(parent => ["exact", "explicit"].includes(parent.relationship_authority));
+    for (const parent of path) memory.expanded.add(parent.node_id);
+    if (!memory.pages.has("root")) await loadTimeline(executionId);
+    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id)) await loadTimeline(executionId, parent.node_id);
+    const inspector = root.querySelector("[data-session-overview]");
+    inspector.replaceChildren(el("h2", null, detail.node.name?.state === "recorded" ? detail.node.name.text : detail.node.kind),
+      el("p", null, `${detail.node.kind} · ${detail.node.status} · ${timingLabel(detail.node)}`));
+    if (push) window.LocalMonitorV1History.push({ execution: executionId, node: nodeId });
+    renderExecutions();
+  }
+
+  function fallbackSelection(push) {
+    state.selectedExecutionId = null; state.selectedNodeId = null;
+    if (push) window.LocalMonitorV1History.push({ execution: null, node: null });
+  }
+
+  async function applyRoute(route) {
+    if (!state.summary) return;
+    if (route.execution && route.node) await selectNode(route.execution, route.node, false);
+    else fallbackSelection(false);
+  }
+
   function render(summary) {
     const session = summary.session;
     root.querySelector("[data-session-breadcrumb]").textContent = session.instruction.label || "Session";
@@ -245,13 +377,8 @@
       renderFact(card.appendChild(el("div")), session.activity[key]); summaryRoot.append(card);
     }
 
-    const executions = root.querySelector("[data-session-executions]"); executions.replaceChildren();
-    for (const execution of summary.executions) {
-      const section = el("section", "local-monitor-session-execution");
-      section.dataset.executionId = execution.execution_id;
-      section.append(el("h2", null, `実行 ${execution.source} · ${execution.status}`), el("p", null, `${format(execution.child_count)} activity`));
-      executions.append(section);
-    }
+    for (const execution of summary.executions) executionMemory(execution.execution_id).open = execution.latest;
+    renderExecutions();
 
     const overview = root.querySelector("[data-session-overview]"); overview.replaceChildren(el("h2", null, "Session overview"));
     overview.append(el("h3", null, "最初の指示"), el("p", null, session.instruction.label || "記録されていません"));
@@ -264,16 +391,24 @@
     const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`)); overview.append(technical);
   }
 
-  async function load() {
+  async function load(refresh = false) {
     try {
       const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error("Session summary unavailable");
       const summary = validate(JSON.parse(await response.text()));
+      if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
+      const route = window.LocalMonitorV1History.current();
+      if (route.execution && route.node) await applyRoute(route);
+      else {
+        const latest = summary.executions.find(execution => execution.latest);
+        if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
+      }
     } catch {
       root.querySelector("[data-session-context-content]").textContent = "Session を読み込めませんでした";
     }
   }
 
+  document.addEventListener("cao-route-state", event => applyRoute(event.detail));
   load();
 })();

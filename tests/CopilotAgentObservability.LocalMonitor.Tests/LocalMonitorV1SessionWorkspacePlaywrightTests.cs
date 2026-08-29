@@ -12,6 +12,44 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
 
     [Fact]
+    public async Task LatestExecutionLoadsOnlyItsRootPageAndExactNodeSelectionUsesCanonicalHistory()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var timelineUrls = new List<string>();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route => route.FulfillAsync(Json(Summary("summary-full.json"))));
+        var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject();
+        timeline["workspace_revision"] = "8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a";
+        await page.RouteAsync("**/api/local-monitor/v1/sessions/*/timeline?*", route =>
+        {
+            timelineUrls.Add(route.Request.Url);
+            return route.FulfillAsync(Json(timeline.ToJsonString()));
+        });
+        var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject();
+        node["workspace_revision"] = "8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a";
+        await page.RouteAsync("**/api/local-monitor/v1/sessions/*/nodes/*?*", route =>
+            route.FulfillAsync(Json(node.ToJsonString())));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("[data-execution-toggle][aria-expanded=true]")).ToHaveCountAsync(1);
+        await Expect(page.Locator("[data-timeline-node]")).ToHaveCountAsync(1);
+        Assert.Single(timelineUrls);
+        Assert.Contains("workspace_revision=8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a", timelineUrls[0]);
+        Assert.Contains("execution_id=9a5590c8-46e3-7069-af48-3844d2bf17a4", timelineUrls[0]);
+        Assert.Contains("limit=100", timelineUrls[0]);
+        Assert.DoesNotContain("parent_node_id=", timelineUrls[0]);
+
+        await page.Locator("[data-timeline-node]").ClickAsync();
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6");
+        await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message");
+    }
+
+    [Fact]
     public async Task NormalEntryFetchesSummaryOnceAndShowsStableSessionOverview()
     {
         using var temp = new MonitorTempDirectory();
@@ -34,6 +72,11 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
                 Body = summary,
             });
         });
+        var emptyTimeline = JsonNode.Parse(Summary("timeline-empty.json"))!.AsObject();
+        emptyTimeline["workspace_revision"] = "8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a";
+        emptyTimeline["execution_id"] = "9a5590c8-46e3-7069-af48-3844d2bf17a4";
+        await page.RouteAsync("**/api/local-monitor/v1/sessions/*/timeline?*", route =>
+            route.FulfillAsync(Json(emptyTimeline.ToJsonString())));
 
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
@@ -195,6 +238,13 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
     private static string Summary(string name) => File.ReadAllText(Path.GetFullPath(Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "TestData", "LocalMonitorV1SessionDetail", name)));
+
+    private static RouteFulfillOptions Json(string body) => new()
+    {
+        Status = 200,
+        ContentType = "application/json; charset=utf-8",
+        Body = body,
+    };
 
     private static string SummaryForSession(string name, string sessionId)
     {
