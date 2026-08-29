@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -146,14 +148,14 @@ public sealed class LocalMonitorV1ComparisonContractTests
         Assert.All(badIds, id => Assert.DoesNotMatch(locationPattern, $"/repositories/{id}/comparisons/{id}"));
         using var read = ReadSchema("local-monitor-comparison-read.response");
         Assert.Equal("基準", read.RootElement.GetProperty("$defs").GetProperty("cohortA").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
-        Assert.Equal("target", read.RootElement.GetProperty("$defs").GetProperty("section1").GetProperty("properties").GetProperty("key").GetProperty("const").GetString());
+        Assert.Equal("target", read.RootElement.GetProperty("$defs").GetProperty("section1").GetProperty("allOf")[1].GetProperty("properties").GetProperty("key").GetProperty("const").GetString());
         using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
         Assert.Equal("#/$defs/uuidv7", evidence.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("execution_id").GetProperty("oneOf")[0].GetProperty("$ref").GetString());
         var sessionLocationPattern = evidence.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("session_location").GetProperty("pattern").GetString()!;
         Assert.All(badIds, id => Assert.DoesNotMatch(sessionLocationPattern, $"/sessions/{id}?execution={id}"));
         for (var index = 0; index < Sections.Length; index++)
         {
-            var definition = read.RootElement.GetProperty("$defs").GetProperty($"section{index + 1}").GetProperty("properties");
+            var definition = read.RootElement.GetProperty("$defs").GetProperty($"section{index + 1}").GetProperty("allOf")[1].GetProperty("properties");
             Assert.Equal(Sections[index].Ordinal, definition.GetProperty("ordinal").GetProperty("const").GetInt32());
             Assert.Equal(Sections[index].Key, definition.GetProperty("key").GetProperty("const").GetString());
             Assert.Equal(Sections[index].Label, definition.GetProperty("label").GetProperty("const").GetString());
@@ -169,8 +171,41 @@ public sealed class LocalMonitorV1ComparisonContractTests
         Assert.Equal(199, cohort.GetProperty("maxItems").GetInt32());
         using var rows = ReadSchema("local-monitor-comparison-rows.response");
         Assert.Equal(100, rows.RootElement.GetProperty("properties").GetProperty("items").GetProperty("maxItems").GetInt32());
+        Assert.Equal(1, rows.RootElement.GetProperty("properties").GetProperty("next_cursor").GetProperty("minLength").GetInt32());
+        Assert.Equal(512, rows.RootElement.GetProperty("properties").GetProperty("next_cursor").GetProperty("maxLength").GetInt32());
+        Assert.Equal(4096, rows.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("values").GetProperty("maxItems").GetInt32());
         using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
         Assert.Equal(200, evidence.RootElement.GetProperty("properties").GetProperty("items").GetProperty("maxItems").GetInt32());
+        Assert.Equal(1, evidence.RootElement.GetProperty("properties").GetProperty("next_cursor").GetProperty("minLength").GetInt32());
+        Assert.Equal(512, evidence.RootElement.GetProperty("properties").GetProperty("next_cursor").GetProperty("maxLength").GetInt32());
+        using var previewResponse = ReadSchema("local-monitor-comparison-preview.response");
+        Assert.Equal(2, previewResponse.RootElement.GetProperty("properties").GetProperty("requested").GetProperty("minItems").GetInt32());
+        Assert.Equal(200, previewResponse.RootElement.GetProperty("properties").GetProperty("requested").GetProperty("maxItems").GetInt32());
+        Assert.Equal(200, previewResponse.RootElement.GetProperty("properties").GetProperty("included").GetProperty("maxItems").GetInt32());
+        Assert.Equal(200, previewResponse.RootElement.GetProperty("properties").GetProperty("excluded").GetProperty("maxItems").GetInt32());
+        using var read = ReadSchema("local-monitor-comparison-read.response");
+        Assert.Equal(9, read.RootElement.GetProperty("properties").GetProperty("sections").GetProperty("minItems").GetInt32());
+        Assert.Equal(9, read.RootElement.GetProperty("properties").GetProperty("sections").GetProperty("maxItems").GetInt32());
+        Assert.Equal(4096, read.RootElement.GetProperty("properties").GetProperty("results").GetProperty("maxItems").GetInt32());
+        Assert.Equal(4096, read.RootElement.GetProperty("$defs").GetProperty("result").GetProperty("properties").GetProperty("values").GetProperty("maxItems").GetInt32());
+
+        (string Token, int Count, string Sha256)[] completeInventories =
+        [
+            ("local-monitor-comparison-create.request", 4, "10315d8be24ad5dd873d5e231a155dc6208d2990c07708d8de4cf257c71d1388"),
+            ("local-monitor-comparison-create.response", 4, "f4e1825ddb9cece844c6a0725eff773ff8a7cdefe317245d462eb8915d01f631"),
+            ("local-monitor-comparison-evidence.response", 10, "9733801791c74e5bcf5d440c67d132f1b88f5926330540b9d3e0fb5d66cc5d27"),
+            ("local-monitor-comparison-preview.request", 3, "6b15153afc39f33ca276423a23bef7710479e227a603cad0379c4625a6a39967"),
+            ("local-monitor-comparison-preview.response", 30, "57b4e2a132cca9fecb58c5219b5b7794c85d4395a064a5c94afb15b48489b3dc"),
+            ("local-monitor-comparison-read.response", 25, "bca8f7f018b6c23d1e6e68e12bbd2557fcc27d3124e9b3e3616f04ad973f23ee"),
+            ("local-monitor-comparison-rows.response", 16, "0c7749b84abf4705832c454308a8d60604aeaaf9626e4ce4fdaf0381a27cab4b"),
+        ];
+        foreach (var expected in completeInventories)
+        {
+            using var schema = ReadSchema(expected.Token);
+            var inventory = CollectExpressibleBounds(schema.RootElement, "#").Order(StringComparer.Ordinal).ToArray();
+            Assert.Equal(expected.Count, inventory.Length);
+            Assert.Equal(expected.Sha256, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', inventory)))).ToLowerInvariant());
+        }
     }
 
     [Fact]
@@ -201,6 +236,20 @@ public sealed class LocalMonitorV1ComparisonContractTests
     }
 
     [Fact]
+    public void ReadSchemaRejectsEveryMutatedSectionTuple()
+    {
+        for (var index = 0; index < Sections.Length; index++)
+        {
+            foreach (var property in new[] { "ordinal", "key", "label" })
+            {
+                var node = JsonNode.Parse(File.ReadAllText(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")))!;
+                node["sections"]![index]![property] = property == "ordinal" ? JsonValue.Create(99) : JsonValue.Create("mutated");
+                AssertSchemaRejects(node.ToJsonString(), "local-monitor-comparison-read.response");
+            }
+        }
+    }
+
+    [Fact]
     public void GoldenDocumentsAreCanonicalOrderedUtf8WithoutRawFields()
     {
         AssertGolden("local-monitor-comparison-preview.request", "schema_version", "cohorts", "include_archived");
@@ -210,14 +259,26 @@ public sealed class LocalMonitorV1ComparisonContractTests
         AssertGolden("local-monitor-comparison-read.response", "schema_version", "comparison_id", "repository_id", "receipt_sha256", "created_at", "expires_at", "cohorts", "sections", "results");
         AssertGolden("local-monitor-comparison-rows.response", "schema_version", "comparison_id", "family", "items", "next_cursor");
         AssertGolden("local-monitor-comparison-evidence.response", "schema_version", "comparison_id", "result_ordinal", "field_key", "items", "next_cursor");
+        foreach (var requestName in new[] { "local-monitor-comparison-preview.request.json", "local-monitor-comparison-create.request.json" })
+        {
+            using var request = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, requestName)));
+            AssertProperties(request.RootElement.GetProperty("cohorts"), "a", "b");
+        }
         using var preview = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-preview.response.json")));
         AssertProperties(preview.RootElement.GetProperty("cohorts"), "a", "b");
         Assert.All(preview.RootElement.GetProperty("cohorts").EnumerateObject(), cohort => AssertProperties(cohort.Value, "label", "requested_count", "included_count", "excluded_count"));
         Assert.All(preview.RootElement.GetProperty("requested").EnumerateArray(), item => AssertProperties(item, "cohort", "request_ordinal", "session_id"));
         Assert.All(preview.RootElement.GetProperty("included").EnumerateArray(), item => { AssertProperties(item, "cohort", "session_id", "metadata"); AssertProperties(item.GetProperty("metadata"), "archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"); });
+        Assert.NotEmpty(preview.RootElement.GetProperty("excluded").EnumerateArray());
+        Assert.All(preview.RootElement.GetProperty("excluded").EnumerateArray(), item => AssertProperties(item, "cohort", "request_ordinal", "session_id", "reason", "metadata"));
         using var read = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")));
+        AssertProperties(read.RootElement.GetProperty("cohorts"), "a", "b");
+        Assert.All(read.RootElement.GetProperty("cohorts").EnumerateObject(), cohort => AssertProperties(cohort.Value, "label", "session_ids", "included_count"));
         Assert.All(read.RootElement.GetProperty("sections").EnumerateArray(), item => AssertProperties(item, "ordinal", "key", "label"));
+        Assert.All(read.RootElement.GetProperty("results").EnumerateArray(), item => AssertProperties(item, "result_ordinal", "section_key", "row_kind", "row_key", "values"));
         Assert.All(read.RootElement.GetProperty("results")[0].GetProperty("values").EnumerateArray(), item => AssertProperties(item, "key", "value"));
+        using var rows = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-rows.response.json")));
+        Assert.All(rows.RootElement.GetProperty("items").EnumerateArray(), item => { AssertProperties(item, "result_ordinal", "row_key", "display_name", "values"); Assert.All(item.GetProperty("values").EnumerateArray(), value => AssertProperties(value, "key", "value")); });
         using var evidence = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-evidence.response.json")));
         Assert.All(evidence.RootElement.GetProperty("items").EnumerateArray(), item => AssertProperties(item, "evidence_ordinal", "cohort", "session_id", "state", "unavailable_reason", "consumed_value", "consumed_revision", "execution_id", "node_id", "session_location"));
     }
@@ -236,22 +297,54 @@ public sealed class LocalMonitorV1ComparisonContractTests
 
     private static void AssertProperties(JsonElement value, params string[] expected) => Assert.Equal(expected, value.EnumerateObject().Select(property => property.Name));
 
+    private static void AssertSchemaRejects(string json, string stem)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.json");
+        try { File.WriteAllText(path, json, new UTF8Encoding(false)); Assert.False(ValidateWithPowerShellJsonSchema(path, Path.Combine(ContractRoot, $"{stem}.schema.json"))); }
+        finally { File.Delete(path); }
+    }
+
     private static bool ValidateWithPowerShellJsonSchema(string instancePath, string schemaPath)
     {
-        using var process = Process.Start(new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = "pwsh",
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'SilentlyContinue'; $instance = Get-Content -Raw -LiteralPath $args[0]; if (Test-Json -Json $instance -SchemaFile $args[1]) { exit 0 } else { exit 1 }", instancePath, schemaPath },
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$instance = Get-Content -Raw -LiteralPath $env:COMPARISON_CONTRACT_INSTANCE; if ($instance | Test-Json -SchemaFile $env:COMPARISON_CONTRACT_SCHEMA) { exit 0 } else { exit 1 }" },
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-        });
+        };
+        startInfo.Environment["COMPARISON_CONTRACT_INSTANCE"] = instancePath;
+        startInfo.Environment["COMPARISON_CONTRACT_SCHEMA"] = schemaPath;
+        using var process = Process.Start(startInfo);
         Assert.NotNull(process);
         process.WaitForExit();
         return process.ExitCode == 0;
     }
 
     private static JsonDocument ReadSchema(string stem) => JsonDocument.Parse(File.ReadAllBytes(Path.Combine(ContractRoot, $"{stem}.schema.json")));
+
+    private static IEnumerable<string> CollectExpressibleBounds(JsonElement element, string path)
+    {
+        string[] keywords = ["minItems", "maxItems", "minLength", "maxLength", "minimum", "maximum", "pattern"];
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (keywords.Contains(property.Name, StringComparer.Ordinal)) yield return $"{path}/{property.Name}={property.Value}";
+                foreach (var nested in CollectExpressibleBounds(property.Value, $"{path}/{property.Name}")) yield return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+            {
+                foreach (var nested in CollectExpressibleBounds(item, $"{path}/{index}")) yield return nested;
+                index++;
+            }
+        }
+    }
 
     private static void AssertEveryObjectSchemaIsClosed(JsonElement element, string path, string token)
     {
