@@ -100,7 +100,9 @@ stored sections (`target`, `tokens`, `input_token_breakdown`,
 publishes the existing stored ordered facts losslessly as the closed `values`
 collection. Each item is exactly `{ "key": <bounded-token>, "value":
 <bounded-string> }`: key is 1..128 lowercase token characters and value is
-0..16,384 characters. Existing `not_available` and `*_unavailable_states`
+1..16,384 characters in schema and, independently, strict UTF-8 1..16,384
+bytes enforced by the owner parser/serializer. JSON Schema `maxLength` counts
+characters and is not byte-bound proof. Existing `not_available` and `*_unavailable_states`
 strings pass through unchanged; no state field or mapping is invented. Scalar facts include `session_count`, `available_count`, `median`,
 `minimum`, `maximum`, `total`, `absolute_difference`, and
 `relative_difference` keys with their existing stored prefixes. The client
@@ -141,3 +143,12 @@ size, persistence. Known expiry is 410; unknown/mismatched identity is 404.
 Errors and logs never echo request values or identifiers. Comparison lifetime
 is exactly 24 hours and operational comparison state remains excluded from
 backup.
+
+Exact security/transport rule: POST request entity is strict UTF-8, at most
+16,384 bytes, exact `application/json; charset=utf-8`, same-origin, and requires
+the existing CSRF header. Exact read rule: GET and HEAD only; HEAD has
+GET-equivalent status/headers/content length and zero body. Exact publication
+rule: every response is fully buffered strict UTF-8 JSON, at most 8,388,608
+bytes, `Cache-Control: no-store`, exact `Content-Length`, and no CORS. Exact
+no-echo rule: errors and logs MUST NOT echo any request value, Repository ID,
+Session ID, comparison ID, cursor, search value, field key, or locator.

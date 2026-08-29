@@ -81,6 +81,10 @@ public sealed class LocalMonitorV1ComparisonContractTests
         Assert.Equal(["key", "value"], rowsSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("required").EnumerateArray().Select(value => value.GetString()));
         Assert.Equal(128, readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("properties").GetProperty("key").GetProperty("maxLength").GetInt32());
         Assert.Equal(16_384, readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("properties").GetProperty("value").GetProperty("maxLength").GetInt32());
+        Assert.Equal("^[a-z0-9_.:/-]{1,128}$", readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("properties").GetProperty("key").GetProperty("pattern").GetString());
+        Assert.Equal(1, readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("properties").GetProperty("value").GetProperty("minLength").GetInt32());
+        Assert.Equal(4096, readSchema.RootElement.GetProperty("$defs").GetProperty("result").GetProperty("properties").GetProperty("values").GetProperty("maxItems").GetInt32());
+        Assert.Equal(4096, rowsSchema.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("values").GetProperty("maxItems").GetInt32());
 
         using var read = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")));
         Assert.Equal(["基準", "比較対象"], read.RootElement.GetProperty("cohorts").EnumerateObject().Select(item => item.Value.GetProperty("label").GetString()));
@@ -138,11 +142,22 @@ public sealed class LocalMonitorV1ComparisonContractTests
         using var create = ReadSchema("local-monitor-comparison-create.response");
         var locationPattern = create.RootElement.GetProperty("properties").GetProperty("location").GetProperty("pattern").GetString()!;
         Assert.DoesNotMatch(locationPattern, "/repositories/not-a-uuid/comparisons/not-a-uuid");
+        string[] badIds = ["018F0000-0000-7000-8000-000000000001", "018f0000-0000-4000-8000-000000000001", "018f0000-0000-7000-7000-000000000001", "018f00000000-7000-8000-000000000001"];
+        Assert.All(badIds, id => Assert.DoesNotMatch(locationPattern, $"/repositories/{id}/comparisons/{id}"));
         using var read = ReadSchema("local-monitor-comparison-read.response");
         Assert.Equal("基準", read.RootElement.GetProperty("$defs").GetProperty("cohortA").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
         Assert.Equal("target", read.RootElement.GetProperty("$defs").GetProperty("section1").GetProperty("properties").GetProperty("key").GetProperty("const").GetString());
         using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
         Assert.Equal("#/$defs/uuidv7", evidence.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("execution_id").GetProperty("oneOf")[0].GetProperty("$ref").GetString());
+        var sessionLocationPattern = evidence.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("session_location").GetProperty("pattern").GetString()!;
+        Assert.All(badIds, id => Assert.DoesNotMatch(sessionLocationPattern, $"/sessions/{id}?execution={id}"));
+        for (var index = 0; index < Sections.Length; index++)
+        {
+            var definition = read.RootElement.GetProperty("$defs").GetProperty($"section{index + 1}").GetProperty("properties");
+            Assert.Equal(Sections[index].Ordinal, definition.GetProperty("ordinal").GetProperty("const").GetInt32());
+            Assert.Equal(Sections[index].Key, definition.GetProperty("key").GetProperty("const").GetString());
+            Assert.Equal(Sections[index].Label, definition.GetProperty("label").GetProperty("const").GetString());
+        }
     }
 
     [Fact]
@@ -171,6 +186,10 @@ public sealed class LocalMonitorV1ComparisonContractTests
         Assert.Contains("CSRF", specification, StringComparison.Ordinal);
         Assert.Contains("no CORS", specification, StringComparison.Ordinal);
         Assert.Contains("HEAD has the GET-equivalent status, headers, and content length with zero body", normalized, StringComparison.Ordinal);
+        Assert.Contains("Exact security/transport rule: POST request entity is strict UTF-8, at most 16,384 bytes, exact `application/json; charset=utf-8`, same-origin, and requires the existing CSRF header.", normalized, StringComparison.Ordinal);
+        Assert.Contains("Exact publication rule: every response is fully buffered strict UTF-8 JSON, at most 8,388,608 bytes, `Cache-Control: no-store`, exact `Content-Length`, and no CORS.", normalized, StringComparison.Ordinal);
+        Assert.Contains("Exact no-echo rule: errors and logs MUST NOT echo any request value, Repository ID, Session ID, comparison ID, cursor, search value, field key, or locator.", normalized, StringComparison.Ordinal);
+        Assert.Contains("JSON Schema `maxLength` counts characters and is not byte-bound proof", normalized, StringComparison.Ordinal);
 
         (int Status, string Code)[] errors =
         [
@@ -191,6 +210,16 @@ public sealed class LocalMonitorV1ComparisonContractTests
         AssertGolden("local-monitor-comparison-read.response", "schema_version", "comparison_id", "repository_id", "receipt_sha256", "created_at", "expires_at", "cohorts", "sections", "results");
         AssertGolden("local-monitor-comparison-rows.response", "schema_version", "comparison_id", "family", "items", "next_cursor");
         AssertGolden("local-monitor-comparison-evidence.response", "schema_version", "comparison_id", "result_ordinal", "field_key", "items", "next_cursor");
+        using var preview = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-preview.response.json")));
+        AssertProperties(preview.RootElement.GetProperty("cohorts"), "a", "b");
+        Assert.All(preview.RootElement.GetProperty("cohorts").EnumerateObject(), cohort => AssertProperties(cohort.Value, "label", "requested_count", "included_count", "excluded_count"));
+        Assert.All(preview.RootElement.GetProperty("requested").EnumerateArray(), item => AssertProperties(item, "cohort", "request_ordinal", "session_id"));
+        Assert.All(preview.RootElement.GetProperty("included").EnumerateArray(), item => { AssertProperties(item, "cohort", "session_id", "metadata"); AssertProperties(item.GetProperty("metadata"), "archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"); });
+        using var read = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")));
+        Assert.All(read.RootElement.GetProperty("sections").EnumerateArray(), item => AssertProperties(item, "ordinal", "key", "label"));
+        Assert.All(read.RootElement.GetProperty("results")[0].GetProperty("values").EnumerateArray(), item => AssertProperties(item, "key", "value"));
+        using var evidence = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-evidence.response.json")));
+        Assert.All(evidence.RootElement.GetProperty("items").EnumerateArray(), item => AssertProperties(item, "evidence_ordinal", "cohort", "session_id", "state", "unavailable_reason", "consumed_value", "consumed_revision", "execution_id", "node_id", "session_location"));
     }
 
     private static void AssertGolden(string stem, params string[] properties)
@@ -204,6 +233,8 @@ public sealed class LocalMonitorV1ComparisonContractTests
         using var document = JsonDocument.Parse(bytes);
         Assert.Equal(properties, document.RootElement.EnumerateObject().Select(property => property.Name));
     }
+
+    private static void AssertProperties(JsonElement value, params string[] expected) => Assert.Equal(expected, value.EnumerateObject().Select(property => property.Name));
 
     private static bool ValidateWithPowerShellJsonSchema(string instancePath, string schemaPath)
     {
