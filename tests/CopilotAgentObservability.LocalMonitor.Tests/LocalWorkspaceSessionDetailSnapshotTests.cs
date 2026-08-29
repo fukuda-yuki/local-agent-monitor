@@ -1886,7 +1886,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         int ConnectionCount,
         int ReadTransactionCount);
 
-    private static void InitializeRoundFiveSemanticFixture(
+    internal static void InitializeRoundFiveSemanticFixture(
         string databasePath,
         string sessionId,
         string otelRunId,

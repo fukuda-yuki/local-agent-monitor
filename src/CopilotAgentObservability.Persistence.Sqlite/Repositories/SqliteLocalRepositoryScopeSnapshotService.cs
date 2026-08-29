@@ -204,7 +204,18 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                                     : detailContributor.ReadAsync(capability, summaryRequest, token),
                                 cancellationToken).ConfigureAwait(false);
                             ValidateDetail(currentSession.SessionId, summaryRequest, currentDetail);
-                            inputs.Add(new(currentSession, currentDetail, ComputeRevision(currentSession, currentDetail)));
+                            LocalWorkspaceComparisonDetailContribution? comparisonDetail = null;
+                            if (detailContributor is LocalWorkspaceSessionDetailSnapshotContributor workspaceComparison && pinnedRegistry is not null)
+                            {
+                                comparisonDetail = await capability.RunContributorAsync(
+                                    ReadPhase.Archive,
+                                    token => workspaceComparison.ReadComparisonPinnedAsync(
+                                        capability, currentSession.SessionId, acceptedAt, pinnedRegistry, token),
+                                    cancellationToken).ConfigureAwait(false);
+                            }
+                            inputs.Add(new(currentSession, currentDetail,
+                                comparisonDetail is null ? ComputeRevision(currentSession, currentDetail) : ComputeRevision(currentSession, comparisonDetail),
+                                ComparisonDetail: comparisonDetail));
                         }
                         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error != "workspace_too_large")
                         {
@@ -289,6 +300,9 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             session,
             detail.CanonicalRevisionInput ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"),
             detail.SkillRegistryGenerationIdentity ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
+
+    private static string ComputeRevision(LocalRepositoryScopeSessionSnapshot session, LocalWorkspaceComparisonDetailContribution detail) =>
+        ComputeRevisionForTest(session, detail.CanonicalRevisionInput, detail.SkillRegistryGenerationIdentity);
 
     private static string ComputeUnavailableRevision(LocalRepositoryScopeSessionSnapshot session, string error) =>
         Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(

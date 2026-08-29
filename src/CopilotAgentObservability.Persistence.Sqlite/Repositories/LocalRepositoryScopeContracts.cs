@@ -64,12 +64,21 @@ internal interface ILocalWorkspaceSessionDetailSnapshotContributor
         CancellationToken cancellationToken);
 }
 
+internal interface ILocalWorkspaceComparisonDetailSnapshotContributor
+{
+    ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonAsync(
+        ILocalRepositoryReadTransaction transaction,
+        string sessionId,
+        CancellationToken cancellationToken);
+}
+
 internal enum LocalRepositorySessionDetailRequestKind
 {
     Summary,
     Timeline,
     Node,
     Content,
+    Compare,
 }
 
 internal sealed record LocalRepositoryTimelinePosition(
@@ -226,7 +235,8 @@ internal sealed record LocalRepositoryComparisonSessionInput(
     LocalRepositoryScopeSessionSnapshot Session,
     LocalWorkspaceSessionDetailContribution? Detail,
     string WorkspaceRevision,
-    string? ProjectionError = null);
+    string? ProjectionError = null,
+    LocalWorkspaceComparisonDetailContribution? ComparisonDetail = null);
 
 internal sealed record LocalRepositoryComparisonInputSnapshot(
     LocalRepositoryScopeSnapshot Scope,

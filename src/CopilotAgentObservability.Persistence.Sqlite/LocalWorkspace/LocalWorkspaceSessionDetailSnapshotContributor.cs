@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor
+internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor, ILocalWorkspaceComparisonDetailSnapshotContributor
 {
     internal const string BoundsSql = """
         SELECT
@@ -58,6 +58,28 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         CancellationToken cancellationToken) =>
         transaction.ReadAsync((connection, sqliteTransaction, token) =>
             ReadAsync(connection, sqliteTransaction, request, acceptedAt, pinnedRegistry, revisionSession, token), cancellationToken);
+
+    public async ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonAsync(
+        ILocalRepositoryReadTransaction transaction, string sessionId, CancellationToken cancellationToken)
+    {
+        var acceptedAt = timeProvider.GetUtcNow();
+        using var pinnedRegistry = registryAuthority is null ? null : PinnedRegistryAuthority.TryCreate(registryAuthority);
+        if (pinnedRegistry is null) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        return await ReadComparisonPinnedAsync(transaction, sessionId, acceptedAt, pinnedRegistry, cancellationToken);
+    }
+
+    internal ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
+        ILocalRepositoryReadTransaction transaction, string sessionId, DateTimeOffset acceptedAt,
+        PinnedRegistryAuthority pinnedRegistry, CancellationToken cancellationToken) =>
+        transaction.ReadAsync<LocalWorkspaceComparisonDetailContribution>(async (connection, sqliteTransaction, token) =>
+        {
+            var detail = await ReadAsync(connection, sqliteTransaction,
+                new(LocalRepositorySessionDetailRequestKind.Compare, sessionId, Limit: MaximumNodes),
+                acceptedAt, pinnedRegistry, revisionSession: null, token);
+            var versions = await ReadComparisonVersions(connection, sqliteTransaction, sessionId, token);
+            return new(detail.Nodes, versions.SourceApplicationVersions, versions.AdapterVersions,
+                detail.CanonicalRevisionInput!, detail.SkillRegistryGenerationIdentity!);
+        }, cancellationToken);
 
     private async ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
         SqliteConnection connection, SqliteTransaction transaction, LocalRepositorySessionDetailRequest request,
@@ -124,11 +146,12 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             if (selected.ParentNodeId is not null)
                 edges = [.. edges, new(selected.NodeId, selected.ParentNodeId, "parent", "exact", selected.SourceOrdinal)];
         }
-        var metadata = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
+        var metadata = request.Kind is LocalRepositorySessionDetailRequestKind.Summary or LocalRepositorySessionDetailRequestKind.Compare
             ? await ReadMetadata(connection, transaction, sessionId, token)
             : new Metadata([], [], null, null);
         var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
             ? await ReadSummaryContent(connection, transaction, sessionId, acceptedAt, token)
+            : request.Kind == LocalRepositorySessionDetailRequestKind.Compare ? []
             : await ReadContent(connection, transaction, nodeIds, acceptedAt, token);
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Content)
         {
@@ -2436,6 +2459,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var predicate = request.Kind switch
         {
             LocalRepositorySessionDetailRequestKind.Summary => "session_id=$session_id AND source_kind='execution_root'",
+            LocalRepositorySessionDetailRequestKind.Compare => "session_id=$session_id AND kind IN ('skill','tool','subagent')",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ExecutionId is null => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
             LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND parent_node_id=$parent_node_id",
@@ -2464,10 +2488,13 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 StringComparison.Ordinal);
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline)
             predicate += " AND " + skillPredicate;
+        if (request.Kind == LocalRepositorySessionDetailRequestKind.Compare)
+            predicate += " AND " + skillPredicate;
         var limit = request.Kind switch
         {
             LocalRepositorySessionDetailRequestKind.Summary => 257,
             LocalRepositorySessionDetailRequestKind.Node => 4097,
+            LocalRepositorySessionDetailRequestKind.Compare => 4097,
             _ => request.Limit + 1
         };
         var orderPrefix = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ExecutionId is null
@@ -2498,7 +2525,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         while (await reader.ReadAsync(token))
         {
             if (request.Kind == LocalRepositorySessionDetailRequestKind.Summary && rows.Count == MaximumExecutions
-                || request.Kind == LocalRepositorySessionDetailRequestKind.Node && rows.Count == MaximumNodes)
+                || request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Compare && rows.Count == MaximumNodes)
                 throw new LocalWorkspaceSessionDetailException("workspace_too_large");
             rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49),reader.GetInt64(50)));
         }
@@ -2704,6 +2731,23 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         using (var reader = await command.ExecuteReaderAsync(token))
             if(await reader.ReadAsync(token)){source=reader.GetString(0);additional=reader.GetInt64(1);}
         return new(Array.AsReadOnly(nativeIds.ToArray()),Array.AsReadOnly(versions.ToArray()),source,additional);
+    }
+
+    private static async Task<ComparisonVersions> ReadComparisonVersions(
+        SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
+    {
+        var sourceVersions = new List<string>();
+        var adapterVersions = new List<string>();
+        using var command = Command(c, t, """
+            SELECT version_kind,version FROM (
+              SELECT 'source' version_kind,source_application_version version FROM session_events WHERE session_id=$session_id
+              UNION SELECT 'adapter',adapter_version FROM session_events WHERE session_id=$session_id)
+            WHERE version IS NOT NULL AND trim(version)<>'' ORDER BY version_kind,version COLLATE BINARY;
+            """, sessionId);
+        using var reader = await command.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+            (reader.GetString(0) == "source" ? sourceVersions : adapterVersions).Add(reader.GetString(1));
+        return new(Array.AsReadOnly(sourceVersions.ToArray()), Array.AsReadOnly(adapterVersions.ToArray()));
     }
 
     private static async Task<string> ReadCanonicalRevisionInput(
@@ -2959,6 +3003,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private static LocalWorkspaceFact<long> Fact(SqliteDataReader r,int i)=>new(r.GetString(i),L(r,i+1));
     private static LocalWorkspaceTokenFacts Tokens(SqliteDataReader r,int i)=>new(r.GetString(i),r.GetString(i+1),r.GetInt64(i+2),r.GetInt64(i+3),Fact(r,i+4),Fact(r,i+6),Fact(r,i+8),Fact(r,i+10),Fact(r,i+12),Fact(r,i+14),Fact(r,i+16),Fact(r,i+18));
     private sealed record Metadata(IReadOnlyList<string> NativeSessionIds,IReadOnlyList<string> Versions,string? InstructionSourceIdentity,long? InstructionAdditionalCount);
+    private sealed record ComparisonVersions(IReadOnlyList<string> SourceApplicationVersions,IReadOnlyList<string> AdapterVersions);
 }
 
 internal sealed class LocalWorkspaceSessionDetailException(string error) : Exception(error)

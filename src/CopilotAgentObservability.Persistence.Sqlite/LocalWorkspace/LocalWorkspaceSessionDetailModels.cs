@@ -12,6 +12,13 @@ internal sealed record LocalWorkspaceSessionDetailContribution(
     string? CanonicalRevisionInput = null,
     string? SkillRegistryGenerationIdentity = null);
 
+internal sealed record LocalWorkspaceComparisonDetailContribution(
+    IReadOnlyList<LocalWorkspaceNodeDetail> Nodes,
+    IReadOnlyList<string> SourceApplicationVersions,
+    IReadOnlyList<string> AdapterVersions,
+    string CanonicalRevisionInput,
+    string SkillRegistryGenerationIdentity);
+
 internal sealed record LocalWorkspaceExecutionDetail(
     string ExecutionId, string SessionId, string SourceKind, string SourceIdentity, long SourceOrdinal,
     string Lifecycle, string Status, string? Model, string? TraceId,
