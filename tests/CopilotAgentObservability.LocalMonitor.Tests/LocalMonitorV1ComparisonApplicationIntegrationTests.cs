@@ -111,7 +111,15 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         var namedEvidence = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={storedRow.ResultOrdinal}&field_key=count", default);
         using (var namedJson = JsonDocument.Parse(namedEvidence.Entity))
         {
-            Assert.All(namedJson.RootElement.GetProperty("items").EnumerateArray(), item => Assert.NotEqual(JsonValueKind.Null, item.GetProperty("consumed_value").ValueKind));
+            Assert.All(namedJson.RootElement.GetProperty("items").EnumerateArray(), item =>
+            {
+                Assert.NotEqual(JsonValueKind.Null, item.GetProperty("consumed_value").ValueKind);
+                var execution = item.GetProperty("execution_id").GetString();
+                var node = item.GetProperty("node_id").GetString();
+                Assert.NotNull(execution);
+                Assert.NotNull(node);
+                Assert.Equal($"/sessions/{item.GetProperty("session_id").GetString()}?execution={execution}&node={node}", item.GetProperty("session_location").GetString());
+            });
         }
         var acceptedFields = new Dictionary<string, string>(StringComparer.Ordinal)
         {

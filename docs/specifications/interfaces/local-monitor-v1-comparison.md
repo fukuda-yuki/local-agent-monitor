@@ -112,6 +112,13 @@ consumed value/revision, and optional opaque execution/node references. Missing
 is not zero. No raw content, path, locator, prompt/response, Tool payload, Skill
 body, or inferred identity is returned.
 
+Evidence `session_location` is the server-authored canonical human Session URL
+for the frozen references on that evidence item. It is Session-only when neither
+reference exists, otherwise uses canonical query order `execution`, then `node`;
+execution-only, node-only, and execution-plus-node are all valid. The client
+validates this relative location and renders it verbatim. It never reconstructs
+a location from the separately returned opaque `execution_id` or `node_id`.
+
 ## Response and errors
 
 Every response is completely buffered before publication, strict UTF-8 JSON,

@@ -193,7 +193,7 @@ public sealed class LocalMonitorV1ComparisonContractTests
         [
             ("local-monitor-comparison-create.request", 4, "10315d8be24ad5dd873d5e231a155dc6208d2990c07708d8de4cf257c71d1388"),
             ("local-monitor-comparison-create.response", 4, "f4e1825ddb9cece844c6a0725eff773ff8a7cdefe317245d462eb8915d01f631"),
-            ("local-monitor-comparison-evidence.response", 10, "9733801791c74e5bcf5d440c67d132f1b88f5926330540b9d3e0fb5d66cc5d27"),
+            ("local-monitor-comparison-evidence.response", 10, "5e731008b08de85443e9cb7e160e7d1349a7be4d436cfdf5887f0e00ad391372"),
             ("local-monitor-comparison-preview.request", 3, "6b15153afc39f33ca276423a23bef7710479e227a603cad0379c4625a6a39967"),
             ("local-monitor-comparison-preview.response", 30, "57b4e2a132cca9fecb58c5219b5b7794c85d4395a064a5c94afb15b48489b3dc"),
             ("local-monitor-comparison-read.response", 25, "bca8f7f018b6c23d1e6e68e12bbd2557fcc27d3124e9b3e3616f04ad973f23ee"),

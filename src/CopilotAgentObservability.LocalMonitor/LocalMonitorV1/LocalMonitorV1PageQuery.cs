@@ -278,6 +278,28 @@ internal static class LocalMonitorV1PageQueryParser
 
 internal static class LocalMonitorV1CanonicalUrlBuilder
 {
+    internal static string BuildSessionEvidence(string sessionId, string? executionId, string? nodeId)
+    {
+        if (!LocalMonitorV1Identity.TryParseUuidV7(sessionId, out _)
+            || executionId is not null && !LocalMonitorV1Identity.TryParseUuidV7(executionId, out _)
+            || nodeId is not null && !LocalMonitorV1Identity.IsCanonicalNodeId(nodeId))
+        {
+            throw new InvalidOperationException("local_monitor_v1_evidence_location_invalid");
+        }
+
+        return Build(
+            new(
+                LocalMonitorV1PathClassification.Matched,
+                LocalMonitorV1PrimaryRouteKind.SessionDetail,
+                SessionId: sessionId),
+            new()
+            {
+                RouteKind = LocalMonitorV1PrimaryRouteKind.SessionDetail,
+                ExecutionId = executionId,
+                NodeId = nodeId,
+            });
+    }
+
     internal static string Build(LocalMonitorV1PrimaryPathResult path, LocalMonitorV1PageQuery query)
     {
         ArgumentNullException.ThrowIfNull(query);

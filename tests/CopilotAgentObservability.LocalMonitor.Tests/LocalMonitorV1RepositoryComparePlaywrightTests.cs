@@ -71,7 +71,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "次のページ" }).ClickAsync();
         Assert.Contains(rowQueries, query => query.Contains("after=cursor-one", StringComparison.Ordinal));
 
-        var evidenceButton = page.Locator(".local-monitor-compare-table").First.GetByRole(AriaRole.Button, new() { Name = "根拠を表示" }).Nth(2);
+        var evidenceButton = page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true });
         await evidenceButton.ClickAsync();
         await Expect(page.Locator("#repository-compare-evidence-dialog")).ToBeVisibleAsync();
         await Expect(page.Locator("#repository-compare-evidence-close")).ToBeFocusedAsync();
@@ -118,6 +118,151 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(page.Locator("[data-session-explorer]")).ToBeVisibleAsync();
         await page.GoBackAsync(new PageGoBackOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+    }
+
+    [Fact]
+    public async Task EvidenceActionsUseAcceptedResultFieldsAndPagingKeepsRowsInsideTheirTables()
+    {
+        var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
+        read["results"]!.AsArray().Add(new JsonObject
+        {
+            ["result_ordinal"] = 2, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "included_session_count",
+            ["values"] = new JsonArray(new JsonObject { ["key"] = "a_session_count", ["value"] = "1" }),
+        });
+        read["results"]!.AsArray().Add(new JsonObject
+        {
+            ["result_ordinal"] = 3, ["section_key"] = "conditions", ["row_kind"] = "scalar", ["row_key"] = "archived_inclusion",
+            ["values"] = new JsonArray(new JsonObject { ["key"] = "a_value", ["value"] = "0" }),
+        });
+        var readBody = read.ToJsonString();
+        var evidenceGolden = await Golden("local-monitor-comparison-evidence.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var evidenceQueries = new List<string>();
+        var rowQueries = new List<string>();
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}**", route =>
+        {
+            var uri = new Uri(route.Request.Url);
+            if (uri.AbsolutePath.EndsWith("/rows", StringComparison.Ordinal))
+            {
+                rowQueries.Add(uri.Query);
+                var parameters = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
+                var family = parameters["family"].ToString();
+                var after = parameters.TryGetValue("after", out var afterValue) ? afterValue.ToString() : string.Empty;
+                var ordinal = family switch { "skill" => 21, "subagent" => 22, _ when after.Length > 0 => 24, _ => 20 };
+                var display = ordinal == 24 ? "Second tool" : family switch { "skill" => "Synthetic skill", "subagent" => "Synthetic sub-agent", _ => "Synthetic tool" };
+                var rows = new JsonObject
+                {
+                    ["schema_version"] = "local-monitor-comparison-rows.response.v1",
+                    ["comparison_id"] = ComparisonId,
+                    ["family"] = family,
+                    ["items"] = new JsonArray(new JsonObject
+                    {
+                        ["result_ordinal"] = ordinal,
+                        ["row_key"] = $"{family}.{ordinal}",
+                        ["display_name"] = display,
+                        ["values"] = new JsonArray(
+                            new JsonObject { ["key"] = "display_name", ["value"] = display },
+                            new JsonObject { ["key"] = "sort_key", ["value"] = $"{family}.{ordinal}" }),
+                    }),
+                    ["next_cursor"] = family == "tool" && after.Length == 0 ? "rows-cursor" : null,
+                };
+                return route.FulfillAsync(Json(rows.ToJsonString()));
+            }
+            if (uri.AbsolutePath.EndsWith("/evidence", StringComparison.Ordinal))
+            {
+                evidenceQueries.Add(uri.Query);
+                var parameters = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
+                var ordinal = int.Parse(parameters["result_ordinal"].ToString(), System.Globalization.CultureInfo.InvariantCulture);
+                var field = parameters["field_key"].ToString();
+                var accepted = ordinal switch
+                {
+                    1 => field is "median" or "total_tokens",
+                    2 => field == "count",
+                    3 => field == "condition",
+                    20 => field is "count" or "error_count" or "retry_count",
+                    21 => field == "count",
+                    22 => field is "count" or "total_tokens",
+                    _ => false,
+                };
+                if (!accepted)
+                {
+                    return route.FulfillAsync(new() { Status = 404, ContentType = "application/json", Body = "{\"error\":\"comparison_not_found\"}" });
+                }
+                var evidence = JsonNode.Parse(evidenceGolden)!.AsObject();
+                evidence["result_ordinal"] = ordinal;
+                evidence["field_key"] = field;
+                var secondPage = parameters.ContainsKey("after");
+                evidence["items"]![0]!["evidence_ordinal"] = secondPage ? 2 : 1;
+                evidence["items"]![0]!["session_id"] = secondPage ? "018f0000-0000-7000-8000-000000000002" : SessionId;
+                evidence["items"]![0]!["consumed_value"] = secondPage ? "second" : "first";
+                evidence["items"]![0]!["execution_id"] = null;
+                evidence["items"]![0]!["node_id"] = NodeId;
+                evidence["items"]![0]!["session_location"] = $"/sessions/{(secondPage ? "018f0000-0000-7000-8000-000000000002" : SessionId)}?node={NodeId}";
+                evidence["next_cursor"] = ordinal == 2 && !secondPage ? "evidence-cursor" : null;
+                return route.FulfillAsync(Json(evidence.ToJsonString()));
+            }
+            return route.FulfillAsync(Json(readBody));
+        });
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        Assert.Equal(0, await page.GetByRole(AriaRole.Button, new() { Name = "a_session_countの根拠を表示", Exact = true }).CountAsync());
+
+        foreach (var label in new[] { "中央値の根拠を表示", "条件の根拠を表示" })
+        {
+            await page.GetByRole(AriaRole.Button, new() { Name = label, Exact = true }).ClickAsync();
+            await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
+            await page.Keyboard.PressAsync("Escape");
+        }
+
+        var targetEvidence = page.Locator(".local-monitor-compare-section").First.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true });
+        await targetEvidence.ClickAsync();
+        await Expect(page.Locator("[data-compare-evidence-items] li")).ToHaveCountAsync(1);
+        await Expect(page.Locator("[data-compare-evidence-items] a")).ToHaveAttributeAsync("href", $"/sessions/{SessionId}?node={NodeId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "さらに表示", Exact = true }).ClickAsync();
+        await Expect(page.Locator("[data-compare-evidence-items] li")).ToHaveCountAsync(2);
+        Assert.Equal(new[] { "first / 採用 / revision " + new string('6', 64) + " / セッションを開く", "second / 採用 / revision " + new string('6', 64) + " / セッションを開く" },
+            await page.Locator("[data-compare-evidence-items] li").AllTextContentsAsync());
+        Assert.Contains(evidenceQueries, query => query.Contains("after=evidence-cursor", StringComparison.Ordinal));
+        await page.Keyboard.PressAsync("Escape");
+        await Expect(targetEvidence).ToBeFocusedAsync();
+
+        foreach (var (label, load, action) in new[]
+                 {
+                     ("スキル", "スキルを読み込む", "件数の根拠を表示"),
+                     ("ツール", "ツールを読み込む", "エラー件数の根拠を表示"),
+                     ("サブエージェント", "サブエージェントを読み込む", "合計トークンの根拠を表示"),
+                 })
+        {
+            var section = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = label }) });
+            await section.GetByRole(AriaRole.Button, new() { Name = load, Exact = true }).ClickAsync();
+            await Expect(section.GetByRole(AriaRole.Status)).ToContainTextAsync("1件を読み込みました");
+            var button = section.GetByRole(AriaRole.Button, new() { Name = action, Exact = true }).First;
+            await button.ClickAsync();
+            await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
+            await page.Keyboard.PressAsync("Escape");
+        }
+
+        var toolSection = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = "ツール" }) });
+        await toolSection.GetByRole(AriaRole.Button, new() { Name = "次のページ", Exact = true }).ClickAsync();
+        await Expect(toolSection.Locator("table tbody .local-monitor-compare-result-heading")).ToHaveCountAsync(2);
+        Assert.Equal(new[] { "Synthetic tool", "Second tool" },
+            await toolSection.Locator("table tbody .local-monitor-compare-result-heading th").AllTextContentsAsync());
+        Assert.Equal(0, await toolSection.Locator(":scope > div > div > tr").CountAsync());
+        Assert.Contains(rowQueries, query => query.Contains("after=rows-cursor", StringComparison.Ordinal));
+        Assert.DoesNotContain(evidenceQueries, query => query.Contains("field_key=a_", StringComparison.Ordinal));
+
+        await targetEvidence.ClickAsync();
+        await page.Locator("[data-compare-evidence-items] a").First.ClickAsync();
+        await page.WaitForURLAsync($"**/sessions/{SessionId}?node={NodeId}");
     }
 
     private static Task<string> Golden(string name) => File.ReadAllTextAsync(Path.Combine(

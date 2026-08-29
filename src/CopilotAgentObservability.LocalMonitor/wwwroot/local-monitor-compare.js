@@ -13,12 +13,22 @@
     [8, "errors_and_retries", "エラー・再試行"], [9, "conditions", "比較条件"],
   ];
   const FAMILY = new Map([["skills", "skill"], ["tools", "tool"], ["subagents", "subagent"]]);
-  const state = { generation: 0, controller: null, evidenceGeneration: 0, evidenceController: null, invoker: null };
+  const EVIDENCE_LABELS = new Map([
+    ["value", "保存値"], ["available_count", "利用可能件数"], ["median", "中央値"], ["minimum", "最小値"],
+    ["maximum", "最大値"], ["total", "合計"], ["absolute_difference", "絶対差"],
+    ["relative_difference_percent", "相対差"], ["condition", "条件"], ["count", "件数"],
+    ["duration_ms", "所要時間"], ["input_tokens", "入力トークン"], ["output_tokens", "出力トークン"],
+    ["total_tokens", "合計トークン"], ["cache_read", "キャッシュ読み取り"],
+    ["cache_creation", "キャッシュ作成"], ["new_input", "新規入力"],
+    ["error_count", "エラー件数"], ["retry_count", "再試行件数"],
+  ]);
+  const state = { generation: 0, controller: null, evidenceGeneration: 0, evidenceController: null, evidenceCursor: null, evidenceResultOrdinal: null, evidenceField: null, invoker: null };
   const sections = root.querySelector("[data-compare-sections]");
   const status = root.querySelector("#repository-compare-status");
   const evidenceDialog = root.querySelector("#repository-compare-evidence-dialog");
   const evidenceStatus = root.querySelector("#repository-compare-evidence-status");
   const evidenceItems = root.querySelector("[data-compare-evidence-items]");
+  const evidenceMore = root.querySelector("#repository-compare-evidence-more");
   const evidenceClose = root.querySelector("#repository-compare-evidence-close");
   const repositoryId = root.dataset.repositoryId;
   const comparisonId = root.dataset.comparisonId;
@@ -112,10 +122,25 @@
     window.LocalMonitorV1FactState.render(target, presentations[token] ?? presentations.projection_invalid);
   }
 
-  function evidenceField(key) {
-    const known = ["available_count", "median", "minimum", "maximum", "total", "absolute_difference", "relative_difference_percent",
-      "condition", "count", "duration_ms", "input_tokens", "output_tokens", "total_tokens", "cache_read", "cache_creation", "new_input", "error_count", "retry_count"];
-    return known.find(field => key === field || key.endsWith(`_${field}`)) ?? "value";
+  function evidenceFields(result) {
+    if (result.section_key === "target") {
+      if (["included_session_count", "available_session_count"].includes(result.row_key)) return ["count"];
+      if (["period", "archived_inclusion"].includes(result.row_key)) return ["condition"];
+      return [];
+    }
+    if (result.row_kind === "skill") return ["count"];
+    if (result.row_kind === "tool") return ["count", "error_count", "retry_count"];
+    if (result.row_kind === "subagent") return ["count", "total_tokens"];
+    if (result.row_kind === "condition" || result.section_key === "conditions") return ["condition"];
+    if (result.row_kind !== "scalar") return [];
+    const fields = ["value", "available_count", "median", "minimum", "maximum", "total", "absolute_difference", "relative_difference_percent"];
+    const specialized = new Map([
+      ["session_duration", "duration_ms"], ["input_tokens", "input_tokens"], ["output_tokens", "output_tokens"],
+      ["total_tokens", "total_tokens"], ["cache_read_tokens", "cache_read"], ["cache_creation_tokens", "cache_creation"],
+      ["new_input_tokens", "new_input"], ["error_count", "error_count"], ["retry_count", "retry_count"],
+    ]).get(result.row_key);
+    if (specialized) fields.push(specialized);
+    return fields;
   }
 
   function resultTable(items, captionText) {
@@ -129,8 +154,15 @@
     for (const result of items) {
       const group = element("tr", "local-monitor-compare-result-heading");
       const groupLabel = element("th", null, result.display_name ?? result.row_key);
-      groupLabel.colSpan = 3;
-      group.append(groupLabel);
+      groupLabel.colSpan = 2;
+      const actions = element("td", "local-monitor-compare-evidence-actions");
+      for (const field of evidenceFields(result)) {
+        const button = element("button", null, `${EVIDENCE_LABELS.get(field)}の根拠を表示`);
+        button.type = "button";
+        button.addEventListener("click", () => openEvidence(result.result_ordinal, field, button));
+        actions.append(button);
+      }
+      group.append(groupLabel, actions);
       body.append(group);
       for (const pair of result.values) {
         const row = element("tr");
@@ -138,12 +170,7 @@
         const value = element("td");
         renderStoredValue(value, pair);
         row.append(value);
-        const action = element("td");
-        const button = element("button", null, "根拠を表示");
-        button.type = "button";
-        button.addEventListener("click", () => openEvidence(result.result_ordinal, evidenceField(pair.key), button));
-        action.append(button);
-        row.append(action);
+        row.append(element("td"));
         body.append(row);
       }
     }
@@ -181,7 +208,7 @@
     const live = element("p"); live.setAttribute("role", "status"); live.setAttribute("aria-live", "polite");
     const content = element("div");
     const next = element("button", null, "次のページ"); next.type = "button"; next.hidden = true;
-    let cursor = null; let search = ""; let generation = 0; let controller = null;
+    let cursor = null; let search = ""; let generation = 0; let controller = null; let table = null; let body = null;
     const load = async (append = false) => {
       const current = ++generation; controller?.abort(); controller = new AbortController();
       live.textContent = "読み込んでいます。"; next.disabled = true;
@@ -194,8 +221,12 @@
         value.items.forEach(item => {
           if (!exact(item, ["result_ordinal", "row_key", "display_name", "values"]) || !Array.isArray(item.values) || !item.values.every(valuePair)) throw new TypeError("invalid comparison rows");
         });
-        const table = resultTable(value.items.map(item => ({ ...item, row_kind: family, section_key: `${family}s` })), `${label}の保存済み比較値`);
-        if (append) content.append(...table.tBodies[0].rows); else content.replaceChildren(table);
+        const pageTable = resultTable(value.items.map(item => ({ ...item, row_kind: family, section_key: `${family}s` })), `${label}の保存済み比較値`);
+        if (append) {
+          for (const row of [...pageTable.tBodies[0].rows]) body.append(row);
+        } else {
+          table = pageTable; body = table.tBodies[0]; content.replaceChildren(table);
+        }
         cursor = value.next_cursor; next.hidden = cursor === null; next.disabled = false; live.textContent = `${value.items.length}件を読み込みました。`;
       } catch (error) { if (!controller.signal.aborted && current === generation) live.textContent = "読み込めませんでした。"; }
     };
@@ -209,25 +240,37 @@
 
   function evidenceLink(item) {
     const plain = `/sessions/${item.session_id}`;
-    if (item.session_location === plain && item.execution_id === null && item.node_id === null) return plain;
-    const detailed = item.execution_id && UUID_V7.test(item.execution_id)
-      && (item.node_id === null || NODE.test(item.node_id))
-      ? `${plain}?execution=${item.execution_id}${item.node_id === null ? "" : `&node=${item.node_id}`}` : null;
-    return item.session_location === detailed ? detailed : null;
+    if (item.execution_id !== null && !UUID_V7.test(item.execution_id) || item.node_id !== null && !NODE.test(item.node_id)) return null;
+    const query = item.execution_id !== null
+      ? `?execution=${item.execution_id}${item.node_id === null ? "" : `&node=${item.node_id}`}`
+      : item.node_id !== null ? `?node=${item.node_id}` : "";
+    return item.session_location === plain + query ? item.session_location : null;
   }
 
   async function openEvidence(resultOrdinal, fieldKey, invoker) {
-    const generation = ++state.evidenceGeneration; state.evidenceController?.abort();
-    const controller = new AbortController(); state.evidenceController = controller; state.invoker = invoker;
+    state.evidenceController?.abort(); state.invoker = invoker; state.evidenceCursor = null;
+    state.evidenceResultOrdinal = resultOrdinal; state.evidenceField = fieldKey;
     evidenceItems.replaceChildren(); evidenceStatus.textContent = "根拠を読み込んでいます。";
+    evidenceMore.hidden = true;
     if (!evidenceDialog.open) evidenceDialog.showModal(); evidenceClose.focus();
-    const query = new URLSearchParams(); query.append("result_ordinal", String(resultOrdinal)); query.append("field_key", fieldKey); query.append("limit", "100");
+    await loadEvidence(false);
+  }
+
+  async function loadEvidence(append) {
+    const generation = ++state.evidenceGeneration; state.evidenceController?.abort();
+    const controller = new AbortController(); state.evidenceController = controller;
+    evidenceMore.disabled = true; evidenceStatus.textContent = append ? "続きの根拠を読み込んでいます。" : "根拠を読み込んでいます。";
+    const query = new URLSearchParams(); query.append("result_ordinal", String(state.evidenceResultOrdinal)); query.append("field_key", state.evidenceField);
+    if (append && state.evidenceCursor) query.append("after", state.evidenceCursor);
+    query.append("limit", "100");
     try {
       const value = await get(`${base}/evidence?${query}`, controller.signal);
       if (generation !== state.evidenceGeneration || !exact(value, ["schema_version", "comparison_id", "result_ordinal", "field_key", "items", "next_cursor"])
           || value.schema_version !== "local-monitor-comparison-evidence.response.v1" || value.comparison_id !== comparisonId
-          || value.result_ordinal !== resultOrdinal || value.field_key !== fieldKey || !Array.isArray(value.items)) throw new TypeError("invalid comparison evidence");
-      const list = element("ul", "local-monitor-compare-evidence-list");
+          || value.result_ordinal !== state.evidenceResultOrdinal || value.field_key !== state.evidenceField || !Array.isArray(value.items)
+          || !(value.next_cursor === null || typeof value.next_cursor === "string" && value.next_cursor.length > 0)) throw new TypeError("invalid comparison evidence");
+      const list = append ? evidenceItems.querySelector("ul") : element("ul", "local-monitor-compare-evidence-list");
+      if (!list) throw new TypeError("invalid comparison evidence");
       for (const item of value.items) {
         if (!exact(item, ["evidence_ordinal", "cohort", "session_id", "state", "unavailable_reason", "consumed_value", "consumed_revision", "execution_id", "node_id", "session_location"])
             || !UUID_V7.test(item.session_id) || !(item.consumed_revision === null || SHA256.test(item.consumed_revision))) throw new TypeError("invalid comparison evidence");
@@ -241,15 +284,18 @@
         const href = evidenceLink(item); if (href) { const link = element("a", null, "セッションを開く"); link.href = href; row.append(document.createTextNode(" / "), link); }
         list.append(row);
       }
-      evidenceItems.replaceChildren(list); evidenceStatus.textContent = `${value.items.length}件の根拠を表示しています。`;
+      if (!append) evidenceItems.replaceChildren(list);
+      state.evidenceCursor = value.next_cursor; evidenceMore.hidden = value.next_cursor === null; evidenceMore.disabled = false;
+      evidenceStatus.textContent = `${list.children.length}件の根拠を表示しています。`;
     } catch (error) { if (!controller.signal.aborted && generation === state.evidenceGeneration) evidenceStatus.textContent = "根拠を読み込めませんでした。"; }
   }
 
   function closeEvidence() {
-    state.evidenceController?.abort(); state.evidenceController = null; evidenceStatus.textContent = ""; evidenceItems.replaceChildren();
+    state.evidenceController?.abort(); state.evidenceController = null; state.evidenceCursor = null; evidenceStatus.textContent = ""; evidenceItems.replaceChildren(); evidenceMore.hidden = true;
     if (evidenceDialog.open) evidenceDialog.close(); if (state.invoker?.isConnected) state.invoker.focus(); state.invoker = null;
   }
   evidenceClose.addEventListener("click", closeEvidence);
+  evidenceMore.addEventListener("click", () => { if (state.evidenceCursor) loadEvidence(true); });
   evidenceDialog.addEventListener("cancel", event => { event.preventDefault(); closeEvidence(); });
   window.addEventListener("pagehide", () => { state.controller?.abort(); closeEvidence(); });
 

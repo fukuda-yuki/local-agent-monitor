@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
@@ -38,7 +39,7 @@ internal static class ComparisonJson
     internal static byte[] Evidence(string id, int ordinal, string? field, IReadOnlyList<LocalComparisonStoredEvidence> items, string? next) => Write(j =>
     {
         j.WriteStartObject(); j.WriteString("schema_version", "local-monitor-comparison-evidence.response.v1"); j.WriteString("comparison_id", id); j.WriteNumber("result_ordinal", ordinal); Nullable(j, "field_key", field); j.WritePropertyName("items"); j.WriteStartArray();
-        foreach (var x in items) { var included = x.AvailabilityState is "recorded" or "explicit_zero"; j.WriteStartObject(); j.WriteNumber("evidence_ordinal", x.EvidenceOrdinal + 1); j.WriteString("cohort", x.Cohort); j.WriteString("session_id", x.SessionId); j.WriteString("state", included ? "included" : "unavailable"); Nullable(j, "unavailable_reason", included ? null : Unavailable(x.AvailabilityState)); Nullable(j, "consumed_value", x.ConsumedValue); Nullable(j, "consumed_revision", x.RevisionSha256); var execution = x.SourceKind == "workspace_execution" ? x.SourceIdentity : null; var node = x.SourceKind == "workspace_node" ? x.SourceIdentity : null; Nullable(j, "execution_id", execution); Nullable(j, "node_id", node); j.WriteString("session_location", $"/sessions/{x.SessionId}"); j.WriteEndObject(); }
+        foreach (var x in items) { var included = x.AvailabilityState is "recorded" or "explicit_zero"; j.WriteStartObject(); j.WriteNumber("evidence_ordinal", x.EvidenceOrdinal + 1); j.WriteString("cohort", x.Cohort); j.WriteString("session_id", x.SessionId); j.WriteString("state", included ? "included" : "unavailable"); Nullable(j, "unavailable_reason", included ? null : Unavailable(x.AvailabilityState)); Nullable(j, "consumed_value", x.ConsumedValue); Nullable(j, "consumed_revision", x.RevisionSha256); var execution = x.SourceKind == "session_run" ? x.SourceIdentity : x.SourceKind == "workspace_node" ? x.EventId : null; var node = x.SourceKind == "workspace_node" ? x.SourceIdentity : null; Nullable(j, "execution_id", execution); Nullable(j, "node_id", node); j.WriteString("session_location", LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(x.SessionId, execution, node)); j.WriteEndObject(); }
         j.WriteEndArray(); Nullable(j, "next_cursor", next); j.WriteEndObject();
     });
 

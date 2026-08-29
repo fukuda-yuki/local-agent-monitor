@@ -197,7 +197,7 @@ internal static class LocalComparisonInputProjection
         {
             var items = detail.Nodes.Where(node => node.Kind == family).Select(node =>
             {
-                var reference = new LocalComparisonSourceReference("workspace_node", node.NodeId, null, null, null, workspaceRevision);
+                var reference = new LocalComparisonSourceReference("workspace_node", node.NodeId, null, null, node.ExecutionId, workspaceRevision);
                 var display = node.NameState == "recorded" && !string.IsNullOrWhiteSpace(node.NameText) ? node.NameText! : "識別名なし";
                 var values = LocalComparisonRegistryV1.NamedFieldKeys[family].ToDictionary(
                     static key => key, _ => Missing(LocalComparisonFactState.SourceUnsupported), StringComparer.Ordinal);
