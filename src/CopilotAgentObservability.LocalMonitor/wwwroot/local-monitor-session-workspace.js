@@ -539,7 +539,7 @@
     else if (event.key === "ArrowUp") target = rows[index - 1] ?? row;
     else if (event.key === "Home") target = rows[0];
     else if (event.key === "End") target = rows.at(-1);
-    else if (event.key === "ArrowRight" && expanded) target = rows[index + 1]?.getAttribute("aria-level") > row.getAttribute("aria-level") ? rows[index + 1] : row;
+    else if (event.key === "ArrowRight" && expanded) target = Number(rows[index + 1]?.getAttribute("aria-level")) > Number(row.getAttribute("aria-level")) ? rows[index + 1] : row;
     else if (event.key === "ArrowRight" && row.hasAttribute("aria-expanded")) { event.preventDefault(); await setExpanded(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, true); return; }
     else if (event.key === "ArrowLeft" && expanded) { event.preventDefault(); await setExpanded(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, false); return; }
     else if (event.key === "ArrowLeft") target = rows.slice(0, index).reverse().find(candidate => Number(candidate.getAttribute("aria-level")) < Number(row.getAttribute("aria-level"))) ?? row;
@@ -569,7 +569,7 @@
     const node = detail.node; const metadata = node.metadata; inspector.replaceChildren();
     if (narrowInspector.matches) {
       inspectorReturnFocus = { executionId: detail.execution.execution_id, nodeId: node.node_id };
-      const close = el("button", "local-monitor-session-inspector-close", "閉じる"); close.type = "button"; close.dataset.inspectorClose = ""; close.setAttribute("aria-label", "インスペクターを閉じる"); close.addEventListener("click", closeInspector); inspector.append(close);
+      inspector.append(createInspectorClose());
       inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
       setBackgroundInert(true);
     }
@@ -664,9 +664,20 @@
     document.querySelector(".monitor-shell-header").inert = value;
   }
 
+  function createInspectorClose() {
+    const close = el("button", "local-monitor-session-inspector-close", "閉じる"); close.type = "button"; close.dataset.inspectorClose = ""; close.setAttribute("aria-label", "インスペクターを閉じる"); close.addEventListener("click", closeInspector); return close;
+  }
+
   function normalizeInspectorBreakpoint(event) {
-    if (event.matches) return;
+    if (event.matches) {
+      if (!state.selectedNodeId || !inspector.querySelector(".local-monitor-contextual-inspector")) return;
+      inspectorReturnFocus = { executionId: state.selectedExecutionId, nodeId: state.selectedNodeId };
+      if (!inspector.querySelector("[data-inspector-close]")) inspector.prepend(createInspectorClose());
+      inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
+      setBackgroundInert(true); requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus()); return;
+    }
     inspector.removeAttribute("role"); inspector.removeAttribute("aria-modal"); inspector.removeAttribute("aria-hidden");
+    inspector.querySelector("[data-inspector-close]")?.remove();
     setBackgroundInert(false); inspectorReturnFocus = null;
   }
 
