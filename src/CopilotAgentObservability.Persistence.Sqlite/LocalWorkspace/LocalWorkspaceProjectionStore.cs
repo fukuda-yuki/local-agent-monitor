@@ -1400,7 +1400,7 @@ internal static class LocalWorkspaceProjectionStore
             UNION ALL
             SELECT 'subagent','session_sdk','native_run',
                    local_workspace_semantic_digest('session_sdk_subagent',native.native_session_id,r.native_run_id),
-                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,r.native_run_id,
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,NULL,
                    e.source_adapter||'|native_run|v1'
             FROM session_events e JOIN session_runs r ON r.session_id=e.session_id AND r.run_id=e.run_id
             JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
@@ -1439,11 +1439,15 @@ internal static class LocalWorkspaceProjectionStore
             UNION ALL
             SELECT 'subagent','claude_hook','native_run',
                    local_workspace_semantic_digest('claude_hook_subagent',native.native_session_id,run.native_run_id),
-                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,run.native_run_id,
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,
+                   CASE WHEN json_valid(content.content_json)=1 AND json_type(content.content_json,'$.agent_type')='text'
+                              AND trim(json_extract(content.content_json,'$.agent_type'))<>''
+                        THEN json_extract(content.content_json,'$.agent_type') END,
                    e.source_adapter||'|exact_hook_subagent|v1'
             FROM session_events e
             JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
             JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='claude-code' COLLATE BINARY
+            LEFT JOIN session_event_content content ON content.event_id=e.event_id
             JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=e.event_id
             WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
               AND e.source_surface='claude-code' COLLATE BINARY AND run.source_surface='claude-code' COLLATE BINARY

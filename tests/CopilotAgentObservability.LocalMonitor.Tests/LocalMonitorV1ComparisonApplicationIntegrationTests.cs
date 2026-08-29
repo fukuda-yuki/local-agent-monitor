@@ -227,15 +227,15 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
             new SqliteLocalComparisonStore(storeDb.Path, clock),
             clock,
             cursorKey: new byte[32]);
-        var subagent = Assert.Single(frozen.Results, result => result.RowKind == "subagent" && result.Values.ToDictionary()["display_name"] == "native-child-sdk");
-        Assert.Equal("native-child-sdk", subagent.Values.ToDictionary()["sort_key"]);
+        var subagent = Assert.Single(frozen.Results, result => result.RowKind == "subagent" && result.Values.ToDictionary()["display_name"] == "識別名なし");
+        Assert.Equal("識別名なし", subagent.Values.ToDictionary()["sort_key"]);
         var subagentRows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=subagent&limit=1", default);
         Assert.Equal(200, subagentRows.StatusCode);
         using (var subagentJson = JsonDocument.Parse(subagentRows.Entity))
         {
             var persistedSubagent = Assert.Single(subagentJson.RootElement.GetProperty("items").EnumerateArray());
-            Assert.Equal("native-child-sdk", persistedSubagent.GetProperty("display_name").GetString());
-            Assert.Equal("native-child-sdk", persistedSubagent.GetProperty("values").EnumerateArray().Single(item => item.GetProperty("key").GetString() == "sort_key").GetProperty("value").GetString());
+            Assert.Equal("識別名なし", persistedSubagent.GetProperty("display_name").GetString());
+            Assert.Equal("識別名なし", persistedSubagent.GetProperty("values").EnumerateArray().Single(item => item.GetProperty("key").GetString() == "sort_key").GetProperty("value").GetString());
         }
         var rows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=tool&q=Read&limit=1", default);
         var expected = (await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-production-rows.response.json")))
@@ -292,6 +292,7 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         using var storeDb = new Database(); storeDb.Initialize();
         const string a = SessionA, b = SessionB;
         db.InitializeProductionNamedComparison(a, b);
+        db.SeedClaudeNamedSubagent(a);
         var clock = new FixedClock(new(2026, 8, 26, 0, 10, 0, TimeSpan.Zero));
         var authority = FixedSkillRegistryGenerationAuthority.Load();
         var service = new SqliteLocalRepositoryScopeSnapshotService(db.Path,
@@ -315,15 +316,16 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         var subagentRows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, "?family=subagent&limit=10", default);
         using var subagentJson = JsonDocument.Parse(subagentRows.Entity);
         var subagents = subagentJson.RootElement.GetProperty("items").EnumerateArray().ToArray();
-        var named = Assert.Single(subagents, item => item.GetProperty("display_name").GetString() == "native-child-sdk");
-        var otherNamed = Assert.Single(subagents, item => item.GetProperty("display_name").GetString() == "native-child-sdk-b");
+        var named = Assert.Single(subagents, item => item.GetProperty("display_name").GetString() == "reviewer");
+        var unidentified = Assert.Single(subagents, item => item.GetProperty("display_name").GetString() == "識別名なし");
         var namedValues = Values(named);
         Assert.Equal("1", namedValues["a_start_count_total"]);
         Assert.Equal("1", namedValues["a_completed_count_total"]);
         Assert.Equal("not_available", namedValues["a_failed_count_total"]);
         Assert.Equal("not_available", namedValues["a_recorded_tokens_total"]);
         Assert.Contains("not_observed", namedValues["a_recorded_tokens_unavailable_states"], StringComparison.Ordinal);
-        Assert.Equal("1", Values(otherNamed)["b_start_count_total"]);
+        Assert.Equal("1", Values(unidentified)["a_start_count_total"]);
+        Assert.Equal("1", Values(unidentified)["b_start_count_total"]);
     }
 
     [Fact]
@@ -769,6 +771,22 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         {
             using var c = Open(); using var command = c.CreateCommand();
             command.CommandText = "DELETE FROM monitor_spans WHERE trace_id IN (SELECT trace_id FROM session_runs WHERE session_id=$session); DELETE FROM session_events WHERE session_id=$session AND (type='otel.span' OR type='tool.execution_complete');";
+            command.Parameters.AddWithValue("$session", sessionId); command.ExecuteNonQuery();
+            using var refresh = c.BeginTransaction(); LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-26T00:10:00Z")); refresh.Commit();
+        }
+        internal void SeedClaudeNamedSubagent(string sessionId)
+        {
+            using var c = Open(); using var command = c.CreateCommand();
+            command.CommandText = """
+                INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+                  VALUES($session,'claude-code','native-claude-session','native','2026-08-26T00:00:00.0000000+00:00');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,normalization_version) VALUES
+                  ('018f0000-0000-7000-8000-000000000061',$session,'018f0000-0000-7000-8000-000000000010','claude-code','claude-code-hook','hook-subagent-start','SubagentStart','2026-08-26T00:00:01.0000000+00:00','available','2.1.145','hook-v1','normalization-v1'),
+                  ('018f0000-0000-7000-8000-000000000062',$session,'018f0000-0000-7000-8000-000000000010','claude-code','claude-code-hook','hook-subagent-stop','SubagentStop','2026-08-26T00:00:02.0000000+00:00','available','2.1.145','hook-v1','normalization-v1');
+                INSERT INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token) VALUES
+                  ('018f0000-0000-7000-8000-000000000061','application/json','{"agent_type":"reviewer"}','2026-08-26T00:00:01.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32)),
+                  ('018f0000-0000-7000-8000-000000000062','application/json','{"agent_type":"reviewer"}','2026-08-26T00:00:02.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
+                """;
             command.Parameters.AddWithValue("$session", sessionId); command.ExecuteNonQuery();
             using var refresh = c.BeginTransaction(); LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-26T00:10:00Z")); refresh.Commit();
         }

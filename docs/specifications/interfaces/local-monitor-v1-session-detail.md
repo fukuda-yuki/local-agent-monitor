@@ -360,6 +360,16 @@ event type does not authorize aggregation.
 | OTel | Tool | exact OTel `trace_id` plus `span_id` on a span already authorized as a semantic Tool by the source adapter | Start/end and OTel status apply only to that span; an event name or `tool_name` alone is insufficient. |
 | OTel | Sub-agent | exact trace/span or native identity only when the source adapter explicitly declares that span kind as a semantic Sub-agent | No current Claude OTel span mapping is authorized; unsupported spans remain ordinary nodes. |
 
+For a Claude Hook Sub-agent semantic object, `agent_type` from the authenticated
+`SubagentStart` / `SubagentStop` retained content is the only current display
+name/type authority. The projection records it only when the approved Hook
+version/fingerprint yields one distinct, nonblank value no larger than 256
+UTF-8 bytes across the object. Missing, conflicting, invalid, or oversized
+values remain `name:not_observed`; Compare groups those objects under its fixed
+unidentified Sub-agent row. `agent_id` and SDK `run_native_id` remain carrier
+identities only and are never display names or types. No SDK Sub-agent display
+name/type field is currently authorized.
+
 The carrier selector itself is versioned source authority. A same-shaped field
 from an unsupported source/version is not an identity. Two same-name or
 concurrent objects with different carriers remain distinct. Name, time,
