@@ -120,7 +120,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        for (var mutation = 0; mutation < 6; mutation++)
+        for (var mutation = 0; mutation < 17; mutation++)
         {
             var page = await browser.NewPageAsync();
             var body = InvalidSummary(mutation);
@@ -134,6 +134,38 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
             await Expect(page.Locator("[data-session-summary]")).ToBeEmptyAsync();
             await page.CloseAsync();
         }
+    }
+
+    [Fact]
+    public async Task InstructionLabelUsesUnicodeScalarLimit()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var valid = JsonNode.Parse(Summary("summary-full.json"))!.AsObject();
+        valid["session"]!["instruction"]!["label"] = string.Concat(Enumerable.Repeat("😀", 160));
+        var validPage = await browser.NewPageAsync();
+        await validPage.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200, ContentType = "application/json; charset=utf-8", Body = valid.ToJsonString(),
+        }));
+
+        await validPage.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(validPage.Locator("[data-session-overview]")).ToContainTextAsync("😀😀😀");
+        Assert.NotNull(await validPage.EvaluateAsync<object?>("() => window.LocalMonitorSessionWorkspace.summary"));
+
+        var invalid = valid.DeepClone().AsObject();
+        invalid["session"]!["instruction"]!["label"] = string.Concat(Enumerable.Repeat("😀", 161));
+        var invalidPage = await browser.NewPageAsync();
+        await invalidPage.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route => route.FulfillAsync(new RouteFulfillOptions
+        {
+            Status = 200, ContentType = "application/json; charset=utf-8", Body = invalid.ToJsonString(),
+        }));
+        await invalidPage.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(invalidPage.Locator("[data-session-context-content]")).ToContainTextAsync("読み込めませんでした");
+        Assert.Null(await invalidPage.EvaluateAsync<object?>("() => window.LocalMonitorSessionWorkspace.summary"));
     }
 
     [Fact]
@@ -187,8 +219,55 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
             case 3: summary["executions"]![0]!["latest"] = false; break;
             case 4: summary["session"]!["archive"]!["effectively_eligible"] = false; break;
             case 5: summary["technical_references"]!["trace_ids"]!.AsArray().Add("00000000000000000000000000000001"); break;
+            case 6:
+                summary["session"]!["tokens"]!["new_input"]!["state"] = "recorded";
+                summary["session"]!["tokens"]!["new_input"]!["value"] = 10;
+                break;
+            case 7:
+                summary["session"]!["tokens"]!["cache_read"]!["state"] = "recorded";
+                summary["session"]!["tokens"]!["cache_read"]!["value"] = 11;
+                break;
+            case 8:
+                var zeroTokens = summary["session"]!["tokens"]!;
+                zeroTokens["input"]!["value"] = 0; zeroTokens["total"]!["value"] = 5;
+                zeroTokens["cache_read"]!["state"] = "recorded"; zeroTokens["cache_read"]!["value"] = 0;
+                zeroTokens["new_input"]!["state"] = "recorded"; zeroTokens["new_input"]!["value"] = 0;
+                zeroTokens["cache_read_ratio_basis_points"]!["state"] = "recorded";
+                zeroTokens["cache_read_ratio_basis_points"]!["value"] = 0;
+                break;
+            case 9:
+                summary["session"]!["timing"]!["ended_at"] = null;
+                summary["session"]!["timing"]!["duration_ms"] = null;
+                break;
+            case 10: summary["session"]!["status"] = "active"; break;
+            case 11:
+                summary["executions"]![0]!["timing"]!["ended_at"] = null;
+                summary["executions"]![0]!["timing"]!["duration_ms"] = null;
+                break;
+            case 12: summary["executions"]![0]!["status"] = "active"; break;
+            case 13: AddSecondExecution(summary, "2026-08-26T01:02:02.0000000+00:00", "claude-code", reverse: true); break;
+            case 14: AddSecondExecution(summary, "2026-08-26T01:02:03.0000000+00:00", "claude-code", reverse: false); break;
+            case 15: AddSecondExecution(summary, "2026-08-26T01:02:03.0000000+00:00", "vscode", reverse: false); break;
+            case 16:
+                summary["session"]!["tokens"]!["cache_read_ratio_basis_points"]!["state"] = "recorded";
+                summary["session"]!["tokens"]!["cache_read_ratio_basis_points"]!["value"] = 0;
+                break;
         }
         return summary.ToJsonString();
+    }
+
+    private static void AddSecondExecution(JsonObject summary, string startedAt, string source, bool reverse)
+    {
+        var executions = summary["executions"]!.AsArray();
+        var second = executions[0]!.DeepClone().AsObject();
+        second["execution_id"] = "8a5590c8-46e3-7069-af48-3844d2bf17a4";
+        second["node_id"] = "node-1db4028cf76015c954848d7dcbb5deca";
+        second["latest"] = false;
+        second["source"] = source;
+        second["timing"]!["started_at"] = startedAt;
+        second["timing"]!["ended_at"] = startedAt;
+        second["timing"]!["duration_ms"] = 0;
+        if (reverse) executions.Insert(0, second); else executions.Add(second);
     }
 
     private static MonitorHostTestOptions Options() => new()

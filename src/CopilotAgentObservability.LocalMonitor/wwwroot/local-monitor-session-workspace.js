@@ -29,11 +29,22 @@
   const countFact = value => scalarFact(value, "count");
 
   function tokens(value) {
-    return exact(value, TOKEN_KEYS) && oneOf(value.authority, ["session_run", "llm_span", "mixed", "none"])
+    if (!(exact(value, TOKEN_KEYS) && oneOf(value.authority, ["session_run", "llm_span", "mixed", "none"])
       && FACT_STATES.has(value.state) && nonnegative(value.available_execution_count) && nonnegative(value.total_execution_count)
       && value.available_execution_count <= value.total_execution_count
       && ["input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input"].every(key => scalarFact(value[key], "value"))
-      && scalarFact(value.cache_read_ratio_basis_points, "value", 10000);
+      && scalarFact(value.cache_read_ratio_basis_points, "value", 10000))) return false;
+    const derivedInputsValid = value.input.state === "recorded" && value.cache_read.state === "recorded"
+      && value.cache_read.value <= value.input.value;
+    const contradictoryInputs = value.input.state === "recorded" && value.cache_read.state === "recorded"
+      && value.cache_read.value > value.input.value;
+    if (contradictoryInputs && (value.new_input.state !== "inconsistent"
+        || value.cache_read_ratio_basis_points.state !== "inconsistent")) return false;
+    if (value.new_input.state === "recorded"
+        && (!derivedInputsValid || value.new_input.value !== value.input.value - value.cache_read.value)) return false;
+    if (value.cache_read_ratio_basis_points.state === "recorded"
+        && (!derivedInputsValid || value.input.value === 0)) return false;
+    return true;
   }
 
   const activity = value => exact(value, ACTIVITY_KEYS) && ACTIVITY_KEYS.every(key => countFact(value[key]));
@@ -42,21 +53,24 @@
     && sorted(value.values) && value.values.every(item => typeof item === "string" && item.length > 0)
     && (value.state !== "recorded" || value.values.length > 0);
 
-  function timing(value, execution = false) {
+  function timing(value, status, execution = false) {
     const keys = execution ? ["state", "started_at", "ended_at", "duration_ms"] : ["state", "started_at", "ended_at", "last_seen_at", "duration_ms"];
     if (!exact(value, keys)) return false;
     if (execution) {
       if (!oneOf(value.state, ["recorded", "missing", "invalid"])) return false;
       if (value.state !== "recorded") return value.started_at === null && value.ended_at === null && value.duration_ms === null;
-      return instant(value.started_at) && (value.ended_at === null && value.duration_ms === null
-        || instant(value.ended_at) && nonnegative(value.duration_ms) && value.ended_at >= value.started_at);
+      const open = value.ended_at === null && value.duration_ms === null;
+      const closed = instant(value.ended_at) && nonnegative(value.duration_ms) && value.ended_at >= value.started_at;
+      return instant(value.started_at) && (status === "active" ? open
+        : oneOf(status, ["completed", "failed"]) ? closed : open || closed);
     }
     if (!FACT_STATES.has(value.state) || value.last_seen_at !== null && !instant(value.last_seen_at)) return false;
     if (value.state !== "recorded") return (value.started_at === null || instant(value.started_at))
       && (value.ended_at === null || instant(value.ended_at)) && (value.duration_ms === null || nonnegative(value.duration_ms));
+    const open = value.ended_at === null && value.duration_ms === null;
+    const closed = instant(value.ended_at) && nonnegative(value.duration_ms) && value.ended_at >= value.started_at;
     return instant(value.started_at) && instant(value.last_seen_at) && value.last_seen_at >= value.started_at
-      && (value.ended_at === null && value.duration_ms === null
-        || instant(value.ended_at) && nonnegative(value.duration_ms) && value.ended_at >= value.started_at);
+      && (status === "active" ? open : oneOf(status, ["completed", "failed"]) ? closed : open || closed);
   }
 
   function assignment(value) {
@@ -82,7 +96,7 @@
   const instruction = value => exact(value, ["state", "label", "additional_count", "content_available"])
     && oneOf(value.state, ["recorded", "not_observed", "not_captured", "expired", "invalid"])
     && (value.additional_count === null || nonnegative(value.additional_count)) && typeof value.content_available === "boolean"
-    && (value.state === "recorded" ? typeof value.label === "string" && value.label.length >= 1 && value.label.length <= 160
+    && (value.state === "recorded" ? typeof value.label === "string" && Array.from(value.label).length >= 1 && Array.from(value.label).length <= 160
       : value.label === null && value.content_available === false);
 
   function capture(value) {
@@ -106,7 +120,7 @@
         || summary.session.source.values.some(value => !SOURCES.has(value))
         || summary.session.archive.exclusion_reason === "repository_archived"
           && (summary.session.assignment.state !== "assigned" || summary.session.assignment.repository_id === null)
-        || !timing(summary.session.timing) || !tokens(summary.session.tokens) || !activity(summary.session.activity)
+        || !timing(summary.session.timing, summary.session.status) || !tokens(summary.session.tokens) || !activity(summary.session.activity)
         || !capture(summary.session.capture) || !Array.isArray(summary.executions) || summary.executions.length > 256
         || !exact(summary.technical_references, ["native_session_ids", "trace_ids"])
         || !Array.isArray(summary.technical_references.native_session_ids) || !Array.isArray(summary.technical_references.trace_ids)) throw new TypeError("invalid Session summary");
@@ -121,12 +135,26 @@
           || execution.source !== null && (typeof execution.source !== "string" || execution.source.length === 0)
           || execution.model !== null && (typeof execution.model !== "string" || execution.model.length === 0)
           || !oneOf(execution.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
-          || !oneOf(execution.status, ["active", "completed", "failed", "unknown"]) || !timing(execution.timing, true)
+          || !oneOf(execution.status, ["active", "completed", "failed", "unknown"]) || !timing(execution.timing, execution.status, true)
           || !tokens(execution.tokens) || !activity(execution.activity) || !nonnegative(execution.child_count) || execution.child_count > 4096) throw new TypeError("invalid Session summary");
       if (execution.latest) latest++;
     }
     if (latest !== (summary.executions.length === 0 ? 0 : 1)) throw new TypeError("invalid Session summary");
+    if (summary.executions.some((execution, index) => index > 0
+        && compareExecutions(summary.executions[index - 1], execution) > 0)) throw new TypeError("invalid Session summary");
     return summary;
+  }
+
+  function compareExecutions(left, right) {
+    const group = timing => timing.state === "recorded" ? 0 : timing.state === "missing" ? 1 : 2;
+    const groupDifference = group(left.timing) - group(right.timing);
+    if (groupDifference !== 0) return groupDifference;
+    if (left.timing.state === "recorded" && left.timing.started_at !== right.timing.started_at)
+      return left.timing.started_at > right.timing.started_at ? -1 : 1;
+    const leftSource = left.source ?? "\uffff";
+    const rightSource = right.source ?? "\uffff";
+    if (leftSource !== rightSource) return leftSource < rightSource ? -1 : 1;
+    return left.execution_id < right.execution_id ? -1 : left.execution_id > right.execution_id ? 1 : 0;
   }
 
   const el = (tag, className, text) => {
