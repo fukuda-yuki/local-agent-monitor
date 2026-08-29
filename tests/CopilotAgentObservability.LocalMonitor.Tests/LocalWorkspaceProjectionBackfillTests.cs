@@ -261,6 +261,45 @@ public sealed class LocalWorkspaceProjectionBackfillTests
                 """));
     }
 
+    [Fact]
+    public void ClaudeHookSubagentNameRequiresOneExactValidValueOnEveryLifecycleObservation()
+    {
+        var cases = new (string Name, string? StartJson, string? StopJson, string Expected)[]
+        {
+            ("all-valid-same", "{\"agent_type\":\"reviewer\"}", "{\"agent_type\":\"reviewer\"}", "recorded:reviewer"),
+            ("zero-missing", null, null, "not_observed:null"),
+            ("valid-plus-missing", "{\"agent_type\":\"reviewer\"}", null, "not_observed:null"),
+            ("conflict", "{\"agent_type\":\"reviewer\"}", "{\"agent_type\":\"planner\"}", "not_observed:null"),
+            ("non-text", "{\"agent_type\":7}", "{\"agent_type\":7}", "not_observed:null"),
+            ("blank", "{\"agent_type\":\"  \"}", "{\"agent_type\":\"  \"}", "not_observed:null"),
+            ("oversized", System.Text.Json.JsonSerializer.Serialize(new { agent_type = new string('é', 129) }), System.Text.Json.JsonSerializer.Serialize(new { agent_type = new string('é', 129) }), "not_observed:null")
+        };
+        foreach (var item in cases)
+        {
+            using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                INSERT INTO sessions VALUES('session-hook','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:01.0000000+00:00');
+                INSERT INTO session_native_ids VALUES('session-hook','claude-code','native-session','native','2026-08-24T00:00:00.0000000+00:00');
+                INSERT INTO session_runs VALUES('run-hook','session-hook','claude-code','native-agent',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version) VALUES
+                  ('hook-agent-start','session-hook','run-hook','claude-code','claude-code-hook','agent-start','SubagentStart','2026-08-24T00:00:00.0000000+00:00','available','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1'),
+                  ('hook-agent-stop','session-hook','run-hook','claude-code','claude-code-hook','agent-stop','SubagentStop','2026-08-24T00:00:01.0000000+00:00','available','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1');
+                """);
+            using (var content = connection.CreateCommand())
+            {
+                content.CommandText = "INSERT INTO session_event_content VALUES($event,'application/json',$json,'2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));";
+                foreach (var observation in new[] { (Event: "hook-agent-start", Json: item.StartJson), (Event: "hook-agent-stop", Json: item.StopJson) })
+                {
+                    if (observation.Json is null) continue;
+                    content.Parameters.Clear(); content.Parameters.AddWithValue("$event", observation.Event); content.Parameters.AddWithValue("$json", observation.Json); content.ExecuteNonQuery();
+                }
+            }
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            Assert.Equal(item.Expected, LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT name_state||':'||COALESCE(name_text,'null') FROM local_workspace_nodes WHERE source_kind='semantic_subagent';").Single());
+        }
+    }
+
     [Theory]
     [InlineData("copilot-sdk", "claude-code-hook", "2.1.145", "0000000000000000000000000000000000000000000000000000000000000000")]
     [InlineData("claude-code", "synthetic", "2.1.145", "0000000000000000000000000000000000000000000000000000000000000000")]

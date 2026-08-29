@@ -1546,6 +1546,22 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  SUM(event.type='PreToolUse') tool_started_count,SUM(event.type='PostToolUse') tool_completed_count,
                  SUM(event.type='PostToolUseFailure') tool_failed_count,SUM(event.type='SubagentStart') subagent_started_count,
                  SUM(event.type='SubagentStop') subagent_completed_count,
+                 SUM(substr(reference.revision_input,-length('|claude-subagent-name-v1:unavailable|'||owner.authority_receipt))
+                   ='|claude-subagent-name-v1:unavailable|'||owner.authority_receipt) subagent_name_unavailable_count,
+                 SUM(substr(reference.revision_input,-length('|'||local_workspace_claude_agent_type_marker(owner.name_text)||'|'||owner.authority_receipt))
+                   ='|'||local_workspace_claude_agent_type_marker(owner.name_text)||'|'||owner.authority_receipt) subagent_name_text_match_count,
+                 COUNT(DISTINCT CASE WHEN
+                   substr(reference.revision_input,-length('|'||owner.authority_receipt))='|'||owner.authority_receipt
+                   AND substr(reference.revision_input,-(length('claude-subagent-name-v1:recorded:')+64+length(owner.authority_receipt)+1),length('claude-subagent-name-v1:recorded:'))='claude-subagent-name-v1:recorded:'
+                   AND substr(reference.revision_input,-(64+length(owner.authority_receipt)+1),64)=lower(substr(reference.revision_input,-(64+length(owner.authority_receipt)+1),64))
+                   AND substr(reference.revision_input,-(64+length(owner.authority_receipt)+1),64) NOT GLOB '*[^0-9a-f]*'
+                   THEN substr(reference.revision_input,-(length('claude-subagent-name-v1:recorded:')+64+length(owner.authority_receipt)+1),length('claude-subagent-name-v1:recorded:')+64) END) subagent_name_digest_count,
+                 SUM(substr(reference.revision_input,-length('|claude-subagent-name-v1:unavailable|'||owner.authority_receipt))
+                   ='|claude-subagent-name-v1:unavailable|'||owner.authority_receipt
+                   OR substr(reference.revision_input,-length('|'||owner.authority_receipt))='|'||owner.authority_receipt
+                     AND substr(reference.revision_input,-(length('claude-subagent-name-v1:recorded:')+64+length(owner.authority_receipt)+1),length('claude-subagent-name-v1:recorded:'))='claude-subagent-name-v1:recorded:'
+                     AND substr(reference.revision_input,-(64+length(owner.authority_receipt)+1),64)=lower(substr(reference.revision_input,-(64+length(owner.authority_receipt)+1),64))
+                     AND substr(reference.revision_input,-(64+length(owner.authority_receipt)+1),64) NOT GLOB '*[^0-9a-f]*') subagent_name_marker_count,
                  SUM(reference.source_kind<>'session_event' OR reference.source_identity<>event.event_id OR reference.event_id<>event.event_id
                    OR reference.trace_id IS NOT NULL OR reference.span_id IS NOT NULL
                    OR event.session_id<>owner.session_id OR event.run_id<>owner.run_id
@@ -1586,9 +1602,11 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR owner.carrier_digest<>local_workspace_semantic_digest('claude_hook_subagent',owner.native_session_id,owner.native_run_id)
               OR owner.node_id<>local_workspace_node_id('semantic_subagent',owner.carrier_digest)
               OR owner.subagent_started_count<>1 OR owner.subagent_completed_count<>1
+              OR owner.subagent_name_marker_count<>owner.reference_count
+              OR owner.name_state='recorded' AND (owner.name_text IS NULL OR owner.subagent_name_text_match_count<>owner.reference_count OR owner.subagent_name_digest_count<>1)
+              OR owner.name_state='not_observed' AND (owner.name_text IS NOT NULL
+                OR owner.subagent_name_unavailable_count=0 AND owner.subagent_name_digest_count=1)
               OR owner.name_state NOT IN ('recorded','not_observed')
-              OR owner.name_state='recorded' AND (owner.name_text IS NULL OR trim(owner.name_text)='' OR length(CAST(owner.name_text AS BLOB))>256)
-              OR owner.name_state='not_observed' AND owner.name_text IS NOT NULL
               OR owner.lifecycle<>'unknown' OR owner.status<>'unknown'
               OR subagent.node_id IS NULL OR subagent.selected_state<>'not_observed' OR subagent.started_state<>'recorded'
               OR subagent.completed_state<>'recorded' OR subagent.failed_state<>'not_observed'

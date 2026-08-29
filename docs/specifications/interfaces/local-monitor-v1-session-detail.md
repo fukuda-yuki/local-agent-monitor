@@ -368,7 +368,18 @@ UTF-8 bytes across the object. Missing, conflicting, invalid, or oversized
 values remain `name:not_observed`; Compare groups those objects under its fixed
 unidentified Sub-agent row. `agent_id` and SDK `run_native_id` remain carrier
 identities only and are never display names or types. No SDK Sub-agent display
-name/type field is currently authorized.
+name/type field is currently authorized. Every authoritative lifecycle
+observation must carry the same valid value for the name to be recorded; one
+missing, invalid, blank, non-text, oversized, or conflicting observation makes
+the semantic object's name unavailable.
+
+The sanitized projection stores no raw `agent_type` in source receipts. Each
+Claude Hook Sub-agent source-reference revision input carries either a
+versioned unavailable marker or a versioned, domain-separated SHA-256 digest
+of the exact bounded value. Detail validation remains raw-free: it authenticates
+the persisted name against every per-reference marker. Backup validation also
+recomputes each marker from the authenticated retained Hook content, detecting
+source/receipt drift without weakening the sanitized Detail boundary.
 
 The carrier selector itself is versioned source authority. A same-shaped field
 from an unsupported source/version is not an identity. Two same-name or

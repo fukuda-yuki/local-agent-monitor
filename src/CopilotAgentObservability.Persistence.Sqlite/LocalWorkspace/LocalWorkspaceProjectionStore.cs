@@ -1440,9 +1440,7 @@ internal static class LocalWorkspaceProjectionStore
             SELECT 'subagent','claude_hook','native_run',
                    local_workspace_semantic_digest('claude_hook_subagent',native.native_session_id,run.native_run_id),
                    e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,
-                   CASE WHEN json_valid(content.content_json)=1 AND json_type(content.content_json,'$.agent_type')='text'
-                              AND trim(json_extract(content.content_json,'$.agent_type'))<>''
-                        THEN json_extract(content.content_json,'$.agent_type') END,
+                   local_workspace_claude_agent_type(content.content_json),
                    e.source_adapter||'|exact_hook_subagent|v1'
             FROM session_events e
             JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
@@ -1561,7 +1559,8 @@ internal static class LocalWorkspaceProjectionStore
                      SUM(c.type IN ('PreToolUse','SubagentStart','tool.execution_start','otel.tool.started')) started_count,SUM(c.type IN ('PostToolUse','SubagentStop','tool.execution_complete','otel.tool.completed')) completed_count,SUM(c.type IN ('PostToolUseFailure','otel.tool.failed')) failed_count,
                      COUNT(DISTINCT c.tool_name) tool_name_count,MIN(c.tool_name) tool_name,
                      COUNT(DISTINCT c.mcp_tool_name) mcp_tool_name_count,MIN(c.mcp_tool_name) mcp_tool_name,
-                     COUNT(DISTINCT c.subagent_name) subagent_name_count,MIN(c.subagent_name) subagent_name
+                     COUNT(DISTINCT c.subagent_name) subagent_name_count,MIN(c.subagent_name) subagent_name,
+                     SUM(c.semantic_kind='subagent' AND c.source_family='claude_hook' AND c.subagent_name IS NULL) subagent_name_missing_count
               FROM local_workspace_semantic_candidates c GROUP BY c.semantic_kind,c.source_family,c.scope_kind,c.carrier_digest),
             candidate_rows AS (
               SELECT g.*,h.execution_id,(SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id)+
@@ -1577,10 +1576,10 @@ internal static class LocalWorkspaceProjectionStore
                    CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest,source_ordinal,
                    local_workspace_node_id('execution_root',run_id),'exact',semantic_kind,
                    CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN 'recorded'
-                        WHEN semantic_kind='subagent' AND subagent_name_count=1 AND trim(subagent_name)<>'' AND length(CAST(subagent_name AS BLOB))<=256 THEN 'recorded'
+                        WHEN semantic_kind='subagent' AND subagent_name_count=1 AND subagent_name_missing_count=0 THEN 'recorded'
                         ELSE 'not_observed' END,
                    CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN tool_name
-                        WHEN semantic_kind='subagent' AND subagent_name_count=1 AND trim(subagent_name)<>'' AND length(CAST(subagent_name AS BLOB))<=256 THEN subagent_name END,
+                        WHEN semantic_kind='subagent' AND subagent_name_count=1 AND subagent_name_missing_count=0 THEN subagent_name END,
                    CASE WHEN semantic_kind='tool' AND authority_count=1 AND failed_count=1 AND completed_count=0 AND started_count<=1 THEN 'failed'
                         WHEN semantic_kind='tool' AND authority_count=1 AND completed_count=1 AND failed_count=0 AND started_count<=1 THEN 'completed'
                         WHEN semantic_kind='tool' AND authority_count=1 AND started_count=1 AND completed_count=0 AND failed_count=0 THEN 'started'
@@ -1607,7 +1606,7 @@ internal static class LocalWorkspaceProjectionStore
             WITH exact_references AS (
               SELECT c.semantic_kind,c.source_family,c.carrier_digest,c.event_id,MIN(c.source_adapter) source_adapter,
                      MIN(c.source_event_id) source_event_id,MIN(c.type)||'|'||MAX(c.type)||'|'||COUNT(DISTINCT c.type) type,MIN(c.occurred_at) occurred_at,MIN(c.authority_receipt) authority_receipt,
-                     MAX(c.source_family='session_sdk' AND c.type='tool.execution_start') required_start
+                     MIN(c.subagent_name) subagent_name,MAX(c.source_family='session_sdk' AND c.type='tool.execution_start') required_start
               FROM local_workspace_semantic_candidates c GROUP BY c.semantic_kind,c.source_family,c.carrier_digest,c.event_id),
             ranked AS (
               SELECT c.*,row_number() OVER(PARTITION BY c.semantic_kind,c.source_family,c.carrier_digest ORDER BY c.required_start DESC,c.event_id COLLATE BINARY)-1 ordinal
@@ -1617,7 +1616,9 @@ internal static class LocalWorkspaceProjectionStore
                    CASE source_family WHEN 'otel' THEN 'otel_span' ELSE 'session_event' END,ranked.event_id,
                    CASE source_family WHEN 'otel' THEN e.trace_id END,
                    CASE source_family WHEN 'otel' THEN substr(e.source_event_id,length(e.trace_id)+2) END,ranked.event_id,
-                   ranked.source_adapter||'|'||ranked.source_event_id||'|'||ranked.type||'|'||COALESCE(ranked.occurred_at,'')||'|'||ranked.authority_receipt
+                   ranked.source_adapter||'|'||ranked.source_event_id||'|'||ranked.type||'|'||COALESCE(ranked.occurred_at,'')||
+                   CASE WHEN semantic_kind='subagent' AND source_family='claude_hook' THEN '|'||local_workspace_claude_agent_type_marker(ranked.subagent_name) ELSE '' END||
+                   '|'||ranked.authority_receipt
             FROM ranked JOIN session_events e ON e.event_id=ranked.event_id
             WHERE ordinal<16 AND EXISTS(SELECT 1 FROM local_workspace_semantic_receipts receipt
               WHERE receipt.node_id=local_workspace_node_id(CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest));
@@ -2155,7 +2156,31 @@ internal static class LocalWorkspaceProjectionStore
         connection.CreateFunction<string?, string?, string?, string?, string?, string?, string?, string?, string?, byte[]?, byte[]?, long>(
             "local_workspace_retention_receipt_matches", RetentionReceiptMatches, isDeterministic: true);
         connection.CreateFunction<string?, long?>("local_workspace_ticks", static value => Time(value).Ticks, isDeterministic: true);
+        connection.CreateFunction<string?, string?>("local_workspace_claude_agent_type", ClaudeAgentType, isDeterministic: true);
+        connection.CreateFunction<string?, string>("local_workspace_claude_agent_type_marker", ClaudeAgentTypeMarker, isDeterministic: true);
     }
+
+    private static string? ClaudeAgentType(string? json)
+    {
+        if (json is null) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("agent_type", out var property)
+                || property.ValueKind != JsonValueKind.String)
+                return null;
+            var value = property.GetString();
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            return new UTF8Encoding(false, true).GetByteCount(value) <= 256 ? value : null;
+        }
+        catch (JsonException) { return null; }
+        catch (EncoderFallbackException) { return null; }
+    }
+
+    private static string ClaudeAgentTypeMarker(string? value) => value is null
+        ? "claude-subagent-name-v1:unavailable"
+        : "claude-subagent-name-v1:recorded:" + Convert.ToHexString(Hash("local-workspace-claude-subagent-name\0v1\0", value)).ToLowerInvariant();
 
     private static bool TryInstant(string? value, out DateTimeOffset instant)
     {

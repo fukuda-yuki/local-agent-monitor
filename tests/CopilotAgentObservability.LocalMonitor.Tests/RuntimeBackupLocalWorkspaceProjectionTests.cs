@@ -956,12 +956,74 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,adapter_version,schema_fingerprint,normalization_version) VALUES
               ('hook-agent-start','session-hook','run-hook','claude-code','claude-code-hook','agent-start','SubagentStart','2026-08-24T00:00:00.0000000+00:00','not_captured','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1'),
               ('hook-agent-stop','session-hook','run-hook','claude-code','claude-code-hook','agent-stop','SubagentStop','2026-08-24T00:00:01.0000000+00:00','not_captured','2.1.145','hook-adapter-v1',printf('%064d',1),'hook-normalization-v1');
+            INSERT INTO session_event_content VALUES
+              ('hook-agent-start','application/json','{"agent_type":"reviewer"}','2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32)),
+              ('hook-agent-stop','application/json','{"agent_type":"reviewer"}','2026-08-24T00:00:01.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
         using (var control = connection.BeginTransaction(deferred: true))
         {
             LocalWorkspaceProjectionBackupValidation.Validate(connection, control);
             control.Rollback();
+        }
+        using (var nameDrift = connection.BeginTransaction())
+        {
+            using var mutate = new SqliteCommand("UPDATE local_workspace_nodes SET name_text='planner' WHERE source_kind='semantic_subagent';", connection, nameDrift);
+            mutate.ExecuteNonQuery();
+            using var detailValidation = connection.CreateCommand();
+            detailValidation.Transaction = nameDrift;
+            detailValidation.CommandText = LocalWorkspaceSessionDetailSnapshotContributor.ClaudeHookOwnerValidationSql;
+            detailValidation.Parameters.AddWithValue("$session_id", "session-hook");
+            Assert.Equal(1L, Convert.ToInt64(detailValidation.ExecuteScalar()));
+            nameDrift.Rollback();
+        }
+        using (var malformedMarker = connection.BeginTransaction())
+        {
+            using var mutate = new SqliteCommand("""
+                UPDATE local_workspace_node_source_references SET revision_input=replace(revision_input,
+                  local_workspace_claude_agent_type_marker('reviewer'),replace(local_workspace_claude_agent_type_marker('reviewer'),':recorded:',':recorded:g'));
+                """, connection, malformedMarker);
+            mutate.ExecuteNonQuery();
+            using var detailValidation = connection.CreateCommand();
+            detailValidation.Transaction = malformedMarker;
+            detailValidation.CommandText = LocalWorkspaceSessionDetailSnapshotContributor.ClaudeHookOwnerValidationSql;
+            detailValidation.Parameters.AddWithValue("$session_id", "session-hook");
+            Assert.Equal(1L, Convert.ToInt64(detailValidation.ExecuteScalar()));
+            malformedMarker.Rollback();
+        }
+        using (var earlierSpoof = connection.BeginTransaction())
+        {
+            using var mutate = new SqliteCommand("""
+                UPDATE local_workspace_node_source_references SET revision_input='claude-subagent-name-v1:recorded:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff|'||revision_input;
+                """, connection, earlierSpoof);
+            mutate.ExecuteNonQuery();
+            using var detailValidation = connection.CreateCommand();
+            detailValidation.Transaction = earlierSpoof;
+            detailValidation.CommandText = LocalWorkspaceSessionDetailSnapshotContributor.ClaudeHookOwnerValidationSql;
+            detailValidation.Parameters.AddWithValue("$session_id", "session-hook");
+            Assert.Equal(0L, Convert.ToInt64(detailValidation.ExecuteScalar()));
+            earlierSpoof.Rollback();
+        }
+        using (var referenceAndNameDrift = connection.BeginTransaction())
+        {
+            using var mutate = new SqliteCommand("""
+                UPDATE local_workspace_nodes SET name_text='planner' WHERE source_kind='semantic_subagent';
+                UPDATE local_workspace_node_source_references SET revision_input=replace(revision_input,
+                  local_workspace_claude_agent_type_marker('reviewer'),local_workspace_claude_agent_type_marker('planner'));
+                """, connection, referenceAndNameDrift);
+            mutate.ExecuteNonQuery();
+            Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.Validate(connection, referenceAndNameDrift)).Message);
+            referenceAndNameDrift.Rollback();
+        }
+        using (var rawMismatch = connection.BeginTransaction())
+        {
+            using var mutate = new SqliteCommand(
+                "UPDATE session_event_content SET content_json='{\"agent_type\":\"planner\"}';", connection, rawMismatch);
+            mutate.ExecuteNonQuery();
+            Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.Validate(connection, rawMismatch)).Message);
+            rawMismatch.Rollback();
         }
         using (var missing = connection.BeginTransaction())
         {

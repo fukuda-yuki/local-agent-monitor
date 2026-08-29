@@ -365,6 +365,19 @@ internal static class LocalWorkspaceProjectionBackupValidation
             validation.Parameters.AddWithValue("$session_id", sessionId);
             if (Convert.ToInt64(validation.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
                 throw new InvalidOperationException();
+            validation.CommandText = """
+                SELECT EXISTS(
+                  SELECT 1 FROM local_workspace_semantic_receipts receipt
+                  JOIN local_workspace_nodes node ON node.node_id=receipt.node_id
+                  JOIN local_workspace_node_source_references reference ON reference.node_id=node.node_id
+                  JOIN session_events event ON event.event_id=reference.event_id AND event.event_id=reference.source_identity
+                  LEFT JOIN session_event_content content ON content.event_id=event.event_id
+                  WHERE node.session_id=$session_id AND receipt.source_family='claude_hook' AND receipt.semantic_kind='subagent'
+                    AND substr(reference.revision_input,-length('|'||local_workspace_claude_agent_type_marker(local_workspace_claude_agent_type(content.content_json))||'|'||receipt.authority_receipt))
+                      <>'|'||local_workspace_claude_agent_type_marker(local_workspace_claude_agent_type(content.content_json))||'|'||receipt.authority_receipt);
+                """;
+            if (Convert.ToInt64(validation.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException();
         }
     }
 
