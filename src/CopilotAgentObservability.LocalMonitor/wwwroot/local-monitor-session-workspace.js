@@ -367,11 +367,10 @@
   async function readGenericContent(trigger, nodeId, part) {
     showRawDialog(trigger, `${CONTENT_LABELS[part]} raw content`);
     try {
-      const response = await fetch(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part }), { headers: { Accept: "application/json" } });
-      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "Raw content could not be read"); return; }
-      const document = validateContent(JSON.parse(await response.text()), nodeId, part);
+      const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part });
+      const document = validateContent(await requestJson(urlFactory, false, () => selectNode(state.selectedExecutionId, nodeId, false, true)), nodeId, part);
       publishRawText(document.text, `${format(document.utf8_byte_length)} bytes · ${format(document.unicode_scalar_length)} scalars · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · revision ${format(document.source_reference.revision)}`);
-    } catch { publishRawText("", "Raw content could not be read"); }
+    } catch (error) { publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "Raw content could not be read"); }
   }
 
   async function readSkillContent(trigger, snapshotId, current) {
@@ -385,11 +384,11 @@
       const validHistorical = !current && exact(document, ["schema_version", "snapshot_id", "content_kind", "body", "definition_path", "body_sha256", "definition_path_sha256", "captured_at"]) && document.schema_version === "local-skill-invocation-snapshot.content.v1" && document.content_kind === "historical_snapshot";
       const validCurrent = current && exact(document, ["schema_version", "snapshot_id", "content_kind", "comparison", "historical_body_sha256", "current_body_sha256", "current_body_utf8_bytes", "body", "read_at"]) && document.schema_version === "local-skill-current-file-read.response.v1" && document.content_kind === "current_file" && ["same", "changed"].includes(document.comparison);
       if ((!validHistorical && !validCurrent) || document.snapshot_id !== snapshotId || typeof document.body !== "string") throw new TypeError("invalid Skill document");
-      publishRawText(document.body, current ? `${title} · ${document.comparison}` : `${title} · ${document.captured_at}`);
+      publishRawText(document.body, current ? `${title} · ${document.comparison}` : `${title} · ${document.captured_at} · Definition path: ${document.definition_path}`);
     } catch { publishRawText("", "Skill content could not be read"); }
   }
 
-  async function requestJson(urlFactory, attempted = false) {
+  async function requestJson(urlFactory, attempted = false, reestablish = null) {
     const response = await fetch(urlFactory(), { headers: { Accept: "application/json" } });
     if (response.status === 409 && !attempted) {
       const error = await response.json().catch(() => null);
@@ -397,10 +396,11 @@
         const previous = state.revision;
         await refreshSummary();
         if (state.revision === previous) throw new Error("Session revision did not advance");
-        return requestJson(urlFactory, true);
+        if (reestablish) await reestablish();
+        return requestJson(urlFactory, true, reestablish);
       }
     }
-    if (!response.ok) throw new Error("Session detail unavailable");
+    if (!response.ok) { const failure = new Error("Session detail unavailable"); failure.status = response.status; throw failure; }
     return JSON.parse(await response.text());
   }
 
@@ -461,9 +461,11 @@
         const start = Date.parse(node.timing.started_at) - Date.parse(execution.timing.started_at);
         const duration = node.timing.duration_ms;
         const extent = Math.max(1, execution.timing.duration_ms, start + duration);
-        const bar = el("span", "local-monitor-session-time-bar"); bar.dataset.timelineTimeBar = "";
-        bar.style.marginLeft = `${Math.max(0, start) / extent * 100}%`; bar.style.width = `${Math.max(1, duration / extent * 100)}%`;
-        wrapper.append(bar);
+        const geometry = duration === 0 ? el("span", "local-monitor-session-time-instant") : el("span", "local-monitor-session-time-bar");
+        if (duration === 0) { geometry.dataset.timelineInstant = ""; geometry.setAttribute("aria-label", "記録された瞬時イベント"); }
+        else geometry.dataset.timelineTimeBar = "";
+        geometry.style.marginLeft = `${Math.max(0, start) / extent * 100}%`; if (duration > 0) geometry.style.width = `${duration / extent * 100}%`;
+        wrapper.append(geometry);
       }
       row.addEventListener("click", async () => {
         if (node.child_count > 0) await setExpanded(execution.execution_id, node.node_id, !memory.expanded.has(node.node_id));
@@ -509,7 +511,9 @@
       const section = el("section", "local-monitor-session-execution"); section.dataset.executionId = execution.execution_id;
       const toggle = el("button", "local-monitor-session-execution-toggle"); toggle.type = "button"; toggle.dataset.executionToggle = "";
       toggle.setAttribute("aria-expanded", String(memory.open));
-      toggle.append(el("strong", null, `実行 ${execution.source ?? "不明"} · ${execution.status}`), el("span", null, `${format(execution.child_count)} activity · ${timingLabel(execution)}`));
+      const summaryFacts = [`${format(execution.child_count)} activity`, timingLabel(execution), `Token ${execution.tokens.total.state === "recorded" ? format(execution.tokens.total.value) : execution.tokens.total.state}`];
+      for (const [key, label] of [["skill", "Skill"], ["tool", "Tool"], ["subagent", "Sub-agent"], ["error", "Error"], ["retry", "Retry"]]) summaryFacts.push(`${label} ${execution.activity[key].state === "recorded" ? format(execution.activity[key].count) : execution.activity[key].state}`);
+      toggle.append(el("strong", null, `実行 ${execution.source ?? "不明"} · ${execution.status}`), el("span", null, summaryFacts.join(" · ")));
       toggle.addEventListener("click", async () => {
         memory.open = !memory.open;
         if (memory.open && !memory.pages.has("root")) await loadTimeline(execution.execution_id);
@@ -567,6 +571,7 @@
 
   function renderInspector(detail) {
     const node = detail.node; const metadata = node.metadata; inspector.replaceChildren();
+    inspector.setAttribute("aria-label", node.name.state === "recorded" ? node.name.text : node.kind);
     if (narrowInspector.matches) {
       inspectorReturnFocus = { executionId: detail.execution.execution_id, nodeId: node.node_id };
       inspector.append(createInspectorClose());
@@ -574,7 +579,8 @@
       setBackgroundInert(true);
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
-    section.append(el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+    const overview = el("button", null, "Session overviewに戻る"); overview.type = "button"; overview.addEventListener("click", () => { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
+    section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
     if (node.kind === "tool") {
       appendInspectorFact(section, "Start", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "End", { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "Duration", { state: node.timing.state, value: node.timing.duration_ms === null ? null : `${node.timing.duration_ms} ms` });
       appendInspectorFact(section, "Caller", metadata.caller, "node_id"); appendInspectorFact(section, "Lifecycle", metadata.lifecycle); appendInspectorFact(section, "Status", metadata.status); appendInspectorFact(section, "Exit", metadata.exit);
@@ -635,20 +641,39 @@
     if (!state.summary) return;
     if (route.node) {
       try { await selectNode(route.execution ?? null, route.node, false); }
-      catch { fallbackSelection(true); }
+      catch (error) { if (error instanceof TypeError || error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
+    } else if (route.execution) {
+      const execution = state.summary.executions.find(item => item.execution_id === route.execution);
+      if (!execution) { fallbackSelection(true); return; }
+      state.selectedExecutionId = execution.execution_id; state.selectedNodeId = null;
+      for (const item of state.summary.executions) executionMemory(item.execution_id).open = item.execution_id === execution.execution_id;
+      if (!executionMemory(execution.execution_id).pages.has("root")) await loadTimeline(execution.execution_id);
+      renderOverview(state.summary); renderExecutions();
     } else fallbackSelection(false);
+  }
+
+  function renderRouteRecovery(error) {
+    state.selectedNodeId = null;
+    const action = error?.status === 409 ? "open_all_sessions" : "retry";
+    inspector.setAttribute("aria-label", "Session detail unavailable");
+    inspector.replaceChildren(el("h2", null, "Session detail unavailable"), el("p", null, action));
+    normalizeInspectorBreakpoint(narrowInspector);
   }
 
   function renderOverview(summary) {
     const session = summary.session;
-    const overview = root.querySelector("[data-session-overview]"); overview.replaceChildren(el("h2", null, "Session overview"));
+    const overview = root.querySelector("[data-session-overview]"); overview.setAttribute("aria-label", "Session overview"); overview.replaceChildren(el("h2", null, "Session overview"));
     overview.append(el("h3", null, "最初の指示"), el("p", null, session.instruction.label || "記録されていません"));
     overview.append(el("p", null, session.instruction.additional_count === null
       ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
     overview.append(el("p", null, `状態 ${session.status} · 実行 ${format(summary.executions.length)}件`));
+    const source = session.source.state === "recorded" ? session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ") : session.source.state;
+    overview.append(el("p", null, `Source ${source}`), el("p", null, `Time ${timingLabel(session)}`));
     const coverage = el("ul"); for (const item of session.capture.coverage) coverage.append(el("li", null, `${item.signal_family}: ${item.state}`));
     overview.append(el("h3", null, "取得範囲"), coverage);
-    const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`)); overview.append(technical);
+    const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`));
+    for (const [key, values] of Object.entries(summary.technical_references)) for (const value of values) technical.append(el("p", null, `${key}: ${value}`)); overview.append(technical);
+    normalizeInspectorBreakpoint(narrowInspector);
   }
 
   function closeInspector() {
@@ -656,7 +681,9 @@
     inspector.setAttribute("aria-hidden", "true");
     setBackgroundInert(false);
     const target = inspectorReturnFocus; inspectorReturnFocus = null;
-    root.querySelector(`[data-execution-id='${target?.executionId}'] [data-timeline-node='${target?.nodeId}']`)?.focus();
+    if (target instanceof Element && target.isConnected && target !== document.body) target.focus();
+    else if (!(target instanceof Element)) root.querySelector(`[data-execution-id='${target?.executionId}'] [data-timeline-node='${target?.nodeId}']`)?.focus();
+    if (document.activeElement === document.body) root.querySelector("[data-execution-toggle]")?.focus();
   }
 
   function setBackgroundInert(value) {
@@ -670,8 +697,7 @@
 
   function normalizeInspectorBreakpoint(event) {
     if (event.matches) {
-      if (!state.selectedNodeId || !inspector.querySelector(".local-monitor-contextual-inspector")) return;
-      inspectorReturnFocus = { executionId: state.selectedExecutionId, nodeId: state.selectedNodeId };
+      inspectorReturnFocus = state.selectedNodeId ? { executionId: state.selectedExecutionId, nodeId: state.selectedNodeId } : document.activeElement;
       if (!inspector.querySelector("[data-inspector-close]")) inspector.prepend(createInspectorClose());
       inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
       setBackgroundInert(true); requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus()); return;
@@ -749,7 +775,7 @@
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
       const route = window.LocalMonitorV1History.current();
-      if (applyCurrentRoute && route.node) await applyRoute(route);
+      if (applyCurrentRoute && (route.node || route.execution)) await applyRoute(route);
       else if (applyCurrentRoute) {
         const latest = summary.executions.find(execution => execution.latest);
         if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
