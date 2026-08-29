@@ -221,8 +221,9 @@ internal sealed record LocalRepositorySessionDetailSnapshot(
 
 internal sealed record LocalRepositoryComparisonSessionInput(
     LocalRepositoryScopeSessionSnapshot Session,
-    LocalWorkspaceSessionDetailContribution Detail,
-    string WorkspaceRevision);
+    LocalWorkspaceSessionDetailContribution? Detail,
+    string WorkspaceRevision,
+    string? ProjectionError = null);
 
 internal sealed record LocalRepositoryComparisonInputSnapshot(
     LocalRepositoryScopeSnapshot Scope,

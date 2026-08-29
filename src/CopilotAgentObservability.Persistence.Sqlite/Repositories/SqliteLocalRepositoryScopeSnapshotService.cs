@@ -190,14 +190,21 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     foreach (var currentSession in snapshot.Sessions.OrderBy(static item => item.SessionId, StringComparer.Ordinal))
                     {
                         var summaryRequest = new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Summary, currentSession.SessionId);
-                        var currentDetail = await capability.RunContributorAsync(
-                            ReadPhase.Archive,
-                            token => detailContributor is LocalWorkspaceSessionDetailSnapshotContributor workspaceDetail && pinnedRegistry is not null
-                                ? workspaceDetail.ReadPinnedAsync(capability, summaryRequest, acceptedAt, pinnedRegistry, currentSession, token)
-                                : detailContributor.ReadAsync(capability, summaryRequest, token),
-                            cancellationToken).ConfigureAwait(false);
-                        ValidateDetail(currentSession.SessionId, summaryRequest, currentDetail);
-                        inputs.Add(new(currentSession, currentDetail, ComputeRevision(currentSession, currentDetail)));
+                        try
+                        {
+                            var currentDetail = await capability.RunContributorAsync(
+                                ReadPhase.Archive,
+                                token => detailContributor is LocalWorkspaceSessionDetailSnapshotContributor workspaceDetail && pinnedRegistry is not null
+                                    ? workspaceDetail.ReadPinnedAsync(capability, summaryRequest, acceptedAt, pinnedRegistry, currentSession, token)
+                                    : detailContributor.ReadAsync(capability, summaryRequest, token),
+                                cancellationToken).ConfigureAwait(false);
+                            ValidateDetail(currentSession.SessionId, summaryRequest, currentDetail);
+                            inputs.Add(new(currentSession, currentDetail, ComputeRevision(currentSession, currentDetail)));
+                        }
+                        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error != "workspace_too_large")
+                        {
+                            inputs.Add(new(currentSession, null, ComputeUnavailableRevision(currentSession, exception.Error), exception.Error));
+                        }
                     }
                     comparisonSessions = Array.AsReadOnly(inputs.ToArray());
                 }
@@ -277,6 +284,10 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             session,
             detail.CanonicalRevisionInput ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"),
             detail.SkillRegistryGenerationIdentity ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
+
+    private static string ComputeUnavailableRevision(LocalRepositoryScopeSessionSnapshot session, string error) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"local-monitor-comparison-unavailable\0v1\0{session.SessionId}\0{session.AssignmentRevision}\0{session.ArchiveRevision}\0{session.AssignedRepositoryArchiveRevision ?? -1}\0{JsonSerializer.Serialize(session.Session)}\0{error}")));
 
     internal static string ComputeRevisionForTest(
         LocalRepositoryScopeSessionSnapshot session,

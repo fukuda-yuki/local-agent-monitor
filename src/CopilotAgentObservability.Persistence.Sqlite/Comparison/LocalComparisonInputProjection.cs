@@ -185,7 +185,7 @@ internal static class LocalComparisonInputProjection
             session.SessionId,
             session.RepositoryId ?? throw new LocalComparisonSelectionUnavailableException(),
             workspaceRevision,
-            session.IsEffectivelyEligible,
+            session.IsEffectivelyEligible || includeArchived && session.ArchiveExclusionReason == "session_archived",
             session.ArchiveState == LocalArchiveState.Archived,
             scalars,
             Array.AsReadOnly(families),

@@ -117,7 +117,7 @@ public sealed class LocalComparisonInputProjectionTests
         var activity = new LocalWorkspaceActivityFacts(Fact(0), Fact(1), Fact(1), new("source_unsupported", null), new("not_observed", null));
         var tokens = new LocalWorkspaceTokenFacts("session_run", "recorded", 1, 1, Fact(10), Fact(5), Fact(15), new("not_observed", null), Fact(0), new("source_unsupported", null), Fact(10), Fact(0));
         var row = new LocalWorkspaceProjectionRow(sessionId, 1, 1, "not_observed", null, "completed", "full", new("recorded", ["synthetic"]), new("recorded", ["test-model"]), activity, tokens, "recorded", "2026-08-29T00:00:00.0000000+00:00", "2026-08-29T00:00:01.0000000+00:00", "2026-08-29T00:00:01.0000000+00:00", 1000, [], "revision");
-        return new(sessionId, row, 1, LocalRepositoryScopeAssignmentState.Assigned, LocalRepositoryScopeAssignmentAuthority.Manual, RepositoryId, [], true, false, true, archived ? LocalArchiveState.Archived : LocalArchiveState.Active, 1, true, null, 1);
+        return new(sessionId, row, 1, LocalRepositoryScopeAssignmentState.Assigned, LocalRepositoryScopeAssignmentAuthority.Manual, RepositoryId, [], true, false, true, archived ? LocalArchiveState.Archived : LocalArchiveState.Active, 1, !archived, archived ? "session_archived" : null, 1);
     }
 
     internal static LocalWorkspaceSessionDetailContribution Detail(string sessionId, bool unidentifiedSubagent)

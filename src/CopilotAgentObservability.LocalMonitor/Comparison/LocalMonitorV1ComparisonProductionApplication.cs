@@ -33,6 +33,7 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
         catch (LocalMonitorV1ComparisonRequestException) { return Error(400, "invalid_request"); }
         catch (ArgumentException) { return Error(400, "invalid_request"); }
         catch (LocalRepositoryScopeSnapshotException x) when (x.Error == LocalRepositoryScopeSnapshotError.PersistenceBusy) { return Error(503, "persistence_busy"); }
+        catch (LocalWorkspaceSessionDetailException x) when (x.Error == "workspace_too_large") { return Error(409, "workspace_too_large"); }
         catch (LocalComparisonTooLargeException) { return Error(409, "workspace_too_large"); }
     }
 
@@ -75,15 +76,19 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
     {
         var requested = a.Concat(b).Distinct(StringComparer.Ordinal).ToArray();
         var snapshot = await inputs.ReadComparisonInputAsync(new(LocalRepositoryScopeKind.Repository, repositoryId, ExactTargetSessionIds: requested), ct);
-        var candidates = snapshot.Sessions.Select(Candidate).ToArray();
+        var archivedRepositories = snapshot.Scope.Repositories
+            .Where(static repository => repository.ArchiveState == LocalArchiveState.Archived)
+            .Select(static repository => repository.RepositoryId)
+            .ToHashSet(StringComparer.Ordinal);
+        var candidates = snapshot.Sessions.Select(session => Candidate(session, archivedRepositories.Contains(session.Session.RepositoryId ?? ""))).ToArray();
         var revision = Hash(snapshot.Scope.Repositories.OrderBy(x => x.RepositoryId).SelectMany(x => new[] { x.RepositoryId, x.Revision.ToString(CultureInfo.InvariantCulture), x.ArchiveRevision.ToString(CultureInfo.InvariantCulture) }).Concat(snapshot.Sessions.Select(x => x.WorkspaceRevision)));
         var preview = LocalComparisonInputProjection.Project(repositoryId, a, b, archived, candidates, revision); var map = snapshot.Sessions.ToDictionary(x => x.Session.SessionId, StringComparer.Ordinal);
-        LocalComparisonSessionFact Fact(string id) { var x = map[id]; return LocalComparisonInputProjection.MapSessionFact(x.Session, x.Detail, x.WorkspaceRevision, archived); }
+        LocalComparisonSessionFact Fact(string id) { var x = map[id]; return LocalComparisonInputProjection.MapSessionFact(x.Session, x.Detail!, x.WorkspaceRevision, archived); }
         var aa = preview.Included.Where(x => a.Contains(x.SessionId)).Select(x => Fact(x.SessionId)).ToArray(); var bb = preview.Included.Where(x => b.Contains(x.SessionId) && !a.Contains(x.SessionId)).Select(x => Fact(x.SessionId)).ToArray();
         var draft = new LocalComparisonDraft(repositoryId, new(Array.AsReadOnly(aa), preview.Excluded.Count(x => x.Cohort == "a")), new(Array.AsReadOnly(bb), preview.Excluded.Count(x => x.Cohort == "b")), SHA256.HashData(Encoding.ASCII.GetBytes(preview.PreviewRevision)));
         return new(preview, draft);
     }
-    private static LocalComparisonProjectionCandidate Candidate(LocalRepositoryComparisonSessionInput x) { var s = x.Session; var row = (LocalWorkspaceProjectionRow)s.Session; var state = s.RepositoryId is null ? LocalComparisonCandidateState.RepositoryMismatch : s.IsEffectivelyEligible ? LocalComparisonCandidateState.Included : LocalComparisonCandidateState.UnsupportedSelection; return new(s.SessionId, s.RepositoryId ?? "", state, s.ArchiveState == LocalArchiveState.Archived, s.ArchiveState == LocalArchiveState.Archived ? "archived" : "active", row.Sources.Values, row.Sources.State, row.Models.Values, row.Models.State, 1, row.Completeness, ["tokens", "time_and_execution", "skills", "tools", "subagents", "errors_and_retries", "conditions"], s.AssignmentRevision, x.WorkspaceRevision); }
+    private static LocalComparisonProjectionCandidate Candidate(LocalRepositoryComparisonSessionInput x, bool repositoryArchived) { var s = x.Session; var row = (LocalWorkspaceProjectionRow)s.Session; var state = s.RepositoryId is null ? LocalComparisonCandidateState.RepositoryMismatch : repositoryArchived ? LocalComparisonCandidateState.RepositoryArchived : x.ProjectionError is not null ? LocalComparisonCandidateState.ProjectionUnavailable : s.ArchiveState == LocalArchiveState.Archived ? LocalComparisonCandidateState.Included : s.IsEffectivelyEligible ? LocalComparisonCandidateState.Included : LocalComparisonCandidateState.UnsupportedSelection; return new(s.SessionId, s.RepositoryId ?? "", state, s.ArchiveState == LocalArchiveState.Archived, s.ArchiveState == LocalArchiveState.Archived ? "archived" : "active", row.Sources.Values, row.Sources.State, row.Models.Values, row.Models.State, 1, row.Completeness, ["tokens", "time_and_execution", "skills", "tools", "subagents", "errors_and_retries", "conditions"], s.AssignmentRevision, x.WorkspaceRevision); }
     private static string Hash(IEnumerable<string> values) { using var s = new MemoryStream(); foreach (var x in values) LocalComparisonSelectionFrame.WriteFrame(s, x); return Convert.ToHexStringLower(SHA256.HashData(s.ToArray())); }
     private static string Display(LocalComparisonStoredResult x) => x.Values.FirstOrDefault(v => v.Key == "display_name").Value ?? x.RowKey;
     private static string Normalize(string value) => string.Join(' ', value.Normalize(NormalizationForm.FormKC).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();

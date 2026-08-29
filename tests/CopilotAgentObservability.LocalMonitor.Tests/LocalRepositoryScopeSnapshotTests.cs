@@ -13,6 +13,42 @@ public sealed class LocalRepositoryScopeSnapshotTests
     private const string LocatorC = "01900000-0000-7000-8000-000000000013";
 
     [Fact]
+    public async Task ComparisonBatchKeepsTypedPerTargetDetailFailureAsProjectionUnavailable()
+    {
+        using var database = new ScopeDatabase();
+        var unavailable = SessionId(1);
+        var available = SessionId(2);
+        database.AddRepository(RepositoryA, LocatorA, revision: 1);
+        foreach (var sessionId in new[] { unavailable, available })
+        {
+            database.AddCandidate(sessionId, RepositoryA);
+            database.SetRevision(sessionId, 1);
+        }
+        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(capability, [
+            LocalComparisonInputProjectionTests.ScopeSession(unavailable, false).Session,
+            LocalComparisonInputProjectionTests.ScopeSession(available, false).Session,
+        ], token));
+        var archive = new FakeArchiveContributor((capability, input, token) => ReadArchiveContribution(capability, input, token));
+        var detail = new FakeDetailContributor(async (capability, request, token) =>
+        {
+            await capability.ReadAsync((connection, transaction, innerToken) =>
+                ScalarAsync(connection, transaction, "SELECT value FROM session_snapshot_source;", innerToken), token);
+            if (request.SessionId == unavailable) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            return LocalComparisonInputProjectionTests.Detail(available, false);
+        });
+        var service = new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive, detail);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, new SqliteLocalComparisonStore(database.Path), cursorKey: new byte[32]);
+        var body = System.Text.Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{unavailable}\"],\"b\":[\"{available}\"]}},\"include_archived\":false}}");
+
+        var response = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, RepositoryA, null, body, "", default);
+
+        Assert.Equal(200, response.StatusCode);
+        using var json = System.Text.Json.JsonDocument.Parse(response.Entity);
+        Assert.Equal("projection_unavailable", json.RootElement.GetProperty("excluded")[0].GetProperty("reason").GetString());
+        Assert.DoesNotContain("500", System.Text.Encoding.UTF8.GetString(response.Entity), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReadAsync_UsesOneSequentialSnapshotAndKeepsContributorRowsOpaque()
     {
         using var database = new ScopeDatabase();

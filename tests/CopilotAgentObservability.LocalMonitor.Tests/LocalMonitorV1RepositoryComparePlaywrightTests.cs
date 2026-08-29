@@ -64,7 +64,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         var toolSection = page.Locator(".local-monitor-compare-section").Filter(new LocatorFilterOptions { Has = page.Locator("h2", new PageLocatorOptions { HasText = "ツール" }) });
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "ツールを読み込む" }).ClickAsync();
-        await Expect(toolSection).ToContainTextAsync("Synthetic tool");
+        await Expect(toolSection).ToContainTextAsync("tool-helper");
         await toolSection.GetByPlaceholder("ツールを検索").FillAsync("synthetic");
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "検索" }).ClickAsync();
         Assert.Contains(rowQueries, query => query.Contains("family=tool&q=synthetic", StringComparison.Ordinal));
