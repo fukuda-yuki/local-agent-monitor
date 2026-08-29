@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor, ILocalWorkspaceComparisonDetailSnapshotContributor
+internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor
 {
     internal const string BoundsSql = """
         SELECT
@@ -58,15 +58,6 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         CancellationToken cancellationToken) =>
         transaction.ReadAsync((connection, sqliteTransaction, token) =>
             ReadAsync(connection, sqliteTransaction, request, acceptedAt, pinnedRegistry, revisionSession, token), cancellationToken);
-
-    public async ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonAsync(
-        ILocalRepositoryReadTransaction transaction, string sessionId, CancellationToken cancellationToken)
-    {
-        var acceptedAt = timeProvider.GetUtcNow();
-        using var pinnedRegistry = registryAuthority is null ? null : PinnedRegistryAuthority.TryCreate(registryAuthority);
-        if (pinnedRegistry is null) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-        return await ReadComparisonPinnedAsync(transaction, sessionId, acceptedAt, pinnedRegistry, cancellationToken);
-    }
 
     internal ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
         ILocalRepositoryReadTransaction transaction, string sessionId, DateTimeOffset acceptedAt,

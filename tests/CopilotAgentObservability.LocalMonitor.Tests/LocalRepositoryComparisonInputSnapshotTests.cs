@@ -25,31 +25,113 @@ public sealed class LocalRepositoryComparisonInputSnapshotTests
         var authority = FixedSkillRegistryGenerationAuthority.Load();
         var connectionCount = 0;
         var capabilityEntries = 0;
+        LocalWorkspaceSessionDetailSnapshotTests.NativeDetailObserver? sqlObserver = null;
+        IReadOnlyList<string>? statements = null;
         var service = new SqliteLocalRepositoryScopeSnapshotService(
             temp.DatabasePath,
             new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
             SqliteLocalArchiveFactSnapshotContributor.Instance,
             new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
             capabilityEntryObserver: () => { capabilityEntries++; return ValueTask.CompletedTask; },
-            connectionOpenedObserver: _ => connectionCount++,
+            connectionOpenedObserver: connection =>
+            {
+                connectionCount++;
+                sqlObserver = new(connection);
+            },
+            finalReturnObserver: () =>
+            {
+                statements = sqlObserver!.Sql.ToArray();
+                sqlObserver.Dispose();
+            },
             skillRegistryAuthority: authority,
             timeProvider: clock);
 
         var snapshot = await service.ReadComparisonInputAsync(
             new(LocalRepositoryScopeKind.All, null, ExactTargetSessionIds: [sessionId]), CancellationToken.None);
 
-        var comparison = Assert.Single(snapshot.Sessions).ComparisonDetail!;
-        Assert.Contains(comparison.Nodes, node => node.Kind == "tool" && node.SourceReferences is { Count: > 0 });
-        Assert.Contains(comparison.Nodes, node => node.Kind == "subagent" && node.SourceReferences is { Count: > 0 });
-        Assert.All(comparison.Nodes, node =>
-        {
-            Assert.NotNull(node.Activity);
-            Assert.NotNull(node.Tokens);
-        });
+        var input = Assert.Single(snapshot.Sessions);
+        Assert.NotNull(input.ComparisonDetail);
+        var comparison = input.ComparisonDetail;
+        var tool = Assert.Single(comparison.Nodes, node => node.Kind == "tool" && node.TraceId == new string('a', 32));
+        Assert.Equal("completed", tool.Lifecycle);
+        Assert.Equal("completed", tool.Status);
+        Assert.Equal("not_observed", tool.Activity.Error.State);
+        Assert.Null(tool.Activity.Error.Value);
+        Assert.Equal("not_observed", tool.Activity.Retry.State);
+        Assert.Null(tool.Activity.Retry.Value);
+        Assert.Equal("not_observed", tool.Tokens.Total.State);
+        Assert.Null(tool.Tokens.Total.Value);
+        var toolReference = Assert.Single(tool.SourceReferences!);
+        Assert.Equal("otel_span", toolReference.SourceKind);
+        Assert.Equal("018f0000-0000-7000-8000-000000000011", toolReference.SourceIdentity);
+        Assert.Equal(new string('a', 32), toolReference.TraceId);
+        Assert.Equal(new string('b', 16), toolReference.SpanId);
+        Assert.Equal("018f0000-0000-7000-8000-000000000011", toolReference.EventId);
+        Assert.True(toolReference.AuthorityValidated);
+
+        var subagent = Assert.Single(comparison.Nodes, node => node.Kind == "subagent");
+        Assert.Equal("unknown", subagent.Lifecycle);
+        Assert.Equal("unknown", subagent.Status);
+        Assert.Equal("recorded", subagent.SubagentLifecycle!.StartedState);
+        Assert.Equal("recorded", subagent.SubagentLifecycle.CompletedState);
+        Assert.Equal("not_observed", subagent.SubagentLifecycle.FailedState);
+        Assert.Equal("not_observed", subagent.Tokens.Total.State);
+        Assert.Equal(
+            ["018f0000-0000-7000-8000-000000000021", "018f0000-0000-7000-8000-000000000022"],
+            subagent.SourceReferences!.Select(static reference => reference.EventId).Order(StringComparer.Ordinal));
+        var session = Assert.IsType<LocalWorkspaceProjectionRow>(input.Session.Session);
+        Assert.Equal("recorded", session.Activity.Tool.State);
+        Assert.Equal(1, session.Activity.Tool.Value);
+        Assert.Equal("recorded", session.Activity.Subagent.State);
+        Assert.Equal(1, session.Activity.Subagent.Value);
         Assert.Equal(["source-9.1"], comparison.SourceApplicationVersions);
         Assert.Equal(["adapter-4.2"], comparison.AdapterVersions);
         Assert.Equal(1, connectionCount);
-        Assert.True(capabilityEntries >= 4);
+        Assert.Equal(4, capabilityEntries);
+        Assert.Equal(1, statements!.Count(statement => statement.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
+    public async Task ProductionComparisonInputFreezesAdmittedSkillFactsAndExactReference()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("compare-skill", "review-skill");
+        fixture.RefreshWorkspace();
+        var sessionId = fixture.SessionId("compare-skill");
+        var clock = new SkillClock();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            fixture.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: fixture.RegistryAuthority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: fixture.RegistryAuthority, timeProvider: clock),
+            skillRegistryAuthority: fixture.RegistryAuthority,
+            timeProvider: clock);
+
+        var snapshot = await service.ReadComparisonInputAsync(
+            new(LocalRepositoryScopeKind.All, null, ExactTargetSessionIds: [sessionId]), default);
+
+        var input = Assert.Single(snapshot.Sessions);
+        Assert.NotNull(input.ComparisonDetail);
+        var comparison = input.ComparisonDetail;
+        var skill = Assert.Single(comparison.Nodes, node => node.Kind == "skill");
+        Assert.Equal("review-skill", skill.NameText);
+        Assert.Equal("completed", skill.Lifecycle);
+        Assert.Equal("completed", skill.Status);
+        Assert.Equal("recorded", skill.Activity.Skill.State);
+        Assert.Equal(1, skill.Activity.Skill.Value);
+        Assert.Equal("not_observed", skill.Activity.Error.State);
+        Assert.Equal("not_observed", skill.Activity.Retry.State);
+        Assert.Equal("not_observed", skill.Tokens.Total.State);
+        var reference = Assert.Single(skill.SourceReferences!);
+        Assert.Equal("skill_claim", reference.SourceKind);
+        Assert.StartsWith("sdk:", reference.SourceIdentity, StringComparison.Ordinal);
+        Assert.NotNull(reference.EventId);
+        Assert.Null(reference.TraceId);
+        Assert.Null(reference.SpanId);
+        Assert.True(reference.AuthorityValidated);
+        var session = Assert.IsType<LocalWorkspaceProjectionRow>(input.Session.Session);
+        Assert.Equal("recorded", session.Activity.Skill.State);
+        Assert.Equal(1, session.Activity.Skill.Value);
     }
 
     [Fact]
@@ -85,5 +167,10 @@ public sealed class LocalRepositoryComparisonInputSnapshotTests
     private sealed class FixedClock : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.Parse("2026-08-26T00:10:00Z");
+    }
+
+    private sealed class SkillClock : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.Parse("2026-01-01T01:00:00Z");
     }
 }

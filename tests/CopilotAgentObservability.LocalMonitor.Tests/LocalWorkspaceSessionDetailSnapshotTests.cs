@@ -2160,7 +2160,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         }
     }
 
-    private sealed class NativeDetailObserver : IDisposable
+    internal sealed class NativeDetailObserver : IDisposable
     {
         private const uint Statement = 0x01;
         private const uint Profile = 0x02;

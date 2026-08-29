@@ -13,7 +13,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
     private const string LocatorC = "01900000-0000-7000-8000-000000000013";
 
     [Fact]
-    public async Task ComparisonBatchKeepsTypedPerTargetDetailFailureAsProjectionUnavailable()
+    public async Task ComparisonBatchRejectsAContributorWithoutThePinnedCompareInputSeam()
     {
         using var database = new ScopeDatabase();
         var unavailable = SessionId(1);
@@ -40,12 +40,10 @@ public sealed class LocalRepositoryScopeSnapshotTests
         var application = new LocalMonitorV1ComparisonProductionApplication(service, new SqliteLocalComparisonStore(database.Path), cursorKey: new byte[32]);
         var body = System.Text.Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{unavailable}\"],\"b\":[\"{available}\"]}},\"include_archived\":false}}");
 
-        var response = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, RepositoryA, null, body, "", default);
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() =>
+            application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, RepositoryA, null, body, "", default).AsTask());
 
-        Assert.Equal(200, response.StatusCode);
-        using var json = System.Text.Json.JsonDocument.Parse(response.Entity);
-        Assert.Equal("projection_unavailable", json.RootElement.GetProperty("excluded")[0].GetProperty("reason").GetString());
-        Assert.DoesNotContain("500", System.Text.Encoding.UTF8.GetString(response.Entity), StringComparison.Ordinal);
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
     }
 
     [Fact]
