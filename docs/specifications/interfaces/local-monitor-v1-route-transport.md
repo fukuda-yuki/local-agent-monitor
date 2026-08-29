@@ -187,11 +187,12 @@ state | receiver | ai | repositories | archive | storage | diagnostics
 settings
 ```
 
-Comparison metric/row drill-down state is not added to the URL in v1. Exact
-evidence links navigate to owner-issued Session/node routes.
-No Compare preview/create API path, success DTO, bound, error graph, or
-transport is defined here; those remain absent until #165 supplies the owner
-wire. The human comparison route is not such a machine API.
+Comparison metric/row drill-down state is not added to the human URL in v1.
+Exact evidence links navigate to owner-issued Session/node routes. The five
+Repository-scoped Compare machine operations, success DTOs, bounds, error
+graph, and transport are defined exclusively by
+[`local-monitor-v1-comparison.md`](local-monitor-v1-comparison.md); this file
+continues to own the unchanged human comparison route and shared transport.
 
 ### Session detail
 

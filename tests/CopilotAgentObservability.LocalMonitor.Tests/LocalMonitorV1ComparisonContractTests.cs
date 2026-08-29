@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -21,10 +22,26 @@ public sealed class LocalMonitorV1ComparisonContractTests
         "local-monitor-comparison-evidence.response.v1",
     ];
 
+    private static readonly string[] FactStates =
+    [
+        "recorded", "explicit_zero", "not_observed", "source_unsupported", "capture_gap",
+        "certification_pending", "not_captured", "expired", "deleted", "read_denied",
+        "inconsistent", "projection_invalid", "too_large",
+    ];
+
+    private static readonly (int Ordinal, string Key, string Label)[] Sections =
+    [
+        (1, "target", "対象"), (2, "tokens", "トークン"),
+        (3, "input_token_breakdown", "入力トークンの内訳"), (4, "time_and_execution", "時間・実行量"),
+        (5, "skills", "スキル"), (6, "tools", "ツール"), (7, "subagents", "サブエージェント"),
+        (8, "errors_and_retries", "エラー・再試行"), (9, "conditions", "比較条件"),
+    ];
+
     [Fact]
     public void OwnerSpecificationFreezesExactlyFiveOperationsAndSevenSchemas()
     {
         var specification = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "specifications", "interfaces", "local-monitor-v1-comparison.md"));
+        var normalized = Regex.Replace(specification, @"\s+", " ");
         string[] routes =
         [
             "POST /api/local-monitor/v1/repositories/{repositoryId}/comparisons/preview",
@@ -36,10 +53,14 @@ public sealed class LocalMonitorV1ComparisonContractTests
 
         Assert.All(routes, route => Assert.Contains(route, specification, StringComparison.Ordinal));
         Assert.All(Tokens, token => Assert.Contains(token, specification, StringComparison.Ordinal));
+        Assert.Equal(5, Regex.Matches(specification, @"(?m)^(POST |GET  )/api/local-monitor/v1/repositories/\{repositoryId\}/comparisons(?:/preview|/\{comparisonId\}(?:/rows|/evidence)?)?$", RegexOptions.CultureInvariant).Count);
+        Assert.Equal(7, Regex.Matches(specification, @"(?m)^local-monitor-comparison-(?:preview|create|read|rows|evidence)\.(?:request|response)\.v1$", RegexOptions.CultureInvariant).Count);
         Assert.Contains("16,384", specification, StringComparison.Ordinal);
         Assert.Contains("8,388,608", specification, StringComparison.Ordinal);
         Assert.Contains("comparison_preview_stale", specification, StringComparison.Ordinal);
         Assert.Contains("HEAD", specification, StringComparison.Ordinal);
+        Assert.Contains("total requested occurrences `a + b <= 200` is parser-owned", normalized, StringComparison.Ordinal);
+        Assert.Contains("later parser tests MUST enforce", normalized, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -53,8 +74,80 @@ public sealed class LocalMonitorV1ComparisonContractTests
             using var schema = JsonDocument.Parse(File.ReadAllBytes(schemaPath));
             Assert.Equal("https://json-schema.org/draft/2020-12/schema", schema.RootElement.GetProperty("$schema").GetString());
             Assert.False(schema.RootElement.GetProperty("additionalProperties").GetBoolean());
+            AssertEveryObjectSchemaIsClosed(schema.RootElement, "$", token);
             Assert.True(ValidateWithPowerShellJsonSchema(fixturePath, schemaPath), token);
         });
+    }
+
+    [Fact]
+    public void SchemasFreezeCoreFactStatesLabelsSectionsAndStoredValueCollections()
+    {
+        using var readSchema = ReadSchema("local-monitor-comparison-read.response");
+        using var rowsSchema = ReadSchema("local-monitor-comparison-rows.response");
+        Assert.Equal(FactStates, readSchema.RootElement.GetProperty("$defs").GetProperty("factState").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(FactStates, rowsSchema.RootElement.GetProperty("$defs").GetProperty("factState").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+        Assert.False(readSchema.RootElement.GetRawText().Contains("projection_unavailable", StringComparison.Ordinal));
+        Assert.False(rowsSchema.RootElement.GetRawText().Contains("projection_unavailable", StringComparison.Ordinal));
+
+        using var read = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")));
+        Assert.Equal(["基準", "比較対象"], read.RootElement.GetProperty("cohorts").EnumerateObject().Select(item => item.Value.GetProperty("label").GetString()));
+        Assert.Equal(Sections, read.RootElement.GetProperty("sections").EnumerateArray().Select(section => (
+            section.GetProperty("ordinal").GetInt32(), section.GetProperty("key").GetString()!, section.GetProperty("label").GetString()!)));
+        Assert.All(read.RootElement.GetProperty("results").EnumerateArray(), result => Assert.True(result.GetProperty("values").GetArrayLength() >= 8));
+
+        using var rows = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-rows.response.json")));
+        Assert.All(rows.RootElement.GetProperty("items").EnumerateArray(), item => Assert.True(item.GetProperty("values").GetArrayLength() >= 8));
+    }
+
+    [Fact]
+    public void SchemasRejectNoncanonicalIdentityAndChangedFrozenLabels()
+    {
+        using var create = ReadSchema("local-monitor-comparison-create.response");
+        var locationPattern = create.RootElement.GetProperty("properties").GetProperty("location").GetProperty("pattern").GetString()!;
+        Assert.DoesNotMatch(locationPattern, "/repositories/not-a-uuid/comparisons/not-a-uuid");
+        using var read = ReadSchema("local-monitor-comparison-read.response");
+        Assert.Equal("基準", read.RootElement.GetProperty("$defs").GetProperty("cohortA").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
+        Assert.Equal("target", read.RootElement.GetProperty("$defs").GetProperty("section1").GetProperty("properties").GetProperty("key").GetProperty("const").GetString());
+        using var rows = ReadSchema("local-monitor-comparison-rows.response");
+        Assert.DoesNotContain("projection_unavailable", rows.RootElement.GetProperty("$defs").GetProperty("factState").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+        using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
+        Assert.Equal("#/$defs/uuidv7", evidence.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("execution_id").GetProperty("oneOf")[0].GetProperty("$ref").GetString());
+    }
+
+    [Fact]
+    public void SchemasFreezeExpressibleCollectionAndPagingBounds()
+    {
+        using var preview = ReadSchema("local-monitor-comparison-preview.request");
+        var cohort = preview.RootElement.GetProperty("$defs").GetProperty("cohort");
+        Assert.Equal(1, cohort.GetProperty("minItems").GetInt32());
+        Assert.Equal(199, cohort.GetProperty("maxItems").GetInt32());
+        using var rows = ReadSchema("local-monitor-comparison-rows.response");
+        Assert.Equal(100, rows.RootElement.GetProperty("properties").GetProperty("items").GetProperty("maxItems").GetInt32());
+        using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
+        Assert.Equal(200, evidence.RootElement.GetProperty("properties").GetProperty("items").GetProperty("maxItems").GetInt32());
+    }
+
+    [Fact]
+    public void OwnerContractFreezesQueriesSecurityAndExactErrorTable()
+    {
+        var specification = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "specifications", "interfaces", "local-monitor-v1-comparison.md"));
+        var normalized = Regex.Replace(specification, @"\s+", " ");
+        Assert.Contains("`family`, `q`, `after`, `limit`", specification, StringComparison.Ordinal);
+        Assert.Contains("1..100, default 50", specification, StringComparison.Ordinal);
+        Assert.Contains("`result_ordinal`, `field_key`, `after`, `limit`", specification, StringComparison.Ordinal);
+        Assert.Contains("1..200, default 100", specification, StringComparison.Ordinal);
+        Assert.Contains("same origin", specification, StringComparison.Ordinal);
+        Assert.Contains("CSRF", specification, StringComparison.Ordinal);
+        Assert.Contains("no CORS", specification, StringComparison.Ordinal);
+        Assert.Contains("HEAD has the GET-equivalent status, headers, and content length with zero body", normalized, StringComparison.Ordinal);
+
+        (int Status, string Code)[] errors =
+        [
+            (400, "invalid_host"), (400, "invalid_request"), (400, "invalid_cursor"), (403, "csrf_rejected"),
+            (405, "method_not_allowed"), (409, "comparison_selection_invalid"), (409, "comparison_preview_stale"),
+            (409, "workspace_too_large"), (404, "comparison_not_found"), (410, "comparison_expired"), (503, "persistence_busy"),
+        ];
+        Assert.All(errors, error => Assert.Contains($"{error.Status} `{error.Code}` `{{\"error\":\"{error.Code}\"}}`", specification, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -86,7 +179,7 @@ public sealed class LocalMonitorV1ComparisonContractTests
         using var process = Process.Start(new ProcessStartInfo
         {
             FileName = "pwsh",
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$instance = Get-Content -Raw -LiteralPath $args[0]; if ($instance | Test-Json -SchemaFile $args[1]) { exit 0 } else { exit 1 }", instancePath, schemaPath },
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'SilentlyContinue'; $instance = Get-Content -Raw -LiteralPath $args[0]; if (Test-Json -Json $instance -SchemaFile $args[1]) { exit 0 } else { exit 1 }", instancePath, schemaPath },
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -94,6 +187,25 @@ public sealed class LocalMonitorV1ComparisonContractTests
         Assert.NotNull(process);
         process.WaitForExit();
         return process.ExitCode == 0;
+    }
+
+    private static JsonDocument ReadSchema(string stem) => JsonDocument.Parse(File.ReadAllBytes(Path.Combine(ContractRoot, $"{stem}.schema.json")));
+
+    private static void AssertEveryObjectSchemaIsClosed(JsonElement element, string path, string token)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String && type.GetString() == "object")
+            {
+                Assert.True(element.TryGetProperty("additionalProperties", out var closed) && closed.ValueKind == JsonValueKind.False, $"{token}: {path}");
+            }
+            foreach (var property in element.EnumerateObject()) AssertEveryObjectSchemaIsClosed(property.Value, $"{path}/{property.Name}", token);
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray()) AssertEveryObjectSchemaIsClosed(item, $"{path}/{index++}", token);
+        }
     }
 
     private static string FindRepositoryRoot()

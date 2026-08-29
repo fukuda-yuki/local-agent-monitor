@@ -30,8 +30,9 @@ entity bytes, same origin, and the existing CSRF header. Property order is
 `schema_version`, `cohorts`, `include_archived`, then Create-only
 `selection_sha256`, `preview_revision`; cohort order is `a`, `b`.
 
-Each cohort has 1..199 canonical Session IDs and the total requested
-occurrences is at most 200. Duplicate/overlap are logical Preview exclusions,
+Each cohort has 1..199 canonical Session IDs. The total requested occurrences
+`a + b <= 200` is parser-owned because JSON Schema cannot express this
+cross-array sum; later parser tests MUST enforce it. Duplicate/overlap are logical Preview exclusions,
 not parser repair. Preview is coherent and non-persisting. Requested metadata
 preserves cohort/request ordinal; resolved results canonicalize `a`, then `b`,
 then Session-ID ordinal bytes. The exclusion enum is exactly
@@ -86,9 +87,17 @@ nullability. Preview covers requested/included/excluded metadata, cohort counts,
 selection hash, and preview revision. Resolved entries expose archive,
 source/model/version/completeness, metric coverage, Session revision, and
 projection revision. Read covers immutable identity/receipt/cohorts, the nine
-stored sections (`scope`, `tokens`, `input_tokens`, `time_execution`, `skill`,
-`tool`, `subagent`, `error_retry`, `conditions`), and stored result rows. Named
-row paging covers Skill/Tool/Sub-agent. Evidence covers frozen inclusion state,
+stored sections (`target`, `tokens`, `input_token_breakdown`,
+`time_and_execution`, `skills`, `tools`, `subagents`, `errors_and_retries`,
+`conditions`), and stored result rows. Their exact labels are `対象`,
+`トークン`, `入力トークンの内訳`, `時間・実行量`, `スキル`, `ツール`,
+`サブエージェント`, `エラー・再試行`, `比較条件`. Each result and named row
+publishes the existing stored ordered key/value facts as the closed `values`
+collection; scalar facts include `session_count`, `available_count`, `median`,
+`minimum`, `maximum`, `total`, `absolute_difference`, and
+`relative_difference` keys with their existing stored prefixes. The client
+never recomputes them and this transport introduces no formula vocabulary.
+Named row paging covers Skill/Tool/Sub-agent. Evidence covers frozen inclusion state,
 consumed value/revision, and optional opaque execution/node references. Missing
 is not zero. No raw content, path, locator, prompt/response, Tool payload, Skill
 body, or inferred identity is returned.
@@ -100,21 +109,23 @@ Every response is completely buffered before publication, strict UTF-8 JSON,
 8,388,608 UTF-8 entity bytes. No partial success is published. HEAD has the
 GET-equivalent status, headers, and content length with zero body.
 
-Error bytes are exactly `{"error":"<code>"}` with no newline. Codes are only:
+Error bytes and statuses are exactly:
 
 ```text
-invalid_host
-invalid_request
-invalid_cursor
-csrf_rejected
-method_not_allowed
-comparison_selection_invalid
-comparison_preview_stale
-workspace_too_large
-comparison_not_found
-comparison_expired
-persistence_busy
+400 `invalid_host` `{"error":"invalid_host"}`
+400 `invalid_request` `{"error":"invalid_request"}`
+400 `invalid_cursor` `{"error":"invalid_cursor"}`
+403 `csrf_rejected` `{"error":"csrf_rejected"}`
+405 `method_not_allowed` `{"error":"method_not_allowed"}`
+409 `comparison_selection_invalid` `{"error":"comparison_selection_invalid"}`
+409 `comparison_preview_stale` `{"error":"comparison_preview_stale"}`
+409 `workspace_too_large` `{"error":"workspace_too_large"}`
+404 `comparison_not_found` `{"error":"comparison_not_found"}`
+410 `comparison_expired` `{"error":"comparison_expired"}`
+503 `persistence_busy` `{"error":"persistence_busy"}`
 ```
+
+Each byte sequence above has no trailing newline.
 
 Precedence is host, method, framing/media/size/path/query, same-origin, CSRF for
 POST, cursor, lookup/Repository binding, expiry, selection/staleness, workspace

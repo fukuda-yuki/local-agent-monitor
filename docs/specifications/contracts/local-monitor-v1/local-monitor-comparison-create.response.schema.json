@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": {"const": "local-monitor-comparison-create.response.v1"},
     "comparison_id": {"$ref": "#/$defs/uuidv7"},
-    "location": {"type": "string", "pattern": "^/repositories/[0-9a-f-]{36}/comparisons/[0-9a-f-]{36}$"},
+    "location": {"type": "string", "pattern": "^/repositories/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/comparisons/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
     "receipt_sha256": {"$ref": "#/$defs/digest"},
     "created_at": {"$ref": "#/$defs/instant"},
     "expires_at": {"$ref": "#/$defs/instant"}
