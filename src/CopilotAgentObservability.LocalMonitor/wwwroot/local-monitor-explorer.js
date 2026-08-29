@@ -1386,9 +1386,11 @@
     root.querySelector("[data-cohort-count='b']").textContent = `比較対象 ${b.size}件`;
     const overlap = [...a].filter(id => b.has(id));
     const selected = new Set([...a, ...b]);
-    const excluded = [...selected].filter(id => state.excludedSelections.has(id));
-    const availableA = [...a].filter(id => !state.excludedSelections.has(id));
-    const availableB = [...b].filter(id => !state.excludedSelections.has(id));
+    const locallyExcluded = id => state.excludedSelections.has(id)
+      && !(includeArchived.checked && state.exclusionReasons.get(id) === "session_archived");
+    const excluded = [...selected].filter(locallyExcluded);
+    const availableA = [...a].filter(id => !locallyExcluded(id));
+    const availableB = [...b].filter(id => !locallyExcluded(id));
     const total = a.size + b.size;
     const messages = [];
     if (state.selectionNotice !== null) messages.push(state.selectionNotice);
@@ -1552,9 +1554,12 @@
         include_archived: selection.include_archived, selection_sha256: preview.selection_sha256, preview_revision: preview.preview_revision };
       const result = await comparisonPost(`/api/local-monitor/v1/repositories/${root.dataset.repositoryId}/comparisons`, body, controller.signal);
       if (generation !== state.comparison.generation
-          || !exactKeys(result.value, ["schema_version", "comparison_id", "location"])
+          || !exactKeys(result.value, ["schema_version", "comparison_id", "location", "receipt_sha256", "created_at", "expires_at"])
           || result.value.schema_version !== "local-monitor-comparison-create.response.v1"
           || !UUID_V7.test(result.value.comparison_id)
+          || !REVISION.test(result.value.receipt_sha256)
+          || !timestamp(result.value.created_at) || !timestamp(result.value.expires_at)
+          || Date.parse(result.value.expires_at) - Date.parse(result.value.created_at) !== 86_400_000
           || result.value.location !== `/repositories/${root.dataset.repositoryId}/comparisons/${result.value.comparison_id}`
           || result.response.headers.get("Location") !== result.value.location) throw new TypeError("invalid comparison create");
       const location = result.value.location;
@@ -1647,6 +1652,10 @@
   }
 
   filters.addEventListener("submit", applyFilters);
+  includeArchived.addEventListener("change", () => {
+    if (comparisonDialog.open) clearComparisonDialog(false);
+    updateCompareBar();
+  });
 
   loadMore.addEventListener("click", () => {
     if (state.nextCursor === null) return;

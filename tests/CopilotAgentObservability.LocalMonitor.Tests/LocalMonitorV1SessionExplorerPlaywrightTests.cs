@@ -55,7 +55,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
                 Status = 201,
                 ContentType = "application/json; charset=utf-8",
                 Headers = new Dictionary<string, string> { ["Cache-Control"] = "no-store", ["Location"] = $"/repositories/{RepositoryId}/comparisons/018f0000-0000-7000-8000-000000000010" },
-                Body = $$"""{"schema_version":"local-monitor-comparison-create.response.v1","comparison_id":"018f0000-0000-7000-8000-000000000010","location":"/repositories/{{RepositoryId}}/comparisons/018f0000-0000-7000-8000-000000000010"}""",
+                Body = $$"""{"schema_version":"local-monitor-comparison-create.response.v1","comparison_id":"018f0000-0000-7000-8000-000000000010","location":"/repositories/{{RepositoryId}}/comparisons/018f0000-0000-7000-8000-000000000010","receipt_sha256":"{{new string('7', 64)}}","created_at":"2026-08-29T00:00:00.0000000+00:00","expires_at":"2026-08-30T00:00:00.0000000+00:00"}""",
             });
         });
 
@@ -63,7 +63,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("#session-include-archived").CheckAsync();
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
-        await page.Locator("#session-compare-preview").ClickAsync();
+        await page.Locator("#session-compare-preview").PressAsync("Enter");
         await Expect(page.Locator("#session-comparison-preview-dialog")).ToBeVisibleAsync();
         await Expect(page.Locator("#session-comparison-create")).ToBeEnabledAsync();
         await Expect(page.Locator("#session-comparison-cancel")).ToBeFocusedAsync();
@@ -108,16 +108,34 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(ThreeSessionsAsync().GetAwaiter().GetResult())));
+        var previewCalls = 0;
+        string? previewBody = null;
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/preview", route =>
-            route.FulfillAsync(Json(ComparisonPreviewWithExclusion())));
+        {
+            previewCalls++;
+            previewBody = route.Request.PostData;
+            return route.FulfillAsync(Json(ComparisonPreviewWithExclusion()));
+        });
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions?mode=compare", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{ThirdSessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
+        await Expect(page.Locator("#session-compare-preview")).ToHaveAttributeAsync("aria-disabled", "true");
+        await page.Locator("#session-compare-preview").PressAsync("Enter");
+        Assert.Equal(0, previewCalls);
+        await page.Locator("#session-include-archived").CheckAsync();
+        await Expect(page.Locator("#session-compare-preview")).ToHaveAttributeAsync("aria-disabled", "false");
         await page.Locator("#session-compare-preview").ClickAsync();
 
-        await Expect(page.Locator("[data-comparison-preview-excluded-list]")).ToContainTextAsync("セッションがアーカイブ済みです");
+        using (var request = JsonDocument.Parse(previewBody!))
+        {
+            Assert.True(request.RootElement.GetProperty("include_archived").GetBoolean());
+            Assert.Contains(ThirdSessionId, request.RootElement.GetProperty("cohorts").GetProperty("a").EnumerateArray().Select(value => value.GetString()));
+        }
+        await Expect(page.Locator("[data-comparison-preview-included='a']")).ToContainTextAsync("Archived session");
+        await Expect(page.Locator("[data-comparison-preview-excluded-list]")).ToContainTextAsync("比較用データを利用できません");
+        await Expect(page.Locator("#session-comparison-create")).ToBeEnabledAsync();
         Assert.False(await page.Locator("#session-comparison-preview-dialog").EvaluateAsync<bool>(
             "(dialog, ids) => [...dialog.querySelectorAll('*')].some(node => [...node.attributes].some(attribute => ids.includes(attribute.value)))",
             new[] { SessionId, SecondSessionId, ThirdSessionId }));
@@ -128,6 +146,41 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             "ids => [...Object.values(localStorage), ...Object.values(sessionStorage), JSON.stringify(history.state)].some(value => ids.some(id => value.includes(id)))",
             new[] { SessionId, SecondSessionId, ThirdSessionId }));
         Assert.Empty(await page.EvaluateAsync<string[]>("() => caches.keys()"));
+    }
+
+    [Fact]
+    public async Task CompareCreateRejectsExtraAndMalformedSuccessResponsesWithoutNavigating()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/preview", route => route.FulfillAsync(Json(ComparisonPreview())));
+        var createCalls = 0;
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons", route =>
+        {
+            createCalls++;
+            var body = createCalls == 1
+                ? $$"""{"schema_version":"local-monitor-comparison-create.response.v1","comparison_id":"018f0000-0000-7000-8000-000000000010","location":"/repositories/{{RepositoryId}}/comparisons/018f0000-0000-7000-8000-000000000010","receipt_sha256":"{{new string('7', 64)}}","created_at":"2026-08-29T00:00:00.0000000+00:00","expires_at":"2026-08-30T00:00:00.0000000+00:00","extra":true}"""
+                : $$"""{"schema_version":"local-monitor-comparison-create.response.v1","comparison_id":"018f0000-0000-7000-8000-000000000010","location":"/repositories/{{RepositoryId}}/comparisons/018f0000-0000-7000-8000-000000000010","receipt_sha256":"INVALID","created_at":"2026-08-29T00:00:00.0000000+00:00","expires_at":"2026-08-30T00:00:00.0000000+00:00"}""";
+            return route.FulfillAsync(new RouteFulfillOptions { Status = 201, ContentType = "application/json; charset=utf-8", Headers = new Dictionary<string, string> { ["Location"] = $"/repositories/{RepositoryId}/comparisons/018f0000-0000-7000-8000-000000000010" }, Body = body });
+        });
+
+        var explorerUrl = host.Url + $"/repositories/{RepositoryId}/sessions?mode=compare";
+        await page.GotoAsync(explorerUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
+        await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
+        await page.Locator("#session-compare-preview").ClickAsync();
+        await page.Locator("#session-comparison-create").ClickAsync();
+        await Expect(page.Locator("#session-comparison-preview-status")).ToContainTextAsync("作成できませんでした");
+        Assert.Equal(explorerUrl, page.Url);
+        await page.Locator("#session-comparison-create").ClickAsync();
+        await Expect(page.Locator("#session-comparison-preview-status")).ToContainTextAsync("作成できませんでした");
+        Assert.Equal(explorerUrl, page.Url);
+        Assert.Equal(2, createCalls);
     }
 
     [Fact]
@@ -1023,24 +1076,19 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await archived.Locator("[data-cohort='a']").CheckAsync();
         await repositoryArchived.Locator("[data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='b']").CheckAsync();
-        await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("セッションのアーカイブ除外 1件");
+        await Expect(page.Locator("#session-compare-validation")).Not.ToContainTextAsync("セッションのアーカイブ除外");
         await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("リポジトリのアーカイブ除外 1件");
         var reasonDetails = page.Locator("[data-compare-validation-details]");
-        await Expect(reasonDetails).ToBeVisibleAsync();
-        await reasonDetails.Locator("summary").PressAsync("Enter");
-        await Expect(reasonDetails.Locator("ul")).ToBeVisibleAsync();
+        await Expect(reasonDetails).ToBeHiddenAsync();
         var compareLayout = await page.EvaluateAsync<double[]>("""
             () => {
               const bar = document.querySelector('#session-compare-bar').getBoundingClientRect();
-              const reasons = document.querySelector('[data-compare-validation-list]').getBoundingClientRect();
-              return [bar.height, reasons.left, reasons.right, reasons.top, reasons.bottom,
-                innerWidth, innerHeight, document.documentElement.scrollWidth];
+              return [bar.height, bar.left, bar.right, innerWidth, document.documentElement.scrollWidth];
             }
             """);
         Assert.Equal(56, compareLayout[0]);
-        Assert.True(compareLayout[1] >= 0 && compareLayout[2] <= compareLayout[5]);
-        Assert.True(compareLayout[3] >= 0 && compareLayout[4] <= compareLayout[6]);
-        Assert.True(compareLayout[7] <= compareLayout[5]);
+        Assert.True(compareLayout[1] >= 0 && compareLayout[2] <= compareLayout[3]);
+        Assert.True(compareLayout[4] <= compareLayout[3]);
     }
 
     [Fact]
@@ -1109,7 +1157,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
-    public async Task RestoreKeepsThePriorCompareExclusionUntilCollectionAuthorityRefreshesIt()
+    public async Task RestoreKeepsThePriorCollectionAuthorityWithoutBlockingExplicitArchivedInclusion()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -1134,13 +1182,13 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var archived = page.Locator("[data-session-row][data-session-id='018f0000-0000-7000-8000-000000000001']");
         await archived.Locator("[data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-row][data-session-id='{SessionId}'] [data-cohort='b']").CheckAsync();
-        await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("セッションのアーカイブ除外 1件");
+        await Expect(page.Locator("#session-compare-validation")).Not.ToContainTextAsync("セッションのアーカイブ除外");
         await archived.Locator(".local-monitor-session-row-actions > summary").ClickAsync();
         await archived.Locator("[data-session-archive]").ClickAsync();
 
         await Expect(page.Locator("#session-explorer-status"))
             .ToContainTextAsync("操作は完了しましたが、一覧を更新できませんでした");
-        await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("セッションのアーカイブ除外 1件");
+        await Expect(page.Locator("#session-compare-validation")).Not.ToContainTextAsync("セッションのアーカイブ除外");
         Assert.Equal(3, collectionCalls);
     }
 
@@ -2193,7 +2241,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             .Replace(new string('2', 64), new string(revision, 64), StringComparison.Ordinal);
 
     private static string ComparisonPreviewWithExclusion() => """
-        {"schema_version":"local-monitor-comparison-preview.response.v1","valid":true,"selection_sha256":"1111111111111111111111111111111111111111111111111111111111111111","preview_revision":"2222222222222222222222222222222222222222222222222222222222222222","cohorts":{"a":{"label":"基準","requested_count":2,"included_count":1,"excluded_count":1},"b":{"label":"比較対象","requested_count":1,"included_count":1,"excluded_count":0}},"requested":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}"},{"cohort":"a","request_ordinal":2,"session_id":"{THIRD}"},{"cohort":"b","request_ordinal":1,"session_id":"{SECOND}"}],"included":[{"cohort":"a","session_id":"{SESSION}","metadata":{"archive_state":"active","source":"synthetic","model":"test","projection_version":1,"completeness":"full","metric_coverage":[],"session_revision":1,"projection_revision":"3333333333333333333333333333333333333333333333333333333333333333"}},{"cohort":"b","session_id":"{SECOND}","metadata":{"archive_state":"active","source":null,"model":null,"projection_version":1,"completeness":"partial","metric_coverage":[],"session_revision":2,"projection_revision":"4444444444444444444444444444444444444444444444444444444444444444"}}],"excluded":[{"cohort":"a","request_ordinal":2,"session_id":"{THIRD}","reason":"session_archived","metadata":null}]}
+        {"schema_version":"local-monitor-comparison-preview.response.v1","valid":true,"selection_sha256":"1111111111111111111111111111111111111111111111111111111111111111","preview_revision":"2222222222222222222222222222222222222222222222222222222222222222","cohorts":{"a":{"label":"基準","requested_count":2,"included_count":1,"excluded_count":1},"b":{"label":"比較対象","requested_count":1,"included_count":1,"excluded_count":0}},"requested":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}"},{"cohort":"a","request_ordinal":2,"session_id":"{THIRD}"},{"cohort":"b","request_ordinal":1,"session_id":"{SECOND}"}],"included":[{"cohort":"a","session_id":"{THIRD}","metadata":{"archive_state":"archived","source":"synthetic","model":"test","projection_version":1,"completeness":"full","metric_coverage":[],"session_revision":1,"projection_revision":"3333333333333333333333333333333333333333333333333333333333333333"}},{"cohort":"b","session_id":"{SECOND}","metadata":{"archive_state":"active","source":null,"model":null,"projection_version":1,"completeness":"partial","metric_coverage":[],"session_revision":2,"projection_revision":"4444444444444444444444444444444444444444444444444444444444444444"}}],"excluded":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}","reason":"projection_unavailable","metadata":null}]}
         """.Replace("{SESSION}", SessionId, StringComparison.Ordinal)
             .Replace("{SECOND}", SecondSessionId, StringComparison.Ordinal)
             .Replace("{THIRD}", ThirdSessionId, StringComparison.Ordinal);
@@ -2297,6 +2345,10 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         third["session_id"] = ThirdSessionId;
         third["workspace_revision"] = new string('6', 64);
         third["label"]!["text"] = "Archived session";
+        third["archive"]!["state"] = "archived";
+        third["archive"]!["revision"] = 1;
+        third["archive"]!["effectively_eligible"] = false;
+        third["archive"]!["exclusion_reason"] = "session_archived";
         document["items"]!.AsArray().Add(third);
         return Canonical(document);
     }
