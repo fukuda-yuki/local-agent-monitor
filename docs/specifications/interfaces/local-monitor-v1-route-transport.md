@@ -20,7 +20,12 @@ composes with this transport, so #134 mapping may proceed.
 The Repository success/cursor authority in
 [`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md)
 also composes with the exact GET transport below.
-Optional AI storage remains #162/#163/#164-owned. Comparison formulas and snapshots remain #165/#166-owned.
+Optional AI storage remains #162/#163/#164-owned. Comparison formulas and
+snapshots remain #165/#166-owned. The exact five Repository-scoped operations
+and closed wire are owned only by
+[`local-monitor-v1-comparison.md`](local-monitor-v1-comparison.md); shared
+identity, same-origin, CSRF, buffering, HEAD, no-store, and no-CORS rules here
+continue to apply.
 
 ## 1. Decision and non-negotiable boundary
 

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.local/copilot-agent-observability/local-monitor-v1/local-monitor-comparison-preview.response.schema.json",
+  "title": "local-monitor-comparison-preview.response.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "valid", "selection_sha256", "preview_revision", "cohorts", "requested", "included", "excluded"],
+  "properties": {
+    "schema_version": {"const": "local-monitor-comparison-preview.response.v1"},
+    "valid": {"type": "boolean"},
+    "selection_sha256": {"$ref": "#/$defs/nullableDigest"},
+    "preview_revision": {"$ref": "#/$defs/digest"},
+    "cohorts": {"type": "object", "additionalProperties": false, "required": ["a", "b"], "properties": {"a": {"$ref": "#/$defs/summary"}, "b": {"$ref": "#/$defs/summary"}}},
+    "requested": {"type": "array", "minItems": 2, "maxItems": 200, "items": {"$ref": "#/$defs/requested"}},
+    "included": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/included"}},
+    "excluded": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/excluded"}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableDigest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "uuidv7": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "cohort": {"enum": ["a", "b"]},
+    "summary": {"type": "object", "additionalProperties": false, "required": ["label", "requested_count", "included_count", "excluded_count"], "properties": {"label": {"type": "string", "minLength": 1, "maxLength": 20}, "requested_count": {"type": "integer", "minimum": 1, "maximum": 199}, "included_count": {"type": "integer", "minimum": 0, "maximum": 199}, "excluded_count": {"type": "integer", "minimum": 0, "maximum": 199}}},
+    "requested": {"type": "object", "additionalProperties": false, "required": ["cohort", "request_ordinal", "session_id"], "properties": {"cohort": {"$ref": "#/$defs/cohort"}, "request_ordinal": {"type": "integer", "minimum": 1, "maximum": 199}, "session_id": {"$ref": "#/$defs/uuidv7"}}},
+    "metadata": {"type": "object", "additionalProperties": false, "required": ["archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"], "properties": {"archive_state": {"enum": ["active", "archived"]}, "source": {"type": ["string", "null"], "maxLength": 100}, "model": {"type": ["string", "null"], "maxLength": 200}, "projection_version": {"type": ["integer", "null"], "minimum": 1}, "completeness": {"enum": ["unbound", "partial", "rich", "full", null]}, "metric_coverage": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 80}}, "session_revision": {"type": ["integer", "null"], "minimum": 0}, "projection_revision": {"$ref": "#/$defs/nullableDigest"}}},
+    "included": {"type": "object", "additionalProperties": false, "required": ["cohort", "session_id", "metadata"], "properties": {"cohort": {"$ref": "#/$defs/cohort"}, "session_id": {"$ref": "#/$defs/uuidv7"}, "metadata": {"$ref": "#/$defs/metadata"}}},
+    "excluded": {"type": "object", "additionalProperties": false, "required": ["cohort", "request_ordinal", "session_id", "reason", "metadata"], "properties": {"cohort": {"$ref": "#/$defs/cohort"}, "request_ordinal": {"type": "integer", "minimum": 1, "maximum": 199}, "session_id": {"$ref": "#/$defs/uuidv7"}, "reason": {"enum": ["session_not_found", "repository_mismatch", "duplicate", "cohort_overlap", "session_archived", "repository_archived", "projection_unavailable", "unsupported_selection", "workspace_too_large"]}, "metadata": {"oneOf": [{"$ref": "#/$defs/metadata"}, {"type": "null"}]}}}
+  }
+}

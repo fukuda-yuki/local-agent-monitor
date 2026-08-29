@@ -281,9 +281,9 @@ big-endian UTF-8 byte length followed by those bytes. SHA-256 covers the complet
 framed sequence. Input order, display alias, current time, repository/name/time
 proximity, and mutable Session state are not inputs and cannot repair selection.
 
-The complete formula/snapshot contract is #165; implementation is #166.
-This IA freezes no Compare preview/create API path, success DTO, bound, or
-error graph. Those remain absent until #165 supplies the owner wire.
+The complete formula/snapshot contract is #165; implementation is #166. The
+five machine operations, success DTOs, bounds, paging, and error graph are
+owned by [Local Monitor v1 Repository Session Compare](local-monitor-v1-comparison.md).
 Comparison IDs are canonical local UUIDv7. A live snapshot expires after 24
 hours; #166 retains only the append-only, non-sensitive expiry tombstone in the
 route/transport contract so a known expired URL deterministically returns

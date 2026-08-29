@@ -18,7 +18,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Sanitized-only receiver posture | #159 | #168 |
 | Session/Repository archive | [`local-archive.md`](local-archive.md), #160, D082 | #161 |
 | Optional AI snapshots/results/history | #162 plus the run-ID route amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #163/#164 |
-| Repository Session Compare | #165 plus the identity/expiry amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
+| Repository Session Compare | [`local-monitor-v1-comparison.md`](local-monitor-v1-comparison.md), #165, plus shared transport in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
 | Session collection success response | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md), composing #133 semantics and [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) request/transport/cursor rules | #134 |
 | Other Repository/Session Workspace reads | #133 semantic requirements and the execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #134 |
 | Session summary/timeline/node/content v2 exact response and coherent snapshot | [`local-monitor-v1-session-detail.md`](local-monitor-v1-session-detail.md) | #134 |
@@ -142,8 +142,8 @@ is permitted.
 - Missing values are not zero.
 - Exact-v10 `deleted_before_digest_v10` is tagged predecessor evidence, never a fabricated payload digest; its OTel Skill projection outcome is fail-closed `input_unavailable` under the dedicated contract above.
 - Compare values are deterministic and AI-independent.
-- Compare contract proof does not create preview/create API paths, DTOs,
-  bounds, or errors while #165 has not supplied that owner wire.
+- The five Repository-scoped Compare operations, seven closed schemas, bounds,
+  paging, and errors are owned only by [`local-monitor-v1-comparison.md`](local-monitor-v1-comparison.md).
 - AI can interpret accepted snapshots but cannot recalculate Compare facts or explore outside scope.
 - Archive is not deletion, retention or pin.
 - Historical Skill snapshot is not the current file.

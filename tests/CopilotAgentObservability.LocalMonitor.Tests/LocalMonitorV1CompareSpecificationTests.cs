@@ -41,7 +41,7 @@ public sealed class LocalMonitorV1CompareSpecificationTests
     }
 
     [Fact]
-    public void CompareSpecificationFreezesForbiddenLabelsWithoutInventingAnOwnerWire()
+    public void CompareSpecificationFreezesForbiddenLabelsAndDelegatesToTheOwnerWire()
     {
         var ia = Read("docs", "specifications", "interfaces", "local-monitor-v1-ia.md");
         var transport = Read("docs", "specifications", "interfaces", "local-monitor-v1-route-transport.md");
@@ -50,7 +50,7 @@ public sealed class LocalMonitorV1CompareSpecificationTests
         Assert.Contains("`主要な差`, `比較上の注意` or `品質証拠`", section, StringComparison.Ordinal);
         Assert.DoesNotMatch(new Regex(@"(?m)^#{1,6}\s+(主要な差|比較上の注意|品質証拠)\s*$"), section);
         Assert.DoesNotContain("/api/local-monitor/v1/comparisons", ia + transport, StringComparison.Ordinal);
-        Assert.Contains("Comparison formulas and snapshots remain #165/#166-owned.", transport, StringComparison.Ordinal);
+        Assert.Contains("local-monitor-v1-comparison.md", transport, StringComparison.Ordinal);
     }
 
     [Fact]

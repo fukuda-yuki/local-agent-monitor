@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.local/copilot-agent-observability/local-monitor-v1/local-monitor-comparison-create.request.schema.json",
+  "title": "local-monitor-comparison-create.request.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "cohorts", "include_archived", "selection_sha256", "preview_revision"],
+  "properties": {
+    "schema_version": {"const": "local-monitor-comparison-create.request.v1"},
+    "cohorts": {"$ref": "#/$defs/cohorts"},
+    "include_archived": {"type": "boolean"},
+    "selection_sha256": {"$ref": "#/$defs/digest"},
+    "preview_revision": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "uuidv7": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "cohort": {"type": "array", "minItems": 1, "maxItems": 199, "items": {"$ref": "#/$defs/uuidv7"}},
+    "cohorts": {"type": "object", "additionalProperties": false, "required": ["a", "b"], "properties": {"a": {"$ref": "#/$defs/cohort"}, "b": {"$ref": "#/$defs/cohort"}}}
+  }
+}

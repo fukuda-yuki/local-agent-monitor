@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.local/copilot-agent-observability/local-monitor-v1/local-monitor-comparison-evidence.response.schema.json",
+  "title": "local-monitor-comparison-evidence.response.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "comparison_id", "result_ordinal", "field_key", "items", "next_cursor"],
+  "properties": {
+    "schema_version": {"const": "local-monitor-comparison-evidence.response.v1"},
+    "comparison_id": {"$ref": "#/$defs/uuidv7"}, "result_ordinal": {"type": "integer", "minimum": 1},
+    "field_key": {"enum": [null, "value", "available_count", "median", "minimum", "maximum", "total", "absolute_difference", "relative_difference_percent", "condition", "count", "duration_ms", "input_tokens", "output_tokens", "total_tokens", "cache_read", "cache_creation", "new_input", "error_count", "retry_count"]},
+    "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/item"}},
+    "next_cursor": {"type": ["string", "null"], "minLength": 1, "maxLength": 512}
+  },
+  "$defs": {
+    "uuidv7": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "item": {"type": "object", "additionalProperties": false, "required": ["evidence_ordinal", "cohort", "session_id", "state", "unavailable_reason", "consumed_value", "consumed_revision", "execution_id", "node_id", "session_location"], "properties": {"evidence_ordinal": {"type": "integer", "minimum": 1}, "cohort": {"enum": ["a", "b"]}, "session_id": {"$ref": "#/$defs/uuidv7"}, "state": {"enum": ["included", "unavailable"]}, "unavailable_reason": {"enum": [null, "not_observed", "source_unsupported", "capture_gap", "certification_pending", "projection_unavailable"]}, "consumed_value": {"type": ["string", "null"], "maxLength": 200}, "consumed_revision": {"type": ["integer", "null"], "minimum": 0}, "execution_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 200}, "node_id": {"type": ["string", "null"], "pattern": "^node-[0-9a-f]{32}$"}, "session_location": {"type": "string", "pattern": "^/sessions/[0-9a-f-]{36}(\\?execution=[A-Za-z0-9._~-]+(&node=node-[0-9a-f]{32})?)?$"}}}
+  }
+}
