@@ -44,7 +44,7 @@
       && timing(value.timing, value.status, true) && activity(value.activity) && tokens(value.tokens)
       && nonnegative(value.child_count) && value.child_count <= 4096 && typeof value.has_more_children === "boolean"
       && exact(value.collapsed_children, ["state", "count"]) && oneOf(value.collapsed_children.state, ["complete", "partial", "unavailable"])
-      && (value.collapsed_children.state === "unavailable" ? value.collapsed_children.count === null : nonnegative(value.collapsed_children.count))
+      && (value.collapsed_children.state === "unavailable" ? value.collapsed_children.count === null : nonnegative(value.collapsed_children.count) && value.collapsed_children.count <= 4096)
       && Array.isArray(value.content_parts) && value.content_parts.every((part, index) => CONTENT_PARTS.includes(part)
         && (index === 0 || CONTENT_PARTS.indexOf(value.content_parts[index - 1]) < CONTENT_PARTS.indexOf(part)))
       && referenceFact(value.source_references);
@@ -65,18 +65,23 @@
   const availabilityFact = value => exact(value, ["state", "available"])
     && oneOf(value.state, ["available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid", "source_unsupported", "not_observed"])
     && value.available === (value.state === "available");
+  const contentFact = value => exact(value, ["state", "available"])
+    && oneOf(value.state, ["available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid"])
+    && value.available === (value.state === "available");
   const lifecycleFacts = value => exact(value, ["selected", "started", "completed", "failed", "deselected"])
     && Object.values(value).every(item => exact(item, ["state"]) && FACT_STATES.has(item.state));
   const stateOnlyFact = value => exact(value, ["state"]) && FACT_STATES.has(value.state);
   const referenceFact = value => exact(value, ["state", "references"]) && FACT_STATES.has(value.state) && Array.isArray(value.references)
     && (value.state === "recorded" ? value.references.length >= 1 && value.references.length <= 16 : value.references.length === 0)
+    && distinct(value.references.map(item => JSON.stringify(item)))
     && value.references.every(item => exact(item, ["source_kind", "source_identity", "trace_id", "span_id", "event_id"])
-      && typeof item.source_kind === "string" && item.source_kind.length > 0
+      && (item.source_kind === null || typeof item.source_kind === "string" && item.source_kind.length > 0)
       && ["source_identity", "trace_id", "span_id", "event_id"].every(key => item[key] === null || typeof item[key] === "string" && item[key].length > 0)
       && (item.trace_id === null || /^[0-9a-f]{32}$/.test(item.trace_id)) && (item.span_id === null || /^[0-9a-f]{16}$/.test(item.span_id))
-      && ["source_identity", "trace_id", "span_id", "event_id"].some(key => item[key] !== null));
+      && ["source_kind", "source_identity", "trace_id", "span_id", "event_id"].some(key => item[key] !== null));
   const nodeSetFact = value => exact(value, ["state", "node_ids"]) && FACT_STATES.has(value.state) && Array.isArray(value.node_ids)
-    && value.node_ids.every(id => NODE.test(id)) && (value.state === "recorded" ? value.node_ids.length > 0 : value.node_ids.length === 0);
+    && value.node_ids.length <= 200 && distinct(value.node_ids) && value.node_ids.every(id => NODE.test(id))
+    && (value.state === "recorded" || value.node_ids.length === 0);
 
   function metadata(value, kind) {
     if (!value || value.kind !== kind) return false;
@@ -88,8 +93,8 @@
       && valueFact(value.mcp_server_identity) && (value.mcp_server_identity.value === null || REVISION.test(value.mcp_server_identity.value))
       && typedValueFact(value.mcp_server_name, item => typeof item === "string" && item.length > 0)
       && typedValueFact(value.mcp_tool_name, item => typeof item === "string" && item.length > 0)
-      && availabilityFact(value.input) && availabilityFact(value.result) && availabilityFact(value.error)
-      && nodeSetFact(value.retry) && nodeSetFact(value.recovery) && countFact(value.child_activity) && referenceFact(value.source_references);
+      && contentFact(value.input) && contentFact(value.result) && contentFact(value.error)
+      && nodeSetFact(value.retry) && nodeSetFact(value.recovery) && activity(value.child_activity) && referenceFact(value.source_references);
     if (kind === "skill") return exact(value, ["kind", "current_valid_state", "source", "trigger", "inventory_reference", "historical_snapshot_reference"])
       && oneOf(value.current_valid_state, ["current", "stale", "invalid", "certification_pending", "unavailable"])
       && typedValueFact(value.source, item => typeof item === "string" && item.length > 0)
@@ -97,15 +102,15 @@
       && typedValueFact(value.inventory_reference, item => typeof item === "string" && item.length > 0)
       && typedValueFact(value.historical_snapshot_reference, item => typeof item === "string" && item.length > 0);
     if (kind === "subagent") return exact(value, ["kind", "lifecycle", "input", "activity", "tokens", "children", "source_references"])
-      && lifecycleFacts(value.lifecycle) && availabilityFact(value.input) && activity(value.activity) && tokens(value.tokens) && countFact(value.children) && referenceFact(value.source_references);
+      && lifecycleFacts(value.lifecycle) && contentFact(value.input) && activity(value.activity) && tokens(value.tokens) && countFact(value.children) && referenceFact(value.source_references);
     if (kind === "error") return exact(value, ["kind", "error_code", "message", "status", "source_references"])
-      && typedValueFact(value.error_code, item => typeof item === "string" && item.length > 0) && availabilityFact(value.message)
+      && typedValueFact(value.error_code, item => typeof item === "string" && item.length > 0) && contentFact(value.message)
       && typedValueFact(value.status, item => oneOf(item, ["active", "completed", "failed", "unknown"])) && referenceFact(value.source_references);
     if (kind === "permission") return exact(value, ["kind", "decision", "wait", "source_references"])
-      && typedValueFact(value.decision, item => oneOf(item, ["allow", "deny", "ask"])) && stateOnlyFact(value.wait) && referenceFact(value.source_references);
+      && typedValueFact(value.decision, item => oneOf(item, ["allowed", "denied", "asked", "unknown"])) && stateOnlyFact(value.wait) && referenceFact(value.source_references);
     if (kind === "event") return exact(value, ["kind", "event_name", "source_time", "content", "source_references"])
       && typedValueFact(value.event_name, item => typeof item === "string" && item.length > 0)
-      && typedValueFact(value.source_time, item => typeof item === "string" && !Number.isNaN(Date.parse(item))) && availabilityFact(value.content) && referenceFact(value.source_references);
+      && typedValueFact(value.source_time, instant) && contentFact(value.content) && referenceFact(value.source_references);
     if (kind === "retry") return exact(value, ["kind", "attempt", "target", "recovered", "source_references"])
       && typedValueFact(value.attempt, item => nonnegative(item)) && typedValueFact(value.target, item => NODE.test(item), "node_id")
       && typedValueFact(value.recovered, item => typeof item === "boolean") && referenceFact(value.source_references);
@@ -123,7 +128,7 @@
         || detail.execution.model !== null && (typeof detail.execution.model !== "string" || detail.execution.model.length === 0)
         || !oneOf(detail.execution.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
         || !oneOf(detail.execution.status, ["active", "completed", "failed", "unknown"]) || !timing(detail.execution.timing, detail.execution.status, true)
-        || !tokens(detail.execution.tokens) || !activity(detail.execution.activity) || !nonnegative(detail.execution.child_count)
+        || !tokens(detail.execution.tokens) || !activity(detail.execution.activity) || !nonnegative(detail.execution.child_count) || detail.execution.child_count > 4096
         || !exact(detail.node, [...ITEM_KEYS, "technical_references", "metadata"])
         || !timelineItem(Object.fromEntries(ITEM_KEYS.map(key => [key, detail.node[key]])), detail.execution.execution_id)
         || detail.node.node_id !== nodeId || expectedExecutionId && detail.execution.execution_id !== expectedExecutionId
@@ -132,10 +137,11 @@
         || ["source_identity", "trace_id", "span_id", "event_id"].some(key => detail.node.technical_references[key] !== null && (typeof detail.node.technical_references[key] !== "string" || detail.node.technical_references[key].length === 0))
         || detail.node.technical_references.trace_id !== null && !/^[0-9a-f]{32}$/.test(detail.node.technical_references.trace_id)
         || detail.node.technical_references.span_id !== null && !/^[0-9a-f]{16}$/.test(detail.node.technical_references.span_id)
-        || (detail.node.technical_references.source_kind === null) !== ["source_identity", "trace_id", "span_id", "event_id"].every(key => detail.node.technical_references[key] === null)
         || !metadata(detail.node.metadata, detail.node.kind)
-        || !Array.isArray(detail.parent_path) || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
+        || !Array.isArray(detail.parent_path) || detail.parent_path.length > 4096 || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
         || new Set(detail.parent_path.map(item => item.node_id)).size !== detail.parent_path.length
+        || detail.parent_path.some(item => item.node_id === nodeId)
+        || detail.parent_path.length > 0 && (detail.parent_path[0].node_id !== detail.execution.node_id || detail.parent_path[0].kind !== "execution")
         || detail.parent_path.some((item, index) => index === 0 ? item.parent_node_id !== null : item.parent_node_id !== detail.parent_path[index - 1].node_id)
         || (detail.parent_path.length ? detail.node.parent_node_id !== detail.parent_path.at(-1).node_id : detail.node.parent_node_id !== null)
         || !exact(detail.related, ["retry", "recovery", "children"])

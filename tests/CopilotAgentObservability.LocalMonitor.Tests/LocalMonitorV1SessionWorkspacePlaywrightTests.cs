@@ -30,6 +30,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
     public async Task MalformedTimelineFailsClosedBeforeRowsOrCacheMutation(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -43,7 +45,9 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         else if (mutation == 5) timeline["items"]![0]!["collapsed_children"]!["state"] = "unknown";
         else if (mutation == 6) timeline["items"]![0]!["content_parts"] = new JsonArray("tool_result", "tool_input");
         else if (mutation == 7) timeline["items"]![0]!["source_references"]!["references"] = new JsonArray();
-        else timeline["next_cursor"] = new string('A', 158) + "B";
+        else if (mutation == 8) timeline["next_cursor"] = new string('A', 158) + "B";
+        else if (mutation == 9) timeline["items"]![0]!["collapsed_children"]!["count"] = 4097;
+        else timeline["items"]![0]!["source_references"]!["references"]!.AsArray().Add(timeline["items"]![0]!["source_references"]!["references"]![0]!.DeepClone());
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         await Expect(page.Locator("[data-timeline-node]")).ToHaveCountAsync(0); Assert.Equal(0, await page.EvaluateAsync<int>("() => window.LocalMonitorSessionWorkspace.executionState.values().next().value.pages.size"));
     }
@@ -58,6 +62,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    [InlineData(13)]
+    [InlineData(14)]
     public async Task MalformedNodeFailsClosedAndRestoresCanonicalOverview(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -71,7 +81,13 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         else if (mutation == 5) node["node"]!["technical_references"]!["trace_id"] = 4;
         else if (mutation == 6) node["content"]!["event_content"]!["state"] = "bogus";
         else if (mutation == 7) node["parent_path"]![0]!["parent_node_id"] = "node-00000000000000000000000000000009";
-        else { var related = node["parent_path"]![0]!.DeepClone(); related["relationship_authority"] = "unknown"; node["related"]!["children"]!.AsArray().Add(related); }
+        else if (mutation == 8) { var related = node["parent_path"]![0]!.DeepClone(); related["relationship_authority"] = "unknown"; node["related"]!["children"]!.AsArray().Add(related); }
+        else if (mutation == 9) node["execution"]!["child_count"] = 4097;
+        else if (mutation == 10) node["node"]!["collapsed_children"]!["count"] = 4097;
+        else if (mutation == 11) node["node"]!["metadata"]!["content"]!["state"] = "source_unsupported";
+        else if (mutation == 12) node["node"]!["metadata"]!["source_time"]!["value"] = "2026-08-26T01:02:03Z";
+        else if (mutation == 13) node["parent_path"]![0]!["node_id"] = "node-00000000000000000000000000000009";
+        else node["parent_path"]![0]!["node_id"] = node["node"]!["node_id"]!.GetValue<string>();
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}");
     }
