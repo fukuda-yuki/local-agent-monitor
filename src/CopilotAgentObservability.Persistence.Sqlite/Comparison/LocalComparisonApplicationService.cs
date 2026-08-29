@@ -12,7 +12,8 @@ internal sealed record LocalComparisonSourceReference(
 
 internal sealed record LocalComparisonFactEvidence(
     LocalComparisonFactState State,
-    LocalComparisonSourceReference? Reference);
+    LocalComparisonSourceReference? Reference,
+    string? ConsumedValue = null);
 
 internal sealed record LocalComparisonObservedScalar
 {
@@ -23,7 +24,12 @@ internal sealed record LocalComparisonObservedScalar
             observation,
             Array.AsReadOnly(new[]
             {
-                new LocalComparisonFactEvidence(observation.State, Reference),
+                new LocalComparisonFactEvidence(
+                    observation.State,
+                    Reference,
+                    observation.Value is null
+                        ? null
+                        : LocalComparisonScalarCalculator.CanonicalDecimal(observation.Value.Value)),
             }))
     {
     }
@@ -742,7 +748,8 @@ internal sealed class LocalComparisonApplicationService
                     LocalComparisonFactState.Recorded,
                     new LocalComparisonSourceReference(
                         "workspace_session", session.SessionId, null, null, null,
-                        session.WorkspaceRevision)),
+                        session.WorkspaceRevision),
+                    session.SessionId),
             })).ToArray();
         AddEvidence(comparisonId, resultOrdinal, "selection", cohort, sessions,
             facts, destination, ref evidenceOrdinal);
@@ -762,7 +769,14 @@ internal sealed class LocalComparisonApplicationService
             ? destination[^1].EvidenceOrdinal + 1
             : 0;
         AddEvidence(comparisonId, resultOrdinal, fieldKey, cohort, sessions,
-            facts.Select(static item => item.Evidence).ToArray(), destination, ref evidenceOrdinal);
+            facts.Select(static item =>
+            {
+                var value = item.Observation.Value is null
+                    ? null
+                    : LocalComparisonScalarCalculator.CanonicalDecimal(item.Observation.Value.Value);
+                return (IReadOnlyList<LocalComparisonFactEvidence>)Array.AsReadOnly(
+                    item.Evidence.Select(evidence => evidence with { ConsumedValue = value }).ToArray());
+            }).ToArray(), destination, ref evidenceOrdinal);
     }
 
     private static void AddConditionEvidence(
@@ -781,7 +795,10 @@ internal sealed class LocalComparisonApplicationService
             facts.Select(static item =>
                 (IReadOnlyList<LocalComparisonFactEvidence>)Array.AsReadOnly(new[]
                 {
-                    new LocalComparisonFactEvidence(item.State, item.Reference),
+                    new LocalComparisonFactEvidence(
+                        item.State,
+                        item.Reference,
+                        Available(item) ? string.Join(';', item.Values) : null),
                 })).ToArray(), destination, ref evidenceOrdinal);
     }
 
@@ -820,6 +837,8 @@ internal sealed class LocalComparisonApplicationService
                     .ToArray();
             foreach (var item in items)
             {
+                if (item.ConsumedValue is { Length: > 200 })
+                    throw new LocalComparisonTooLargeException();
                 var reference = item.Reference;
                 destination.Add(new(
                     comparisonId,
@@ -829,6 +848,7 @@ internal sealed class LocalComparisonApplicationService
                     cohort,
                     sessions[index].SessionId,
                     StateToken(item.State),
+                    item.ConsumedValue,
                     reference?.SourceKind,
                     reference?.SourceIdentity,
                     reference?.TraceId,
@@ -876,7 +896,8 @@ internal sealed class LocalComparisonApplicationService
             {
                 new LocalComparisonFactEvidence(
                     session.Target.ObservedAtState,
-                    session.Target.ObservedAtReference),
+                    session.Target.ObservedAtReference,
+                    session.Target.ObservedAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)),
             })).ToArray());
 
     private static string UnavailableStates(IEnumerable<LocalComparisonFactState> states)

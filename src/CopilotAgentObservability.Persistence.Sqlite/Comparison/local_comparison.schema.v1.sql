@@ -109,6 +109,9 @@ CREATE TABLE local_comparison_evidence(
       'recorded','explicit_zero','not_observed','source_unsupported','capture_gap',
       'certification_pending','not_captured','expired','deleted','read_denied',
       'inconsistent','projection_invalid','too_large')),
+  consumed_value TEXT COLLATE BINARY NULL
+    CHECK(consumed_value IS NULL OR (typeof(consumed_value)='text'
+      AND length(consumed_value) BETWEEN 1 AND 200)),
   source_kind TEXT COLLATE BINARY NULL
     CHECK(source_kind IS NULL OR (typeof(source_kind)='text'
       AND source_kind IN ('workspace_session','workspace_node','session_run','session_event','otel_span','skill_claim'))),

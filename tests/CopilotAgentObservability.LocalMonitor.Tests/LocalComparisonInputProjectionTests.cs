@@ -82,7 +82,7 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     private static LocalComparisonProjectionCandidate Candidate(string sessionId, string projectionRevision) =>
-        new(sessionId, RepositoryId, LocalComparisonCandidateState.Included, false, "active", ["synthetic"], ["test-model"], 5, "full", ["tokens"], 1, projectionRevision);
+        new(sessionId, RepositoryId, LocalComparisonCandidateState.Included, false, "active", ["synthetic"], "recorded", ["test-model"], "recorded", 5, "full", ["tokens"], 1, projectionRevision);
 
     [Fact]
     public void WorkspaceAdapterMapsRecordedFactsAndKeepsUnsupportedExplicit()

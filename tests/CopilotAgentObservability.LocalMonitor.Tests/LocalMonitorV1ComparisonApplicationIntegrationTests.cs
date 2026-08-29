@@ -8,6 +8,25 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
 {
     [Fact]
+    public async Task PreviewKeepsUnavailableSourceAndModelMetadataNull()
+    {
+        using var db = new Database(); db.Initialize();
+        const string a = "018f0000-0000-7000-8000-000000000001", b = "018f0000-0000-7000-8000-000000000002";
+        var first = Input(a);
+        var row = (LocalWorkspaceProjectionRow)first.Session.Session;
+        first = first with { Session = first.Session with { Session = row with { Sources = new("source_unsupported", []), Models = new("not_observed", []) } } };
+        var application = new LocalMonitorV1ComparisonProductionApplication(new FakeInput([first, Input(b)]), new SqliteLocalComparisonStore(db.Path, new FixedClock()), new FixedClock(), cursorKey: new byte[32]);
+        var body = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":false}}");
+
+        var response = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, body, "", default);
+        using var json = JsonDocument.Parse(response.Entity);
+        var metadata = json.RootElement.GetProperty("included")[0].GetProperty("metadata");
+
+        Assert.Equal(JsonValueKind.Null, metadata.GetProperty("source").ValueKind);
+        Assert.Equal(JsonValueKind.Null, metadata.GetProperty("model").ValueKind);
+    }
+
+    [Fact]
     public async Task CreatePersistsDistinctSnapshotsAndRestartReadsFrozenState()
     {
         using var db = new Database(); db.Initialize();
@@ -30,6 +49,77 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         Assert.Equal(404, (await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Read, "018f0000-0000-7000-8000-000000000099", id, ReadOnlyMemory<byte>.Empty, "", default)).StatusCode);
         var rows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, "?family=subagent&q=helper", default);
         Assert.Equal(200, rows.StatusCode); Assert.Contains("helper", Encoding.UTF8.GetString(rows.Entity), StringComparison.Ordinal);
+        var frozen = store.Read(LocalComparisonInputProjectionTests.RepositoryId, id, default).Snapshot!;
+        var storedRow = frozen.Results.Single(result => result.RowKind == "subagent");
+        using (var rowsJson = JsonDocument.Parse(rows.Entity))
+        {
+            var serialized = rowsJson.RootElement.GetProperty("items")[0].GetProperty("values")
+                .EnumerateArray()
+                .Select(value => new KeyValuePair<string, string>(
+                    value.GetProperty("key").GetString()!,
+                    value.GetProperty("value").GetString()!))
+                .ToArray();
+            Assert.Equal(storedRow.Values, serialized);
+        }
+        var inputTokens = frozen.Results.Single(result => result.RowKey == "input_tokens");
+        var scalarEvidence = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={inputTokens.ResultOrdinal}&field_key=median", default);
+        using (var scalarJson = JsonDocument.Parse(scalarEvidence.Entity))
+        {
+            var items = scalarJson.RootElement.GetProperty("items").EnumerateArray().ToArray();
+            Assert.NotEmpty(items);
+            Assert.All(items, item => Assert.Equal("10", item.GetProperty("consumed_value").GetString()));
+            Assert.All(items, item => Assert.Equal(new string(item.GetProperty("session_id").GetString()![^1], 64), item.GetProperty("consumed_revision").GetString()));
+        }
+        var unavailableResult = frozen.Results.Single(result => result.RowKey == "model_turn_count");
+        var unavailableEvidence = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={unavailableResult.ResultOrdinal}&field_key=median", default);
+        using (var unavailableJson = JsonDocument.Parse(unavailableEvidence.Entity))
+        {
+            var items = unavailableJson.RootElement.GetProperty("items").EnumerateArray().ToArray();
+            Assert.NotEmpty(items);
+            Assert.All(items, item => Assert.Equal("unavailable", item.GetProperty("state").GetString()));
+            Assert.All(items, item => Assert.Equal("source_unsupported", item.GetProperty("unavailable_reason").GetString()));
+            Assert.All(items, item => Assert.Equal(JsonValueKind.Null, item.GetProperty("consumed_value").ValueKind));
+        }
+        var namedEvidence = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={storedRow.ResultOrdinal}&field_key=count", default);
+        using (var namedJson = JsonDocument.Parse(namedEvidence.Entity))
+        {
+            Assert.All(namedJson.RootElement.GetProperty("items").EnumerateArray(), item => Assert.NotEqual(JsonValueKind.Null, item.GetProperty("consumed_value").ValueKind));
+        }
+        var acceptedFields = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["value"] = "input_tokens",
+            ["available_count"] = "input_tokens",
+            ["median"] = "input_tokens",
+            ["minimum"] = "input_tokens",
+            ["maximum"] = "input_tokens",
+            ["total"] = "input_tokens",
+            ["absolute_difference"] = "input_tokens",
+            ["relative_difference_percent"] = "input_tokens",
+            ["condition"] = "period",
+            ["count"] = storedRow.RowKey,
+            ["duration_ms"] = "session_duration",
+            ["input_tokens"] = "input_tokens",
+            ["output_tokens"] = "output_tokens",
+            ["total_tokens"] = "total_tokens",
+            ["cache_read"] = "cache_read_tokens",
+            ["cache_creation"] = "cache_creation_tokens",
+            ["new_input"] = "new_input_tokens",
+            ["error_count"] = "error_count",
+            ["retry_count"] = "retry_count",
+        };
+        foreach (var accepted in acceptedFields)
+        {
+            var acceptedResult = accepted.Key == "count"
+                ? storedRow
+                : frozen.Results.First(result => result.RowKey == accepted.Value);
+            var response = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={acceptedResult.ResultOrdinal}&field_key={accepted.Key}", default);
+            Assert.Equal(200, response.StatusCode);
+            using var responseJson = JsonDocument.Parse(response.Entity);
+            Assert.True(responseJson.RootElement.GetProperty("items").GetArrayLength() > 0, accepted.Key);
+        }
+        var period = frozen.Results.Single(result => result.RowKey == "period");
+        Assert.Equal(404, (await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={period.ResultOrdinal}&field_key=median", default)).StatusCode);
+        Assert.Equal(404, (await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, "?result_ordinal=999999&field_key=value", default)).StatusCode);
         var evidence = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, "?result_ordinal=1&limit=1", default);
         using var evidenceJson = JsonDocument.Parse(evidence.Entity); var cursor = evidenceJson.RootElement.GetProperty("next_cursor").GetString(); Assert.NotNull(cursor);
         Assert.Equal(200, (await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal=1&after={cursor}&limit=1", default)).StatusCode);

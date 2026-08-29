@@ -59,9 +59,12 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
     });
     private LocalMonitorV1ComparisonResponse Evidence(string repositoryId, string id, LocalMonitorV1ComparisonEvidenceQuery q, CancellationToken ct) => Load(repositoryId, id, ct, s =>
     {
-        if (!s.Results.Any(x => x.ResultOrdinal == q.ResultOrdinal)) return Error(404, "comparison_not_found");
+        var result = s.Results.SingleOrDefault(x => x.ResultOrdinal == q.ResultOrdinal);
+        if (result is null) return Error(404, "comparison_not_found");
+        var storedField = ResolveEvidenceField(result, q.FieldKey);
+        if (q.FieldKey is not null && storedField is null) return Error(404, "comparison_not_found");
         var binding = q.ResultOrdinal.ToString(CultureInfo.InvariantCulture) + "\n" + (q.FieldKey ?? ""); var after = q.After is null ? -1 : cursors.Decode(q.After, repositoryId, id, "evidence", binding) - 1;
-        var all = s.Evidence.Where(x => x.ResultOrdinal == q.ResultOrdinal && x.EvidenceOrdinal > after && (q.FieldKey is null || x.FieldKey == q.FieldKey)).OrderBy(x => x.EvidenceOrdinal).Take(q.Limit + 1).ToArray();
+        var all = s.Evidence.Where(x => x.ResultOrdinal == q.ResultOrdinal && x.EvidenceOrdinal > after && (storedField is null || x.FieldKey == storedField)).OrderBy(x => x.EvidenceOrdinal).Take(q.Limit + 1).ToArray();
         var page = all.Take(q.Limit).ToArray(); var next = all.Length > q.Limit ? cursors.Encode(repositoryId, id, "evidence", binding, page[^1].EvidenceOrdinal + 1) : null;
         return new(200, ComparisonJson.Evidence(id, q.ResultOrdinal, q.FieldKey, page, next));
     });
@@ -80,9 +83,31 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
         var draft = new LocalComparisonDraft(repositoryId, new(Array.AsReadOnly(aa), preview.Excluded.Count(x => x.Cohort == "a")), new(Array.AsReadOnly(bb), preview.Excluded.Count(x => x.Cohort == "b")), SHA256.HashData(Encoding.ASCII.GetBytes(preview.PreviewRevision)));
         return new(preview, draft);
     }
-    private static LocalComparisonProjectionCandidate Candidate(LocalRepositoryComparisonSessionInput x) { var s = x.Session; var row = (LocalWorkspaceProjectionRow)s.Session; var state = s.RepositoryId is null ? LocalComparisonCandidateState.RepositoryMismatch : s.IsEffectivelyEligible ? LocalComparisonCandidateState.Included : LocalComparisonCandidateState.UnsupportedSelection; return new(s.SessionId, s.RepositoryId ?? "", state, s.ArchiveState == LocalArchiveState.Archived, s.ArchiveState == LocalArchiveState.Archived ? "archived" : "active", row.Sources.Values, row.Models.Values, 1, row.Completeness, ["tokens", "time_and_execution", "skills", "tools", "subagents", "errors_and_retries", "conditions"], s.AssignmentRevision, x.WorkspaceRevision); }
+    private static LocalComparisonProjectionCandidate Candidate(LocalRepositoryComparisonSessionInput x) { var s = x.Session; var row = (LocalWorkspaceProjectionRow)s.Session; var state = s.RepositoryId is null ? LocalComparisonCandidateState.RepositoryMismatch : s.IsEffectivelyEligible ? LocalComparisonCandidateState.Included : LocalComparisonCandidateState.UnsupportedSelection; return new(s.SessionId, s.RepositoryId ?? "", state, s.ArchiveState == LocalArchiveState.Archived, s.ArchiveState == LocalArchiveState.Archived ? "archived" : "active", row.Sources.Values, row.Sources.State, row.Models.Values, row.Models.State, 1, row.Completeness, ["tokens", "time_and_execution", "skills", "tools", "subagents", "errors_and_retries", "conditions"], s.AssignmentRevision, x.WorkspaceRevision); }
     private static string Hash(IEnumerable<string> values) { using var s = new MemoryStream(); foreach (var x in values) LocalComparisonSelectionFrame.WriteFrame(s, x); return Convert.ToHexStringLower(SHA256.HashData(s.ToArray())); }
     private static string Display(LocalComparisonStoredResult x) => x.Values.FirstOrDefault(v => v.Key == "display_name").Value ?? x.RowKey;
+    private static string? ResolveEvidenceField(LocalComparisonStoredResult result, string? field)
+    {
+        if (field is null) return null;
+        if (field is "available_count" or "median" or "minimum" or "maximum" or "total" or "absolute_difference" or "relative_difference_percent")
+        {
+            if (result.RowKind == "scalar") return "value";
+            return LocalComparisonRegistryV1.NamedFieldKeys.TryGetValue(result.RowKind, out var aggregateNamed) ? aggregateNamed[0] : null;
+        }
+        if (field == "condition" && result.RowKind == "condition")
+            return result.RowKey switch { "period" => "observed_at", "archived_inclusion" => "selection", _ => "value" };
+        if (field == "count" && LocalComparisonRegistryV1.NamedFieldKeys.TryGetValue(result.RowKind, out var named)) return named[0];
+        if (field == "total_tokens" && result.RowKind == "subagent") return "recorded_tokens";
+        if (field == "error_count" && result.RowKind == "tool") return "failure_count";
+        if (field == "retry_count" && result.RowKind == "tool") return "retry_count";
+        if (field == "duration_ms" && result.RowKey == "session_duration") return "value";
+        if (field is "input_tokens" or "output_tokens" or "total_tokens" or "cache_read" or "cache_creation" or "new_input" or "error_count" or "retry_count")
+        {
+            var expected = field switch { "cache_read" => "cache_read_tokens", "cache_creation" => "cache_creation_tokens", "new_input" => "new_input_tokens", _ => field };
+            return result.RowKey == expected ? "value" : null;
+        }
+        return result.RowKind is "scalar" or "condition" && field == "value" ? "value" : result.RowKind is "skill" or "tool" or "subagent" && result.Values.Any(value => value.Key.StartsWith(field + "_", StringComparison.Ordinal)) ? field : null;
+    }
     private static string Normalize(string value) => string.Join(' ', value.Normalize(NormalizationForm.FormKC).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
     private static LocalMonitorV1ComparisonResponse Error(int status, string code) => new(status, Encoding.UTF8.GetBytes($"{{\"error\":\"{code}\"}}"));
     private sealed record Projected(LocalComparisonProjectionPreview Preview, LocalComparisonDraft Draft);

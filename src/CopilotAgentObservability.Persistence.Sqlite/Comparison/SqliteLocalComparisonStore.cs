@@ -394,7 +394,7 @@ internal sealed class SqliteLocalComparisonStore
         command.Transaction = transaction;
         command.CommandText = """
             SELECT comparison_id,result_ordinal,evidence_ordinal,field_key,cohort,session_id,
-                   availability_state,source_kind,source_identity,trace_id,span_id,event_id,revision_sha256
+                   availability_state,consumed_value,source_kind,source_identity,trace_id,span_id,event_id,revision_sha256
             FROM local_comparison_evidence
             WHERE comparison_id=$comparison
             ORDER BY result_ordinal,evidence_ordinal;
@@ -411,7 +411,8 @@ internal sealed class SqliteLocalComparisonStore
                 reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2),
                 reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
                 Nullable(reader, 7), Nullable(reader, 8), Nullable(reader, 9),
-                Nullable(reader, 10), Nullable(reader, 11), Nullable(reader, 12)));
+                Nullable(reader, 10), Nullable(reader, 11), Nullable(reader, 12),
+                Nullable(reader, 13)));
         }
         return Array.AsReadOnly(values.ToArray());
     }
@@ -498,8 +499,8 @@ internal sealed class SqliteLocalComparisonStore
         command.CommandText = """
             INSERT INTO local_comparison_evidence(
               comparison_id,result_ordinal,evidence_ordinal,field_key,cohort,session_id,
-              availability_state,source_kind,source_identity,trace_id,span_id,event_id,revision_sha256)
-            VALUES($comparison,$result,$ordinal,$field,$cohort,$session,$state,$kind,$identity,
+              availability_state,consumed_value,source_kind,source_identity,trace_id,span_id,event_id,revision_sha256)
+            VALUES($comparison,$result,$ordinal,$field,$cohort,$session,$state,$value,$kind,$identity,
                    $trace,$span,$event,$revision);
             """;
         command.Parameters.AddWithValue("$comparison", item.ComparisonId);
@@ -509,6 +510,7 @@ internal sealed class SqliteLocalComparisonStore
         command.Parameters.AddWithValue("$cohort", item.Cohort);
         command.Parameters.AddWithValue("$session", item.SessionId);
         command.Parameters.AddWithValue("$state", item.AvailabilityState);
+        AddNullable(command, "$value", item.ConsumedValue);
         AddNullable(command, "$kind", item.SourceKind);
         AddNullable(command, "$identity", item.SourceIdentity);
         AddNullable(command, "$trace", item.TraceId);

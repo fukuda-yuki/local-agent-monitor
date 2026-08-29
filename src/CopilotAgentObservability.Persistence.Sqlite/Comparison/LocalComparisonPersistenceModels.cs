@@ -287,6 +287,7 @@ internal sealed record LocalComparisonStoredEvidence(
     string Cohort,
     string SessionId,
     string AvailabilityState,
+    string? ConsumedValue,
     string? SourceKind,
     string? SourceIdentity,
     string? TraceId,
