@@ -1131,15 +1131,20 @@ internal static class LocalComparisonApplicationValidation
         string sessionId)
     {
         if (fact is null || fact.Observation is null
-            || fact.Evidence is null || fact.Evidence.Count is < 1 or > 16
-            || fact.Evidence.Any(item => item is null || item.State != fact.Observation.State)
+            || fact.Evidence is null || fact.Evidence.Count is < 1 or > 4096
+            || fact.Evidence.Any(static item => item is null)
             || fact.Evidence.Distinct().Count() != fact.Evidence.Count)
             throw new ArgumentException("local_comparison_input_scalar_invalid");
         if (fact.Observation.Value < 0m)
             throw new ArgumentException("local_comparison_input_scalar_invalid");
         if (fact.Observation.Value is not null
-            && fact.Evidence.Any(static item => item.Reference is null))
+            && (fact.Evidence.Any(static item => item.State is not LocalComparisonFactState.Recorded and not LocalComparisonFactState.ExplicitZero)
+                || fact.Evidence.Any(static item => item.Reference is null)))
             throw new ArgumentException("local_comparison_input_scalar_reference_missing");
+        if (fact.Observation.Value is null
+            && (fact.Evidence.All(static item => item.State is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero)
+                || !fact.Evidence.Any(item => item.State == fact.Observation.State)))
+            throw new ArgumentException("local_comparison_input_scalar_invalid");
         foreach (var item in fact.Evidence)
             if (item.Reference is not null)
                 ValidateReference(item.Reference, sessionId);
@@ -1162,12 +1167,6 @@ internal static class LocalComparisonApplicationValidation
             && family.Reference is null)
         {
             throw new ArgumentException("local_comparison_input_named_family_reference_missing");
-        }
-        if (family.State is not LocalComparisonFactState.Recorded
-                and not LocalComparisonFactState.ExplicitZero
-            && family.Items.Count != 0)
-        {
-            throw new ArgumentException("local_comparison_input_named_family_invalid");
         }
         if (family.State == LocalComparisonFactState.ExplicitZero
             && family.Items.Count != 0)
@@ -1554,7 +1553,7 @@ internal static class LocalComparisonFactFrame
             }
             value = parsed;
         }
-        var count = ReadCount(ref reader, 16);
+        var count = ReadCount(ref reader, 4096);
         if (count == 0)
             Reject();
         var evidence = new LocalComparisonFactEvidence[count];

@@ -182,8 +182,12 @@ public sealed class LocalComparisonInputProjectionTests
 
         var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(nodes), new string('a', 64), false);
 
-        Assert.Empty(fact.NamedFamilies.Single(family => family.Family == "skill").Items);
-        Assert.Empty(fact.NamedFamilies.Single(family => family.Family == "tool").Items);
+        var skillFamily = fact.NamedFamilies.Single(family => family.Family == "skill");
+        var toolFamily = fact.NamedFamilies.Single(family => family.Family == "tool");
+        Assert.Empty(skillFamily.Items);
+        Assert.Empty(toolFamily.Items);
+        Assert.Equal(LocalComparisonFactState.NotObserved, skillFamily.State);
+        Assert.Equal(LocalComparisonFactState.NotObserved, toolFamily.State);
         var subagents = fact.NamedFamilies.Single(family => family.Family == "subagent").Items;
         Assert.Equal(2, subagents.Count);
         var unidentified = Assert.Single(subagents, item => item.DisplayName == "識別名なし");
@@ -198,7 +202,7 @@ public sealed class LocalComparisonInputProjectionTests
         var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
         var detail = Detail(session.SessionId, unidentifiedSubagent: false);
         var tool = detail.Nodes.Single(node => node.Kind == "tool") with { Lifecycle = "active", Status = "active", Activity = detail.Nodes.Single(node => node.Kind == "tool").Activity with { Retry = new("not_observed", null) } };
-        var completed = tool with { NodeId = "tool-completed", Lifecycle = "completed", Status = "succeeded", Activity = tool.Activity with { Retry = Fact(1) } };
+        var completed = tool with { NodeId = "tool-completed", Lifecycle = "completed", Status = "completed", Activity = tool.Activity with { Retry = Fact(1) } };
 
         var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail([tool, completed]), new string('a', 64), false);
 
@@ -209,6 +213,39 @@ public sealed class LocalComparisonInputProjectionTests
         Assert.Equal(2, item.Values["failure_count"].Evidence.Count);
         Assert.Contains(item.Values["failure_count"].Evidence, evidence => evidence.State == LocalComparisonFactState.ExplicitZero && evidence.Reference!.SourceIdentity == completed.NodeId);
         Assert.Equal(2, item.Values["retry_count"].Evidence.Count);
+    }
+
+    [Theory]
+    [InlineData("active")]
+    [InlineData("unknown")]
+    public void WorkspaceAdapterDoesNotPublishToolFailureZeroWithoutCompletedStatus(string status)
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var tool = detail.Nodes.Single(node => node.Kind == "tool") with { Lifecycle = "completed", Status = status };
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail([tool]), new string('a', 64), false);
+
+        var failure = Assert.Single(fact.NamedFamilies.Single(family => family.Family == "tool").Items)
+            .Values["failure_count"];
+        Assert.Equal(LocalComparisonFactState.SourceUnsupported, failure.Observation.State);
+        Assert.Null(failure.Observation.Value);
+    }
+
+    [Fact]
+    public void WorkspaceAdapterRetainsKnownItemsButMarksFamilyPartialWhenAnyExactNameIsMissing()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var tool = detail.Nodes.Single(node => node.Kind == "tool");
+        var missing = tool with { NodeId = "tool-missing", NameState = "not_observed", NameText = null };
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail([tool, missing]), new string('a', 64), false);
+
+        var family = fact.NamedFamilies.Single(item => item.Family == "tool");
+        Assert.Equal(LocalComparisonFactState.NotObserved, family.State);
+        Assert.Single(family.Items);
+        LocalComparisonApplicationValidation.ValidateSession(session.RepositoryId!, fact);
     }
 
     [Fact]

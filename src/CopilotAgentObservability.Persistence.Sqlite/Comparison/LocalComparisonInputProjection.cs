@@ -200,8 +200,8 @@ internal static class LocalComparisonInputProjection
 
         LocalComparisonNamedFamilyFact Family(string family, LocalWorkspaceFact<long> aggregate)
         {
-            var admitted = comparisonDetail.Nodes
-                .Where(node => node.Kind == family)
+            var familyNodes = comparisonDetail.Nodes.Where(node => node.Kind == family).ToArray();
+            var admitted = familyNodes
                 .Select(node => (Node: node, Identity: SemanticIdentity(node, family)))
                 .Where(static item => item.Identity is not null)
                 .GroupBy(static item => item.Identity!, StringComparer.Ordinal);
@@ -229,11 +229,25 @@ internal static class LocalComparisonInputProjection
                 }
                 return new LocalComparisonNamedItem(family, identityKey, Normalize(display), display, values, reference);
             }).OrderBy(static item => item.SortKey, StringComparer.Ordinal).ThenBy(static item => item.IdentityKey, StringComparer.Ordinal).ToArray();
-            var state = items.Length > 0 ? LocalComparisonFactState.Recorded : State(aggregate.State);
+            var missingNames = family is "skill" or "tool"
+                ? familyNodes.Where(node => SemanticIdentity(node, family) is null).ToArray()
+                : [];
+            var state = missingNames.Length > 0
+                ? MissingNameState(missingNames)
+                : items.Length > 0 ? LocalComparisonFactState.Recorded : State(aggregate.State);
             if (items.Length == 0 && state == LocalComparisonFactState.Recorded)
                 state = aggregate.Value == 0 ? LocalComparisonFactState.ExplicitZero : LocalComparisonFactState.CaptureGap;
             return new(family, state, Array.AsReadOnly(items), state is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero ? sessionReference : null);
         }
+    }
+
+    private static LocalComparisonFactState MissingNameState(IReadOnlyList<LocalWorkspaceNodeDetail> nodes)
+    {
+        var states = nodes.Select(node => State(node.NameState))
+            .Where(static state => state is not LocalComparisonFactState.Recorded and not LocalComparisonFactState.ExplicitZero)
+            .Order()
+            .ToArray();
+        return states.Length == 0 ? LocalComparisonFactState.CaptureGap : states[0];
     }
 
     private static string? SemanticIdentity(LocalWorkspaceNodeDetail node, string family) =>
@@ -300,7 +314,7 @@ internal static class LocalComparisonInputProjection
     private static (LocalComparisonFactState State, decimal? Value) ToolFailure(LocalWorkspaceNodeDetail node) => node.Status switch
     {
         "failed" => (LocalComparisonFactState.Recorded, 1m),
-        _ when node.Lifecycle == "completed" => (LocalComparisonFactState.ExplicitZero, 0m),
+        "completed" => (LocalComparisonFactState.ExplicitZero, 0m),
         _ => (LocalComparisonFactState.SourceUnsupported, null),
     };
 

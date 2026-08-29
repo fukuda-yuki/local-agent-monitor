@@ -699,6 +699,90 @@ public sealed class LocalComparisonApplicationTests
         }
     }
 
+    [Fact]
+    public void ProductionPrepareAndCreateAcceptMappedRepeatedNamedEvidenceBeyondLegacyBound()
+    {
+        var directory = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"local-comparison-named-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var path = System.IO.Path.Combine(directory, "comparison.sqlite");
+        try
+        {
+            new SqliteSessionStore(path).CreateSchema();
+            using (var connection = Open(path))
+            {
+                LocalRepositoryCatalogSchemaV1.Ensure(connection);
+                LocalArchiveSchemaV1.Ensure(connection);
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+                LocalComparisonSchemaV1.Ensure(connection);
+                Execute(connection, $"""
+                    INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at)
+                    VALUES('{RepositoryId}','Repository',1,'{Timestamp(CreatedAt)}','{Timestamp(CreatedAt)}');
+                    INSERT INTO sessions(
+                      session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
+                    VALUES('{SessionA}','active','unbound','{Timestamp(CreatedAt)}','not_captured','{Timestamp(CreatedAt)}','{Timestamp(CreatedAt)}'),
+                          ('{SessionB}','active','unbound','{Timestamp(CreatedAt)}','not_captured','{Timestamp(CreatedAt)}','{Timestamp(CreatedAt)}');
+                    """);
+            }
+            var scopeA = LocalComparisonInputProjectionTests.ScopeSession(SessionA, archived: false) with { RepositoryId = RepositoryId };
+            var detailA = LocalComparisonInputProjectionTests.Detail(SessionA, unidentifiedSubagent: false);
+            var tool = detailA.Nodes.Single(node => node.Kind == "tool") with
+            {
+                Lifecycle = "active",
+                Status = "active",
+                SourceReferences = Enumerable.Range(0, 20).Select(index => new LocalWorkspaceNodeSourceReferenceDetail(
+                    "workspace_node", $"node-{index + 16:x32}", null, null, null, RevisionA, true)).ToArray(),
+            };
+            var completed = tool with
+            {
+                NodeId = "node-ffffffffffffffffffffffffffffffff",
+                ExecutionId = SessionB,
+                Lifecycle = "completed",
+                Status = "completed",
+                SourceReferences = [],
+            };
+            var mappedA = LocalComparisonInputProjection.MapSessionFact(
+                scopeA,
+                detailA,
+                new([tool, completed], [], [], "revision-a", new string('d', 64)),
+                RevisionA,
+                false);
+            var referenceB = new LocalComparisonSourceReference(
+                "workspace_session", SessionB, null, null, null, RevisionB);
+            var mappedB = Session(SessionB, RevisionB, referenceB,
+                Recorded(20m, referenceB), ExplicitZero(referenceB), []);
+            var draft = new LocalComparisonDraft(
+                RepositoryId,
+                new([mappedA], 0),
+                new([mappedB], 0),
+                ScopeConditionDigest());
+            var application = new LocalComparisonApplicationService(
+                new SqliteLocalComparisonStore(path, new FixedTimeProvider(CreatedAt)),
+                new FixedTimeProvider(CreatedAt),
+                _ => ComparisonId);
+
+            var validationFailure = Record.Exception(() => LocalComparisonApplicationValidation.Freeze(draft));
+            var prepared = application.Prepare(draft);
+            var created = application.Create(draft, default);
+
+            Assert.Null(validationFailure);
+            Assert.Equal(LocalComparisonCreateStatus.Accepted, prepared.Status);
+            Assert.Equal(LocalComparisonCreateStatus.Accepted, created.Status);
+            var snapshot = Assert.IsType<LocalComparisonSnapshotWrite>(created.Snapshot);
+            var row = snapshot.Results.Single(item => item.RowKind == "tool");
+            var failureEvidence = snapshot.Evidence.Where(item =>
+                item.ResultOrdinal == row.ResultOrdinal && item.FieldKey == "failure_count" && item.SessionId == SessionA).ToArray();
+            Assert.True(failureEvidence.Length > 16);
+            Assert.Contains(failureEvidence, item => item.AvailabilityState == "source_unsupported");
+            Assert.Contains(failureEvidence, item => item.AvailabilityState == "explicit_zero");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static SqliteConnection Open(string path)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
