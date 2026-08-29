@@ -516,7 +516,7 @@
 
   function appendInspectorFact(section, label, fact, key = "value") {
     const row = el("p"); row.append(el("strong", null, `${label}: `));
-    row.append(document.createTextNode(fact?.state === "recorded" ? String(fact[key]) : fact?.state ?? "not_observed")); section.append(row);
+    row.append(document.createTextNode(fact?.state === "recorded" ? String(Object.hasOwn(fact, key) ? fact[key] : "recorded") : fact?.state ?? "not_observed")); section.append(row);
   }
 
   function appendContentAction(section, detail, part) {
@@ -536,7 +536,10 @@
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
     section.append(el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
     if (node.kind === "tool") {
-      appendInspectorFact(section, "MCP server", metadata.mcp_server_name); appendInspectorFact(section, "Tool", metadata.mcp_tool_name); appendInspectorFact(section, "Caller", metadata.caller, "node_id");
+      appendInspectorFact(section, "Start", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "End", { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "Duration", { state: node.timing.state, value: node.timing.duration_ms === null ? null : `${node.timing.duration_ms} ms` });
+      appendInspectorFact(section, "Caller", metadata.caller, "node_id"); appendInspectorFact(section, "Lifecycle", metadata.lifecycle); appendInspectorFact(section, "Status", metadata.status); appendInspectorFact(section, "Exit", metadata.exit);
+      if (metadata.mcp_server_identity.state === "recorded") appendInspectorFact(section, "MCP server identity", metadata.mcp_server_identity);
+      appendInspectorFact(section, "Tool", metadata.mcp_tool_name);
     } else if (node.kind === "skill") {
       section.append(el("p", null, `Current valid state: ${metadata.current_valid_state}`)); appendInspectorFact(section, "Source", metadata.source); appendInspectorFact(section, "Trigger", metadata.trigger); appendInspectorFact(section, "Inventory reference", metadata.inventory_reference);
       if (metadata.historical_snapshot_reference.state === "recorded") {
@@ -545,6 +548,8 @@
       } else section.append(el("p", null, "履歴スナップショットはありません"));
     } else if (node.kind === "subagent") {
       for (const key of ["selected", "started", "completed", "failed", "deselected"]) appendInspectorFact(section, key, metadata.lifecycle[key]);
+      for (const [key, label] of [["skill", "Skill activity"], ["tool", "Tool activity"], ["subagent", "Sub-agent activity"], ["error", "Error activity"], ["retry", "Retry activity"]]) appendInspectorFact(section, label, metadata.activity[key], "count");
+      for (const [key, label] of [["input", "Input tokens"], ["output", "Output tokens"], ["total", "Total tokens"], ["reasoning", "Reasoning tokens"], ["cache_read", "Cache read tokens"], ["cache_creation", "Cache creation tokens"], ["new_input", "New input tokens"]]) appendInspectorFact(section, label, metadata.tokens[key]);
       appendInspectorFact(section, "Children", metadata.children, "count");
     } else if (node.kind === "error") {
       appendInspectorFact(section, "Error code", metadata.error_code); appendInspectorFact(section, "Status", metadata.status);
