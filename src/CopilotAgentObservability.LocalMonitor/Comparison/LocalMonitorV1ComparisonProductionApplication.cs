@@ -51,24 +51,35 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
         var location = $"/repositories/{repositoryId}/comparisons/{result.Snapshot!.ComparisonId}";
         return new(201, ComparisonJson.Create(result.Snapshot, location), location);
     }
-    private LocalMonitorV1ComparisonResponse Rows(string repositoryId, string id, LocalMonitorV1ComparisonRowsQuery q, CancellationToken ct) => Load(repositoryId, id, ct, s =>
+    private LocalMonitorV1ComparisonResponse Rows(string repositoryId, string id, LocalMonitorV1ComparisonRowsQuery q, CancellationToken ct)
     {
-        var binding = q.Family + "\n" + (q.Search ?? ""); var after = q.After is null ? 0 : cursors.Decode(q.After, repositoryId, id, "rows", binding);
-        var all = s.Results.Where(x => x.ResultOrdinal > after && x.RowKind == q.Family).Where(x => q.Search is null || Normalize(x.RowKey).Contains(q.Search, StringComparison.Ordinal) || Normalize(Display(x)).Contains(q.Search, StringComparison.Ordinal)).OrderBy(x => x.ResultOrdinal).Take(q.Limit + 1).ToArray();
-        var page = all.Take(q.Limit).ToArray(); var next = all.Length > q.Limit ? cursors.Encode(repositoryId, id, "rows", binding, page[^1].ResultOrdinal) : null;
-        return new(200, ComparisonJson.Rows(id, q.Family, page, next));
-    });
-    private LocalMonitorV1ComparisonResponse Evidence(string repositoryId, string id, LocalMonitorV1ComparisonEvidenceQuery q, CancellationToken ct) => Load(repositoryId, id, ct, s =>
+        var binding = q.Family + "\n" + (q.Search ?? "");
+        var after = q.After is null ? 0 : cursors.Decode(q.After, repositoryId, id, "rows", binding);
+        return Load(repositoryId, id, ct, s =>
+        {
+            if (q.After is not null && !s.Results.Any(x => x.ResultOrdinal == after && Matches(x, q))) throw new LocalMonitorV1ComparisonCursorException();
+            var all = s.Results.Where(x => x.ResultOrdinal > after && Matches(x, q)).OrderBy(x => x.ResultOrdinal).Take(q.Limit + 1).ToArray();
+            var page = all.Take(q.Limit).ToArray(); var next = all.Length > q.Limit ? cursors.Encode(repositoryId, id, "rows", binding, page[^1].ResultOrdinal) : null;
+            return new(200, ComparisonJson.Rows(id, q.Family, page, next));
+        });
+    }
+    private LocalMonitorV1ComparisonResponse Evidence(string repositoryId, string id, LocalMonitorV1ComparisonEvidenceQuery q, CancellationToken ct)
     {
-        var result = s.Results.SingleOrDefault(x => x.ResultOrdinal == q.ResultOrdinal);
-        if (result is null) return Error(404, "comparison_not_found");
-        var storedField = LocalMonitorV1ComparisonEvidenceFieldResolver.Resolve(result, q.FieldKey);
-        if (q.FieldKey is not null && storedField is null) return Error(404, "comparison_not_found");
-        var binding = q.ResultOrdinal.ToString(CultureInfo.InvariantCulture) + "\n" + (q.FieldKey ?? ""); var after = q.After is null ? -1 : cursors.Decode(q.After, repositoryId, id, "evidence", binding) - 1;
-        var all = s.Evidence.Where(x => x.ResultOrdinal == q.ResultOrdinal && x.EvidenceOrdinal > after && (storedField is null || x.FieldKey == storedField)).OrderBy(x => x.EvidenceOrdinal).Take(q.Limit + 1).ToArray();
-        var page = all.Take(q.Limit).ToArray(); var next = all.Length > q.Limit ? cursors.Encode(repositoryId, id, "evidence", binding, page[^1].EvidenceOrdinal + 1) : null;
-        return new(200, ComparisonJson.Evidence(id, q.ResultOrdinal, q.FieldKey, page, next));
-    });
+        var binding = q.ResultOrdinal.ToString(CultureInfo.InvariantCulture) + "\n" + (q.FieldKey ?? "");
+        var afterPosition = q.After is null ? 0 : cursors.Decode(q.After, repositoryId, id, "evidence", binding);
+        return Load(repositoryId, id, ct, s =>
+        {
+            var result = s.Results.SingleOrDefault(x => x.ResultOrdinal == q.ResultOrdinal);
+            if (result is null) return Error(404, "comparison_not_found");
+            var storedField = LocalMonitorV1ComparisonEvidenceFieldResolver.Resolve(result, q.FieldKey);
+            if (q.FieldKey is not null && storedField is null) return Error(404, "comparison_not_found");
+            var after = afterPosition - 1;
+            if (q.After is not null && !s.Evidence.Any(x => x.ResultOrdinal == q.ResultOrdinal && x.EvidenceOrdinal == after && (storedField is null || x.FieldKey == storedField))) throw new LocalMonitorV1ComparisonCursorException();
+            var all = s.Evidence.Where(x => x.ResultOrdinal == q.ResultOrdinal && x.EvidenceOrdinal > after && (storedField is null || x.FieldKey == storedField)).OrderBy(x => x.EvidenceOrdinal).Take(q.Limit + 1).ToArray();
+            var page = all.Take(q.Limit).ToArray(); var next = all.Length > q.Limit ? cursors.Encode(repositoryId, id, "evidence", binding, page[^1].EvidenceOrdinal + 1) : null;
+            return new(200, ComparisonJson.Evidence(id, q.ResultOrdinal, q.FieldKey, page, next));
+        });
+    }
     private LocalMonitorV1ComparisonResponse Load(string repositoryId, string id, CancellationToken ct, Func<LocalComparisonFrozenSnapshot, LocalMonitorV1ComparisonResponse> found)
     { var r = store.Read(repositoryId, id, ct); return r.Status switch { LocalComparisonReadStatus.Found => found(r.Snapshot!), LocalComparisonReadStatus.Expired => Error(410, "comparison_expired"), LocalComparisonReadStatus.PersistenceBusy => Error(503, "persistence_busy"), _ => Error(404, "comparison_not_found") }; }
 
@@ -109,6 +120,9 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
     }
     private static string Hash(IEnumerable<string> values) { using var s = new MemoryStream(); foreach (var x in values) LocalComparisonSelectionFrame.WriteFrame(s, x); return Convert.ToHexStringLower(SHA256.HashData(s.ToArray())); }
     private static string Display(LocalComparisonStoredResult x) => x.Values.FirstOrDefault(v => v.Key == "display_name").Value ?? x.RowKey;
+    private static bool Matches(LocalComparisonStoredResult result, LocalMonitorV1ComparisonRowsQuery query) =>
+        result.RowKind == query.Family
+        && (query.Search is null || Normalize(result.RowKey).Contains(query.Search, StringComparison.Ordinal) || Normalize(Display(result)).Contains(query.Search, StringComparison.Ordinal));
     private static string Normalize(string value) => string.Join(' ', value.Normalize(NormalizationForm.FormKC).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
     private static LocalMonitorV1ComparisonResponse Error(int status, string code) => new(status, Encoding.UTF8.GetBytes($"{{\"error\":\"{code}\"}}"));
     private sealed record Projected(LocalComparisonProjectionPreview Preview, LocalComparisonDraft Draft);

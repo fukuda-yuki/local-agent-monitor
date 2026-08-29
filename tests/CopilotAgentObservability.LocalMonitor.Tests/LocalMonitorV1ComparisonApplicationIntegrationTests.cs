@@ -383,11 +383,151 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         Assert.Equal(400, (await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal=1&after={cursor}x&limit=1", default)).StatusCode);
     }
 
+    [Theory]
+    [InlineData("rows", "invalid_unknown", 400, "invalid_cursor")]
+    [InlineData("rows", "invalid_mismatch", 400, "invalid_cursor")]
+    [InlineData("rows", "invalid_expired", 400, "invalid_cursor")]
+    [InlineData("rows", "wrong_binding_unknown", 400, "invalid_cursor")]
+    [InlineData("rows", "wrong_binding_mismatch", 400, "invalid_cursor")]
+    [InlineData("rows", "wrong_binding_expired", 400, "invalid_cursor")]
+    [InlineData("rows", "valid_unknown", 404, "comparison_not_found")]
+    [InlineData("rows", "valid_mismatch", 404, "comparison_not_found")]
+    [InlineData("rows", "valid_expired", 410, "comparison_expired")]
+    [InlineData("evidence", "invalid_unknown", 400, "invalid_cursor")]
+    [InlineData("evidence", "invalid_mismatch", 400, "invalid_cursor")]
+    [InlineData("evidence", "invalid_expired", 400, "invalid_cursor")]
+    [InlineData("evidence", "wrong_binding_unknown", 400, "invalid_cursor")]
+    [InlineData("evidence", "wrong_binding_mismatch", 400, "invalid_cursor")]
+    [InlineData("evidence", "wrong_binding_expired", 400, "invalid_cursor")]
+    [InlineData("evidence", "valid_unknown", 404, "comparison_not_found")]
+    [InlineData("evidence", "valid_mismatch", 404, "comparison_not_found")]
+    [InlineData("evidence", "valid_expired", 410, "comparison_expired")]
+    public async Task CursorAuthenticationPrecedesLookupRepositoryBindingAndExpiry(string operationName, string scenario, int expectedStatus, string expectedError)
+    {
+        var operation = operationName == "rows" ? LocalMonitorV1ComparisonOperation.Rows : LocalMonitorV1ComparisonOperation.Evidence;
+        using var db = new Database(); db.Initialize();
+        var initialClock = new FixedClock();
+        var store = new SqliteLocalComparisonStore(db.Path, initialClock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(new FakeInput([Input(SessionA), Input(SessionB)]), store, initialClock, _ => ComparisonId, CursorKey);
+        await CreateComparison(application);
+        var snapshot = store.Read(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, default).Snapshot!;
+        var evidenceResultOrdinal = snapshot.Evidence[0].ResultOrdinal;
+        var requestedRepository = scenario.EndsWith("mismatch", StringComparison.Ordinal) ? OtherRepositoryId : LocalComparisonInputProjectionTests.RepositoryId;
+        var requestedComparison = scenario.EndsWith("unknown", StringComparison.Ordinal) ? UnknownComparisonId : ComparisonId;
+        var binding = operation == LocalMonitorV1ComparisonOperation.Rows ? "tool\n" : evidenceResultOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n";
+        var cursorBinding = scenario.StartsWith("wrong_binding", StringComparison.Ordinal) ? binding + "wrong" : binding;
+        var cursor = new LocalMonitorV1ComparisonCursorCodec(CursorKey).Encode(requestedRepository, requestedComparison, operation == LocalMonitorV1ComparisonOperation.Rows ? "rows" : "evidence", cursorBinding, 1);
+        if (scenario.StartsWith("invalid", StringComparison.Ordinal)) cursor = cursor[..^1] + (cursor[^1] == 'A' ? "B" : "A");
+        if (scenario.EndsWith("expired", StringComparison.Ordinal))
+        {
+            var expiredClock = new FixedClock(initialClock.GetUtcNow().AddHours(25));
+            application = new LocalMonitorV1ComparisonProductionApplication(new ThrowingInput(), new SqliteLocalComparisonStore(db.Path, expiredClock), expiredClock, cursorKey: CursorKey);
+        }
+        var query = operation == LocalMonitorV1ComparisonOperation.Rows ? $"?family=tool&after={cursor}&limit=1" : $"?result_ordinal={evidenceResultOrdinal}&after={cursor}&limit=1";
+
+        var response = await application.ExecuteAsync(operation, requestedRepository, requestedComparison, ReadOnlyMemory<byte>.Empty, query, default);
+
+        var entity = Encoding.UTF8.GetString(response.Entity);
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.Equal($"{{\"error\":\"{expectedError}\"}}", entity);
+        Assert.DoesNotContain(requestedRepository, entity, StringComparison.Ordinal);
+        Assert.DoesNotContain(requestedComparison, entity, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("rows")]
+    [InlineData("evidence")]
+    public async Task AuthenticatedCursorPositionMustBeAFrozenPagingBoundary(string operationName)
+    {
+        var operation = operationName == "rows" ? LocalMonitorV1ComparisonOperation.Rows : LocalMonitorV1ComparisonOperation.Evidence;
+        using var db = new Database(); db.Initialize();
+        var clock = new FixedClock();
+        var store = new SqliteLocalComparisonStore(db.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(new FakeInput([Input(SessionA), Input(SessionB)]), store, clock, _ => ComparisonId, CursorKey);
+        await CreateComparison(application);
+        var snapshot = store.Read(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, default).Snapshot!;
+        var codec = new LocalMonitorV1ComparisonCursorCodec(CursorKey);
+        string query;
+        if (operation == LocalMonitorV1ComparisonOperation.Rows)
+        {
+            var impossible = snapshot.Results.First(result => result.ResultOrdinal > 0 && result.RowKind != "tool").ResultOrdinal;
+            var cursor = codec.Encode(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, "rows", "tool\n", impossible);
+            query = $"?family=tool&after={cursor}&limit=1";
+        }
+        else
+        {
+            var resultOrdinal = snapshot.Evidence[0].ResultOrdinal;
+            var cursor = codec.Encode(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, "evidence", resultOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n", int.MaxValue);
+            query = $"?result_ordinal={resultOrdinal}&after={cursor}&limit=1";
+        }
+
+        var response = await application.ExecuteAsync(operation, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, query, default);
+
+        Assert.Equal(400, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_cursor\"}", Encoding.UTF8.GetString(response.Entity));
+    }
+
+    [Theory]
+    [InlineData("rows")]
+    [InlineData("evidence")]
+    public async Task ValidAndAbsentCursorsPreserveFrozenPaging(string operationName)
+    {
+        var operation = operationName == "rows" ? LocalMonitorV1ComparisonOperation.Rows : LocalMonitorV1ComparisonOperation.Evidence;
+        using var db = new Database(); db.Initialize();
+        var clock = new FixedClock();
+        var store = new SqliteLocalComparisonStore(db.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(new FakeInput([Input(SessionA), Input(SessionB)]), store, clock, _ => ComparisonId, CursorKey);
+        await CreateComparison(application);
+        var snapshot = store.Read(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, default).Snapshot!;
+        string absentQuery;
+        string continuedQuery;
+        if (operation == LocalMonitorV1ComparisonOperation.Rows)
+        {
+            var boundary = snapshot.Results.First(result => result.RowKind == "tool").ResultOrdinal;
+            var cursor = new LocalMonitorV1ComparisonCursorCodec(CursorKey).Encode(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, "rows", "tool\n", boundary);
+            absentQuery = "?family=tool&limit=1";
+            continuedQuery = $"?family=tool&after={cursor}&limit=1";
+        }
+        else
+        {
+            var evidence = snapshot.Evidence.GroupBy(item => item.ResultOrdinal).First(group => group.Count() >= 2).OrderBy(item => item.EvidenceOrdinal).ToArray();
+            var resultOrdinal = evidence[0].ResultOrdinal;
+            var cursor = new LocalMonitorV1ComparisonCursorCodec(CursorKey).Encode(LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, "evidence", resultOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n", evidence[0].EvidenceOrdinal + 1);
+            absentQuery = $"?result_ordinal={resultOrdinal}&limit=1";
+            continuedQuery = $"?result_ordinal={resultOrdinal}&after={cursor}&limit=1";
+        }
+
+        var absent = await application.ExecuteAsync(operation, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, absentQuery, default);
+        var continued = await application.ExecuteAsync(operation, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, continuedQuery, default);
+
+        Assert.Equal(200, absent.StatusCode);
+        Assert.Equal(200, continued.StatusCode);
+        Assert.StartsWith("{\"schema_version\":\"local-monitor-comparison-", Encoding.UTF8.GetString(absent.Entity), StringComparison.Ordinal);
+        Assert.StartsWith("{\"schema_version\":\"local-monitor-comparison-", Encoding.UTF8.GetString(continued.Entity), StringComparison.Ordinal);
+    }
+
+    private const string SessionA = "018f0000-0000-7000-8000-000000000001";
+    private const string SessionB = "018f0000-0000-7000-8000-000000000002";
+    private const string ComparisonId = "018f0000-0000-7000-8000-000000000010";
+    private const string UnknownComparisonId = "018f0000-0000-7000-8000-000000000011";
+    private const string OtherRepositoryId = "018f0000-0000-7000-8000-000000000099";
+    private static readonly byte[] CursorKey = new byte[32];
+
+    private static async Task CreateComparison(LocalMonitorV1ComparisonProductionApplication application)
+    {
+        var previewBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{SessionA}\"],\"b\":[\"{SessionB}\"]}},\"include_archived\":false}}");
+        var preview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, previewBody, "", default);
+        using var previewJson = JsonDocument.Parse(preview.Entity);
+        var createBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{SessionA}\"],\"b\":[\"{SessionB}\"]}},\"include_archived\":false,\"selection_sha256\":\"{previewJson.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{previewJson.RootElement.GetProperty("preview_revision").GetString()}\"}}");
+        var created = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
+        Assert.Equal(201, created.StatusCode);
+    }
+
     private static LocalRepositoryComparisonSessionInput Input(string id, bool archived = false) { var s = LocalComparisonInputProjectionTests.ScopeSession(id, archived); var detail = LocalComparisonInputProjectionTests.Detail(id, false); return new(s, detail, new string(id[^1], 64), new(detail.Nodes, detail.Versions ?? [], [], detail.CanonicalRevisionInput!, detail.SkillRegistryGenerationIdentity!)); }
     private sealed class FakeInput(IReadOnlyList<LocalRepositoryComparisonSessionInput> sessions, bool repositoryArchived = false) : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) { var repo = new LocalRepositoryCatalogSnapshot(LocalComparisonInputProjectionTests.RepositoryId, "Repository", 1, null, 0, repositoryArchived ? LocalArchiveState.Archived : LocalArchiveState.Active, repositoryArchived ? 2 : 1); return ValueTask.FromResult(new LocalRepositoryComparisonInputSnapshot(new(request, [repo], sessions.Select(x => x.Session).ToArray()), sessions)); } }
     private sealed class ThrowingInput : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException("current_session_state_was_queried"); }
     private sealed class DetailFailureInput(string error) : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) => throw new LocalWorkspaceSessionDetailException(error); }
-    private sealed class FixedClock : TimeProvider { public override DateTimeOffset GetUtcNow() => new(2026, 8, 29, 0, 0, 0, TimeSpan.Zero); }
+    private sealed class FixedClock(DateTimeOffset? now = null) : TimeProvider { public override DateTimeOffset GetUtcNow() => now ?? new(2026, 8, 29, 0, 0, 0, TimeSpan.Zero); }
     private sealed class Database : IDisposable { private readonly string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"comparison-app-{Guid.NewGuid():N}"); internal Database() { Directory.CreateDirectory(dir); Path = System.IO.Path.Combine(dir, "db.sqlite"); } internal string Path { get; } internal void Initialize() { new SqliteSessionStore(Path).CreateSchema(); using var c = Open(); LocalRepositoryCatalogSchemaV1.Ensure(c); LocalArchiveSchemaV1.Ensure(c); LocalWorkspaceProjectionSchemaV1.Ensure(c, DateTimeOffset.UnixEpoch); LocalComparisonSchemaV1.Ensure(c); using var cmd = c.CreateCommand(); cmd.CommandText = $"INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('{LocalComparisonInputProjectionTests.RepositoryId}','Repository',1,'2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');"; cmd.ExecuteNonQuery(); }
         internal void InitializeProductionScope(string active, string archived, bool archiveSecond = true) { new SqliteSessionStore(Path).CreateSchema(); using var c = Open(); using (var skills = c.BeginTransaction()) { MonitorSchemaMigrator.ApplyBaseSchema(c, skills); CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(c, skills); SkillProjectionSchemaV1.Ensure(c, skills); skills.Commit(); } var authority = FixedSkillRegistryGenerationAuthority.Load(); LocalRepositoryCatalogSchemaV1.Ensure(c); LocalWorkspaceProjectionSchemaV1.Ensure(c, DateTimeOffset.Parse("2026-08-29T00:00:00Z"), authority); LocalArchiveSchemaV1.Ensure(c); LocalComparisonSchemaV1.Ensure(c); using (var seed = c.CreateCommand()) { seed.CommandText = $"INSERT INTO sessions VALUES('{active}','completed','partial',NULL,NULL,NULL,NULL,'2026-08-29T00:00:00.0000000+00:00','not_captured','2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00'),('{archived}','completed','partial',NULL,NULL,NULL,NULL,'2026-08-29T00:00:00.0000000+00:00','not_captured','2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');"; seed.ExecuteNonQuery(); } using (var refresh = c.BeginTransaction()) { LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-29T00:00:00Z")); refresh.Commit(); } using (var assignments = c.CreateCommand()) { assignments.CommandText = $"""
             INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('{LocalComparisonInputProjectionTests.RepositoryId}','Repository',1,'2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');
