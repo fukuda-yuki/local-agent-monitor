@@ -1219,7 +1219,7 @@ internal static class LocalComparisonApplicationValidation
         {
             if (item.Family != family.Family
                 || !IsOpaqueIdentity(item.IdentityKey)
-                || !LocalComparisonBoundedText.IsToken(item.SortKey, 256)
+                || !LocalComparisonBoundedText.IsText(item.SortKey, 256)
                 || !LocalComparisonBoundedText.IsText(item.DisplayName, 256)
                 || !seen.Add(item.IdentityKey)
                 || item.Values is null

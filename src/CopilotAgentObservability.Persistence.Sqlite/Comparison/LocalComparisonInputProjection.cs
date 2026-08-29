@@ -287,7 +287,7 @@ internal static class LocalComparisonInputProjection
     {
         var references = new List<LocalComparisonSourceReference>
         {
-            new("workspace_node", node.NodeId, node.TraceId, node.SpanId, node.ExecutionId, workspaceRevision),
+            new("workspace_node", node.NodeId, null, null, null, workspaceRevision),
         };
         foreach (var source in (node.SourceReferences ?? []).Concat(node.ToolMetadata?.SourceReferences ?? []).Concat(node.SubagentLifecycle?.SourceReferences ?? []))
         {

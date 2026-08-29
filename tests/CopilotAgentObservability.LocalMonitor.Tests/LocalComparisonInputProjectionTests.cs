@@ -112,7 +112,9 @@ public sealed class LocalComparisonInputProjectionTests
         Assert.Equal(LocalComparisonFactState.SourceUnsupported, fact.Scalars["model_turn_count"].Observation.State);
         var subagent = Assert.Single(fact.NamedFamilies.Single(item => item.Family == "subagent").Items);
         Assert.Equal("識別名なし", subagent.DisplayName);
-        Assert.Equal("018f0000-0000-7000-8000-000000000010", subagent.Reference.EventId);
+        Assert.Null(subagent.Reference.TraceId);
+        Assert.Null(subagent.Reference.SpanId);
+        Assert.Null(subagent.Reference.EventId);
         Assert.Equal("node-00000000000000000000000000000001", subagent.Reference.SourceIdentity);
         Assert.DoesNotContain("path", System.Text.Json.JsonSerializer.Serialize(fact), StringComparison.OrdinalIgnoreCase);
     }

@@ -153,25 +153,74 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
     }
 
     [Fact]
-    public async Task PersistedNamedRowsSerializerMatchesNormativeGoldenBytes()
+    public async Task ProductionSqlitePreviewCreatePersistedRowsMatchExactBytes()
     {
-        using var db = new Database(); db.Initialize();
+        using var db = new Database();
+        using var storeDb = new Database(); storeDb.Initialize();
         const string a = "018f0000-0000-7000-8000-000000000001", b = "018f0000-0000-7000-8000-000000000002";
+        db.InitializeProductionNamedComparison(a, b);
+        var clock = new FixedClock(new(2026, 8, 26, 0, 10, 0, TimeSpan.Zero));
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            db.Path,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority,
+            timeProvider: clock);
+        var store = new SqliteLocalComparisonStore(storeDb.Path, clock);
         var application = new LocalMonitorV1ComparisonProductionApplication(
-            new FakeInput([Input(a), Input(b)]),
-            new SqliteLocalComparisonStore(db.Path, new FixedClock()),
-            new FixedClock(),
+            service,
+            store,
+            clock,
             _ => "018f0000-0000-7000-8000-000000000010",
             new byte[32]);
         var previewBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":false}}");
         var preview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, previewBody, "", default);
+        Assert.True(preview.StatusCode == 200, Encoding.UTF8.GetString(preview.Entity));
         using var previewJson = JsonDocument.Parse(preview.Entity);
+        Assert.True(previewJson.RootElement.GetProperty("valid").GetBoolean(), Encoding.UTF8.GetString(preview.Entity));
         var createBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":false,\"selection_sha256\":\"{previewJson.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{previewJson.RootElement.GetProperty("preview_revision").GetString()}\"}}");
         var created = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
-        Assert.Equal(201, created.StatusCode);
+        Assert.True(created.StatusCode == 201, Encoding.UTF8.GetString(created.Entity));
 
-        var rows = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=tool&q=tool-helper", default);
-        var expected = (await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-rows.response.json")))
+        var frozen = store.Read(LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", default).Snapshot!;
+        var tool = Assert.Single(frozen.Results, result => result.RowKind == "tool" && result.Values.ToDictionary()["display_name"] == "Read");
+        Assert.Equal("2", tool.Values.ToDictionary()["a_call_count_total"]);
+        Assert.Equal("1", tool.Values.ToDictionary()["b_call_count_total"]);
+        var toolEvidence = frozen.Evidence.Where(item => item.ResultOrdinal == tool.ResultOrdinal && item.FieldKey == "call_count").ToArray();
+        Assert.Equal(3, toolEvidence.Count(item => item.SourceKind == "workspace_node"));
+        Assert.Equal(3, toolEvidence.Count(item => item.SourceKind == "otel_span"));
+        Assert.All(toolEvidence.Where(item => item.SourceKind == "workspace_node"), item =>
+        {
+            Assert.Null(item.TraceId);
+            Assert.Null(item.SpanId);
+            Assert.Null(item.EventId);
+        });
+        Assert.All(toolEvidence.Where(item => item.SourceKind == "otel_span"), item =>
+        {
+            Assert.NotNull(item.TraceId);
+            Assert.NotNull(item.SpanId);
+            Assert.NotNull(item.EventId);
+        });
+
+        var restarted = new LocalMonitorV1ComparisonProductionApplication(
+            new ThrowingInput(),
+            new SqliteLocalComparisonStore(storeDb.Path, clock),
+            clock,
+            cursorKey: new byte[32]);
+        var subagent = Assert.Single(frozen.Results, result => result.RowKind == "subagent" && result.Values.ToDictionary()["display_name"] == "識別名なし");
+        Assert.Equal("識別名なし", subagent.Values.ToDictionary()["sort_key"]);
+        var subagentRows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=subagent&limit=1", default);
+        Assert.Equal(200, subagentRows.StatusCode);
+        using (var subagentJson = JsonDocument.Parse(subagentRows.Entity))
+        {
+            var persistedSubagent = Assert.Single(subagentJson.RootElement.GetProperty("items").EnumerateArray());
+            Assert.Equal("識別名なし", persistedSubagent.GetProperty("display_name").GetString());
+            Assert.Equal("識別名なし", persistedSubagent.GetProperty("values").EnumerateArray().Single(item => item.GetProperty("key").GetString() == "sort_key").GetProperty("value").GetString());
+        }
+        var rows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=tool&q=Read&limit=1", default);
+        var expected = (await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-production-rows.response.json")))
             .AsSpan().TrimEnd([(byte)'\r', (byte)'\n']).ToArray();
 
         Assert.Equal(expected, rows.Entity);
@@ -320,9 +369,9 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
                 Assert.NotEqual(JsonValueKind.Null, item.GetProperty("consumed_value").ValueKind);
                 var execution = item.GetProperty("execution_id").GetString();
                 var node = item.GetProperty("node_id").GetString();
-                Assert.NotNull(execution);
+                Assert.Null(execution);
                 Assert.NotNull(node);
-                Assert.Equal($"/sessions/{item.GetProperty("session_id").GetString()}?execution={execution}&node={node}", item.GetProperty("session_location").GetString());
+                Assert.Equal($"/sessions/{item.GetProperty("session_id").GetString()}?node={node}", item.GetProperty("session_location").GetString());
             });
         }
         var acceptedFields = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -540,5 +589,40 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         internal void CorruptProjection(string sessionId) { using var c = Open(); using var cmd = c.CreateCommand(); cmd.CommandText = "PRAGMA ignore_check_constraints=ON; UPDATE local_workspace_sessions SET label_state='invalid_owner_state' WHERE session_id=$session_id; PRAGMA ignore_check_constraints=OFF;"; cmd.Parameters.AddWithValue("$session_id", sessionId); cmd.ExecuteNonQuery(); }
         internal void SeedVersions(string sessionId, string dimension, int count) { for (var index = 0; index < count; index++) SeedVersion(sessionId, dimension, index == 0 ? "V1+meta" : index == count - 1 ? char.ToUpperInvariant(dimension[0]) + new string('x', 253) + "+1" : $"{dimension}-{index:D3}", index); }
         internal void SeedVersion(string sessionId, string dimension, string version, int index = 0) { using var c = Open(); using var cmd = c.CreateCommand(); cmd.CommandText = $"INSERT INTO session_events(event_id,session_id,source_adapter,source_event_id,type,occurred_at,content_state,{(dimension == "source" ? "source_application_version" : "adapter_version")}) VALUES($event,$session,'compare-version-test',$source,'version.fact','2026-08-29T00:00:00.0000000+00:00','not_captured',$version);"; cmd.Parameters.AddWithValue("$event", $"018f0000-0000-7000-8000-{index + 0x100:x12}"); cmd.Parameters.AddWithValue("$session", sessionId); cmd.Parameters.AddWithValue("$source", $"{dimension}-{index:D3}"); cmd.Parameters.AddWithValue("$version", version); cmd.ExecuteNonQuery(); }
+        internal void InitializeProductionNamedComparison(string a, string b)
+        {
+            const string aOtel = "018f0000-0000-7000-8000-000000000010", aSdk = "018f0000-0000-7000-8000-000000000020";
+            const string bOtel = "018f0000-0000-7000-8000-000000000110", bSdk = "018f0000-0000-7000-8000-000000000120";
+            LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(Path, a, aOtel, aSdk);
+            using var c = Open();
+            using var seed = c.CreateCommand();
+            seed.CommandText = $"""
+                INSERT INTO sessions SELECT '{b}',status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at FROM sessions WHERE session_id='{a}';
+                INSERT INTO session_native_ids VALUES('{b}','copilot-sdk','native-session-sdk-b','native','2026-08-26T00:00:00.0000000+00:00');
+                INSERT INTO session_runs VALUES
+                  ('{bOtel}','{b}','claude-code','native-run-otel-b','cccccccccccccccccccccccccccccccc',NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:04.0000000+00:00',NULL,NULL,NULL,'completed'),
+                  ('{bSdk}','{b}','copilot-sdk','native-child-sdk-b',NULL,NULL,NULL,'2026-08-26T00:00:05.0000000+00:00','2026-08-26T00:00:06.0000000+00:00',NULL,NULL,NULL,'completed');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES
+                  ('018f0000-0000-7000-8000-000000000111','{b}','{bOtel}','claude-code','cccccccccccccccccccccccccccccccc','otel-exact','cccccccccccccccccccccccccccccccc/dddddddddddddddd','otel.span','2026-08-26T09:00:00.0000000+00:00','not_captured'),
+                  ('018f0000-0000-7000-8000-000000000121','{b}','{bSdk}','copilot-sdk',NULL,'copilot-sdk-stream','sdk-subagent-started-b','subagent.started','2026-08-26T00:00:05.0000000+00:00','not_captured'),
+                  ('018f0000-0000-7000-8000-000000000122','{b}','{bSdk}','copilot-sdk',NULL,'copilot-sdk-stream','sdk-subagent-completed-b','subagent.completed','2026-08-26T00:00:06.0000000+00:00','not_captured'),
+                  ('018f0000-0000-7000-8000-000000000041','{a}','{aOtel}','claude-code','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/eeeeeeeeeeeeeeee','otel.span','2026-08-26T09:00:01.0000000+00:00','not_captured');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,parent_event_id,type,occurred_at,content_state) VALUES
+                  ('018f0000-0000-7000-8000-000000000131','{b}','{bSdk}','copilot-sdk','copilot-sdk-stream','sdk-tool-start-b',NULL,'tool.execution_start','2026-08-26T00:00:03.0000000+00:00','not_captured'),
+                  ('018f0000-0000-7000-8000-000000000132','{b}','{bSdk}','copilot-sdk','copilot-sdk-stream','sdk-tool-complete-b','018f0000-0000-7000-8000-000000000131','tool.execution_complete','2026-08-26T00:00:04.0000000+00:00','not_captured');
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,mcp_tool_name,mcp_server_hash,status,duration_ms,start_time,end_time,projected_at) VALUES
+                  (2,'cccccccccccccccccccccccccccccccc','dddddddddddddddd',NULL,0,'execute_tool','tool_call','Read','ReadMcp','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','ok',2000,'2026-08-26T00:00:02.0000000+00:00','2026-08-26T00:00:04.0000000+00:00','2026-08-26T00:00:04.0000000+00:00'),
+                  (3,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','eeeeeeeeeeeeeeee',NULL,1,'execute_tool','tool_call','Read','ReadMcp','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','ok',1000,'2026-08-26T00:00:03.0000000+00:00','2026-08-26T00:00:04.0000000+00:00','2026-08-26T00:00:04.0000000+00:00');
+                """;
+            seed.ExecuteNonQuery();
+            using (var refresh = c.BeginTransaction()) { LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-26T00:10:00Z")); refresh.Commit(); }
+            using var assignment = c.CreateCommand();
+            assignment.CommandText = $"""
+                INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('{LocalComparisonInputProjectionTests.RepositoryId}','Repository',1,'2026-08-26T00:10:00.0000000+00:00','2026-08-26T00:10:00.0000000+00:00');
+                INSERT INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES('{a}',1,'2026-08-26T00:10:00.0000000+00:00'),('{b}',1,'2026-08-26T00:10:00.0000000+00:00');
+                INSERT INTO session_repository_manual_overrides(session_id,state,repository_id,revision,updated_at) VALUES('{a}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-08-26T00:10:00.0000000+00:00'),('{b}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-08-26T00:10:00.0000000+00:00');
+                """;
+            assignment.ExecuteNonQuery();
+        }
         private SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path, Pooling = false }.ToString()); c.Open(); return c; } public void Dispose() { SqliteConnection.ClearAllPools(); Directory.Delete(dir, true); } }
 }
