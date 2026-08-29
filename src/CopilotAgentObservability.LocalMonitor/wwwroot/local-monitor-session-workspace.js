@@ -14,7 +14,9 @@
   const TOKEN_KEYS = ["authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points"];
   const ACTIVITY_KEYS = ["skill", "tool", "subagent", "error", "retry"];
   const SOURCES = new Set(["copilot-sdk", "copilot-cli", "vscode", "hook-unknown", "claude-code"]);
-  const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map(), staleAttempted: false };
+  const CURSOR = /^[A-Za-z0-9_-]{159}$/;
+  const ITEM_KEYS = ["node_id", "execution_id", "parent_node_id", "relationship_authority", "kind", "name", "lifecycle", "status", "timing", "activity", "tokens", "child_count", "has_more_children", "collapsed_children", "content_parts", "source_references"];
+  const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map() };
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -27,6 +29,52 @@
   const scalarFact = (value, key, maximum = null) => exact(value, ["state", key]) && FACT_STATES.has(value.state)
     && (value.state === "recorded" ? nonnegative(value[key]) && (maximum === null || value[key] <= maximum) : value[key] === null);
   const countFact = value => scalarFact(value, "count");
+
+  function timelineItem(value, executionId) {
+    return exact(value, ITEM_KEYS) && NODE.test(value.node_id) && value.execution_id === executionId
+      && (value.parent_node_id === null || NODE.test(value.parent_node_id))
+      && oneOf(value.relationship_authority, ["exact", "explicit", "unknown"])
+      && typeof value.kind === "string" && value.kind.length > 0
+      && exact(value.name, ["state", "text"]) && FACT_STATES.has(value.name.state)
+      && (value.name.state === "recorded" ? typeof value.name.text === "string" && value.name.text.length > 0 : value.name.text === null)
+      && oneOf(value.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
+      && oneOf(value.status, ["active", "completed", "failed", "unknown"])
+      && timing(value.timing, value.status, true) && activity(value.activity) && tokens(value.tokens)
+      && nonnegative(value.child_count) && value.child_count <= 4096 && typeof value.has_more_children === "boolean"
+      && exact(value.collapsed_children, ["state", "count"]) && oneOf(value.collapsed_children.state, ["complete", "partial", "unknown"])
+      && nonnegative(value.collapsed_children.count) && Array.isArray(value.content_parts)
+      && value.content_parts.every(part => oneOf(part, ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"]))
+      && exact(value.source_references, ["state", "references"]) && FACT_STATES.has(value.source_references.state)
+      && Array.isArray(value.source_references.references);
+  }
+
+  function validateTimeline(page, executionId, parentNodeId) {
+    if (!exact(page, ["schema_version", "workspace_revision", "session_id", "execution_id", "parent_node_id", "items", "next_cursor"])
+        || page.schema_version !== "local-monitor-session-timeline.response.v2" || page.workspace_revision !== state.revision
+        || page.session_id !== root.dataset.sessionId || page.execution_id !== executionId || page.parent_node_id !== parentNodeId
+        || !Array.isArray(page.items) || page.items.length > 200 || !page.items.every(item => timelineItem(item, executionId))
+        || page.next_cursor !== null && !CURSOR.test(page.next_cursor)) throw new TypeError("invalid timeline");
+    return page;
+  }
+
+  function validateNode(detail, nodeId, expectedExecutionId) {
+    if (!exact(detail, ["schema_version", "workspace_revision", "session_id", "execution", "node", "parent_path", "related", "content"])
+        || detail.schema_version !== "local-monitor-session-node.response.v2" || detail.workspace_revision !== state.revision
+        || detail.session_id !== root.dataset.sessionId
+        || !exact(detail.execution, ["execution_id", "node_id", "latest", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
+        || !UUID_V7.test(detail.execution.execution_id) || !NODE.test(detail.execution.node_id)
+        || typeof detail.execution.latest !== "boolean" || !timing(detail.execution.timing, detail.execution.status, true)
+        || !tokens(detail.execution.tokens) || !activity(detail.execution.activity) || !nonnegative(detail.execution.child_count)
+        || !exact(detail.node, [...ITEM_KEYS, "technical_references", "metadata"])
+        || !timelineItem(Object.fromEntries(ITEM_KEYS.map(key => [key, detail.node[key]])), detail.execution.execution_id)
+        || detail.node.node_id !== nodeId || expectedExecutionId && detail.execution.execution_id !== expectedExecutionId
+        || !Array.isArray(detail.parent_path) || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
+        || !exact(detail.related, ["retry", "recovery", "children"])
+        || ![...detail.related.retry, ...detail.related.recovery, ...detail.related.children].every(item => timelineItem(item, detail.execution.execution_id))
+        || !exact(detail.content, ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"])
+        || !Object.values(detail.content).every(value => exact(value, ["state", "available"]) && typeof value.available === "boolean")) throw new TypeError("invalid node");
+    return detail;
+  }
 
   function tokens(value) {
     if (!(exact(value, TOKEN_KEYS) && oneOf(value.authority, ["session_run", "llm_span", "mixed", "none"])
@@ -193,16 +241,27 @@
 
   const requestUrl = (path, parameters) => `${path}?${new URLSearchParams(parameters)}`;
 
-  async function requestJson(url, exactTarget) {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
-    if (response.status === 409 && !state.staleAttempted) {
-      state.staleAttempted = true;
-      await load(true, false);
-      state.executionState.clear();
-      return exactTarget();
+  async function requestJson(urlFactory, attempted = false) {
+    const response = await fetch(urlFactory(), { headers: { Accept: "application/json" } });
+    if (response.status === 409 && !attempted) {
+      const error = await response.json().catch(() => null);
+      if (error?.error === "workspace_snapshot_stale") {
+        const previous = state.revision;
+        await refreshSummary();
+        if (state.revision === previous) throw new Error("Session revision did not advance");
+        return requestJson(urlFactory, true);
+      }
     }
     if (!response.ok) throw new Error("Session detail unavailable");
     return JSON.parse(await response.text());
+  }
+
+  async function refreshSummary() {
+    const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error("Session summary unavailable");
+    const summary = validate(JSON.parse(await response.text()));
+    state.executionState.clear(); state.summary = summary; state.revision = summary.workspace_revision;
+    render(summary, false);
   }
 
   function executionMemory(executionId) {
@@ -212,15 +271,13 @@
     return state.executionState.get(executionId);
   }
 
-  async function loadTimeline(executionId, parentNodeId = null, after = null) {
+  async function loadTimeline(executionId, parentNodeId = null, after = null, attempted = false) {
     const parameters = { workspace_revision: state.revision, execution_id: executionId };
     if (parentNodeId) parameters.parent_node_id = parentNodeId;
     if (after) parameters.after = after;
     parameters.limit = "100";
-    const exactTarget = () => loadTimeline(executionId, parentNodeId, after);
-    const page = await requestJson(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/timeline`, parameters), exactTarget);
-    if (page.workspace_revision !== state.revision || page.execution_id !== executionId || page.parent_node_id !== parentNodeId
-        || !Array.isArray(page.items)) throw new TypeError("invalid timeline");
+    const urlFactory = () => { parameters.workspace_revision = state.revision; return requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/timeline`, parameters); };
+    const page = validateTimeline(await requestJson(urlFactory, attempted), executionId, parentNodeId);
     const memory = executionMemory(executionId);
     const key = parentNodeId ?? "root";
     const existing = after ? memory.pages.get(key)?.items ?? [] : [];
@@ -246,6 +303,14 @@
       row.setAttribute("aria-expanded", node.child_count > 0 ? String(memory.expanded.has(node.node_id)) : "false");
       const label = node.name?.state === "recorded" ? node.name.text : node.kind;
       row.append(el("strong", null, label), el("span", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+      if (node.timing.state === "recorded" && node.timing.started_at && execution.timing.state === "recorded" && execution.timing.started_at) {
+        const start = Date.parse(node.timing.started_at) - Date.parse(execution.timing.started_at);
+        const duration = node.timing.duration_ms ?? Math.max(0, Date.now() - Date.parse(node.timing.started_at));
+        const extent = Math.max(1, execution.timing.duration_ms ?? duration, start + duration);
+        const bar = el("span", "local-monitor-session-time-bar"); bar.dataset.timelineTimeBar = "";
+        bar.style.marginLeft = `${Math.max(0, start) / extent * 100}%`; bar.style.width = `${Math.max(1, duration / extent * 100)}%`;
+        wrapper.append(bar);
+      }
       row.addEventListener("click", async () => {
         if (node.child_count > 0) {
           if (memory.expanded.has(node.node_id)) memory.expanded.delete(node.node_id);
@@ -275,7 +340,12 @@
   }
 
   function renderExecutions() {
-    const executions = root.querySelector("[data-session-executions]"); executions.replaceChildren();
+    const executions = root.querySelector("[data-session-executions]");
+    for (const section of executions.querySelectorAll("[data-execution-id]")) {
+      const scroll = section.querySelector("[data-execution-scroll]");
+      if (scroll) executionMemory(section.dataset.executionId).scrollTop = scroll.scrollTop;
+    }
+    executions.replaceChildren();
     for (const execution of state.summary.executions) {
       const memory = executionMemory(execution.execution_id);
       const section = el("section", "local-monitor-session-execution"); section.dataset.executionId = execution.execution_id;
@@ -288,17 +358,20 @@
         renderExecutions();
       });
       section.append(toggle);
-      if (memory.open) section.append(renderNodes(execution, memory, null, 0));
+      if (memory.open) {
+        const scroll = el("div", "local-monitor-session-execution-scroll"); scroll.dataset.executionScroll = "";
+        scroll.append(renderNodes(execution, memory, null, 0)); scroll.addEventListener("scroll", () => { memory.scrollTop = scroll.scrollTop; }); section.append(scroll);
+        requestAnimationFrame(() => { scroll.scrollTop = memory.scrollTop; });
+      }
       executions.append(section);
     }
   }
 
-  async function selectNode(executionId, nodeId, push) {
-    const exactTarget = () => selectNode(executionId, nodeId, false);
-    const detail = await requestJson(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`,
-      { workspace_revision: state.revision }), exactTarget);
-    if (detail.workspace_revision !== state.revision || detail.node?.node_id !== nodeId
-        || detail.node.execution_id !== executionId) return fallbackSelection(push);
+  async function selectNode(executionId, nodeId, push, attempted = false) {
+    const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
+    const rawDetail = await requestJson(urlFactory, attempted);
+    const detail = validateNode(rawDetail, nodeId, executionId);
+    executionId = detail.execution.execution_id;
     state.selectedExecutionId = executionId; state.selectedNodeId = nodeId;
     const memory = executionMemory(executionId); memory.open = true;
     const path = (detail.parent_path ?? []).filter(parent => ["exact", "explicit"].includes(parent.relationship_authority));
@@ -309,21 +382,37 @@
     inspector.replaceChildren(el("h2", null, detail.node.name?.state === "recorded" ? detail.node.name.text : detail.node.kind),
       el("p", null, `${detail.node.kind} · ${detail.node.status} · ${timingLabel(detail.node)}`));
     if (push) window.LocalMonitorV1History.push({ execution: executionId, node: nodeId });
+    else if (!window.LocalMonitorV1History.current().execution) window.LocalMonitorV1History.replace({ execution: executionId, node: nodeId });
     renderExecutions();
   }
 
-  function fallbackSelection(push) {
+  function fallbackSelection(replace) {
     state.selectedExecutionId = null; state.selectedNodeId = null;
-    if (push) window.LocalMonitorV1History.push({ execution: null, node: null });
+    renderOverview(state.summary);
+    if (replace) window.LocalMonitorV1History.replace({ execution: null, node: null });
   }
 
   async function applyRoute(route) {
     if (!state.summary) return;
-    if (route.execution && route.node) await selectNode(route.execution, route.node, false);
-    else fallbackSelection(false);
+    if (route.node) {
+      try { await selectNode(route.execution ?? null, route.node, false); }
+      catch { fallbackSelection(true); }
+    } else fallbackSelection(false);
   }
 
-  function render(summary) {
+  function renderOverview(summary) {
+    const session = summary.session;
+    const overview = root.querySelector("[data-session-overview]"); overview.replaceChildren(el("h2", null, "Session overview"));
+    overview.append(el("h3", null, "最初の指示"), el("p", null, session.instruction.label || "記録されていません"));
+    overview.append(el("p", null, session.instruction.additional_count === null
+      ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
+    overview.append(el("p", null, `状態 ${session.status} · 実行 ${format(summary.executions.length)}件`));
+    const coverage = el("ul"); for (const item of session.capture.coverage) coverage.append(el("li", null, `${item.signal_family}: ${item.state}`));
+    overview.append(el("h3", null, "取得範囲"), coverage);
+    const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`)); overview.append(technical);
+  }
+
+  function render(summary, openLatest = true) {
     const session = summary.session;
     root.querySelector("[data-session-breadcrumb]").textContent = session.instruction.label || "Session";
     const context = root.querySelector("[data-session-context-content]");
@@ -377,18 +466,9 @@
       renderFact(card.appendChild(el("div")), session.activity[key]); summaryRoot.append(card);
     }
 
-    for (const execution of summary.executions) executionMemory(execution.execution_id).open = execution.latest;
+    for (const execution of summary.executions) if (openLatest) executionMemory(execution.execution_id).open = execution.latest;
     renderExecutions();
-
-    const overview = root.querySelector("[data-session-overview]"); overview.replaceChildren(el("h2", null, "Session overview"));
-    overview.append(el("h3", null, "最初の指示"), el("p", null, session.instruction.label || "記録されていません"));
-    overview.append(el("p", null, session.instruction.additional_count === null
-      ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
-    overview.append(el("p", null, `状態 ${session.status} · 実行 ${format(summary.executions.length)}件`));
-    const coverage = el("ul");
-    for (const item of session.capture.coverage) coverage.append(el("li", null, `${item.signal_family}: ${item.state}`));
-    overview.append(el("h3", null, "取得範囲"), coverage);
-    const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`)); overview.append(technical);
+    renderOverview(summary);
   }
 
   async function load(refresh = false, applyCurrentRoute = true) {
@@ -399,8 +479,8 @@
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
       const route = window.LocalMonitorV1History.current();
-      if (applyCurrentRoute && route.execution && route.node) await applyRoute(route);
-      else {
+      if (applyCurrentRoute && route.node) await applyRoute(route);
+      else if (applyCurrentRoute) {
         const latest = summary.executions.find(execution => execution.latest);
         if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
       }

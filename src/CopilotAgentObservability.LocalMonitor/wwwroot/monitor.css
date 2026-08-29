@@ -30,6 +30,8 @@
 .local-monitor-session-timeline-node span { color: var(--muted, #777); }
 .local-monitor-session-unknown-group { margin-top: 8px; padding: 8px; border: 1px dashed var(--border, #aaa); }
 .local-monitor-session-load-more { margin: 8px 0 0 20px; }
+.local-monitor-session-execution-scroll { max-height: 420px; overflow: auto; }
+.local-monitor-session-time-bar { display: block; height: 4px; min-width: 2px; border-radius: 2px; background: var(--accent, #526de8); }
 @media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--surface, white); } }
 
 /* Issue #95: contextual estimated-cost surface. */
