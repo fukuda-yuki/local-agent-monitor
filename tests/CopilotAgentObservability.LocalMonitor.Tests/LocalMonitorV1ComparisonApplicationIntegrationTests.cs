@@ -7,6 +7,84 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
 {
+    [Theory]
+    [InlineData("source", 17)]
+    [InlineData("adapter", 17)]
+    [InlineData("source", 63)]
+    [InlineData("adapter", 63)]
+    [InlineData("source", 64)]
+    [InlineData("adapter", 64)]
+    public async Task ProductionPreviewAndCreateEnforceIndependentVersionBoundaries(string dimension, int count)
+    {
+        using var db = new Database();
+        using var storeDb = new Database(); storeDb.Initialize();
+        const string a = "018f0000-0000-7000-8000-000000000001", b = "018f0000-0000-7000-8000-000000000002";
+        db.InitializeProductionScope(a, b, archiveSecond: false);
+        db.SeedVersions(a, dimension, count);
+        var clock = new FixedClock();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(db.Path,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority, timeProvider: clock);
+        var store = new SqliteLocalComparisonStore(storeDb.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, store, clock, cursorKey: new byte[32]);
+        var body = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":true}}");
+
+        var preview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, body, "", default);
+        if (count == 64)
+        {
+            Assert.Equal(409, preview.StatusCode);
+            Assert.Equal("{\"error\":\"workspace_too_large\"}", Encoding.UTF8.GetString(preview.Entity));
+            return;
+        }
+
+        Assert.Equal(200, preview.StatusCode);
+        using var json = JsonDocument.Parse(preview.Entity);
+        var metadata = json.RootElement.GetProperty("included")[0].GetProperty("metadata");
+        var versions = metadata.GetProperty(dimension == "source" ? "source_application_versions" : "adapter_versions").EnumerateArray().Select(static item => item.GetString()).ToArray();
+        Assert.Equal(count, versions.Length);
+        Assert.Contains("V1+meta", versions);
+        Assert.All(versions, static value => Assert.InRange(value!.Length, 1, 256));
+        Assert.Empty(metadata.GetProperty(dimension == "source" ? "adapter_versions" : "source_application_versions").EnumerateArray());
+        var createBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":true,\"selection_sha256\":\"{json.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{json.RootElement.GetProperty("preview_revision").GetString()}\"}}");
+        var created = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
+        Assert.True(created.StatusCode == 201, Encoding.UTF8.GetString(created.Entity));
+        var recreated = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
+        Assert.Equal(201, recreated.StatusCode);
+        using var createdJson = JsonDocument.Parse(created.Entity); using var recreatedJson = JsonDocument.Parse(recreated.Entity);
+        var frozen = store.Read(LocalComparisonInputProjectionTests.RepositoryId, createdJson.RootElement.GetProperty("comparison_id").GetString()!, default).Snapshot!;
+        var refrozen = store.Read(LocalComparisonInputProjectionTests.RepositoryId, recreatedJson.RootElement.GetProperty("comparison_id").GetString()!, default).Snapshot!;
+        var row = frozen.Results.Single(item => item.RowKey == (dimension == "source" ? "source_versions" : "adapter_versions"));
+        var rerow = refrozen.Results.Single(item => item.RowKey == row.RowKey);
+        var summary = frozen.Evidence.Single(item => item.ResultOrdinal == row.ResultOrdinal && item.Cohort == "a").ConsumedValue;
+        var resummary = refrozen.Evidence.Single(item => item.ResultOrdinal == rerow.ResultOrdinal && item.Cohort == "a").ConsumedValue;
+        Assert.Matches($"^set-sha256:[0-9a-f]{{64}}:count:{count}$", summary);
+        Assert.Equal(summary, resummary);
+    }
+
+    [Fact]
+    public async Task ProductionInvalidLegacyVersionTokenFailsOnlyThatTargetClosed()
+    {
+        using var db = new Database();
+        const string a = "018f0000-0000-7000-8000-000000000001", b = "018f0000-0000-7000-8000-000000000002";
+        db.InitializeProductionScope(a, b, archiveSecond: false);
+        db.SeedVersion(a, "source", "V" + new string('x', 256));
+        var clock = new FixedClock(); var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(db.Path,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority), SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock), skillRegistryAuthority: authority, timeProvider: clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, new SqliteLocalComparisonStore(db.Path, clock), clock, cursorKey: new byte[32]);
+        var body = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":true}}");
+
+        var response = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, body, "", default);
+        Assert.Equal(200, response.StatusCode);
+        using var json = JsonDocument.Parse(response.Entity);
+        Assert.Equal("projection_unavailable", json.RootElement.GetProperty("excluded")[0].GetProperty("reason").GetString());
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("excluded")[0].GetProperty("metadata").GetProperty("source_application_versions").ValueKind);
+    }
+
     [Fact]
     public async Task ProductionInitialSessionContributorFailureBecomesTargetProjectionExclusion()
     {
@@ -311,14 +389,16 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
     private sealed class DetailFailureInput(string error) : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) => throw new LocalWorkspaceSessionDetailException(error); }
     private sealed class FixedClock : TimeProvider { public override DateTimeOffset GetUtcNow() => new(2026, 8, 29, 0, 0, 0, TimeSpan.Zero); }
     private sealed class Database : IDisposable { private readonly string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"comparison-app-{Guid.NewGuid():N}"); internal Database() { Directory.CreateDirectory(dir); Path = System.IO.Path.Combine(dir, "db.sqlite"); } internal string Path { get; } internal void Initialize() { new SqliteSessionStore(Path).CreateSchema(); using var c = Open(); LocalRepositoryCatalogSchemaV1.Ensure(c); LocalArchiveSchemaV1.Ensure(c); LocalWorkspaceProjectionSchemaV1.Ensure(c, DateTimeOffset.UnixEpoch); LocalComparisonSchemaV1.Ensure(c); using var cmd = c.CreateCommand(); cmd.CommandText = $"INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('{LocalComparisonInputProjectionTests.RepositoryId}','Repository',1,'2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');"; cmd.ExecuteNonQuery(); }
-        internal void InitializeProductionScope(string active, string archived) { new SqliteSessionStore(Path).CreateSchema(); using var c = Open(); using (var skills = c.BeginTransaction()) { MonitorSchemaMigrator.ApplyBaseSchema(c, skills); CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(c, skills); SkillProjectionSchemaV1.Ensure(c, skills); skills.Commit(); } var authority = FixedSkillRegistryGenerationAuthority.Load(); LocalRepositoryCatalogSchemaV1.Ensure(c); LocalWorkspaceProjectionSchemaV1.Ensure(c, DateTimeOffset.Parse("2026-08-29T00:00:00Z"), authority); LocalArchiveSchemaV1.Ensure(c); LocalComparisonSchemaV1.Ensure(c); using (var seed = c.CreateCommand()) { seed.CommandText = $"INSERT INTO sessions VALUES('{active}','completed','partial',NULL,NULL,NULL,NULL,'2026-08-29T00:00:00.0000000+00:00','not_captured','2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00'),('{archived}','completed','partial',NULL,NULL,NULL,NULL,'2026-08-29T00:00:00.0000000+00:00','not_captured','2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');"; seed.ExecuteNonQuery(); } using (var refresh = c.BeginTransaction()) { LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-29T00:00:00Z")); refresh.Commit(); } using (var assignments = c.CreateCommand()) { assignments.CommandText = $"""
+        internal void InitializeProductionScope(string active, string archived, bool archiveSecond = true) { new SqliteSessionStore(Path).CreateSchema(); using var c = Open(); using (var skills = c.BeginTransaction()) { MonitorSchemaMigrator.ApplyBaseSchema(c, skills); CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(c, skills); SkillProjectionSchemaV1.Ensure(c, skills); skills.Commit(); } var authority = FixedSkillRegistryGenerationAuthority.Load(); LocalRepositoryCatalogSchemaV1.Ensure(c); LocalWorkspaceProjectionSchemaV1.Ensure(c, DateTimeOffset.Parse("2026-08-29T00:00:00Z"), authority); LocalArchiveSchemaV1.Ensure(c); LocalComparisonSchemaV1.Ensure(c); using (var seed = c.CreateCommand()) { seed.CommandText = $"INSERT INTO sessions VALUES('{active}','completed','partial',NULL,NULL,NULL,NULL,'2026-08-29T00:00:00.0000000+00:00','not_captured','2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00'),('{archived}','completed','partial',NULL,NULL,NULL,NULL,'2026-08-29T00:00:00.0000000+00:00','not_captured','2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');"; seed.ExecuteNonQuery(); } using (var refresh = c.BeginTransaction()) { LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-29T00:00:00Z")); refresh.Commit(); } using (var assignments = c.CreateCommand()) { assignments.CommandText = $"""
             INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('{LocalComparisonInputProjectionTests.RepositoryId}','Repository',1,'2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');
             INSERT INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES('{active}',1,'2026-08-29T00:00:00.0000000+00:00'),('{archived}',1,'2026-08-29T00:00:00.0000000+00:00');
             INSERT INTO session_repository_manual_overrides(session_id,state,repository_id,revision,updated_at) VALUES('{active}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-08-29T00:00:00.0000000+00:00'),('{archived}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-08-29T00:00:00.0000000+00:00');
-            """; assignments.ExecuteNonQuery(); } using var cmd = c.CreateCommand(); cmd.CommandText = $"""
+            """; assignments.ExecuteNonQuery(); } if (!archiveSecond) return; using var cmd = c.CreateCommand(); cmd.CommandText = $"""
             INSERT INTO local_archive_current(target_kind,target_id,state,revision,archived_at,updated_at) VALUES('session','{archived}','archived',1,'2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');
             """; cmd.ExecuteNonQuery(); }
         internal void ArchiveRepository() { using var c = Open(); using var cmd = c.CreateCommand(); cmd.CommandText = $"INSERT INTO local_archive_current(target_kind,target_id,state,revision,archived_at,updated_at) VALUES('repository','{LocalComparisonInputProjectionTests.RepositoryId}','archived',1,'2026-08-29T00:00:00.0000000+00:00','2026-08-29T00:00:00.0000000+00:00');"; cmd.ExecuteNonQuery(); }
         internal void CorruptProjection(string sessionId) { using var c = Open(); using var cmd = c.CreateCommand(); cmd.CommandText = "PRAGMA ignore_check_constraints=ON; UPDATE local_workspace_sessions SET label_state='invalid_owner_state' WHERE session_id=$session_id; PRAGMA ignore_check_constraints=OFF;"; cmd.Parameters.AddWithValue("$session_id", sessionId); cmd.ExecuteNonQuery(); }
+        internal void SeedVersions(string sessionId, string dimension, int count) { for (var index = 0; index < count; index++) SeedVersion(sessionId, dimension, index == 0 ? "V1+meta" : index == count - 1 ? char.ToUpperInvariant(dimension[0]) + new string('x', 253) + "+1" : $"{dimension}-{index:D3}", index); }
+        internal void SeedVersion(string sessionId, string dimension, string version, int index = 0) { using var c = Open(); using var cmd = c.CreateCommand(); cmd.CommandText = $"INSERT INTO session_events(event_id,session_id,source_adapter,source_event_id,type,occurred_at,content_state,{(dimension == "source" ? "source_application_version" : "adapter_version")}) VALUES($event,$session,'compare-version-test',$source,'version.fact','2026-08-29T00:00:00.0000000+00:00','not_captured',$version);"; cmd.Parameters.AddWithValue("$event", $"018f0000-0000-7000-8000-{index + 0x100:x12}"); cmd.Parameters.AddWithValue("$session", sessionId); cmd.Parameters.AddWithValue("$source", $"{dimension}-{index:D3}"); cmd.Parameters.AddWithValue("$version", version); cmd.ExecuteNonQuery(); }
         private SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path, Pooling = false }.ToString()); c.Open(); return c; } public void Dispose() { SqliteConnection.ClearAllPools(); Directory.Delete(dir, true); } }
 }

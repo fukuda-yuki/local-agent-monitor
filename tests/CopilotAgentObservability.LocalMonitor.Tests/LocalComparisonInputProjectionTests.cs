@@ -303,6 +303,30 @@ public sealed class LocalComparisonInputProjectionTests
         Assert.DoesNotContain("1", fact.Conditions["source_versions"].Values);
     }
 
+    [Fact]
+    public void WorkspaceAdapterAdmitsSeventeenVersionsAndMapsProvedEmptyToExplicitZero()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var versions = Enumerable.Range(0, 17).Select(index => $"source-{index:D2}").ToArray();
+        var comparison = new LocalWorkspaceComparisonDetailContribution(
+            detail.Nodes, versions, [], detail.CanonicalRevisionInput!, detail.SkillRegistryGenerationIdentity!);
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, comparison, new string('a', 64), false);
+
+        Assert.Equal(17, fact.Conditions["source_versions"].Values.Count);
+        Assert.Equal(LocalComparisonFactState.Recorded, fact.Conditions["source_versions"].State);
+        Assert.Empty(fact.Conditions["adapter_versions"].Values);
+        Assert.Equal(LocalComparisonFactState.ExplicitZero, fact.Conditions["adapter_versions"].State);
+        Assert.NotNull(fact.Conditions["adapter_versions"].Reference);
+        LocalComparisonApplicationValidation.ValidateSession(session.RepositoryId!, fact);
+        var decoded = LocalComparisonFactFrame.Decode(LocalComparisonFactFrame.Create(fact));
+        Assert.Equal(fact.Conditions["source_versions"].State, decoded.Conditions["source_versions"].State);
+        Assert.Equal(fact.Conditions["source_versions"].Values, decoded.Conditions["source_versions"].Values);
+        Assert.Equal(fact.Conditions["adapter_versions"].State, decoded.Conditions["adapter_versions"].State);
+        Assert.Empty(decoded.Conditions["adapter_versions"].Values);
+    }
+
     internal static LocalRepositoryScopeSessionSnapshot ScopeSession(string sessionId, bool archived)
     {
         var activity = new LocalWorkspaceActivityFacts(Fact(0), Fact(1), Fact(1), new("source_unsupported", null), new("not_observed", null));

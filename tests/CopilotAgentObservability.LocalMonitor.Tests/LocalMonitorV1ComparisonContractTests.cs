@@ -195,7 +195,7 @@ public sealed class LocalMonitorV1ComparisonContractTests
             ("local-monitor-comparison-create.response", 4, "f4e1825ddb9cece844c6a0725eff773ff8a7cdefe317245d462eb8915d01f631"),
             ("local-monitor-comparison-evidence.response", 10, "5e731008b08de85443e9cb7e160e7d1349a7be4d436cfdf5887f0e00ad391372"),
             ("local-monitor-comparison-preview.request", 3, "6b15153afc39f33ca276423a23bef7710479e227a603cad0379c4625a6a39967"),
-            ("local-monitor-comparison-preview.response", 38, "4f57b445d3a6755a6d78d2128c194c4d8df3f0123dbb76ee18cbad28d31307bc"),
+            ("local-monitor-comparison-preview.response", 40, "3c8fa7bcadcccb8d00531010a4a637f20eb3358f6a7931e570c617f2ecc2982a"),
             ("local-monitor-comparison-read.response", 25, "bca8f7f018b6c23d1e6e68e12bbd2557fcc27d3124e9b3e3616f04ad973f23ee"),
             ("local-monitor-comparison-rows.response", 16, "0c7749b84abf4705832c454308a8d60604aeaaf9626e4ce4fdaf0381a27cab4b"),
         ];

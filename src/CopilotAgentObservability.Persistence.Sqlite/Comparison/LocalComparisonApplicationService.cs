@@ -535,8 +535,8 @@ internal sealed class LocalComparisonApplicationService
         };
         results.Add(LocalComparisonStoredResult.Create(
             comparisonId, ordinal, 9, "condition", key, values));
-        AddConditionEvidence(comparisonId, ordinal, "a", input.CohortA, a, evidence);
-        AddConditionEvidence(comparisonId, ordinal, "b", input.CohortB, b, evidence);
+        AddConditionEvidence(comparisonId, ordinal, key, "a", input.CohortA, a, evidence);
+        AddConditionEvidence(comparisonId, ordinal, key, "b", input.CohortB, b, evidence);
     }
 
     private static void AddMetricAvailabilityRow(
@@ -826,6 +826,7 @@ internal sealed class LocalComparisonApplicationService
     private static void AddConditionEvidence(
         string comparisonId,
         int resultOrdinal,
+        string key,
         string cohort,
         IReadOnlyList<LocalComparisonSessionFact> sessions,
         IReadOnlyList<LocalComparisonConditionFact> facts,
@@ -836,13 +837,13 @@ internal sealed class LocalComparisonApplicationService
             ? destination[^1].EvidenceOrdinal + 1
             : 0;
         AddEvidence(comparisonId, resultOrdinal, "value", cohort, sessions,
-            facts.Select(static item =>
+            facts.Select(item =>
                 (IReadOnlyList<LocalComparisonFactEvidence>)Array.AsReadOnly(new[]
                 {
                     new LocalComparisonFactEvidence(
                         item.State,
                         item.Reference,
-                        Available(item) ? item.Values.Count == 0 ? "none" : string.Join(';', item.Values) : null),
+                        Available(item) ? ConditionEvidenceValue(key, item.Values) : null),
                 })).ToArray(), destination, ref evidenceOrdinal);
     }
 
@@ -901,6 +902,20 @@ internal sealed class LocalComparisonApplicationService
                     reference?.RevisionSha256));
             }
         }
+    }
+
+    private static string ConditionEvidenceValue(string key, IReadOnlyList<string> values)
+    {
+        if (key is not ("source_versions" or "adapter_versions"))
+            return values.Count == 0 ? "none" : string.Join(';', values);
+        using var stream = new MemoryStream();
+        LocalComparisonSelectionFrame.WriteFrame(stream,
+            "copilot-agent-observability/local-comparison-version-condition-evidence/v1");
+        LocalComparisonSelectionFrame.WriteFrame(stream, key);
+        foreach (var value in values.Order(StringComparer.Ordinal))
+            LocalComparisonSelectionFrame.WriteFrame(stream, value);
+        var digest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(stream.ToArray()));
+        return $"set-sha256:{digest}:count:{values.Count.ToString(CultureInfo.InvariantCulture)}";
     }
 
     private static bool Available(LocalComparisonConditionFact fact) =>
@@ -1115,8 +1130,8 @@ internal static class LocalComparisonApplicationValidation
                 throw new ArgumentException("local_comparison_input_named_family_invalid");
             ValidateFamily(matches[0], session.SessionId);
         }
-        foreach (var condition in session.Conditions.Values)
-            ValidateCondition(condition, session.SessionId);
+        foreach (var condition in session.Conditions)
+            ValidateCondition(condition.Key, condition.Value, session.SessionId);
     }
 
     private static void ValidateTarget(
@@ -1234,10 +1249,13 @@ internal static class LocalComparisonApplicationValidation
     }
 
     private static void ValidateCondition(
+        string key,
         LocalComparisonConditionFact condition,
         string sessionId)
     {
-        if (condition is null || condition.Values is null || condition.Values.Count > 16)
+        var maximumCount = key is "source_versions" or "adapter_versions" ? 63 : 16;
+        var maximumTokenBytes = key is "source_versions" or "adapter_versions" ? 256 : 512;
+        if (condition is null || condition.Values is null || condition.Values.Count > maximumCount)
             throw new ArgumentException("local_comparison_input_condition_invalid");
         if (condition.Reference is not null)
             ValidateReference(condition.Reference, sessionId);
@@ -1247,7 +1265,9 @@ internal static class LocalComparisonApplicationValidation
             || !available && condition.Values.Count != 0
             || condition.State == LocalComparisonFactState.Recorded && condition.Values.Count == 0
             || condition.State == LocalComparisonFactState.ExplicitZero && condition.Values.Count != 0
-            || condition.Values.Any(static value => !LocalComparisonBoundedText.IsToken(value, 512))
+            || condition.Values.Any(value => key is "source_versions" or "adapter_versions"
+                ? !LocalComparisonVersionToken.IsValid(value)
+                : !LocalComparisonBoundedText.IsToken(value, maximumTokenBytes))
             || condition.Values.Distinct(StringComparer.Ordinal).Count() != condition.Values.Count)
         {
             throw new ArgumentException("local_comparison_input_condition_invalid");
@@ -1525,7 +1545,7 @@ internal static class LocalComparisonFactFrame
                 Reject();
             var state = ReadState(ref reader);
             var reference = ReadReference(ref reader);
-            var count = ReadCount(ref reader, 16);
+            var count = ReadCount(ref reader, expectedKey is "source_versions" or "adapter_versions" ? 63 : 16);
             var values = new string[count];
             for (var index = 0; index < count; index++)
                 values[index] = reader.Read();

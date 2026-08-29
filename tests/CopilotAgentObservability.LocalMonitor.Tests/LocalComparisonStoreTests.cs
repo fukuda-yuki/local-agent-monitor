@@ -7,6 +7,24 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalComparisonStoreTests
 {
     [Fact]
+    public void FrozenLegacyV1FactFrameDecodesDirectArchiveWithoutRepositoryArchive()
+    {
+        const string frozenGzipBase64 = "H4sIAAAAAAACCt2YwW7UMBCGU1SgElttS9m2VyRuyNRZCQhVDzwE98jrzIK1biYaj0PL0+Mkm7RdcahED7WtyFFsy/4/jTP5nSzLrjQ2xiIL9RNqFrhyQK1aGWv49sKiVlZovG4UGYe1cOCcCfe10nzR5lmWfZD5t2L9eVUIqaUUX2Woiq6Sd+WR45YyjPuu/rOEOfbysTog0EgVVGPD8W+kjWuUhnLLMvY8FmRPPqieQu99le+XcvlFyEIsix9SXvbXp+3yH/unZ40yM3XjuWTcQO120F7kMq64HKLnBzSHcNNYow2Xf4BwWi//Z9fzjREjK5sa1bFW+heUBKpKDW0xoOnAxkFRanhHWyll5akHTIZsDjegfR8zjb7mdEJ2jRWEFOIpNbI5I9oy2B6bGNip25gAZeo2mLoEt+Q751e9hy0dK+LE6N4AEVJqUARMt4lBnU/7sDs3WWCoEiNcTIRrZWxyeHcBHA8pqRmukyGZjLYrrfCdDEklTbizbku2EPgIbIpf8Ze9S4lLcz/RfucbI9R9MGa7CLW/duhJg4vmh9LwNm5Vi1ZZD6HhVX+YioxiNoieIOYDVRmSUyczMprFjvoJ60hVqmGgSLlOd+VPYLPRndZBcVxQb+9LH4D+AlqViETJGAAA";
+        using var compressed = new MemoryStream(Convert.FromBase64String(frozenGzipBase64));
+        using var gzip = new System.IO.Compression.GZipStream(compressed, System.IO.Compression.CompressionMode.Decompress);
+        using var frame = new MemoryStream(); gzip.CopyTo(frame);
+
+        var decoded = LocalComparisonFactFrame.Decode(frame.ToArray());
+
+        Assert.Equal(SessionA, decoded.SessionId);
+        Assert.True(decoded.IsArchived);
+        Assert.True(decoded.IsArchiveInclusionExplicit);
+        Assert.False(decoded.IsAssignedRepositoryArchived);
+        Assert.Equal(["source_versions-value"], decoded.Conditions["source_versions"].Values);
+        Assert.Equal(["adapter_versions-value"], decoded.Conditions["adapter_versions"].Values);
+    }
+
+    [Fact]
     public void AcceptReadAndCleanup_PreserveFrozenIdentityAndDeterministicExpiry()
     {
         using var database = new ComparisonDatabase();

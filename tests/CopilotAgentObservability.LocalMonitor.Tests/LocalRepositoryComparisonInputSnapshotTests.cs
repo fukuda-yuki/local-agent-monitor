@@ -5,6 +5,48 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalRepositoryComparisonInputSnapshotTests
 {
+    [Theory]
+    [InlineData("source", 63, false)]
+    [InlineData("adapter", 63, false)]
+    [InlineData("source", 64, true)]
+    [InlineData("adapter", 64, true)]
+    public async Task ProductionComparisonVersionsEnforceIndependentCompleteBoundaries(string dimension, int count, bool tooLarge)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(
+            temp.DatabasePath, sessionId,
+            "018f0000-0000-7000-8000-000000000010",
+            "018f0000-0000-7000-8000-000000000020");
+        SeedVersions(temp.DatabasePath, sessionId, dimension, count);
+        var clock = new FixedClock();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority,
+            timeProvider: clock);
+
+        if (tooLarge)
+        {
+            var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+                await service.ReadComparisonInputAsync(new(LocalRepositoryScopeKind.All, null, ExactTargetSessionIds: [sessionId]), default));
+            Assert.Equal("workspace_too_large", error.Error);
+            return;
+        }
+
+        var snapshot = await service.ReadComparisonInputAsync(
+            new(LocalRepositoryScopeKind.All, null, ExactTargetSessionIds: [sessionId]), default);
+        var detail = Assert.Single(snapshot.Sessions).ComparisonDetail;
+        var actual = dimension == "source" ? detail.SourceApplicationVersions : detail.AdapterVersions;
+        Assert.Equal(63, actual.Count);
+        Assert.Contains(actual, static value => value.Length == 256);
+        Assert.Contains("V1+meta", actual);
+        Assert.Empty(dimension == "source" ? detail.AdapterVersions : detail.SourceApplicationVersions);
+    }
+
     [Fact]
     public async Task ProductionComparisonInputFreezesAllNamedSemanticFactsAndIndependentVersionsInOneRead()
     {
@@ -89,6 +131,36 @@ public sealed class LocalRepositoryComparisonInputSnapshotTests
         Assert.Equal(1, connectionCount);
         Assert.Equal(4, capabilityEntries);
         Assert.Equal(1, statements!.Count(statement => statement.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static void SeedVersions(string path, string sessionId, string dimension, int count)
+    {
+        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+        connection.Open();
+        using (var clear = connection.CreateCommand())
+        {
+            clear.CommandText = "UPDATE session_events SET source_application_version=NULL,adapter_version=NULL;";
+            clear.ExecuteNonQuery();
+        }
+        using var transaction = connection.BeginTransaction();
+        for (var index = 0; index < count; index++)
+        {
+            var token = index == count - 1
+                ? char.ToUpperInvariant(dimension[0]) + new string('x', 253) + "+1"
+                : index == 0 ? "V1+meta" : $"{dimension}-{index:D3}";
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = $"""
+                INSERT INTO session_events(event_id,session_id,source_adapter,source_event_id,type,occurred_at,content_state,{(dimension == "source" ? "source_application_version" : "adapter_version")})
+                VALUES($event_id,$session_id,'compare-version-test',$source_event_id,'version.fact','2026-08-29T00:00:00.0000000+00:00','not_captured',$version);
+                """;
+            command.Parameters.AddWithValue("$event_id", $"018f0000-0000-7000-8000-{index + 0x100:x12}");
+            command.Parameters.AddWithValue("$session_id", sessionId);
+            command.Parameters.AddWithValue("$source_event_id", $"{dimension}-{index:D3}");
+            command.Parameters.AddWithValue("$version", token);
+            command.ExecuteNonQuery();
+        }
+        transaction.Commit();
     }
 
     [Fact]

@@ -484,3 +484,15 @@ internal static class LocalComparisonBoundedText
         }
     }
 }
+
+internal static class LocalComparisonVersionToken
+{
+    internal static bool IsValid(string? value) =>
+        LocalComparisonBoundedText.IsText(value, 256)
+        && value![0] is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9'
+        && value.Skip(1).All(static character =>
+            character is >= 'A' and <= 'Z'
+            or >= 'a' and <= 'z'
+            or >= '0' and <= '9'
+            or '.' or '_' or '+' or '-');
+}

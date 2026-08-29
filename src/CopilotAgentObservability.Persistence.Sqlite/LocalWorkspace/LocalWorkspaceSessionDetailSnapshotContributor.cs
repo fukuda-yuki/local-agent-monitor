@@ -2727,18 +2727,30 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private static async Task<ComparisonVersions> ReadComparisonVersions(
         SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
     {
-        var sourceVersions = new List<string>();
-        var adapterVersions = new List<string>();
-        using var command = Command(c, t, """
-            SELECT version_kind,version FROM (
-              SELECT 'source' version_kind,source_application_version version FROM session_events WHERE session_id=$session_id
-              UNION SELECT 'adapter',adapter_version FROM session_events WHERE session_id=$session_id)
-            WHERE version IS NOT NULL AND trim(version)<>'' ORDER BY version_kind,version COLLATE BINARY;
-            """, sessionId);
-        using var reader = await command.ExecuteReaderAsync(token);
-        while (await reader.ReadAsync(token))
-            (reader.GetString(0) == "source" ? sourceVersions : adapterVersions).Add(reader.GetString(1));
-        return new(Array.AsReadOnly(sourceVersions.ToArray()), Array.AsReadOnly(adapterVersions.ToArray()));
+        var sourceVersions = await Read("source_application_version");
+        var adapterVersions = await Read("adapter_version");
+        return new(sourceVersions, adapterVersions);
+
+        async Task<IReadOnlyList<string>> Read(string column)
+        {
+            using var command = Command(c, t, $"""
+                SELECT DISTINCT {column} FROM session_events
+                WHERE session_id=$session_id AND {column} IS NOT NULL AND trim({column})<>''
+                ORDER BY {column} COLLATE BINARY LIMIT 64;
+                """, sessionId);
+            var values = new List<string>();
+            using var reader = await command.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token))
+            {
+                var value = reader.GetString(0);
+                if (!LocalComparisonVersionToken.IsValid(value))
+                    throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+                values.Add(value);
+            }
+            if (values.Count > 63)
+                throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+            return Array.AsReadOnly(values.ToArray());
+        }
     }
 
     private static async Task<string> ReadCanonicalRevisionInput(

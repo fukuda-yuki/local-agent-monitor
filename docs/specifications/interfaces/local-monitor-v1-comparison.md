@@ -122,6 +122,22 @@ strings pass through unchanged; no state field or mapping is invented. Scalar fa
 `minimum`, `maximum`, `total`, `absolute_difference`, and
 `relative_difference` keys with their existing stored prefixes. The client
 never recomputes them and this transport introduces no formula vocabulary.
+
+Each version dimension is independently bounded to 63 distinct ordinal tokens;
+tokens match `^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$` and are therefore 1..256
+strict UTF-8 bytes from the Session ingest version-token alphabet. The
+coherent SQLite read observes at most 64 values per dimension solely to detect
+overflow. A 64th exact value is `409 workspace_too_large`, never truncation.
+Invalid legacy tokens fail that Session's projection closed. A proven empty
+dimension is an explicit empty set, not unsupported authority.
+
+Condition evidence for either version dimension uses
+`set-sha256:<64 lowercase hex>:count:<decimal>`. Its SHA-256 is
+domain-separated by the condition key and length-framed over the canonical
+ordinal-distinct exact values. Exact values remain frozen in membership facts
+and published in the condition distribution; the evidence summary keeps the
+existing 200-character evidence bound.
+
 Named row paging covers Skill/Tool/Sub-agent. Evidence covers frozen inclusion state,
 consumed value/revision, and optional opaque execution/node references. Missing
 is not zero. No raw content, path, locator, prompt/response, Tool payload, Skill
