@@ -12,6 +12,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// for any trace containing errors).
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public class MonitorErrorModePlaywrightTests
 {
     [Fact]

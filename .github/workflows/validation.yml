@@ -1,0 +1,130 @@
+name: Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 18 * * *' # 03:00 JST
+
+permissions:
+  contents: read
+
+jobs:
+  completion:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: windows-latest
+    concurrency:
+      group: validation-completion-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Run Completion validation
+        shell: pwsh
+        run: pwsh scripts/test/run-validation.ps1 -Lane Completion
+
+      - name: Upload TRX
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-trx-${{ github.job }}-${{ github.run_attempt }}
+          path: artifacts/validation/**/*.trx
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-playwright-${{ github.job }}-${{ github.run_attempt }}
+          path: |
+            artifacts/session-workspace/**
+            tests/**/TestResults/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  nightly-windows:
+    if: github.event_name == 'schedule'
+    runs-on: windows-latest
+    concurrency:
+      group: validation-nightly-windows
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Run Windows Nightly validation
+        shell: pwsh
+        run: pwsh scripts/test/run-validation.ps1 -Lane Nightly -Partition Windows
+
+      - name: Upload TRX
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-trx-${{ github.job }}-${{ github.run_attempt }}
+          path: artifacts/validation/**/*.trx
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-playwright-${{ github.job }}-${{ github.run_attempt }}
+          path: |
+            artifacts/session-workspace/**
+            tests/**/TestResults/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  nightly-linux:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: validation-nightly-linux
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Run Linux Nightly validation
+        shell: pwsh
+        run: pwsh scripts/test/run-validation.ps1 -Lane Nightly -Partition Linux
+
+      - name: Upload TRX
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-trx-${{ github.job }}-${{ github.run_attempt }}
+          path: artifacts/validation/**/*.trx
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-playwright-${{ github.job }}-${{ github.run_attempt }}
+          path: |
+            artifacts/session-workspace/**
+            tests/**/TestResults/**
+          if-no-files-found: ignore
+          retention-days: 7

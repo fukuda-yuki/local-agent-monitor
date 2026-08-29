@@ -492,13 +492,11 @@ Atomicity, rollback, stale state, deduplication, and concurrency tests use
 barriers, controllable stores, or transactions; sleep-based coordination is
 forbidden. Existing GitHub Copilot fixtures remain a regression gate.
 
-Required automated closeout commands are:
-
-```powershell
-dotnet build CopilotAgentObservability.slnx
-pwsh scripts\test\install-playwright-chromium.ps1
-dotnet test CopilotAgentObservability.slnx
-```
+Repository development validation follows the Affected, Completion CI, and
+Nightly lanes in
+[Repository Workflow Guidance](../../agent-guides/repository-workflow.md).
+Changes to this interface select Affected tests from the deterministic gates
+above; candidate-bound live and release evidence remains separately required.
 
 Live evidence records date, OS, source version, settings labels, opaque
 trace/session references, observed/missing capabilities, completeness, and

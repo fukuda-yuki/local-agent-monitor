@@ -10,6 +10,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// client-held history, and Esc closes.
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public class MonitorDrawerPlaywrightTests
 {
     [Fact]

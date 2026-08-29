@@ -1493,15 +1493,11 @@ exact candidate, and ties every classification and evidence reference to an
 exact SHA rather than a moving branch. Future unavailable surfaces remain in a
 separate registry and do not count toward release success.
 
-Code、project file、CLI behavior、workflow を変更した場合:
-
-```powershell
-dotnet build CopilotAgentObservability.slnx
-pwsh scripts\test\install-playwright-chromium.ps1
-dotnet test CopilotAgentObservability.slnx
-```
-
-LocalMonitor browser smoke test が solution test suite に含まれるため、build と test の間に Playwright chromium bootstrap が必要。wrapper は未指定時に `PLAYWRIGHT_BROWSERS_PATH` を repository-local の ignored `artifacts\playwright-browsers` に設定し、browser binaries と Playwright cache lock を writable workspace 内に置く。Linux CI では同じ script に `-WithDeps` を付ける。
+Repository development validation follows the Affected, Completion CI, and
+Nightly lanes in
+[Repository Workflow Guidance](agent-guides/repository-workflow.md). Completion
+and Nightly filters, Critical smoke membership, and TRX output are owned by
+`scripts/test/run-validation.ps1` rather than duplicated here.
 
 Collector example を変更した場合:
 

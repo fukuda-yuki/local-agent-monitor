@@ -10,6 +10,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// never fetch the raw span-detail route.
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public class MonitorInspectorPlaywrightTests
 {
     [Fact]

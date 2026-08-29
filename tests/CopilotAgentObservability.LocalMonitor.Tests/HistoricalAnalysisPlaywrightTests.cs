@@ -7,6 +7,7 @@ using static Microsoft.Playwright.Assertions;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class HistoricalAnalysisPlaywrightTests
 {
     private const string ExtractionId = "historical-extraction-11111111111111111111111111111111";

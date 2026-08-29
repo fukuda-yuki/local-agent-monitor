@@ -553,21 +553,11 @@ Dashboard に raw prompt / response / tool arguments / tool results の全文を
 
 ## 10. Validation Requirements
 
-Code、project file、CLI behavior、workflow を変更した場合は以下を実行する。
-
-```powershell
-dotnet build CopilotAgentObservability.slnx
-pwsh scripts\test\install-playwright-chromium.ps1
-dotnet test CopilotAgentObservability.slnx
-```
-
-`dotnet test CopilotAgentObservability.slnx` includes Local Ingestion Monitor
-Playwright smoke tests. The browser install step is therefore part of the
-required validation bootstrap. The wrapper sets `PLAYWRIGHT_BROWSERS_PATH` to
-the repository-local ignored `artifacts\playwright-browsers` path when unset,
-so browser binaries stay outside tracked source and Playwright cache locks are
-created inside the writable workspace. On Linux CI, pass `-WithDeps` to the same
-script.
+Repository development validation follows the Affected, Completion CI, and
+Nightly lanes in
+[Repository Workflow Guidance](agent-guides/repository-workflow.md). Completion
+and Nightly filters, Critical smoke membership, and TRX output are owned by
+`scripts/test/run-validation.ps1` rather than duplicated here.
 
 Collector example を変更した場合は、実 credential ではなく dummy `LANGFUSE_AUTH` で Compose 構文を確認する。
 

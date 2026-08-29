@@ -30,6 +30,7 @@ public sealed class SanitizedImportUiTests
     }
 
     [Fact(Timeout = 60_000)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task Browser_FileChangeInvalidatesPreviewThenExplicitCommitRefreshesHistory()
     {
         using var temp = new MonitorTempDirectory();
@@ -115,6 +116,7 @@ public sealed class SanitizedImportUiTests
     }
 
     [Fact(Timeout = 60_000)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task Browser_AbortedPreviewAndOverlappingHistoryCannotOverwriteNewerState()
     {
         using var temp = new MonitorTempDirectory();
@@ -202,6 +204,7 @@ public sealed class SanitizedImportUiTests
     }
 
     [Fact(Timeout = 60_000)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task Browser_ConfirmedCommitRemainsSuccessfulWhenHistoryRefreshFails()
     {
         using var temp = new MonitorTempDirectory();
@@ -244,6 +247,7 @@ public sealed class SanitizedImportUiTests
     }
 
     [Fact(Timeout = 60_000)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task Browser_PreviewRendersBoundedSourceAndEvidenceDetailsAsInertText()
     {
         using var temp = new MonitorTempDirectory();
@@ -285,6 +289,7 @@ public sealed class SanitizedImportUiTests
     }
 
     [Fact(Timeout = 60_000)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task Browser_DeterministicCommitRejectionExplicitlySaysNothingWasCommitted()
     {
         using var temp = new MonitorTempDirectory();
@@ -314,6 +319,7 @@ public sealed class SanitizedImportUiTests
     }
 
     [Fact(Timeout = 60_000)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task Browser_UnparseableCommitResponseKeepsOutcomeAmbiguous()
     {
         using var temp = new MonitorTempDirectory();

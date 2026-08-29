@@ -1949,10 +1949,8 @@ The setup implementation must keep this requirement-to-test mapping:
 | Claude cross-surface integration | `ClaudeConfigurationSetupIntegrationTests` cover adapter to registry/dispatcher/`setup.v1`; `ClaudeSetupTransactionHardeningTests` cover apply-time revalidation, stale/final guard, compensation, rollback, idempotency, and deterministic lock contention; `ClaudeSetupPrivacyEvidenceTests` cover private-versus-repository-safe artifacts; and `LocalMonitorScriptTests.ClaudeSetup_RepositoryAndReleaseWrappersPreserveTransportParityWithoutDotnetAndIsolatedUserState` covers the physical Config CLI, extracted Release wrapper, exact `--allow-wsl2-routing` forwarding, no-dotnet execution, isolated user state, and stdout/stderr/exit parity |
 | Actual-v1 restart compatibility after Claude arm | `SetupStorageTests` and `ClaudeSetupMigrationCompatibilityTests` copy the committed `ownership-ledger.v1.json` and `private-plan.v1.json`, run storage write-close-reopen and historical status projection, prove fresh production commands fail closed at missing-journal recovery without target activity, append/reopen a current schema-v1 Claude plan through the production storage writer while preserving the historical private-plan bytes and ledger row, separately exercise that plan's apply/status/rollback lifecycle across fresh-root restart, and use no v0/v2 or fallback parsing |
 
-Required repository validation remains:
-
-```powershell
-dotnet build CopilotAgentObservability.slnx
-pwsh scripts\test\install-playwright-chromium.ps1
-dotnet test CopilotAgentObservability.slnx
-```
+Repository development validation follows the Affected, Completion CI, and
+Nightly lanes in
+[Repository Workflow Guidance](../../agent-guides/repository-workflow.md).
+Changes to this interface use the requirement-to-test mapping above to select
+Affected tests; release-candidate validation keeps its owning release contract.

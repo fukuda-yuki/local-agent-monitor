@@ -6,6 +6,7 @@ using static Microsoft.Playwright.Assertions;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
 {
     private const string FirstRepositoryId = "018f0000-0000-7000-8000-000000000101";

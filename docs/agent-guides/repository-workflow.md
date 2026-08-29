@@ -122,35 +122,66 @@ Return to the smallest design or replan before continuing when:
 
 Validation must match the changed surface. Start narrow and expand only when the affected contract or acceptance criteria require it.
 
-### 1. During iteration
+### 1. Local iteration and completion report — Affected
 
-Run the nearest targeted test or check for the behavior being changed.
+During implementation and before the ordinary coding-agent completion report,
+run the nearest existing test or component-owned check that directly exercises
+the changed behavior or contract. A bounded task can complete with this
+Affected validation.
 
 ```powershell
 dotnet test <test-project.csproj> --filter FullyQualifiedName~<test-or-class>
 ```
 
-### 2. Before completion
-
-Validate the affected project or contract boundary:
+Select the Affected boundary from the change:
 
 - documentation-only changes: inspect the rendered Markdown or diff, paths, and references; no build is required unless the documentation change is generated or executable;
 - local implementation changes: build or test the affected project and run nearby regression tests;
 - shared libraries, public interfaces, schemas, storage, serialization, or cross-process contracts: run all affected project and contract tests;
 - Razor Pages or browser behavior: run the affected browser-facing tests and install Playwright when those tests require it.
 
-### 3. Full integration validation
+Do not start the Completion or Nightly runner locally unless the user or active
+work item explicitly requires that lane. Direct changes to an E2E, OS-specific,
+or long-running test make that specific test Affected; they do not make the
+whole Nightly lane Affected.
 
-Run the full solution validation only when the change is broad or integration-sensitive, the active acceptance criteria require it, or the work is being integrated, released, or closed as a cross-cutting item.
+### 2. Pull Request / main integration — Completion CI
+
+GitHub Actions owns Completion validation for Pull Requests and pushes to
+`main`. The single runner executes all unclassified portable deterministic Fast
+tests and the fixed Critical smoke set without running the smoke tests twice.
 
 ```powershell
-dotnet build CopilotAgentObservability.slnx
-pwsh scripts\test\install-playwright-chromium.ps1
-dotnet test CopilotAgentObservability.slnx
+pwsh scripts\test\run-validation.ps1 -Lane Completion
 ```
 
-The Playwright wrapper sets `PLAYWRIGHT_BROWSERS_PATH` to `artifacts\playwright-browsers` when unset. On Linux CI, pass `-WithDeps`.
-Do not install Playwright or run the full solution by default for an unrelated documentation or bounded implementation change.
+Completion CI is the ordinary integration gate. Do not require the same full
+gate locally before push unless the user or active work item says to do so.
+
+### 3. Scheduled deep validation — Nightly
+
+Scheduled GitHub Actions owns Nightly validation on Windows and Linux at 03:00
+JST. It runs all schedulable automated tests while excluding operator-only live
+validation.
+
+```powershell
+pwsh scripts\test\run-validation.ps1 -Lane Nightly -Partition Windows
+pwsh scripts\test\run-validation.ps1 -Lane Nightly -Partition Linux
+```
+
+Nightly does not run from Pull Requests or ordinary coding-agent completion,
+and it does not retry automatically. Operator-only live validation keeps its
+existing runbook and separate authorization.
+
+### 4. Failure diagnosis
+
+When Completion CI or Nightly fails, narrow diagnosis to the failed project,
+class, or test and reproduce only that Affected boundary. Do not automatically
+restart the entire Completion or Nightly lane during the same task.
+
+Release tags, manual releases, and cross-surface release candidates keep the
+validation required by their owning specification and existing release
+workflow; these development lanes do not replace those gates.
 
 Use component-owned specifications, scripts, READMEs, and test projects for feature-specific validation. This guide intentionally contains no feature- or Issue-specific smoke procedure.
 
