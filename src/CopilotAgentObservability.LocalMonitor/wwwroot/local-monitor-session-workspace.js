@@ -14,7 +14,9 @@
   const TOKEN_KEYS = ["authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points"];
   const ACTIVITY_KEYS = ["skill", "tool", "subagent", "error", "retry"];
   const SOURCES = new Set(["copilot-sdk", "copilot-cli", "vscode", "hook-unknown", "claude-code"]);
-  const CURSOR = /^[A-Za-z0-9_-]{159}$/;
+  const CURSOR = /^[A-Za-z0-9_-]{158}[AEIMQUYcgkosw048]$/;
+  const KINDS = new Set(["execution", "agent", "skill", "tool", "subagent", "event", "error", "retry", "permission", "unknown_relation_group"]);
+  const CONTENT_PARTS = ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"];
   const ITEM_KEYS = ["node_id", "execution_id", "parent_node_id", "relationship_authority", "kind", "name", "lifecycle", "status", "timing", "activity", "tokens", "child_count", "has_more_children", "collapsed_children", "content_parts", "source_references"];
   const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map(), ignoreRouteEvent: false };
   window.LocalMonitorSessionWorkspace = state;
@@ -34,18 +36,18 @@
     return exact(value, ITEM_KEYS) && NODE.test(value.node_id) && value.execution_id === executionId
       && (value.parent_node_id === null || NODE.test(value.parent_node_id))
       && oneOf(value.relationship_authority, ["exact", "explicit", "unknown"])
-      && typeof value.kind === "string" && value.kind.length > 0
-      && exact(value.name, ["state", "text"]) && FACT_STATES.has(value.name.state)
+      && KINDS.has(value.kind)
+      && exact(value.name, ["state", "text"]) && oneOf(value.name.state, ["recorded", "not_observed", "invalid"])
       && (value.name.state === "recorded" ? typeof value.name.text === "string" && value.name.text.length > 0 : value.name.text === null)
       && oneOf(value.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
       && oneOf(value.status, ["active", "completed", "failed", "unknown"])
       && timing(value.timing, value.status, true) && activity(value.activity) && tokens(value.tokens)
       && nonnegative(value.child_count) && value.child_count <= 4096 && typeof value.has_more_children === "boolean"
-      && exact(value.collapsed_children, ["state", "count"]) && oneOf(value.collapsed_children.state, ["complete", "partial", "unknown"])
-      && nonnegative(value.collapsed_children.count) && Array.isArray(value.content_parts)
-      && value.content_parts.every(part => oneOf(part, ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"]))
-      && exact(value.source_references, ["state", "references"]) && FACT_STATES.has(value.source_references.state)
-      && Array.isArray(value.source_references.references);
+      && exact(value.collapsed_children, ["state", "count"]) && oneOf(value.collapsed_children.state, ["complete", "partial", "unavailable"])
+      && (value.collapsed_children.state === "unavailable" ? value.collapsed_children.count === null : nonnegative(value.collapsed_children.count))
+      && Array.isArray(value.content_parts) && value.content_parts.every((part, index) => CONTENT_PARTS.includes(part)
+        && (index === 0 || CONTENT_PARTS.indexOf(value.content_parts[index - 1]) < CONTENT_PARTS.indexOf(part)))
+      && referenceFact(value.source_references);
   }
 
   function validateTimeline(page, executionId, parentNodeId) {
@@ -59,6 +61,7 @@
 
   const valueFact = (value, key = "value") => exact(value, ["state", key]) && FACT_STATES.has(value.state)
     && (value.state === "recorded" ? value[key] !== null : value[key] === null);
+  const typedValueFact = (value, predicate, key = "value") => valueFact(value, key) && (value.state !== "recorded" || predicate(value[key]));
   const availabilityFact = value => exact(value, ["state", "available"])
     && oneOf(value.state, ["available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid", "source_unsupported", "not_observed"])
     && value.available === (value.state === "available");
@@ -66,8 +69,12 @@
     && Object.values(value).every(item => exact(item, ["state"]) && FACT_STATES.has(item.state));
   const stateOnlyFact = value => exact(value, ["state"]) && FACT_STATES.has(value.state);
   const referenceFact = value => exact(value, ["state", "references"]) && FACT_STATES.has(value.state) && Array.isArray(value.references)
+    && (value.state === "recorded" ? value.references.length >= 1 && value.references.length <= 16 : value.references.length === 0)
     && value.references.every(item => exact(item, ["source_kind", "source_identity", "trace_id", "span_id", "event_id"])
-      && typeof item.source_kind === "string" && ["source_identity", "trace_id", "span_id", "event_id"].every(key => item[key] === null || typeof item[key] === "string"));
+      && typeof item.source_kind === "string" && item.source_kind.length > 0
+      && ["source_identity", "trace_id", "span_id", "event_id"].every(key => item[key] === null || typeof item[key] === "string" && item[key].length > 0)
+      && (item.trace_id === null || /^[0-9a-f]{32}$/.test(item.trace_id)) && (item.span_id === null || /^[0-9a-f]{16}$/.test(item.span_id))
+      && ["source_identity", "trace_id", "span_id", "event_id"].some(key => item[key] !== null));
   const nodeSetFact = value => exact(value, ["state", "node_ids"]) && FACT_STATES.has(value.state) && Array.isArray(value.node_ids)
     && value.node_ids.every(id => NODE.test(id)) && (value.state === "recorded" ? value.node_ids.length > 0 : value.node_ids.length === 0);
 
@@ -75,25 +82,33 @@
     if (!value || value.kind !== kind) return false;
     if (["execution", "agent", "unknown_relation_group"].includes(kind)) return exact(value, ["kind"]);
     if (kind === "tool") return exact(value, ["kind", "caller", "lifecycle", "status", "exit", "mcp_server_identity", "mcp_server_name", "mcp_tool_name", "input", "result", "error", "retry", "recovery", "child_activity", "source_references"])
-      && valueFact(value.caller, "node_id") && NODE.test(value.caller.node_id ?? "node-00000000000000000000000000000000")
-      && valueFact(value.lifecycle) && valueFact(value.status) && stateOnlyFact(value.exit)
+      && typedValueFact(value.caller, item => NODE.test(item), "node_id")
+      && typedValueFact(value.lifecycle, item => oneOf(item, ["selected", "started", "completed", "failed", "deselected", "unknown"]))
+      && typedValueFact(value.status, item => oneOf(item, ["active", "completed", "failed", "unknown"])) && stateOnlyFact(value.exit)
       && valueFact(value.mcp_server_identity) && (value.mcp_server_identity.value === null || REVISION.test(value.mcp_server_identity.value))
-      && valueFact(value.mcp_server_name) && valueFact(value.mcp_tool_name)
+      && typedValueFact(value.mcp_server_name, item => typeof item === "string" && item.length > 0)
+      && typedValueFact(value.mcp_tool_name, item => typeof item === "string" && item.length > 0)
       && availabilityFact(value.input) && availabilityFact(value.result) && availabilityFact(value.error)
       && nodeSetFact(value.retry) && nodeSetFact(value.recovery) && countFact(value.child_activity) && referenceFact(value.source_references);
     if (kind === "skill") return exact(value, ["kind", "current_valid_state", "source", "trigger", "inventory_reference", "historical_snapshot_reference"])
       && oneOf(value.current_valid_state, ["current", "stale", "invalid", "certification_pending", "unavailable"])
-      && valueFact(value.source) && valueFact(value.trigger) && valueFact(value.inventory_reference) && valueFact(value.historical_snapshot_reference);
+      && typedValueFact(value.source, item => typeof item === "string" && item.length > 0)
+      && typedValueFact(value.trigger, item => typeof item === "string" && item.length > 0)
+      && typedValueFact(value.inventory_reference, item => typeof item === "string" && item.length > 0)
+      && typedValueFact(value.historical_snapshot_reference, item => typeof item === "string" && item.length > 0);
     if (kind === "subagent") return exact(value, ["kind", "lifecycle", "input", "activity", "tokens", "children", "source_references"])
       && lifecycleFacts(value.lifecycle) && availabilityFact(value.input) && activity(value.activity) && tokens(value.tokens) && countFact(value.children) && referenceFact(value.source_references);
     if (kind === "error") return exact(value, ["kind", "error_code", "message", "status", "source_references"])
-      && valueFact(value.error_code) && availabilityFact(value.message) && valueFact(value.status) && referenceFact(value.source_references);
+      && typedValueFact(value.error_code, item => typeof item === "string" && item.length > 0) && availabilityFact(value.message)
+      && typedValueFact(value.status, item => oneOf(item, ["active", "completed", "failed", "unknown"])) && referenceFact(value.source_references);
     if (kind === "permission") return exact(value, ["kind", "decision", "wait", "source_references"])
-      && valueFact(value.decision) && stateOnlyFact(value.wait) && referenceFact(value.source_references);
+      && typedValueFact(value.decision, item => oneOf(item, ["allow", "deny", "ask"])) && stateOnlyFact(value.wait) && referenceFact(value.source_references);
     if (kind === "event") return exact(value, ["kind", "event_name", "source_time", "content", "source_references"])
-      && valueFact(value.event_name) && valueFact(value.source_time) && availabilityFact(value.content) && referenceFact(value.source_references);
+      && typedValueFact(value.event_name, item => typeof item === "string" && item.length > 0)
+      && typedValueFact(value.source_time, item => typeof item === "string" && !Number.isNaN(Date.parse(item))) && availabilityFact(value.content) && referenceFact(value.source_references);
     if (kind === "retry") return exact(value, ["kind", "attempt", "target", "recovered", "source_references"])
-      && valueFact(value.attempt) && valueFact(value.target, "node_id") && valueFact(value.recovered) && referenceFact(value.source_references);
+      && typedValueFact(value.attempt, item => nonnegative(item)) && typedValueFact(value.target, item => NODE.test(item), "node_id")
+      && typedValueFact(value.recovered, item => typeof item === "boolean") && referenceFact(value.source_references);
     return false;
   }
 
@@ -103,18 +118,33 @@
         || detail.session_id !== root.dataset.sessionId
         || !exact(detail.execution, ["execution_id", "node_id", "latest", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
         || !UUID_V7.test(detail.execution.execution_id) || !NODE.test(detail.execution.node_id)
-        || typeof detail.execution.latest !== "boolean" || !timing(detail.execution.timing, detail.execution.status, true)
+        || typeof detail.execution.latest !== "boolean"
+        || detail.execution.source !== null && (typeof detail.execution.source !== "string" || detail.execution.source.length === 0)
+        || detail.execution.model !== null && (typeof detail.execution.model !== "string" || detail.execution.model.length === 0)
+        || !oneOf(detail.execution.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
+        || !oneOf(detail.execution.status, ["active", "completed", "failed", "unknown"]) || !timing(detail.execution.timing, detail.execution.status, true)
         || !tokens(detail.execution.tokens) || !activity(detail.execution.activity) || !nonnegative(detail.execution.child_count)
         || !exact(detail.node, [...ITEM_KEYS, "technical_references", "metadata"])
         || !timelineItem(Object.fromEntries(ITEM_KEYS.map(key => [key, detail.node[key]])), detail.execution.execution_id)
         || detail.node.node_id !== nodeId || expectedExecutionId && detail.execution.execution_id !== expectedExecutionId
         || !exact(detail.node.technical_references, ["source_kind", "source_identity", "trace_id", "span_id", "event_id"])
+        || detail.node.technical_references.source_kind !== null && (typeof detail.node.technical_references.source_kind !== "string" || detail.node.technical_references.source_kind.length === 0)
+        || ["source_identity", "trace_id", "span_id", "event_id"].some(key => detail.node.technical_references[key] !== null && (typeof detail.node.technical_references[key] !== "string" || detail.node.technical_references[key].length === 0))
+        || detail.node.technical_references.trace_id !== null && !/^[0-9a-f]{32}$/.test(detail.node.technical_references.trace_id)
+        || detail.node.technical_references.span_id !== null && !/^[0-9a-f]{16}$/.test(detail.node.technical_references.span_id)
+        || (detail.node.technical_references.source_kind === null) !== ["source_identity", "trace_id", "span_id", "event_id"].every(key => detail.node.technical_references[key] === null)
         || !metadata(detail.node.metadata, detail.node.kind)
         || !Array.isArray(detail.parent_path) || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
+        || new Set(detail.parent_path.map(item => item.node_id)).size !== detail.parent_path.length
+        || detail.parent_path.some((item, index) => index === 0 ? item.parent_node_id !== null : item.parent_node_id !== detail.parent_path[index - 1].node_id)
+        || (detail.parent_path.length ? detail.node.parent_node_id !== detail.parent_path.at(-1).node_id : detail.node.parent_node_id !== null)
         || !exact(detail.related, ["retry", "recovery", "children"])
-        || ![...detail.related.retry, ...detail.related.recovery, ...detail.related.children].every(item => timelineItem(item, detail.execution.execution_id))
+        || ![detail.related.retry, detail.related.recovery, detail.related.children].every(items => Array.isArray(items) && items.length <= 200
+          && items.every(item => timelineItem(item, detail.execution.execution_id) && oneOf(item.relationship_authority, ["exact", "explicit"])))
         || !exact(detail.content, ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"])
-        || !Object.values(detail.content).every(value => exact(value, ["state", "available"]) && typeof value.available === "boolean")) throw new TypeError("invalid node");
+        || !Object.values(detail.content).every(value => exact(value, ["state", "available"])
+          && oneOf(value.state, ["available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid"])
+          && value.available === (value.state === "available"))) throw new TypeError("invalid node");
     return detail;
   }
 
@@ -346,10 +376,11 @@
       row.setAttribute("aria-expanded", node.child_count > 0 ? String(memory.expanded.has(node.node_id)) : "false");
       const label = node.name?.state === "recorded" ? node.name.text : node.kind;
       row.append(el("strong", null, label), el("span", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
-      if (node.timing.state === "recorded" && node.timing.started_at && execution.timing.state === "recorded" && execution.timing.started_at) {
+      if (node.timing.state === "recorded" && node.timing.started_at && node.timing.duration_ms !== null
+          && execution.timing.state === "recorded" && execution.timing.started_at && execution.timing.duration_ms !== null) {
         const start = Date.parse(node.timing.started_at) - Date.parse(execution.timing.started_at);
-        const duration = node.timing.duration_ms ?? Math.max(0, Date.now() - Date.parse(node.timing.started_at));
-        const extent = Math.max(1, execution.timing.duration_ms ?? duration, start + duration);
+        const duration = node.timing.duration_ms;
+        const extent = Math.max(1, execution.timing.duration_ms, start + duration);
         const bar = el("span", "local-monitor-session-time-bar"); bar.dataset.timelineTimeBar = "";
         bar.style.marginLeft = `${Math.max(0, start) / extent * 100}%`; bar.style.width = `${Math.max(1, duration / extent * 100)}%`;
         wrapper.append(bar);

@@ -24,12 +24,26 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
     public async Task MalformedTimelineFailsClosedBeforeRowsOrCacheMutation(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null;
-        if (mutation == 0) timeline["extra"] = true; else if (mutation == 1) timeline["items"]![0]!["relationship_authority"] = "inferred"; else timeline["items"]![0]!.AsObject().Remove("status");
+        if (mutation == 0) timeline["extra"] = true;
+        else if (mutation == 1) timeline["items"]![0]!["relationship_authority"] = "inferred";
+        else if (mutation == 2) timeline["items"]![0]!.AsObject().Remove("status");
+        else if (mutation == 3) timeline["items"]![0]!["kind"] = "bogus";
+        else if (mutation == 4) timeline["items"]![0]!["name"]!["state"] = "expired";
+        else if (mutation == 5) timeline["items"]![0]!["collapsed_children"]!["state"] = "unknown";
+        else if (mutation == 6) timeline["items"]![0]!["content_parts"] = new JsonArray("tool_result", "tool_input");
+        else if (mutation == 7) timeline["items"]![0]!["source_references"]!["references"] = new JsonArray();
+        else timeline["next_cursor"] = new string('A', 158) + "B";
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         await Expect(page.Locator("[data-timeline-node]")).ToHaveCountAsync(0); Assert.Equal(0, await page.EvaluateAsync<int>("() => window.LocalMonitorSessionWorkspace.executionState.values().next().value.pages.size"));
     }
@@ -39,12 +53,25 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
     public async Task MalformedNodeFailsClosedAndRestoresCanonicalOverview(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision;
-        if (mutation == 0) node["node"]!["unexpected"] = true; else if (mutation == 1) node["node"]!["metadata"]!["kind"] = "tool"; else if (mutation == 2) node["node"]!["metadata"]!["source_references"]!["references"]![0]!["extra"] = true; else node["node"]!["metadata"]!["content"]!["available"] = true;
+        if (mutation == 0) node["node"]!["unexpected"] = true;
+        else if (mutation == 1) node["node"]!["metadata"]!["kind"] = "tool";
+        else if (mutation == 2) node["node"]!["metadata"]!["source_references"]!["references"]![0]!["extra"] = true;
+        else if (mutation == 3) node["node"]!["metadata"]!["content"]!["available"] = true;
+        else if (mutation == 4) node["execution"]!["source"] = 4;
+        else if (mutation == 5) node["node"]!["technical_references"]!["trace_id"] = 4;
+        else if (mutation == 6) node["content"]!["event_content"]!["state"] = "bogus";
+        else if (mutation == 7) node["parent_path"]![0]!["parent_node_id"] = "node-00000000000000000000000000000009";
+        else { var related = node["parent_path"]![0]!.DeepClone(); related["relationship_authority"] = "unknown"; node["related"]!["children"]!.AsArray().Add(related); }
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}");
     }
@@ -132,6 +159,16 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Fact]
+    public async Task RecordedOpenTimingRendersOpenFactWithoutInferringDurationGeometry()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var item = timeline["items"]![0]!; item["status"] = "active"; item["lifecycle"] = "started"; item["timing"]!["ended_at"] = null; item["timing"]!["duration_ms"] = null; item["collapsed_children"]!["state"] = "unavailable"; item["collapsed_children"]!["count"] = null;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await Expect(page.Locator("[data-timeline-node]")).ToContainTextAsync("2026-08-26T01:02:03.0000000+00:00"); await Expect(page.Locator("[data-timeline-time-bar]")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
     public async Task ExactDeepLinkReloadAndHistoryRestoreOnlyReturnedNodeIdentity()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -140,8 +177,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => { nodeCalls++; return r.FulfillAsync(Json(node.ToJsonString())); });
         var exact = $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6";
         await page.GotoAsync(host.Url + exact); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message"); await page.ReloadAsync(); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message");
-        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?node=node-a8a773d6614d5030f505ff195b452dd6"); await Expect(page).ToHaveURLAsync(host.Url + exact); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message");
-        await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: null, node: null })"); await page.GoBackAsync(); await Expect(page).ToHaveURLAsync(host.Url + exact); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message"); Assert.True(nodeCalls >= 3);
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?node=node-a8a773d6614d5030f505ff195b452dd6"); await Expect(page).ToHaveURLAsync(host.Url + exact); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message"); await page.ReloadAsync(); await Expect(page).ToHaveURLAsync(host.Url + exact); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message");
+        await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: null, node: null })"); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); await page.GoBackAsync(); await Expect(page).ToHaveURLAsync(host.Url + exact); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message"); await page.GoForwardAsync(); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); Assert.True(nodeCalls >= 4);
     }
 
     [Fact]
