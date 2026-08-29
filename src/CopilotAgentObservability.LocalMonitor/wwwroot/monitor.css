@@ -32,7 +32,9 @@
 .local-monitor-session-load-more { margin: 8px 0 0 20px; }
 .local-monitor-session-execution-scroll { max-height: 420px; overflow: auto; }
 .local-monitor-session-time-bar { display: block; height: 4px; min-width: 2px; border-radius: 2px; background: var(--accent, #526de8); }
-@media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--surface, white); } }
+@media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--surface, white); box-shadow: -8px 0 24px rgb(0 0 0 / 24%); } .local-monitor-session-inspector[aria-hidden="true"] { display: none; } }
+.local-monitor-session-inspector-close { float: right; }
+.local-monitor-session-timeline-node[aria-selected="true"] { outline: 2px solid var(--accent, #526de8); outline-offset: -2px; }
 
 /* Issue #95: contextual estimated-cost surface. */
 .cost-page {
