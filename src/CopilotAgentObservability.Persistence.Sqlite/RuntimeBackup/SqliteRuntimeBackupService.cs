@@ -43,6 +43,7 @@ public sealed class SqliteRuntimeBackupService
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
+        ["local_comparison"] = LocalComparisonSchemaV1.Version,
         ["local_repository_catalog"] = 1,
         ["local_workspace_projection"] = LocalWorkspaceProjectionSchemaV1.Version,
         ["monitor"] = 11,
@@ -54,6 +55,9 @@ public sealed class SqliteRuntimeBackupService
         ["skill_invocation_snapshot"] = 1,
         ["skill_projection"] = 1,
     };
+    private static readonly IReadOnlyDictionary<string, int> InstalledArchiveComponents = SupportedComponents
+        .Where(component => !string.Equals(component.Key, "local_comparison", StringComparison.Ordinal))
+        .ToDictionary(component => component.Key, component => component.Value, StringComparer.Ordinal);
     private static readonly string[] RetentionStoreKinds = ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"];
     private static readonly string[] RetentionStates = ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed"];
     private static readonly string[] MigrationOrder =
@@ -85,7 +89,8 @@ public sealed class SqliteRuntimeBackupService
     private ISkillRegistryGenerationAuthority? skillRegistryAuthority;
 
     public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) :
-        this(timeProvider, (Action<string>?)null, null, null) { }
+        this(timeProvider, (Action<string>?)null, null, null)
+    { }
 
     internal SqliteRuntimeBackupService(
         TimeProvider timeProvider,
@@ -1131,6 +1136,7 @@ public sealed class SqliteRuntimeBackupService
             snapshotOwner = CreateTransientOwner(snapshot, sqlite: true);
             checkpoint?.Invoke(RuntimeBackupCheckpoints.BeforeOnlineSnapshot);
             OnlineSnapshot(databasePath, snapshot);
+            RemoveLocalComparisonsFromStaging(snapshot);
             checkpoint?.Invoke(RuntimeBackupCheckpoints.AfterOnlineSnapshot);
             var snapshotPreflight = PreflightForMigration(
                 snapshot,
@@ -1340,6 +1346,28 @@ public sealed class SqliteRuntimeBackupService
         ValidateIntegrity(destination);
     }
 
+    private static void RemoveLocalComparisonsFromStaging(string path)
+    {
+        using var connection = Open(path, SqliteOpenMode.ReadWrite);
+        SetPragma(connection, "foreign_keys", false);
+        using var transaction = connection.BeginTransaction(deferred: false);
+        foreach (var table in LocalComparisonSchemaV1.TableNames.Reverse())
+        {
+            using var drop = connection.CreateCommand();
+            drop.Transaction = transaction;
+            drop.CommandText = $"DROP TABLE IF EXISTS \"{table}\";";
+            drop.ExecuteNonQuery();
+        }
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "DELETE FROM schema_version WHERE component='local_comparison';";
+            _ = version.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        ValidateIntegrity(connection);
+    }
+
     private void ValidateDatabaseMatchesManifest(string path, RuntimeBackupManifestData manifest)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: true);
@@ -1387,8 +1415,8 @@ public sealed class SqliteRuntimeBackupService
         ValidateIntegrity(connection);
         ValidateSchemaMetadataBounds(connection);
         var versions = ReadComponentVersions(connection);
-        if (versions.Count != SupportedComponents.Count
-            || SupportedComponents.Any(item => !versions.TryGetValue(item.Key, out var current) || current != item.Value))
+        if (versions.Count != InstalledArchiveComponents.Count
+            || InstalledArchiveComponents.Any(item => !versions.TryGetValue(item.Key, out var current) || current != item.Value))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         if (!ValidateExecutableObjects(connection, versions)) throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         if (!ValidateComponentShapes(
@@ -1567,6 +1595,7 @@ public sealed class SqliteRuntimeBackupService
             || versions.ContainsKey("local_archive")
             || versions.ContainsKey("skill_invocation_snapshot")
             || versions.ContainsKey("local_workspace_projection")
+            || versions.ContainsKey("local_comparison")
             || workspaceShapeOnly)
         {
             if (versions.ContainsKey("local_repository_catalog")
@@ -1612,6 +1641,8 @@ public sealed class SqliteRuntimeBackupService
                         SqliteLocalRepositoryTargetExistenceAuthority.Instance);
                 if (versions.ContainsKey("skill_invocation_snapshot"))
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
+                if (versions.ContainsKey("local_comparison"))
+                    LocalComparisonSchemaV1.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
                     if (workspaceShapeOnly && versions["local_workspace_projection"] == 4)
@@ -1817,6 +1848,14 @@ public sealed class SqliteRuntimeBackupService
 
     private static bool ValidateExecutableObjects(SqliteConnection connection, IReadOnlyDictionary<string, int> versions)
     {
+        if (versions.ContainsKey("local_comparison"))
+        {
+            using var replica = new SqliteConnection("Data Source=:memory:");
+            replica.Open(); connection.BackupDatabase(replica); SetPragma(replica, "foreign_keys", false);
+            foreach (var table in LocalComparisonSchemaV1.TableNames.Reverse()) { using var drop = replica.CreateCommand(); drop.CommandText = $"DROP TABLE \"{table}\";"; drop.ExecuteNonQuery(); }
+            var without = versions.Where(item => item.Key != "local_comparison").ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
+            return ValidateExecutableObjects(replica, without);
+        }
         using (var forbidden = connection.CreateCommand())
         {
             forbidden.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='view' OR (type='table' AND rootpage=0);";
@@ -1878,6 +1917,11 @@ public sealed class SqliteRuntimeBackupService
             foreach (var trigger in SkillInvocationSnapshotSchemaV1.TriggerDefinitions)
                 allowed[trigger.Name] = (trigger.Table, trigger.Sql);
         }
+        if (versions.ContainsKey("local_comparison"))
+        {
+            foreach (var trigger in LocalComparisonSchemaV1.OwnedObjects.Where(item => item.Type == "trigger"))
+                allowed[trigger.Name] = (trigger.Table, trigger.Sql);
+        }
 
         var actual = new HashSet<string>(StringComparer.Ordinal);
         using var command = connection.CreateCommand();
@@ -1905,6 +1949,19 @@ public sealed class SqliteRuntimeBackupService
         SqliteConnection connection,
         IReadOnlyDictionary<string, int> versions)
     {
+        if (versions.ContainsKey("local_comparison"))
+        {
+            using var replica = new SqliteConnection("Data Source=:memory:");
+            replica.Open();
+            connection.BackupDatabase(replica);
+            SetPragma(replica, "foreign_keys", false);
+            foreach (var table in LocalComparisonSchemaV1.TableNames.Reverse())
+            {
+                using var drop = replica.CreateCommand(); drop.CommandText = $"DROP TABLE \"{table}\";"; drop.ExecuteNonQuery();
+            }
+            var without = versions.Where(item => item.Key != "local_comparison").ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
+            return ValidateIndexesAreNonExecutable(replica, without);
+        }
         var indexes = new List<(string Name, string Table, string? Definition)>();
         using (var command = connection.CreateCommand())
         {
@@ -2094,6 +2151,8 @@ public sealed class SqliteRuntimeBackupService
             owners[item.Name] = "skill_invocation_snapshot";
         foreach (var item in LocalWorkspaceProjectionSchemaV1.OwnedObjects)
             owners[item.Name] = "local_workspace_projection";
+        foreach (var item in LocalComparisonSchemaV1.OwnedObjects)
+            owners[item.Name] = "local_comparison";
         if (versions.TryGetValue("monitor", out var monitorVersion)
             && monitorVersion is >= 9 and < 11
             && !versions.ContainsKey("skill_projection"))
@@ -2124,6 +2183,8 @@ public sealed class SqliteRuntimeBackupService
             "IX_session_repository_",
             "local_archive_",
             "IX_local_archive_",
+            "local_comparison_",
+            "IX_local_comparison_",
             "local_workspace_",
         };
         using var command = connection.CreateCommand();
@@ -3015,8 +3076,8 @@ public sealed class SqliteRuntimeBackupService
     }
 
     private static bool HasCompleteCurrentVector(IReadOnlyDictionary<string, int> versions) =>
-        versions.Count == SupportedComponents.Count
-        && SupportedComponents.All(component =>
+        versions.Count == InstalledArchiveComponents.Count
+        && InstalledArchiveComponents.All(component =>
             versions.TryGetValue(component.Key, out var version)
             && version == component.Value);
 

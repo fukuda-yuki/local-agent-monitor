@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService
+internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService, ILocalRepositoryComparisonInputSnapshotService
 {
     private const int MaximumSessions = 10_000;
     private const int MaximumCandidatesPerSession = 128;
@@ -76,7 +76,17 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken) =>
-        (await ReadCoreAsync(request, detailRequest: null, cancellationToken).ConfigureAwait(false)).Scope;
+        (await ReadCoreAsync(request, detailRequest: null, comparisonBatch: false, cancellationToken).ConfigureAwait(false)).Scope;
+
+    public async ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(
+        LocalRepositoryScopeRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.ExactTargetSessionIds is null)
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        var result = await ReadCoreAsync(request, detailRequest: null, comparisonBatch: true, cancellationToken).ConfigureAwait(false);
+        return new(result.Scope, result.ComparisonSessions!);
+    }
 
     public async ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
         LocalRepositorySessionDetailRequest detailRequest,
@@ -87,16 +97,17 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId))
             throw new ArgumentException("invalid_session_id", nameof(sessionId));
         ValidateDetailRequest(detailRequest);
-        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, cancellationToken).ConfigureAwait(false);
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, comparisonBatch: false, cancellationToken).ConfigureAwait(false);
         if (result.Scope.Sessions.Count == 0 || result.Detail is null)
             throw new LocalWorkspaceSessionDetailException("session_not_found");
         var session = result.Scope.Sessions[0];
         return new(session, result.Detail, ComputeRevision(session, result.Detail));
     }
 
-    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail)> ReadCoreAsync(
+    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail, IReadOnlyList<LocalRepositoryComparisonSessionInput>? ComparisonSessions)> ReadCoreAsync(
         LocalRepositoryScopeRequest request,
         LocalRepositorySessionDetailRequest? detailRequest,
+        bool comparisonBatch,
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
@@ -172,9 +183,28 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     ValidateDetail(request.TargetSessionId!, detailRequest, detail);
                 }
 
+                IReadOnlyList<LocalRepositoryComparisonSessionInput>? comparisonSessions = null;
+                if (comparisonBatch)
+                {
+                    var inputs = new List<LocalRepositoryComparisonSessionInput>(snapshot.Sessions.Count);
+                    foreach (var currentSession in snapshot.Sessions.OrderBy(static item => item.SessionId, StringComparer.Ordinal))
+                    {
+                        var summaryRequest = new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Summary, currentSession.SessionId);
+                        var currentDetail = await capability.RunContributorAsync(
+                            ReadPhase.Archive,
+                            token => detailContributor is LocalWorkspaceSessionDetailSnapshotContributor workspaceDetail && pinnedRegistry is not null
+                                ? workspaceDetail.ReadPinnedAsync(capability, summaryRequest, acceptedAt, pinnedRegistry, currentSession, token)
+                                : detailContributor.ReadAsync(capability, summaryRequest, token),
+                            cancellationToken).ConfigureAwait(false);
+                        ValidateDetail(currentSession.SessionId, summaryRequest, currentDetail);
+                        inputs.Add(new(currentSession, currentDetail, ComputeRevision(currentSession, currentDetail)));
+                    }
+                    comparisonSessions = Array.AsReadOnly(inputs.ToArray());
+                }
+
                 finalReturnObserver?.Invoke();
                 cancellationToken.ThrowIfCancellationRequested();
-                return (snapshot, detail);
+                return (snapshot, detail, comparisonSessions);
             }
             finally
             {
@@ -214,23 +244,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     }
 
     private static void ValidateRequest(LocalRepositoryScopeRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        if (!Enum.IsDefined(request.ScopeKind))
-            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
-        if (request.ScopeKind == LocalRepositoryScopeKind.Repository)
-        {
-            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(request.RepositoryId))
-                throw new ArgumentException("invalid_local_repository_scope", nameof(request));
-        }
-        else if (request.RepositoryId is not null)
-        {
-            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
-        }
-        if (request.TargetSessionId is not null
-            && !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(request.TargetSessionId))
-            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
-    }
+        => LocalRepositoryScopeRequestValidation.Validate(request);
 
     private static void ValidateDetailRequest(LocalRepositorySessionDetailRequest request)
     {

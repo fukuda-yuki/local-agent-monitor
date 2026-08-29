@@ -83,6 +83,12 @@ internal sealed class SqliteLocalComparisonStore
         }
     }
 
+    internal void EnsureSchema()
+    {
+        using var connection = Open();
+        LocalComparisonSchemaV1.Ensure(connection);
+    }
+
     internal LocalComparisonReadResult Read(
         string repositoryId,
         string comparisonId,
@@ -159,22 +165,16 @@ internal sealed class SqliteLocalComparisonStore
             }
 
             LocalComparisonSchemaV1.DropOperationalDeleteGuards(connection, transaction);
-            var cleanedCount = 0;
-            while (expired.Count > 0)
+            foreach (var item in expired)
             {
-                foreach (var item in expired)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    InsertOrValidateTombstone(connection, transaction, item);
-                    DeleteOperationalRows(connection, transaction, item.ComparisonId);
-                }
-                cleanedCount = checked(cleanedCount + expired.Count);
-                expired = ReadExpired(connection, transaction, now, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                InsertOrValidateTombstone(connection, transaction, item);
+                DeleteOperationalRows(connection, transaction, item.ComparisonId);
             }
             LocalComparisonSchemaV1.RestoreOperationalDeleteGuards(connection, transaction);
             LocalComparisonSchemaV1.Validate(connection, transaction);
             transaction.Commit();
-            return new(LocalComparisonCleanupStatus.Completed, cleanedCount);
+            return new(LocalComparisonCleanupStatus.Completed, expired.Count);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

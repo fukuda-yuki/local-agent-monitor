@@ -1208,6 +1208,10 @@ internal static class LocalComparisonApplicationValidation
         {
             "workspace_session" => reference.SourceIdentity == sessionId
                 && reference.TraceId is null && reference.EventId is null,
+            "workspace_node" => reference.SourceIdentity.StartsWith("node-", StringComparison.Ordinal)
+                && reference.SourceIdentity.Length == 37
+                && reference.SourceIdentity[5..].All(static value => value is >= '0' and <= '9' or >= 'a' and <= 'f')
+                && reference.TraceId is null && reference.EventId is null,
             "session_run" => LocalRepositoryCatalogValidation.IsCanonicalUuidV7(reference.SourceIdentity)
                 && reference.TraceId is null && reference.EventId is null,
             "session_event" => LocalRepositoryCatalogValidation.IsCanonicalUuidV7(reference.SourceIdentity)

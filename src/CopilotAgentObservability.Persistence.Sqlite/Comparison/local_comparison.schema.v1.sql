@@ -111,7 +111,7 @@ CREATE TABLE local_comparison_evidence(
       'inconsistent','projection_invalid','too_large')),
   source_kind TEXT COLLATE BINARY NULL
     CHECK(source_kind IS NULL OR (typeof(source_kind)='text'
-      AND source_kind IN ('workspace_session','session_run','session_event','otel_span','skill_claim'))),
+      AND source_kind IN ('workspace_session','workspace_node','session_run','session_event','otel_span','skill_claim'))),
   source_identity TEXT COLLATE BINARY NULL
     CHECK(source_identity IS NULL OR (typeof(source_identity)='text'
       AND length(CAST(source_identity AS BLOB)) BETWEEN 1 AND 128

@@ -1647,7 +1647,7 @@ public sealed class RuntimeBackupArchiveTests
     [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
     private static extern int MkFifo([MarshalAs(UnmanagedType.LPUTF8Str)] string path, uint mode);
 
-    private sealed class RuntimeBackupTemp : IDisposable
+    internal sealed class RuntimeBackupTemp : IDisposable
     {
         internal RuntimeBackupTemp()
         {

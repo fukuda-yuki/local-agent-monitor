@@ -1,0 +1,284 @@
+using System.Security.Cryptography;
+using System.Text;
+
+namespace CopilotAgentObservability.Persistence.Sqlite;
+
+internal enum LocalComparisonCandidateState
+{
+    Included,
+    RepositoryMismatch,
+    RepositoryArchived,
+    ProjectionUnavailable,
+    UnsupportedSelection,
+    WorkspaceTooLarge,
+}
+
+internal sealed record LocalComparisonProjectionCandidate(
+    string SessionId,
+    string RepositoryId,
+    LocalComparisonCandidateState State,
+    bool IsArchived,
+    string ArchiveState,
+    IReadOnlyList<string> Sources,
+    IReadOnlyList<string> Models,
+    int ProjectionVersion,
+    string Completeness,
+    IReadOnlyList<string> MetricCoverage,
+    long SessionRevision,
+    string ProjectionRevision);
+
+internal sealed record LocalComparisonRequestedOccurrence(string Cohort, int RequestOrdinal, string SessionId);
+internal sealed record LocalComparisonProjectionExclusion(string Cohort, int RequestOrdinal, string SessionId, string Reason);
+internal sealed record LocalComparisonProjectionPreview(
+    bool Valid,
+    string SelectionSha256,
+    string PreviewRevision,
+    IReadOnlyList<LocalComparisonRequestedOccurrence> Requested,
+    IReadOnlyList<LocalComparisonProjectionCandidate> Included,
+    IReadOnlyList<LocalComparisonProjectionExclusion> Excluded);
+
+internal static class LocalComparisonInputProjection
+{
+    private const string SelectionDomain = "copilot-agent-observability/local-comparison-selection/v1";
+    private const string PreviewDomain = "copilot-agent-observability/local-comparison-preview/v1";
+
+    internal static LocalComparisonProjectionPreview Project(
+        string repositoryId,
+        IReadOnlyList<string> cohortA,
+        IReadOnlyList<string> cohortB,
+        bool includeArchived,
+        IReadOnlyList<LocalComparisonProjectionCandidate> candidates,
+        string repositoryRevision)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(repositoryId);
+        ArgumentNullException.ThrowIfNull(cohortA);
+        ArgumentNullException.ThrowIfNull(cohortB);
+        ArgumentNullException.ThrowIfNull(candidates);
+        ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRevision);
+        if (cohortA.Count is < 1 or > 199 || cohortB.Count is < 1 or > 199 || cohortA.Count + cohortB.Count > 200)
+            throw new ArgumentException("local_comparison_input_invalid");
+
+        var requested = new List<LocalComparisonRequestedOccurrence>(cohortA.Count + cohortB.Count);
+        AddRequested("a", cohortA);
+        AddRequested("b", cohortB);
+        var byId = candidates.ToDictionary(static item => item.SessionId, StringComparer.Ordinal);
+        var aIds = cohortA.ToHashSet(StringComparer.Ordinal);
+        var included = new List<(string Cohort, LocalComparisonProjectionCandidate Candidate)>();
+        var excluded = new List<LocalComparisonProjectionExclusion>();
+        Resolve("a", cohortA);
+        Resolve("b", cohortB);
+        var orderedIncludedEntries = included
+            .OrderBy(static item => item.Cohort, StringComparer.Ordinal)
+            .ThenBy(static item => item.Candidate.SessionId, StringComparer.Ordinal)
+            .ToArray();
+        var orderedIncluded = orderedIncludedEntries
+            .Select(static item => item.Candidate)
+            .ToArray();
+        var selectionSha256 = Hash(SelectionDomain, orderedIncludedEntries.SelectMany(static item => new[] { item.Cohort, item.Candidate.SessionId }));
+        var previewValues = new List<string> { repositoryId, repositoryRevision, includeArchived ? "1" : "0", selectionSha256 };
+        foreach (var candidate in orderedIncluded)
+        {
+            previewValues.Add(candidate.SessionId);
+            previewValues.Add(candidate.RepositoryId);
+            previewValues.Add(candidate.ArchiveState);
+            previewValues.Add(candidate.ProjectionVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            previewValues.Add(candidate.Completeness);
+            previewValues.Add(candidate.SessionRevision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            previewValues.Add(candidate.ProjectionRevision);
+            previewValues.AddRange(candidate.Sources.Order(StringComparer.Ordinal));
+            previewValues.AddRange(candidate.Models.Order(StringComparer.Ordinal));
+            previewValues.AddRange(candidate.MetricCoverage.Order(StringComparer.Ordinal));
+        }
+        foreach (var item in excluded)
+            previewValues.AddRange([item.Cohort, item.RequestOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture), item.SessionId, item.Reason]);
+        var valid = included.Any(static item => item.Cohort == "a")
+            && included.Any(static item => item.Cohort == "b")
+            && excluded.All(static item => item.Reason == "session_archived");
+        return new(valid, selectionSha256, Hash(PreviewDomain, previewValues), Array.AsReadOnly(requested.ToArray()), Array.AsReadOnly(orderedIncluded), Array.AsReadOnly(excluded.ToArray()));
+
+        void AddRequested(string cohort, IReadOnlyList<string> ids)
+        {
+            for (var index = 0; index < ids.Count; index++) requested.Add(new(cohort, index + 1, ids[index]));
+        }
+
+        void Resolve(string cohort, IReadOnlyList<string> ids)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (var index = 0; index < ids.Count; index++)
+            {
+                var id = ids[index];
+                string? reason = null;
+                if (!seen.Add(id)) reason = "duplicate";
+                else if (cohort == "b" && aIds.Contains(id)) reason = "cohort_overlap";
+                else if (!byId.TryGetValue(id, out var candidate)) reason = "session_not_found";
+                else if (!string.Equals(candidate.RepositoryId, repositoryId, StringComparison.Ordinal)) reason = "repository_mismatch";
+                else if (candidate.State != LocalComparisonCandidateState.Included) reason = ExclusionToken(candidate.State);
+                else if (candidate.IsArchived && !includeArchived) reason = "session_archived";
+                else included.Add((cohort, candidate));
+                if (reason is not null) excluded.Add(new(cohort, index + 1, id, reason));
+            }
+        }
+    }
+
+    internal static string ExclusionToken(LocalComparisonCandidateState state) => state switch
+    {
+        LocalComparisonCandidateState.RepositoryMismatch => "repository_mismatch",
+        LocalComparisonCandidateState.RepositoryArchived => "repository_archived",
+        LocalComparisonCandidateState.ProjectionUnavailable => "projection_unavailable",
+        LocalComparisonCandidateState.UnsupportedSelection => "unsupported_selection",
+        LocalComparisonCandidateState.WorkspaceTooLarge => "workspace_too_large",
+        _ => throw new ArgumentOutOfRangeException(nameof(state)),
+    };
+
+    internal static LocalComparisonSessionFact MapSessionFact(
+        LocalRepositoryScopeSessionSnapshot session,
+        LocalWorkspaceSessionDetailContribution detail,
+        string workspaceRevision,
+        bool includeArchived)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(detail);
+        if (session.Session is not LocalWorkspaceProjectionRow row || workspaceRevision.Length != 64)
+            throw new LocalComparisonSelectionUnavailableException();
+        var sessionReference = new LocalComparisonSourceReference("workspace_session", session.SessionId, null, null, null, workspaceRevision);
+        var scalars = LocalComparisonRegistryV1.RequiredSessionScalarKeys.ToDictionary(
+            static key => key,
+            _ => Missing(LocalComparisonFactState.SourceUnsupported),
+            StringComparer.Ordinal);
+        scalars["input_tokens"] = Observed(row.Tokens.Input, sessionReference);
+        scalars["output_tokens"] = Observed(row.Tokens.Output, sessionReference);
+        scalars["total_tokens"] = Observed(row.Tokens.Total, sessionReference);
+        scalars["cache_read_tokens"] = Observed(row.Tokens.CacheRead, sessionReference);
+        scalars["cache_creation_tokens"] = Observed(row.Tokens.CacheCreation, sessionReference);
+        scalars["session_duration"] = Observed(row.TimingState, row.DurationMilliseconds, sessionReference);
+        scalars["execution_count"] = Count(detail.Executions.Count, sessionReference);
+        scalars["tool_call_count"] = Observed(row.Activity.Tool, sessionReference);
+        scalars["skill_invocation_count"] = Observed(row.Activity.Skill, sessionReference);
+        scalars["subagent_start_count"] = Observed(row.Activity.Subagent, sessionReference);
+        scalars["error_count"] = Observed(row.Activity.Error, sessionReference);
+        scalars["retry_count"] = Observed(row.Activity.Retry, sessionReference);
+        scalars["error_session_count"] = Presence(scalars["error_count"], sessionReference);
+        scalars["retry_session_count"] = Presence(scalars["retry_count"], sessionReference);
+
+        var families = new[]
+        {
+            Family("skill", row.Activity.Skill),
+            Family("tool", row.Activity.Tool),
+            Family("subagent", row.Activity.Subagent),
+        };
+        var conditions = new Dictionary<string, LocalComparisonConditionFact>(StringComparer.Ordinal)
+        {
+            ["sources"] = Condition(row.Sources.State, row.Sources.Values, sessionReference),
+            ["models"] = Condition(row.Models.State, row.Models.Values, sessionReference),
+            ["source_versions"] = Condition(detail.Versions is null ? "source_unsupported" : "recorded", detail.Versions ?? [], sessionReference),
+            ["adapter_versions"] = new(LocalComparisonFactState.SourceUnsupported, [], null),
+            ["completeness"] = Condition("recorded", [row.Completeness], sessionReference),
+        };
+        var observedAt = DateTimeOffset.TryParse(row.LastSeenAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed)
+            ? parsed.ToUniversalTime() : (DateTimeOffset?)null;
+        var targetState = observedAt is null ? State(row.TimingState) : LocalComparisonFactState.Recorded;
+        return new(
+            session.SessionId,
+            session.RepositoryId ?? throw new LocalComparisonSelectionUnavailableException(),
+            workspaceRevision,
+            session.IsEffectivelyEligible,
+            session.ArchiveState == LocalArchiveState.Archived,
+            scalars,
+            Array.AsReadOnly(families),
+            conditions,
+            new(LocalComparisonFactState.Recorded, sessionReference, targetState, observedAt, observedAt is null ? null : sessionReference),
+            includeArchived && session.ArchiveState == LocalArchiveState.Archived);
+
+        LocalComparisonNamedFamilyFact Family(string family, LocalWorkspaceFact<long> aggregate)
+        {
+            var items = detail.Nodes.Where(node => node.Kind == family).Select(node =>
+            {
+                var reference = new LocalComparisonSourceReference("workspace_node", node.NodeId, null, null, null, workspaceRevision);
+                var display = node.NameState == "recorded" && !string.IsNullOrWhiteSpace(node.NameText) ? node.NameText! : "識別名なし";
+                var values = LocalComparisonRegistryV1.NamedFieldKeys[family].ToDictionary(
+                    static key => key, _ => Missing(LocalComparisonFactState.SourceUnsupported), StringComparer.Ordinal);
+                if (family == "skill") values["invocation_count"] = Count(1, reference);
+                if (family == "tool")
+                {
+                    values["call_count"] = Count(1, reference);
+                    values["failure_count"] = Count(node.Status == "failed" ? 1 : 0, reference);
+                    values["retry_count"] = Observed(node.Activity.Retry, reference);
+                }
+                if (family == "subagent")
+                {
+                    values["start_count"] = Lifecycle(node.SubagentLifecycle?.StartedState, reference);
+                    values["completed_count"] = Lifecycle(node.SubagentLifecycle?.CompletedState, reference);
+                    values["failed_count"] = Lifecycle(node.SubagentLifecycle?.FailedState, reference);
+                    values["recorded_tokens"] = Observed(node.Tokens.Total, reference);
+                }
+                return new LocalComparisonNamedItem(family, node.NodeId, node.NodeId, display, values, reference);
+            }).OrderBy(static item => item.SortKey, StringComparer.Ordinal).ToArray();
+            var state = items.Length > 0 ? LocalComparisonFactState.Recorded : State(aggregate.State);
+            if (items.Length == 0 && state == LocalComparisonFactState.Recorded) state = LocalComparisonFactState.ExplicitZero;
+            return new(family, state, Array.AsReadOnly(items), state is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero ? sessionReference : null);
+        }
+    }
+
+    private static LocalComparisonObservedScalar Lifecycle(string? state, LocalComparisonSourceReference reference) =>
+        state == "recorded" ? Count(1, reference) : Missing(State(state ?? "source_unsupported"));
+
+    private static LocalComparisonObservedScalar Presence(LocalComparisonObservedScalar input, LocalComparisonSourceReference reference) =>
+        input.Observation.Value is decimal value ? Count(value > 0 ? 1 : 0, reference) : Missing(input.Observation.State);
+
+    private static LocalComparisonObservedScalar Count(long value, LocalComparisonSourceReference reference) =>
+        new(new(value == 0 ? LocalComparisonFactState.ExplicitZero : LocalComparisonFactState.Recorded, value), reference);
+
+    private static LocalComparisonObservedScalar Observed(LocalWorkspaceFact<long> fact, LocalComparisonSourceReference reference) =>
+        Observed(fact.State, fact.Value, reference);
+
+    private static LocalComparisonObservedScalar Observed(string state, long? value, LocalComparisonSourceReference reference)
+    {
+        var mapped = State(state);
+        if (mapped == LocalComparisonFactState.Recorded && value == 0) mapped = LocalComparisonFactState.ExplicitZero;
+        return mapped is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero
+            ? new(new(mapped, value), reference) : Missing(mapped);
+    }
+
+    private static LocalComparisonObservedScalar Missing(LocalComparisonFactState state) =>
+        new(new(state, null), Reference: null);
+
+    private static LocalComparisonConditionFact Condition(string state, IReadOnlyList<string> values, LocalComparisonSourceReference reference)
+    {
+        var mapped = State(state);
+        if (mapped == LocalComparisonFactState.Recorded && values.Count == 0) mapped = LocalComparisonFactState.ExplicitZero;
+        return new(mapped, mapped is LocalComparisonFactState.Recorded ? Array.AsReadOnly(values.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()) : [], mapped is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero ? reference : null);
+    }
+
+    private static LocalComparisonFactState State(string state) => state switch
+    {
+        "recorded" => LocalComparisonFactState.Recorded,
+        "not_observed" or "missing" => LocalComparisonFactState.NotObserved,
+        "source_unsupported" => LocalComparisonFactState.SourceUnsupported,
+        "capture_gap" => LocalComparisonFactState.CaptureGap,
+        "certification_pending" => LocalComparisonFactState.CertificationPending,
+        "not_captured" => LocalComparisonFactState.NotCaptured,
+        "expired" => LocalComparisonFactState.Expired,
+        "deleted" => LocalComparisonFactState.Deleted,
+        "read_denied" => LocalComparisonFactState.ReadDenied,
+        "too_large" => LocalComparisonFactState.TooLarge,
+        "invalid" or "inconsistent" => LocalComparisonFactState.ProjectionInvalid,
+        _ => LocalComparisonFactState.SourceUnsupported,
+    };
+
+    private static string Hash(string domain, IEnumerable<string> values)
+    {
+        using var stream = new MemoryStream();
+        Write(domain);
+        foreach (var value in values) Write(value);
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+
+        void Write(string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            Span<byte> length = stackalloc byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+            stream.Write(length);
+            stream.Write(bytes);
+        }
+    }
+}

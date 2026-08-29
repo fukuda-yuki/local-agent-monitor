@@ -566,6 +566,20 @@ internal static class MonitorHost
                 ?? services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
             builder.Services.AddSingleton<ILocalRepositorySessionDetailSnapshotService>(services =>
                 services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
+            builder.Services.AddSingleton<ILocalRepositoryComparisonInputSnapshotService>(services =>
+                services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
+            var localComparisonStore = new SqliteLocalComparisonStore(options.DatabasePath, timeProvider);
+            localComparisonStore.EnsureSchema();
+            builder.Services.AddSingleton(localComparisonStore);
+            builder.Services.AddSingleton<ILocalMonitorV1ComparisonApplication>(services =>
+                testOptions?.LocalMonitorV1ComparisonApplication
+                ?? new LocalMonitorV1ComparisonProductionApplication(
+                    services.GetRequiredService<ILocalRepositoryComparisonInputSnapshotService>(),
+                    services.GetRequiredService<SqliteLocalComparisonStore>(),
+                    timeProvider));
+            if (testOptions?.StartLocalComparisonCleanupHostedService ?? true)
+                builder.Services.AddHostedService(services => new LocalComparisonCleanupHostedService(
+                    services.GetRequiredService<SqliteLocalComparisonStore>(), timeProvider));
             if (testOptions?.StartLocalRepositoryCatalogHostedService ?? true)
             {
                 builder.Services.AddHostedService(_ => localRepositoryHostedService);
@@ -774,12 +788,13 @@ internal static class MonitorHost
             var localArchivePath = LocalArchiveRoutes.IsPath(context);
             var localMonitorV1CollectionPath = LocalMonitorV1CollectionRoutes.IsPath(context.Request.Path);
             var localMonitorV1DetailPath = LocalMonitorV1SessionDetailRoutes.IsPath(context.Request.Path);
+            var localMonitorV1ComparisonPath = LocalMonitorV1ComparisonRoutes.IsPath(context.Request.Path);
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
-                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath
+                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
                 || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
@@ -849,6 +864,10 @@ internal static class MonitorHost
                 {
                     await LocalMonitorV1SessionDetailRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
+                else if (localMonitorV1ComparisonPath)
+                {
+                    await LocalMonitorV1ComparisonRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
                 else if (!options.SanitizedOnly && (localMonitorV1HumanPath || retiredTraceListPath))
                 {
                     await LocalMonitorV1HumanRoutes.InvalidHostAsync(context);
@@ -865,6 +884,7 @@ internal static class MonitorHost
                     || localArchivePath
                     || localMonitorV1CollectionPath
                     || localMonitorV1DetailPath
+                    || localMonitorV1ComparisonPath
                     || ((HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
                         && localMonitorV1HumanPath)
                     || RuntimeBackupRoutes.IsPath(context.Request.Path)
@@ -899,6 +919,7 @@ internal static class MonitorHost
             LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(),
                 contentReader: new LocalWorkspaceNodeContentReader(retentionContext, timeProvider),
                 contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
+            LocalMonitorV1ComparisonRoutes.Map(app, app.Services.GetRequiredService<ILocalMonitorV1ComparisonApplication>());
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
@@ -1655,30 +1676,30 @@ internal static class MonitorHost
                     var detail = SpanDetailExtractor.Extract(reference.Value.PayloadJson, traceId, spanId);
                     entity = JsonSerializer.Serialize(new
                     {
-                    trace_id = traceId,
-                    span_id = spanId,
-                    span = new
-                    {
-                        operation = spanRow.Operation,
-                        category = spanRow.Category,
-                        tool_name = spanRow.ToolName,
-                        mcp_tool_name = spanRow.McpToolName,
-                        agent_name = spanRow.AgentName,
-                        request_model = spanRow.RequestModel,
-                        response_model = spanRow.ResponseModel,
-                        parent_span_id = spanRow.ParentSpanId,
-                        status = spanRow.Status,
-                        error_type = spanRow.ErrorType,
-                        input_tokens = spanRow.InputTokens,
-                        output_tokens = spanRow.OutputTokens,
-                        total_tokens = spanRow.TotalTokens,
-                        cache_read_tokens = spanRow.CacheReadTokens,
-                        cache_creation_tokens = spanRow.CacheCreationTokens,
-                        duration_ms = spanRow.DurationMs,
-                        start_time = spanRow.StartTime,
-                        end_time = spanRow.EndTime,
-                    },
-                    tool = detail?.Tool is { } tool
+                        trace_id = traceId,
+                        span_id = spanId,
+                        span = new
+                        {
+                            operation = spanRow.Operation,
+                            category = spanRow.Category,
+                            tool_name = spanRow.ToolName,
+                            mcp_tool_name = spanRow.McpToolName,
+                            agent_name = spanRow.AgentName,
+                            request_model = spanRow.RequestModel,
+                            response_model = spanRow.ResponseModel,
+                            parent_span_id = spanRow.ParentSpanId,
+                            status = spanRow.Status,
+                            error_type = spanRow.ErrorType,
+                            input_tokens = spanRow.InputTokens,
+                            output_tokens = spanRow.OutputTokens,
+                            total_tokens = spanRow.TotalTokens,
+                            cache_read_tokens = spanRow.CacheReadTokens,
+                            cache_creation_tokens = spanRow.CacheCreationTokens,
+                            duration_ms = spanRow.DurationMs,
+                            start_time = spanRow.StartTime,
+                            end_time = spanRow.EndTime,
+                        },
+                        tool = detail?.Tool is { } tool
                         ? new
                         {
                             arguments = tool.Arguments,
@@ -1687,7 +1708,7 @@ internal static class MonitorHost
                             exit_code = tool.ExitCode,
                         }
                         : (object?)null,
-                    llm = detail?.Llm is { } llm
+                        llm = detail?.Llm is { } llm
                         ? new
                         {
                             messages = llm.Messages.Select(message => new
@@ -1701,8 +1722,8 @@ internal static class MonitorHost
                             response_token_estimate = llm.ResponseTokenEstimate,
                         }
                         : (object?)null,
-                    error_message = detail?.ErrorMessage,
-                    raw_span_json = detail?.RawSpanJson,
+                        error_message = detail?.ErrorMessage,
+                        raw_span_json = detail?.RawSpanJson,
                     });
                 }
                 if (!RawResponsePublication.AuthorizesRawDerivedPublication(spanLease.TrySealRawResponse()))
@@ -2766,6 +2787,8 @@ internal sealed class MonitorHostTestOptions
 
     public bool StartLocalRepositoryCatalogHostedService { get; init; } = true;
 
+    public bool StartLocalComparisonCleanupHostedService { get; init; } = true;
+
     public TimeSpan? SessionOtelPollInterval { get; init; }
 
     public TimeProvider? TimeProvider { get; set; }
@@ -2787,6 +2810,8 @@ internal sealed class MonitorHostTestOptions
     public ILocalRepositoryScopeSnapshotService? LocalRepositoryScopeSnapshotService { get; init; }
 
     public LocalMonitorV1CollectionTestOverrides? LocalMonitorV1CollectionOverrides { get; init; }
+
+    public ILocalMonitorV1ComparisonApplication? LocalMonitorV1ComparisonApplication { get; init; }
 
     public Action<IEndpointRouteBuilder>? AdditionalEndpoints { get; set; }
 

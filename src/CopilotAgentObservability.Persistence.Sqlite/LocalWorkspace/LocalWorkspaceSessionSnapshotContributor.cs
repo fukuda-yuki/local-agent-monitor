@@ -32,7 +32,9 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         var acceptedAt = timeProvider.GetUtcNow();
         var now = acceptedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
         return transaction.ReadAsync((connection, sqliteTransaction, token) =>
-            ReadRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.TargetSessionId, statementObserver, registryAuthority, token), cancellationToken);
+            request.ExactTargetSessionIds is null
+                ? ReadRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.TargetSessionId, statementObserver, registryAuthority, token)
+                : ReadExactRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.ExactTargetSessionIds, statementObserver, registryAuthority, token), cancellationToken);
     }
 
     internal ValueTask<LocalRepositorySessionContribution> ReadPinnedAsync(
@@ -44,7 +46,37 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
     {
         var now = acceptedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
         return transaction.ReadAsync((connection, sqliteTransaction, token) =>
-            ReadRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.TargetSessionId, statementObserver, registryGeneration, token), cancellationToken);
+            request.ExactTargetSessionIds is null
+                ? ReadRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.TargetSessionId, statementObserver, registryGeneration, token)
+                : ReadExactRowsAsync(connection, sqliteTransaction, acceptedAt, now, request.ExactTargetSessionIds, statementObserver, registryGeneration, token), cancellationToken);
+    }
+
+    private static async ValueTask<LocalRepositorySessionContribution> ReadExactRowsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset acceptedAt,
+        string now,
+        IReadOnlyList<string> exactTargetSessionIds,
+        Action<string>? statementObserver,
+        ISkillRegistryGenerationAuthority? registryAuthority,
+        CancellationToken cancellationToken)
+    {
+        var rows = new List<ILocalRepositorySessionSnapshotRow>(exactTargetSessionIds.Count);
+        foreach (var sessionId in exactTargetSessionIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var contribution = await ReadRowsAsync(
+                connection,
+                transaction,
+                acceptedAt,
+                now,
+                sessionId,
+                statementObserver,
+                registryAuthority,
+                cancellationToken).ConfigureAwait(false);
+            rows.AddRange(contribution.Sessions);
+        }
+        return new(Array.AsReadOnly(rows.ToArray()));
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(
@@ -247,7 +279,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             {
                 var sessionId = reader.GetString(0);
                 if (!observations.TryGetValue(sessionId, out var values)) observations[sessionId] = values = [];
-                values.Add(new(reader.GetString(2), Nullable(reader,3), Nullable(reader,4), Nullable(reader,5), Nullable(reader,6), Nullable(reader,7), Nullable(reader,8)));
+                values.Add(new(reader.GetString(2), Nullable(reader, 3), Nullable(reader, 4), Nullable(reader, 5), Nullable(reader, 6), Nullable(reader, 7), Nullable(reader, 8)));
             }
             foreach (var pair in observations) if (byId.TryGetValue(pair.Key, out var row)) row.TokenAggregate = ReadTokens(pair.Value);
         }
@@ -1003,28 +1035,28 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
     private static LocalWorkspaceTokenFacts ReadTokens(IReadOnlyList<TokenObservation> rows)
     {
         var total = rows.Count; var available = rows.Count(r => r.Values.Any(v => v is not null));
-        var authority = rows.Select(r=>r.Authority).Distinct(StringComparer.Ordinal).Count()==1 ? rows[0].Authority : "mixed";
+        var authority = rows.Select(r => r.Authority).Distinct(StringComparer.Ordinal).Count() == 1 ? rows[0].Authority : "mixed";
         var overflow = false;
-        LocalWorkspaceFact<long> Fact(Func<TokenObservation,long?> select)
+        LocalWorkspaceFact<long> Fact(Func<TokenObservation, long?> select)
         {
-            var values=rows.Select(select).ToArray(); var count=values.Count(v=>v is not null);
-            if(count==0)return new("not_observed",null); if(count!=total)return new("capture_gap",null);
-            try { long sum=0; foreach(var value in values) sum=checked(sum+value!.Value); return new("recorded",sum); }
-            catch(OverflowException){overflow=true;return new("oversized",null);}
+            var values = rows.Select(select).ToArray(); var count = values.Count(v => v is not null);
+            if (count == 0) return new("not_observed", null); if (count != total) return new("capture_gap", null);
+            try { long sum = 0; foreach (var value in values) sum = checked(sum + value!.Value); return new("recorded", sum); }
+            catch (OverflowException) { overflow = true; return new("oversized", null); }
         }
-        var input=Fact(r=>r.Input); var output=Fact(r=>r.Output); var producerTotal=Fact(r=>r.Total); var reasoning=Fact(r=>r.Reasoning); var cache=Fact(r=>r.CacheRead); var creation=Fact(r=>r.CacheCreation);
-        var inconsistent=input.State=="recorded"&&cache.State=="recorded"&&cache.Value>input.Value;
+        var input = Fact(r => r.Input); var output = Fact(r => r.Output); var producerTotal = Fact(r => r.Total); var reasoning = Fact(r => r.Reasoning); var cache = Fact(r => r.CacheRead); var creation = Fact(r => r.CacheCreation);
+        var inconsistent = input.State == "recorded" && cache.State == "recorded" && cache.Value > input.Value;
         var componentGap = new[] { input, output, producerTotal, reasoning, cache, creation }.Any(f => f.State == "capture_gap");
-        var overall=overflow?"oversized":inconsistent?"inconsistent":available==0?"not_observed":available<total||componentGap?"capture_gap":"recorded";
+        var overall = overflow ? "oversized" : inconsistent ? "inconsistent" : available == 0 ? "not_observed" : available < total || componentGap ? "capture_gap" : "recorded";
         LocalWorkspaceFact<long> derived;
-        if(inconsistent) derived=new("inconsistent",null); else if(input.State!="recorded"||cache.State!="recorded") derived=new(input.State=="capture_gap"||cache.State=="capture_gap"?"capture_gap":"not_observed",null); else derived=new("recorded",input.Value!.Value-cache.Value!.Value);
+        if (inconsistent) derived = new("inconsistent", null); else if (input.State != "recorded" || cache.State != "recorded") derived = new(input.State == "capture_gap" || cache.State == "capture_gap" ? "capture_gap" : "not_observed", null); else derived = new("recorded", input.Value!.Value - cache.Value!.Value);
         LocalWorkspaceFact<long> ratio;
-        if(inconsistent) ratio=new("inconsistent",null); else if(input.State!="recorded"||cache.State!="recorded"||input.Value==0) ratio=new(input.State=="capture_gap"||cache.State=="capture_gap"?"capture_gap":"not_observed",null); else { var value=(BigInteger)cache.Value!.Value*10_000/input.Value!.Value; ratio=value>long.MaxValue?new("oversized",null):new("recorded",(long)value); }
-        return new(authority,overall,available,total,input,output,producerTotal,reasoning,cache,creation,derived,ratio);
+        if (inconsistent) ratio = new("inconsistent", null); else if (input.State != "recorded" || cache.State != "recorded" || input.Value == 0) ratio = new(input.State == "capture_gap" || cache.State == "capture_gap" ? "capture_gap" : "not_observed", null); else { var value = (BigInteger)cache.Value!.Value * 10_000 / input.Value!.Value; ratio = value > long.MaxValue ? new("oversized", null) : new("recorded", (long)value); }
+        return new(authority, overall, available, total, input, output, producerTotal, reasoning, cache, creation, derived, ratio);
     }
 
-    private sealed record TokenObservation(string Authority,long? Input,long? Output,long? Total,long? Reasoning,long? CacheRead,long? CacheCreation)
-    { internal IEnumerable<long?> Values => [Input,Output,Total,Reasoning,CacheRead,CacheCreation]; }
+    private sealed record TokenObservation(string Authority, long? Input, long? Output, long? Total, long? Reasoning, long? CacheRead, long? CacheCreation)
+    { internal IEnumerable<long?> Values => [Input, Output, Total, Reasoning, CacheRead, CacheCreation]; }
 
     private static long? Nullable(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 

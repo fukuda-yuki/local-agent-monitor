@@ -42,6 +42,13 @@ internal interface ILocalRepositoryScopeSnapshotService
 
 }
 
+internal interface ILocalRepositoryComparisonInputSnapshotService
+{
+    ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(
+        LocalRepositoryScopeRequest request,
+        CancellationToken cancellationToken);
+}
+
 internal interface ILocalRepositorySessionDetailSnapshotService
 {
     ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
@@ -117,7 +124,37 @@ internal enum LocalRepositoryScopeSnapshotError
 internal sealed record LocalRepositoryScopeRequest(
     LocalRepositoryScopeKind ScopeKind,
     string? RepositoryId,
-    string? TargetSessionId = null);
+    string? TargetSessionId = null,
+    IReadOnlyList<string>? ExactTargetSessionIds = null);
+
+internal static class LocalRepositoryScopeRequestValidation
+{
+    internal static void Validate(LocalRepositoryScopeRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!Enum.IsDefined(request.ScopeKind))
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        if (request.ScopeKind == LocalRepositoryScopeKind.Repository)
+        {
+            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(request.RepositoryId))
+                throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        }
+        else if (request.RepositoryId is not null)
+        {
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        }
+        if (request.TargetSessionId is not null
+            && !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(request.TargetSessionId))
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        if (request.TargetSessionId is not null && request.ExactTargetSessionIds is not null)
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        if (request.ExactTargetSessionIds is { } targets
+            && (targets.Count is < 1 or > 200
+                || targets.Any(static id => !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(id))
+                || targets.Distinct(StringComparer.Ordinal).Count() != targets.Count))
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+    }
+}
 
 internal sealed record LocalRepositorySessionContribution(
     IReadOnlyList<ILocalRepositorySessionSnapshotRow> Sessions);
@@ -181,6 +218,15 @@ internal sealed record LocalRepositorySessionDetailSnapshot(
     LocalRepositoryScopeSessionSnapshot Session,
     LocalWorkspaceSessionDetailContribution Detail,
     string WorkspaceRevision);
+
+internal sealed record LocalRepositoryComparisonSessionInput(
+    LocalRepositoryScopeSessionSnapshot Session,
+    LocalWorkspaceSessionDetailContribution Detail,
+    string WorkspaceRevision);
+
+internal sealed record LocalRepositoryComparisonInputSnapshot(
+    LocalRepositoryScopeSnapshot Scope,
+    IReadOnlyList<LocalRepositoryComparisonSessionInput> Sessions);
 
 internal sealed class LocalRepositoryScopeSnapshotException : Exception
 {
