@@ -123,7 +123,9 @@ public sealed class LocalComparisonInputProjectionTests
         var activity = new LocalWorkspaceActivityFacts(Fact(0), Fact(0), Fact(0), Fact(0), Fact(0));
         var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
         var node = new LocalWorkspaceNodeDetail("node-00000000000000000000000000000001", sessionId, "018f0000-0000-7000-8000-000000000010", "semantic_subagent", "opaque", 1, null, "exact", "subagent", unidentifiedSubagent ? "not_observed" : "recorded", unidentifiedSubagent ? null : "helper", "completed", "completed", "missing", null, null, null, activity, tokens, null, null, null, 0, false, null, [], null, null, new("not_observed", "recorded", "recorded", "not_observed", "not_observed", "not_captured"));
-        return new([], [node], [], [], Versions: ["1"], CanonicalRevisionInput: "revision", SkillRegistryGenerationIdentity: new string('b', 64));
+        var skill = node with { NodeId = "node-00000000000000000000000000000002", Kind = "skill", NameState = "recorded", NameText = "skill-helper" };
+        var tool = node with { NodeId = "node-00000000000000000000000000000003", Kind = "tool", NameState = "recorded", NameText = "tool-helper" };
+        return new([], [node, skill, tool], [], [], Versions: ["1"], CanonicalRevisionInput: "revision", SkillRegistryGenerationIdentity: new string('b', 64));
     }
 
     private static LocalWorkspaceFact<long> Fact(long value) => new("recorded", value);

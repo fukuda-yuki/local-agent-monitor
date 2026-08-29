@@ -295,6 +295,28 @@ public sealed class LocalComparisonStoreTests
         Assert.Throws<InvalidOperationException>(() => store.Accept(nonCanonical, default));
     }
 
+    [Fact]
+    public void ReceiptBindsConsumedValueAndReloadRejectsPersistedMutation()
+    {
+        using var database = new ComparisonDatabase();
+        database.Initialize();
+        var store = new SqliteLocalComparisonStore(database.Path, new FixedTimeProvider(CreatedAt));
+        var valid = Snapshot();
+        var changedEvidence = valid.Evidence.ToArray();
+        changedEvidence[0] = changedEvidence[0] with { ConsumedValue = "different" };
+        var changed = ReReceipt(valid, valid.Memberships, valid.Results, changedEvidence);
+
+        Assert.NotEqual(valid.Results[0].PayloadSha256, changed.Results[0].PayloadSha256);
+        Assert.Equal(LocalComparisonAcceptStatus.Accepted, store.Accept(valid, default));
+        using (var connection = database.Open())
+        {
+            Execute(connection, "DROP TRIGGER local_comparison_evidence_update_rejected;");
+            Execute(connection, $"UPDATE local_comparison_evidence SET consumed_value='different' WHERE comparison_id='{ComparisonId}' AND result_ordinal=1 AND evidence_ordinal=0;");
+        }
+
+        Assert.Throws<InvalidOperationException>(() => store.Read(RepositoryId, ComparisonId, default));
+    }
+
     private static LocalComparisonSnapshotWrite ReReceipt(
         LocalComparisonSnapshotWrite source,
         IReadOnlyList<LocalComparisonStoredMembership> memberships,

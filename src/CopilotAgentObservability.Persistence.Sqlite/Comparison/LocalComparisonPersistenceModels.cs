@@ -229,6 +229,7 @@ internal static class LocalComparisonReceiptFrame
             Write(stream, item.Cohort);
             Write(stream, item.SessionId);
             Write(stream, item.AvailabilityState);
+            WriteNullable(stream, item.ConsumedValue);
             WriteNullable(stream, item.SourceKind);
             WriteNullable(stream, item.SourceIdentity);
             WriteNullable(stream, item.TraceId);

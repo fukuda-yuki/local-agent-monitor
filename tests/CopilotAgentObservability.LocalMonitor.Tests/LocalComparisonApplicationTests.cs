@@ -267,7 +267,7 @@ public sealed class LocalComparisonApplicationTests
         Assert.NotEmpty(snapshot.Results[0].Payload);
         Assert.Equal("receipt", snapshot.Results[0].RowKind);
         Assert.Equal(
-            "20f94bdded7ceb7cea4217d7a62c4f9e8be7670028685507892637651a19639f",
+            "8fb6bdb14012981098d8daa047b5fa08a6bc8ac1f895bf00819dc158e1b53658",
             snapshot.Results[0].PayloadSha256);
         Assert.Equal(snapshot.Results[0].Payload,
             Assert.IsType<LocalComparisonSnapshotWrite>(repeated.Snapshot).Results[0].Payload);

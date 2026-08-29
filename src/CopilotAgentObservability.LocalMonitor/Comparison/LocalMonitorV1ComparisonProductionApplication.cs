@@ -89,24 +89,36 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
     private static string? ResolveEvidenceField(LocalComparisonStoredResult result, string? field)
     {
         if (field is null) return null;
-        if (field is "available_count" or "median" or "minimum" or "maximum" or "total" or "absolute_difference" or "relative_difference_percent")
+        if (result.SectionOrdinal == 1)
         {
-            if (result.RowKind == "scalar") return "value";
-            return LocalComparisonRegistryV1.NamedFieldKeys.TryGetValue(result.RowKind, out var aggregateNamed) ? aggregateNamed[0] : null;
+            if (field == "count" && result.RowKey is "included_session_count" or "available_session_count") return "selection";
+            if (field == "condition" && result.RowKind == "condition")
+                return result.RowKey switch { "period" => "observed_at", "archived_inclusion" => "selection", _ => null };
+            return null;
         }
-        if (field == "condition" && result.RowKind == "condition")
-            return result.RowKey switch { "period" => "observed_at", "archived_inclusion" => "selection", _ => "value" };
-        if (field == "count" && LocalComparisonRegistryV1.NamedFieldKeys.TryGetValue(result.RowKind, out var named)) return named[0];
-        if (field == "total_tokens" && result.RowKind == "subagent") return "recorded_tokens";
-        if (field == "error_count" && result.RowKind == "tool") return "failure_count";
-        if (field == "retry_count" && result.RowKind == "tool") return "retry_count";
+        if (result.RowKind is "skill" or "tool" or "subagent")
+        {
+            return (result.RowKind, field) switch
+            {
+                ("skill", "count") => "invocation_count",
+                ("tool", "count") => "call_count",
+                ("tool", "error_count") => "failure_count",
+                ("tool", "retry_count") => "retry_count",
+                ("subagent", "count") => "start_count",
+                ("subagent", "total_tokens") => "recorded_tokens",
+                _ => null,
+            };
+        }
+        if (result.RowKind == "condition") return field == "condition" ? "value" : null;
+        if (field is "available_count" or "median" or "minimum" or "maximum" or "total" or "absolute_difference" or "relative_difference_percent")
+            return result.RowKind == "scalar" ? "value" : null;
         if (field == "duration_ms" && result.RowKey == "session_duration") return "value";
         if (field is "input_tokens" or "output_tokens" or "total_tokens" or "cache_read" or "cache_creation" or "new_input" or "error_count" or "retry_count")
         {
             var expected = field switch { "cache_read" => "cache_read_tokens", "cache_creation" => "cache_creation_tokens", "new_input" => "new_input_tokens", _ => field };
             return result.RowKey == expected ? "value" : null;
         }
-        return result.RowKind is "scalar" or "condition" && field == "value" ? "value" : result.RowKind is "skill" or "tool" or "subagent" && result.Values.Any(value => value.Key.StartsWith(field + "_", StringComparison.Ordinal)) ? field : null;
+        return result.RowKind == "scalar" && field == "value" ? "value" : null;
     }
     private static string Normalize(string value) => string.Join(' ', value.Normalize(NormalizationForm.FormKC).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
     private static LocalMonitorV1ComparisonResponse Error(int status, string code) => new(status, Encoding.UTF8.GetBytes($"{{\"error\":\"{code}\"}}"));

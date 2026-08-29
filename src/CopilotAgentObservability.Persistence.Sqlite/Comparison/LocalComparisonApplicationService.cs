@@ -289,7 +289,8 @@ internal sealed class LocalComparisonApplicationService
             includeEvidence: true,
             evidenceSelector: static item => new LocalComparisonFactEvidence(
                 item.Target.ValueAvailabilityState,
-                item.Target.ValueAvailabilityReference));
+                item.Target.ValueAvailabilityReference,
+                item.Target.ValueAvailabilityState is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero ? "1" : null));
         AddPeriod(nextOrdinal++);
         AddArchiveInclusion(nextOrdinal++);
 
@@ -325,11 +326,11 @@ internal sealed class LocalComparisonApplicationService
                 return;
             }
             var evidenceOrdinal = 0;
-            AddEvidence(comparisonId, ordinal, "value", "a", input.CohortA,
+            AddEvidence(comparisonId, ordinal, "selection", "a", input.CohortA,
                 input.CohortA.Select(evidenceSelector).Select(static item =>
                     (IReadOnlyList<LocalComparisonFactEvidence>)Array.AsReadOnly(new[] { item })).ToArray(),
                 evidence, ref evidenceOrdinal);
-            AddEvidence(comparisonId, ordinal, "value", "b", input.CohortB,
+            AddEvidence(comparisonId, ordinal, "selection", "b", input.CohortB,
                 input.CohortB.Select(evidenceSelector).Select(static item =>
                     (IReadOnlyList<LocalComparisonFactEvidence>)Array.AsReadOnly(new[] { item })).ToArray(),
                 evidence, ref evidenceOrdinal);
@@ -749,7 +750,7 @@ internal sealed class LocalComparisonApplicationService
                     new LocalComparisonSourceReference(
                         "workspace_session", session.SessionId, null, null, null,
                         session.WorkspaceRevision),
-                    session.SessionId),
+                    "1"),
             })).ToArray();
         AddEvidence(comparisonId, resultOrdinal, "selection", cohort, sessions,
             facts, destination, ref evidenceOrdinal);
