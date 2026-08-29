@@ -21,6 +21,18 @@ Check these perspectives before completion:
 - Documentation consistency when product behavior, public interfaces, or user workflows change.
 - Information placement: comments record constraints and rejected alternatives rather than restating code; commit bodies record why the change was needed (`docs/agent-guides/information-placement.md`).
 
+## Over-implementation blocking check
+
+Before completion, block the change unless:
+
+- every changed file and behavior is necessary for the request, an acceptance criterion, or the affected contract;
+- no unused abstraction, configuration, fallback, compatibility path, or parallel implementation remains;
+- every new test covers changed observable behavior rather than duplicating existing coverage or backfilling an unrelated module;
+- unplanned files, lines, artifacts, and Sub-agent output have been removed or returned to a scope decision; and
+- no work was added only to make the result appear more complete.
+
+This workflow owns current-specification consistency review. Do not duplicate that responsibility in another Sub-agent.
+
 ## Preserved Review Records
 
 Create a preserved review record only when the active work item calls for one or the user asks for one.

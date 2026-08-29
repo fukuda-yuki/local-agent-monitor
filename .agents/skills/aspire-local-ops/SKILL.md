@@ -1,6 +1,6 @@
 ---
 name: aspire-local-ops
-description: Operate this repository's existing Aspire AppHost for local lifecycle and diagnostics. Use only when asked to start, stop, or inspect Aspire, or when diagnosing locks, ports, logs, traces, or resource state caused by a running AppHost. Do not use for ordinary build/test work, adding Aspire resources or integrations, deployment, or AppHost behavior changes without a specification update.
+description: Use when explicitly asked to start, stop, or inspect this repository's existing Aspire AppHost, or to diagnose locks, ports, logs, traces, or resource state caused by a running AppHost.
 license: MIT
 ---
 
@@ -10,9 +10,10 @@ This repository contains an intentionally empty Aspire AppHost. Use it only as a
 
 ## Scope guard
 
-- Read `docs/specifications/layers/telemetry-ingestion.md` and `docs/architecture.md` before making an Aspire usage decision.
-- Adding resources, integrations, deployment behavior, or public configuration is a product change: update the current specification and obtain the required user approval first.
-- Do not use this skill for the pinned repository build or test suite. Use `validate` instead.
+- Invoke this skill explicitly for the lifecycle or diagnostic operation in scope; it does not authorize adjacent implementation, testing, documentation, or cleanup.
+- Read an owning specification or `docs/architecture.md` only when the requested operation actually depends on that contract or architecture decision.
+- Adding resources, integrations, deployment behavior, or public configuration is outside this skill; stop and return to the task authority and owning specification.
+- Do not use this skill for repository build or test work.
 
 ## Local lifecycle
 
@@ -33,4 +34,4 @@ Run commands from the repository root.
 
 ## Completion report
 
-State which Aspire commands ran, which resources were observed, whether the AppHost remains running, and any unverified scope. Aspire diagnostics do not replace the repository's pinned `validate` suite.
+State which Aspire commands ran, which resources were observed, whether the AppHost remains running, and any unverified scope. Aspire diagnostics do not replace validation required by the affected contract.

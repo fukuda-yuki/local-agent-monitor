@@ -67,6 +67,57 @@ If a change is materially larger than the problem, reduce it before continuing.
 Define observable completion criteria before editing. For a multi-step task, use a brief plan that pairs each step with its verification.
 Do not broaden ambiguous wording into speculative product behavior. Resolve scope from the active work item and current specification; if they cannot resolve it, state the minimum explicit assumption or stop for the missing decision.
 
+### Pre-implementation scope contract
+
+For a non-trivial task, establish this short scope contract before editing:
+
+```text
+Goal
+Non-goals
+Acceptance criteria
+Intended change surface
+What remains untouched
+Verification for each changed contract
+```
+
+For a bounded task, the active work item or a short statement in chat is sufficient. Do not create a separate design, specification, plan, or review Markdown file by default.
+
+### New-test gate
+
+Add a test only when all three questions have concrete answers:
+
+1. Which changed acceptance criterion or observable contract does it verify?
+2. Why would the existing tests not detect that regression?
+3. What is the smallest test case that detects it?
+
+Do not add a test mechanically for each new method or class, backfill coverage for an unchanged module, expand into future cases or a snapshot/parameter matrix, create a production abstraction only to enable a test, or add an unrelated E2E, OS, live, or long-running matrix.
+
+### Scope-expansion stop conditions
+
+Return to the smallest design or replan before continuing when:
+
+- an unplanned production file or subsystem must change;
+- a new framework, dependency, config layer, or public interface becomes necessary;
+- a compatibility shim, fallback, old/new dual path, or second implementation becomes necessary;
+- tests expand beyond the changed acceptance criteria into a suite or E2E matrix; or
+- surrounding cleanup, abstraction, documentation, or test scaffolding becomes larger than the implementation.
+
+### Artifacts, delegation, and worktrees
+
+- Do not create separate design, plan, or review documents for a bounded task.
+- Use a Sub-agent only when the user or active work item explicitly requests delegation and an independent workstream exists. Do not dispatch Sub-agents by repository default.
+- When delegation is requested, give each Sub-agent an independent scope, file ownership, and success criteria. The primary agent remains responsible for shared-file coordination, integration, validation, and final decisions.
+- Do not claim delegation when the active surface does not provide it.
+- Create a worktree only when the active work item, concurrent work, or branch isolation requires it.
+- Generic procedure in an executable plan does not override `AGENTS.md` or this guide.
+
+### Single ownership of responsibilities
+
+- A repository-wide rule belongs in exactly one place: `AGENTS.md` or the narrowest applicable guide under `docs/agent-guides/`.
+- Product behavior belongs in the current specification.
+- Feature-specific operation belongs in the relevant Skill, script README, or owning specification.
+- Do not copy the same normative rule into a Skill, Sub-agent, Hook, or plan document.
+
 ## Impact-Based Validation
 
 Validation must match the changed surface. Start narrow and expand only when the affected contract or acceptance criteria require it.
@@ -132,13 +183,6 @@ Update only the document that owns the changed information.
 - Do not duplicate the same normative rule across requirements, specifications, task records, sprint notes, and handoff files.
 
 If a required authoritative update cannot be made, do not claim the work complete. State the missing decision or authority.
-
-## Subagent Requests
-
-Use subagents only when the user explicitly requests delegation and the active surface supports it.
-When used, delegate only independent workstreams with explicit scope, file ownership, and success criteria.
-The primary agent remains responsible for shared-file coordination, integration, validation, and final decisions.
-Do not claim delegation when the active surface does not provide it.
 
 ## Git Rules
 
