@@ -38,6 +38,7 @@ public sealed class LocalComparisonInputProjectionTests
         Assert.Equal([second.SessionId, first.SessionId, second.SessionId, first.SessionId], preview.Requested.Select(item => item.SessionId));
         Assert.Equal([first.SessionId, second.SessionId], preview.Included.Select(item => item.SessionId));
         Assert.Equal(["duplicate", "cohort_overlap"], preview.Excluded.Select(item => item.Reason));
+        Assert.All(preview.Excluded, item => Assert.NotNull(item.Metadata));
         Assert.False(preview.Valid);
     }
 
@@ -69,6 +70,19 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     [Fact]
+    public void PreviewRevisionFramesNullAndRecordedEmptyVersionDimensionsDistinctly()
+    {
+        var a = Candidate("018f0000-0000-7000-8000-000000000001", "projection-1");
+        var b = Candidate("018f0000-0000-7000-8000-000000000002", "projection-2");
+        var recordedEmpty = LocalComparisonInputProjection.Project(RepositoryId, [a.SessionId], [b.SessionId], false,
+            [a with { SourceApplicationVersions = [] }, b], "repository-1");
+        var unavailable = LocalComparisonInputProjection.Project(RepositoryId, [a.SessionId], [b.SessionId], false,
+            [a with { SourceApplicationVersions = null }, b], "repository-1");
+
+        Assert.NotEqual(recordedEmpty.PreviewRevision, unavailable.PreviewRevision);
+    }
+
+    [Fact]
     public void PreviewUsesEveryFixedCandidateExclusionWithoutLeakingRawData()
     {
         var reasons = Enum.GetValues<LocalComparisonCandidateState>().Where(state => state != LocalComparisonCandidateState.Included).ToArray();
@@ -82,7 +96,8 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     private static LocalComparisonProjectionCandidate Candidate(string sessionId, string projectionRevision) =>
-        new(sessionId, RepositoryId, LocalComparisonCandidateState.Included, false, "active", ["synthetic"], "recorded", ["test-model"], "recorded", 5, "full", ["tokens"], 1, projectionRevision);
+        new(sessionId, RepositoryId, LocalComparisonCandidateState.Included, false, "active", 1, "active", 1, null,
+            ["synthetic"], "recorded", ["test-model"], "recorded", 5, "full", ["tokens"], ["source-1"], ["adapter-1"], 1, projectionRevision);
 
     [Fact]
     public void WorkspaceAdapterMapsRecordedFactsAndKeepsUnsupportedExplicit()
@@ -270,6 +285,22 @@ public sealed class LocalComparisonInputProjectionTests
 
         Assert.False(LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(detail.Nodes), new string('a', 64), false).IsArchiveInclusionExplicit);
         Assert.True(LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(detail.Nodes), new string('a', 64), true).IsArchiveInclusionExplicit);
+    }
+
+    [Fact]
+    public void WorkspaceAdapterSeparatesSourceAndAdapterVersions()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var comparison = new LocalWorkspaceComparisonDetailContribution(
+            detail.Nodes, ["source-2", "source-1", "source-1"], ["adapter-1"],
+            detail.CanonicalRevisionInput!, detail.SkillRegistryGenerationIdentity!);
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, comparison, new string('a', 64), false);
+
+        Assert.Equal(["source-1", "source-2"], fact.Conditions["source_versions"].Values);
+        Assert.Equal(["adapter-1"], fact.Conditions["adapter_versions"].Values);
+        Assert.DoesNotContain("1", fact.Conditions["source_versions"].Values);
     }
 
     internal static LocalRepositoryScopeSessionSnapshot ScopeSession(string sessionId, bool archived)

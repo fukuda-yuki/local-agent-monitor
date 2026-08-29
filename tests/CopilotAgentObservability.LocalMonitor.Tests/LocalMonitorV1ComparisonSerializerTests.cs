@@ -14,7 +14,10 @@ public sealed class LocalMonitorV1ComparisonSerializerTests
         var preview = new LocalComparisonProjectionPreview(true, new string('1', 64), new string('2', 64),
             [new("a", 1, a), new("a", 2, excluded), new("b", 1, b)],
             [Candidate(a, new string('3', 64), 1), Candidate(b, new string('4', 64), 2)],
-            [new("a", 2, excluded, "session_archived")]);
+            [new("a", 2, excluded, "session_archived", Candidate(excluded, new string('5', 64), 3) with
+            {
+                IsArchived = true, ArchiveState = "archived", ArchiveExclusionReason = "session_archived",
+            })]);
 
         var actual = ComparisonJson.Preview(preview);
         var expected = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-preview.response.json"));
@@ -96,5 +99,5 @@ public sealed class LocalMonitorV1ComparisonSerializerTests
                     [new KeyValuePair<string, string>("value", "1")]));
     }
 
-    private static LocalComparisonProjectionCandidate Candidate(string id, string revision, long sessionRevision) => new(id, "018f0000-0000-7000-8000-000000000100", LocalComparisonCandidateState.Included, false, "active", ["synthetic"], "recorded", ["test-model"], "recorded", 5, "full", ["tokens"], sessionRevision, revision);
+    private static LocalComparisonProjectionCandidate Candidate(string id, string revision, long sessionRevision) => new(id, "018f0000-0000-7000-8000-000000000100", LocalComparisonCandidateState.Included, false, "active", 1, "active", 1, null, ["synthetic"], "recorded", ["test-model"], "recorded", 5, "full", ["tokens"], ["source-1"], ["adapter-1"], sessionRevision, revision);
 }

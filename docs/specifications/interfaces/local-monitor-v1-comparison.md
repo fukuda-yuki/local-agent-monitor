@@ -42,6 +42,12 @@ then Session-ID ordinal bytes. The exclusion enum is exactly
 `valid:false`; archive exclusions may remain valid only with two nonempty
 included cohorts.
 
+`include_archived:false` excludes both a directly archived Session and an exact
+assigned Session whose Repository is archived. `include_archived:true` restores
+either candidate when it is otherwise valid. D081 remains the frozen authority:
+simultaneous causes retain `session_archived` as the primary reason while both
+archive states and revisions remain visible.
+
 ⚠️ Task 2 obligation:
 `LocalMonitorV1ComparisonPreviewRequestParserTests.RejectsAggregateOccurrenceCountAbove200`
 MUST reject the schema-valid 101+100 request. Task 1 deliberately carries this
@@ -89,9 +95,18 @@ local-monitor-comparison-evidence.response.v1
 
 Normative examples and serializers use schema property order and explicit
 nullability. Preview covers requested/included/excluded metadata, cohort counts,
-selection hash, and preview revision. Resolved entries expose archive,
-source/model/version/completeness, metric coverage, Session revision, and
-projection revision. Read covers immutable identity/receipt/cohorts, the nine
+selection hash, and preview revision. Resolved included and excluded entries
+expose every provable archive, source/model/version/completeness, metric
+coverage, Session revision, and projection revision fact. Metadata is null only
+when an exact in-Repository candidate cannot be proved. Its archive fields are
+`archive_state`, `session_archive_revision`,
+`assigned_repository_archive_state`, `assigned_repository_archive_revision`,
+and `archive_exclusion_reason`. `source_application_versions` and
+`adapter_versions` are separate canonical distinct ordinal arrays;
+normalization versions enter neither. Recorded empty sets are `[]`, while
+unavailable authority is null. Every metadata fact enters `preview_revision`,
+with null and empty collections distinctly framed. Read covers immutable
+identity/receipt/cohorts, the nine
 stored sections (`target`, `tokens`, `input_token_breakdown`,
 `time_and_execution`, `skills`, `tools`, `subagents`, `errors_and_retries`,
 `conditions`), and stored result rows. Their exact labels are `対象`,

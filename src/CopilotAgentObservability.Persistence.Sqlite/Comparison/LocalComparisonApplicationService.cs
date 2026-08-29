@@ -82,7 +82,8 @@ internal sealed record LocalComparisonSessionFact(
     IReadOnlyList<LocalComparisonNamedFamilyFact> NamedFamilies,
     IReadOnlyDictionary<string, LocalComparisonConditionFact> Conditions,
     LocalComparisonSessionTargetFact Target,
-    bool IsArchiveInclusionExplicit = false);
+    bool IsArchiveInclusionExplicit = false,
+    bool IsAssignedRepositoryArchived = false);
 
 internal sealed record LocalComparisonCohortDraft(
     IReadOnlyList<LocalComparisonSessionFact> Members,
@@ -364,15 +365,23 @@ internal sealed class LocalComparisonApplicationService
 
         void AddArchiveInclusion(int ordinal)
         {
-            var a = input.CohortA.Count(static item => item.IsArchived);
-            var b = input.CohortB.Count(static item => item.IsArchived);
+            var aDirect = input.CohortA.Count(static item => item.IsArchived);
+            var bDirect = input.CohortB.Count(static item => item.IsArchived);
+            var aRepository = input.CohortA.Count(static item => item.IsAssignedRepositoryArchived);
+            var bRepository = input.CohortB.Count(static item => item.IsAssignedRepositoryArchived);
+            var a = input.CohortA.Count(static item => item.IsArchived || item.IsAssignedRepositoryArchived);
+            var b = input.CohortB.Count(static item => item.IsArchived || item.IsAssignedRepositoryArchived);
             results.Add(LocalComparisonStoredResult.Create(
                 comparisonId, ordinal, 1, "condition", "archived_inclusion",
                 new[]
                 {
                     Pair("a_included_count", a),
+                    Pair("a_direct_session_archived_count", aDirect),
+                    Pair("a_assigned_repository_archived_count", aRepository),
                     new KeyValuePair<string, string>("a_includes_archived", a == 0 ? "false" : "true"),
                     Pair("b_included_count", b),
+                    Pair("b_direct_session_archived_count", bDirect),
+                    Pair("b_assigned_repository_archived_count", bRepository),
                     new KeyValuePair<string, string>("b_includes_archived", b == 0 ? "false" : "true"),
                     Pair("absolute_difference", b - a),
                 }));
@@ -400,10 +409,19 @@ internal sealed class LocalComparisonApplicationService
                     new LocalComparisonSourceReference(
                         "workspace_session", session.SessionId, null, null, null,
                         session.WorkspaceRevision),
-                    session.IsArchived ? "1" : "0"),
+                    ArchiveCause(session)),
             })).ToArray();
         AddEvidence(comparisonId, resultOrdinal, "selection", cohort, sessions,
             facts, destination, ref evidenceOrdinal);
+
+        static string ArchiveCause(LocalComparisonSessionFact session) =>
+            (session.IsArchived, session.IsAssignedRepositoryArchived) switch
+            {
+                (true, true) => "session_archived+repository_archived",
+                (true, false) => "session_archived",
+                (false, true) => "repository_archived",
+                _ => "active",
+            };
     }
 
     private static void AddScalarRow(
@@ -824,7 +842,7 @@ internal sealed class LocalComparisonApplicationService
                     new LocalComparisonFactEvidence(
                         item.State,
                         item.Reference,
-                        Available(item) ? string.Join(';', item.Values) : null),
+                        Available(item) ? item.Values.Count == 0 ? "none" : string.Join(';', item.Values) : null),
                 })).ToArray(), destination, ref evidenceOrdinal);
     }
 
@@ -1066,10 +1084,11 @@ internal static class LocalComparisonApplicationValidation
         {
             throw new ArgumentException("local_comparison_input_session_invalid");
         }
+        var hasArchiveCause = session.IsArchived || session.IsAssignedRepositoryArchived;
         if (!session.IsSelectable
-            || session.IsArchived && !session.IsArchiveInclusionExplicit)
+            || hasArchiveCause && !session.IsArchiveInclusionExplicit)
             throw new LocalComparisonSelectionUnavailableException();
-        if (!session.IsArchived && session.IsArchiveInclusionExplicit)
+        if (!hasArchiveCause && session.IsArchiveInclusionExplicit)
             throw new ArgumentException("local_comparison_input_archive_state_invalid");
         if (session.Scalars is null
             || !ExactKeys(session.Scalars.Keys, LocalComparisonRegistryV1.RequiredSessionScalarKeys)
@@ -1314,7 +1333,8 @@ internal static class LocalComparisonApplicationValidation
                 },
                 StringComparer.Ordinal),
             source.Target,
-            source.IsArchiveInclusionExplicit);
+            source.IsArchiveInclusionExplicit,
+            source.IsAssignedRepositoryArchived);
 
     private static LocalComparisonObservedScalar FreezeObserved(
         LocalComparisonObservedScalar source) =>
@@ -1343,6 +1363,8 @@ internal static class LocalComparisonApplicationValidation
 internal static class LocalComparisonFactFrame
 {
     private const string Domain =
+        "copilot-agent-observability/local-comparison-session-fact/v2";
+    private const string LegacyDomain =
         "copilot-agent-observability/local-comparison-session-fact/v1";
 
     internal static byte[] Create(LocalComparisonSessionFact session)
@@ -1354,6 +1376,7 @@ internal static class LocalComparisonFactFrame
         Write(session.WorkspaceRevision);
         Write(session.IsArchived ? "1" : "0");
         Write(session.IsArchiveInclusionExplicit ? "1" : "0");
+        Write(session.IsAssignedRepositoryArchived ? "1" : "0");
         Write(LocalComparisonApplicationService.StateToken(session.Target.ValueAvailabilityState));
         WriteReference(session.Target.ValueAvailabilityReference);
         Write(LocalComparisonApplicationService.StateToken(session.Target.ObservedAtState));
@@ -1447,13 +1470,15 @@ internal static class LocalComparisonFactFrame
         if (frame.Length is < 1 or > 1_048_576)
             Reject();
         var reader = new LocalComparisonFrameReader(frame);
-        if (reader.Read() != Domain)
+        var domain = reader.Read();
+        if (domain is not Domain and not LegacyDomain)
             Reject();
         var sessionId = reader.Read();
         var repositoryId = reader.Read();
         var workspaceRevision = reader.Read();
         var isArchived = ReadBoolean(ref reader);
         var archiveExplicit = ReadBoolean(ref reader);
+        var repositoryArchived = domain == Domain && ReadBoolean(ref reader);
         var target = new LocalComparisonSessionTargetFact(
             ReadState(ref reader),
             ReadReference(ref reader),
@@ -1520,11 +1545,12 @@ internal static class LocalComparisonFactFrame
             Array.AsReadOnly(families.ToArray()),
             conditions,
             target,
-            archiveExplicit);
+            archiveExplicit,
+            repositoryArchived);
         try
         {
             LocalComparisonApplicationValidation.ValidateSession(repositoryId, result);
-            if (!frame.SequenceEqual(Create(result)))
+            if (domain == Domain && !frame.SequenceEqual(Create(result)))
                 Reject();
             return result;
         }

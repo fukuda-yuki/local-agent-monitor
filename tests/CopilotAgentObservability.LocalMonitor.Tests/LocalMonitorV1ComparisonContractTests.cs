@@ -195,7 +195,7 @@ public sealed class LocalMonitorV1ComparisonContractTests
             ("local-monitor-comparison-create.response", 4, "f4e1825ddb9cece844c6a0725eff773ff8a7cdefe317245d462eb8915d01f631"),
             ("local-monitor-comparison-evidence.response", 10, "5e731008b08de85443e9cb7e160e7d1349a7be4d436cfdf5887f0e00ad391372"),
             ("local-monitor-comparison-preview.request", 3, "6b15153afc39f33ca276423a23bef7710479e227a603cad0379c4625a6a39967"),
-            ("local-monitor-comparison-preview.response", 30, "57b4e2a132cca9fecb58c5219b5b7794c85d4395a064a5c94afb15b48489b3dc"),
+            ("local-monitor-comparison-preview.response", 38, "4f57b445d3a6755a6d78d2128c194c4d8df3f0123dbb76ee18cbad28d31307bc"),
             ("local-monitor-comparison-read.response", 25, "bca8f7f018b6c23d1e6e68e12bbd2557fcc27d3124e9b3e3616f04ad973f23ee"),
             ("local-monitor-comparison-rows.response", 16, "0c7749b84abf4705832c454308a8d60604aeaaf9626e4ce4fdaf0381a27cab4b"),
         ];
@@ -268,7 +268,7 @@ public sealed class LocalMonitorV1ComparisonContractTests
         AssertProperties(preview.RootElement.GetProperty("cohorts"), "a", "b");
         Assert.All(preview.RootElement.GetProperty("cohorts").EnumerateObject(), cohort => AssertProperties(cohort.Value, "label", "requested_count", "included_count", "excluded_count"));
         Assert.All(preview.RootElement.GetProperty("requested").EnumerateArray(), item => AssertProperties(item, "cohort", "request_ordinal", "session_id"));
-        Assert.All(preview.RootElement.GetProperty("included").EnumerateArray(), item => { AssertProperties(item, "cohort", "session_id", "metadata"); AssertProperties(item.GetProperty("metadata"), "archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"); });
+        Assert.All(preview.RootElement.GetProperty("included").EnumerateArray(), item => { AssertProperties(item, "cohort", "session_id", "metadata"); AssertProperties(item.GetProperty("metadata"), "archive_state", "session_archive_revision", "assigned_repository_archive_state", "assigned_repository_archive_revision", "archive_exclusion_reason", "source", "model", "projection_version", "completeness", "metric_coverage", "source_application_versions", "adapter_versions", "session_revision", "projection_revision"); });
         Assert.NotEmpty(preview.RootElement.GetProperty("excluded").EnumerateArray());
         Assert.All(preview.RootElement.GetProperty("excluded").EnumerateArray(), item => AssertProperties(item, "cohort", "request_ordinal", "session_id", "reason", "metadata"));
         using var read = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")));

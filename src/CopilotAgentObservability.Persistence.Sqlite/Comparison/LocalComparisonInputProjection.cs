@@ -19,6 +19,10 @@ internal sealed record LocalComparisonProjectionCandidate(
     LocalComparisonCandidateState State,
     bool IsArchived,
     string ArchiveState,
+    long? SessionArchiveRevision,
+    string? AssignedRepositoryArchiveState,
+    long? AssignedRepositoryArchiveRevision,
+    string? ArchiveExclusionReason,
     IReadOnlyList<string>? Sources,
     string? SourcesState,
     IReadOnlyList<string>? Models,
@@ -26,11 +30,13 @@ internal sealed record LocalComparisonProjectionCandidate(
     int? ProjectionVersion,
     string? Completeness,
     IReadOnlyList<string>? MetricCoverage,
+    IReadOnlyList<string>? SourceApplicationVersions,
+    IReadOnlyList<string>? AdapterVersions,
     long SessionRevision,
     string ProjectionRevision);
 
 internal sealed record LocalComparisonRequestedOccurrence(string Cohort, int RequestOrdinal, string SessionId);
-internal sealed record LocalComparisonProjectionExclusion(string Cohort, int RequestOrdinal, string SessionId, string Reason);
+internal sealed record LocalComparisonProjectionExclusion(string Cohort, int RequestOrdinal, string SessionId, string Reason, LocalComparisonProjectionCandidate? Metadata = null);
 internal sealed record LocalComparisonProjectionPreview(
     bool Valid,
     string SelectionSha256,
@@ -83,24 +89,16 @@ internal static class LocalComparisonInputProjection
         var previewValues = new List<string> { repositoryId, repositoryRevision, includeArchived ? "1" : "0", selectionSha256 };
         foreach (var candidate in orderedIncluded)
         {
-            previewValues.Add(candidate.SessionId);
-            previewValues.Add(candidate.RepositoryId);
-            previewValues.Add(candidate.ArchiveState);
-            previewValues.Add(candidate.ProjectionVersion!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            previewValues.Add(candidate.Completeness!);
-            previewValues.Add(candidate.SessionRevision.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            previewValues.Add(candidate.ProjectionRevision);
-            previewValues.Add(candidate.SourcesState!);
-            previewValues.AddRange(candidate.Sources!.Order(StringComparer.Ordinal));
-            previewValues.Add(candidate.ModelsState!);
-            previewValues.AddRange(candidate.Models!.Order(StringComparer.Ordinal));
-            previewValues.AddRange(candidate.MetricCoverage!.Order(StringComparer.Ordinal));
+            AddMetadata(candidate);
         }
         foreach (var item in excluded)
+        {
             previewValues.AddRange([item.Cohort, item.RequestOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture), item.SessionId, item.Reason]);
+            if (item.Metadata is not null) AddMetadata(item.Metadata);
+        }
         var valid = included.Any(static item => item.Cohort == "a")
             && included.Any(static item => item.Cohort == "b")
-            && excluded.All(static item => item.Reason == "session_archived");
+            && excluded.All(static item => item.Reason is "session_archived" or "repository_archived");
         return new(valid, selectionSha256, Hash(PreviewDomain, previewValues), Array.AsReadOnly(requested.ToArray()), Array.AsReadOnly(orderedIncluded), Array.AsReadOnly(excluded.ToArray()));
 
         void AddRequested(string cohort, IReadOnlyList<string> ids)
@@ -115,14 +113,35 @@ internal static class LocalComparisonInputProjection
             {
                 var id = ids[index];
                 string? reason = null;
+                byId.TryGetValue(id, out var candidate);
                 if (!seen.Add(id)) reason = "duplicate";
                 else if (cohort == "b" && aIds.Contains(id)) reason = "cohort_overlap";
-                else if (!byId.TryGetValue(id, out var candidate)) reason = "session_not_found";
+                else if (candidate is null) reason = "session_not_found";
                 else if (!string.Equals(candidate.RepositoryId, repositoryId, StringComparison.Ordinal)) reason = "repository_mismatch";
+                else if (!includeArchived && candidate.ArchiveExclusionReason is not null) reason = candidate.ArchiveExclusionReason;
                 else if (candidate.State != LocalComparisonCandidateState.Included) reason = ExclusionToken(candidate.State);
-                else if (candidate.IsArchived && !includeArchived) reason = "session_archived";
                 else included.Add((cohort, candidate));
-                if (reason is not null) excluded.Add(new(cohort, index + 1, id, reason));
+                if (reason is not null) excluded.Add(new(cohort, index + 1, id, reason,
+                    candidate is not null && string.Equals(candidate.RepositoryId, repositoryId, StringComparison.Ordinal) ? candidate : null));
+            }
+        }
+
+        void AddMetadata(LocalComparisonProjectionCandidate candidate)
+        {
+            previewValues.Add(candidate.SessionId); previewValues.Add(candidate.RepositoryId);
+            previewValues.Add(candidate.ArchiveState); AddNullable(candidate.SessionArchiveRevision?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AddNullable(candidate.AssignedRepositoryArchiveState); AddNullable(candidate.AssignedRepositoryArchiveRevision?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AddNullable(candidate.ArchiveExclusionReason); AddNullable(candidate.ProjectionVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AddNullable(candidate.Completeness); previewValues.Add(candidate.SessionRevision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AddNullable(candidate.ProjectionRevision); AddNullable(candidate.SourcesState); AddList(candidate.Sources); AddNullable(candidate.ModelsState);
+            AddList(candidate.Models); AddList(candidate.MetricCoverage); AddList(candidate.SourceApplicationVersions); AddList(candidate.AdapterVersions);
+
+            void AddNullable(string? value) { previewValues.Add(value is null ? "0" : "1"); if (value is not null) previewValues.Add(value); }
+            void AddList(IReadOnlyList<string>? values)
+            {
+                if (values is null) { previewValues.Add("0"); return; }
+                previewValues.Add("1"); var canonical = values.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+                previewValues.Add(canonical.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)); previewValues.AddRange(canonical);
             }
         }
     }
@@ -142,7 +161,8 @@ internal static class LocalComparisonInputProjection
         LocalWorkspaceSessionDetailContribution detail,
         LocalWorkspaceComparisonDetailContribution comparisonDetail,
         string workspaceRevision,
-        bool includeArchived)
+        bool includeArchived,
+        bool assignedRepositoryArchived = false)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(detail);
@@ -179,8 +199,8 @@ internal static class LocalComparisonInputProjection
         {
             ["sources"] = Condition(row.Sources.State, row.Sources.Values, sessionReference),
             ["models"] = Condition(row.Models.State, row.Models.Values, sessionReference),
-            ["source_versions"] = Condition(detail.Versions is null ? "source_unsupported" : "recorded", detail.Versions ?? [], sessionReference),
-            ["adapter_versions"] = new(LocalComparisonFactState.SourceUnsupported, [], null),
+            ["source_versions"] = Condition(comparisonDetail.SourceApplicationVersions is null ? "source_unsupported" : "recorded", comparisonDetail.SourceApplicationVersions ?? [], sessionReference),
+            ["adapter_versions"] = Condition(comparisonDetail.AdapterVersions is null ? "source_unsupported" : "recorded", comparisonDetail.AdapterVersions ?? [], sessionReference),
             ["completeness"] = Condition("recorded", [row.Completeness], sessionReference),
         };
         var observedAt = DateTimeOffset.TryParse(row.LastSeenAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed)
@@ -190,13 +210,14 @@ internal static class LocalComparisonInputProjection
             session.SessionId,
             session.RepositoryId ?? throw new LocalComparisonSelectionUnavailableException(),
             workspaceRevision,
-            session.IsEffectivelyEligible || includeArchived && session.ArchiveExclusionReason == "session_archived",
+            session.IsEffectivelyEligible || includeArchived && session.ArchiveExclusionReason is "session_archived" or "repository_archived",
             session.ArchiveState == LocalArchiveState.Archived,
             scalars,
             Array.AsReadOnly(families),
             conditions,
             new(LocalComparisonFactState.Recorded, sessionReference, targetState, observedAt, observedAt is null ? null : sessionReference),
-            includeArchived && session.ArchiveState == LocalArchiveState.Archived);
+            includeArchived && (session.ArchiveState == LocalArchiveState.Archived || assignedRepositoryArchived),
+            assignedRepositoryArchived);
 
         LocalComparisonNamedFamilyFact Family(string family, LocalWorkspaceFact<long> aggregate)
         {

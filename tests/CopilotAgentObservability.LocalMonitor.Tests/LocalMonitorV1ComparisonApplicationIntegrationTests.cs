@@ -21,7 +21,8 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
             SqliteLocalArchiveFactSnapshotContributor.Instance,
             new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
             skillRegistryAuthority: authority, timeProvider: clock);
-        var application = new LocalMonitorV1ComparisonProductionApplication(service, new SqliteLocalComparisonStore(db.Path, clock), clock, cursorKey: new byte[32]);
+        var store = new SqliteLocalComparisonStore(db.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, store, clock, cursorKey: new byte[32]);
         var body = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{unavailable}\"],\"b\":[\"{available}\"]}},\"include_archived\":true}}");
 
         var response = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, body, "", default);
@@ -46,7 +47,8 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
             new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
             skillRegistryAuthority: authority,
             timeProvider: clock);
-        var application = new LocalMonitorV1ComparisonProductionApplication(service, new SqliteLocalComparisonStore(db.Path, clock), clock, cursorKey: new byte[32]);
+        var store = new SqliteLocalComparisonStore(db.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, store, clock, cursorKey: new byte[32]);
         var uncheckedBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{active}\"],\"b\":[\"{archived}\"]}},\"include_archived\":false}}");
         var checkedBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{active}\"],\"b\":[\"{archived}\"]}},\"include_archived\":true}}");
 
@@ -61,7 +63,15 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         db.ArchiveRepository();
         var repositoryPreview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, checkedBody, "", default);
         using var repositoryJson = JsonDocument.Parse(repositoryPreview.Entity);
-        Assert.All(repositoryJson.RootElement.GetProperty("excluded").EnumerateArray(), item => Assert.Equal("repository_archived", item.GetProperty("reason").GetString()));
+        Assert.True(repositoryJson.RootElement.GetProperty("valid").GetBoolean());
+        Assert.Equal([active, archived], repositoryJson.RootElement.GetProperty("included").EnumerateArray().Select(item => item.GetProperty("session_id").GetString()));
+        var archivedMetadata = repositoryJson.RootElement.GetProperty("included")[1].GetProperty("metadata");
+        Assert.Equal("session_archived", archivedMetadata.GetProperty("archive_exclusion_reason").GetString());
+        Assert.Equal("archived", archivedMetadata.GetProperty("archive_state").GetString());
+        Assert.Equal("archived", archivedMetadata.GetProperty("assigned_repository_archive_state").GetString());
+        Assert.Equal(1, archivedMetadata.GetProperty("session_archive_revision").GetInt64());
+        Assert.Equal(1, archivedMetadata.GetProperty("assigned_repository_archive_revision").GetInt64());
+
     }
 
     [Fact]
@@ -119,14 +129,23 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         var items = evidenceJson.RootElement.GetProperty("items").EnumerateArray().ToArray();
 
         Assert.Equal([active, archived], items.Select(item => item.GetProperty("session_id").GetString()));
-        Assert.Equal(["0", "1"], items.Select(item => item.GetProperty("consumed_value").GetString()));
+        Assert.Equal(["active", "session_archived"], items.Select(item => item.GetProperty("consumed_value").GetString()));
         Assert.All(items, item => Assert.Equal("included", item.GetProperty("state").GetString()));
         Assert.Equal([new string('1', 64), new string('2', 64)], items.Select(item => item.GetProperty("consumed_revision").GetString()));
 
         var archivedRepositoryApplication = new LocalMonitorV1ComparisonProductionApplication(new FakeInput([Input(active), Input(archived, archived: true)], repositoryArchived: true), store, new FixedClock(), cursorKey: new byte[32]);
         var repositoryPreview = await archivedRepositoryApplication.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, previewBody, "", default);
         using var repositoryJson = JsonDocument.Parse(repositoryPreview.Entity);
-        Assert.Equal("repository_archived", repositoryJson.RootElement.GetProperty("excluded")[0].GetProperty("reason").GetString());
+        Assert.True(repositoryJson.RootElement.GetProperty("valid").GetBoolean());
+        Assert.Equal([active, archived], repositoryJson.RootElement.GetProperty("included").EnumerateArray().Select(item => item.GetProperty("session_id").GetString()));
+        var repositoryCreateBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{active}\"],\"b\":[\"{archived}\"]}},\"include_archived\":true,\"selection_sha256\":\"{repositoryJson.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{repositoryJson.RootElement.GetProperty("preview_revision").GetString()}\"}}");
+        var repositoryCreated = await archivedRepositoryApplication.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, repositoryCreateBody, "", default);
+        using var repositoryCreatedJson = JsonDocument.Parse(repositoryCreated.Entity);
+        var repositoryFrozen = store.Read(LocalComparisonInputProjectionTests.RepositoryId, repositoryCreatedJson.RootElement.GetProperty("comparison_id").GetString()!, default).Snapshot!;
+        var archiveValues = repositoryFrozen.Results.Single(result => result.RowKey == "archived_inclusion").Values.ToDictionary();
+        Assert.Equal("1", archiveValues["a_assigned_repository_archived_count"]);
+        Assert.Equal("1", archiveValues["b_direct_session_archived_count"]);
+        Assert.Equal("1", archiveValues["b_assigned_repository_archived_count"]);
     }
 
     [Fact]
