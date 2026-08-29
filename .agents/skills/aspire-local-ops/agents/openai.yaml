@@ -1,0 +1,7 @@
+interface:
+  display_name: "Aspire Local Operations"
+  short_description: "Operate and diagnose the repository's local Aspire AppHost"
+  default_prompt: "Use $aspire-local-ops to inspect the existing local Aspire AppHost."
+
+policy:
+  allow_implicit_invocation: false

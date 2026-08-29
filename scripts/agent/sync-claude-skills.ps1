@@ -10,11 +10,7 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).
 $agentSkillsRoot = Join-Path $repositoryRoot '.agents\skills'
 $claudeSkillsRoot = Join-Path $repositoryRoot '.claude\skills'
 $sharedSkills = @(
-    'commit'
     'seed-demo'
-    'spec-update'
-    'sprint-evidence'
-    'validate'
 )
 
 function Get-MirroredFiles {

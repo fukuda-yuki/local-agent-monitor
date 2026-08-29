@@ -96,6 +96,5 @@ The rule assigns each artifact's primary content, not its only content:
 ## Where This Rule Is Applied
 
 - `AGENTS.md` — the four-line principle (always loaded).
-- `.claude/skills/commit` — commit body requirement at commit time.
-- `.claude/agents/test-writer.md` — behavior/contract assertion rule.
+- `docs/agent-guides/repository-workflow.md` — implementation, test, and commit workflow.
 - `docs/agent-guides/review-workflow.md` — review perspective.

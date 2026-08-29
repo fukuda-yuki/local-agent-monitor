@@ -1,0 +1,7 @@
+interface:
+  display_name: "Seed Local Monitor Demo"
+  short_description: "Seed synthetic traces into a throwaway monitor database"
+  default_prompt: "Use $seed-demo to prepare a safe Local Monitor demo with synthetic data."
+
+policy:
+  allow_implicit_invocation: false
