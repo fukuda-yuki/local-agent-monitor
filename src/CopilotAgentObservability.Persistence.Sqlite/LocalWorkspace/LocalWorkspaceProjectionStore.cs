@@ -1362,7 +1362,7 @@ internal static class LocalWorkspaceProjectionStore
                    local_workspace_semantic_digest('session_sdk_tool',native.native_session_id,
                      local_workspace_semantic_digest('session_sdk_tool_run',run.native_run_id,e.source_event_id)) carrier_digest,
                    e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,
-                   NULL tool_name,NULL mcp_tool_name,
+                   NULL tool_name,NULL mcp_tool_name,NULL subagent_name,
                    e.source_adapter||'|exact_sdk_tool|v1' authority_receipt
             FROM session_events e JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
             JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
@@ -1382,7 +1382,7 @@ internal static class LocalWorkspaceProjectionStore
             SELECT 'tool','session_sdk','native_run',
                    local_workspace_semantic_digest('session_sdk_tool',native.native_session_id,
                      local_workspace_semantic_digest('session_sdk_tool_run',run.native_run_id,p.source_event_id)),
-                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,NULL,
                    e.source_adapter||'|exact_sdk_tool|v1'
             FROM session_events e JOIN session_events p
               ON p.event_id=e.parent_event_id AND p.session_id=e.session_id AND p.run_id=e.run_id
@@ -1400,7 +1400,7 @@ internal static class LocalWorkspaceProjectionStore
             UNION ALL
             SELECT 'subagent','session_sdk','native_run',
                    local_workspace_semantic_digest('session_sdk_subagent',native.native_session_id,r.native_run_id),
-                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,r.native_run_id,
                    e.source_adapter||'|native_run|v1'
             FROM session_events e JOIN session_runs r ON r.session_id=e.session_id AND r.run_id=e.run_id
             JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
@@ -1416,7 +1416,7 @@ internal static class LocalWorkspaceProjectionStore
             SELECT 'tool','claude_hook','native_session',
                    local_workspace_semantic_digest('claude_hook_tool',native.native_session_id,json_extract(content.content_json,'$.tool_use_id')),
                    e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,
-                   json_extract(content.content_json,'$.tool_name'),NULL,e.source_adapter||'|exact_hook_tool|v1'
+                   json_extract(content.content_json,'$.tool_name'),NULL,NULL,e.source_adapter||'|exact_hook_tool|v1'
             FROM session_events e
             JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
             JOIN session_native_ids native ON native.session_id=e.session_id AND native.source_surface='claude-code' COLLATE BINARY
@@ -1439,7 +1439,7 @@ internal static class LocalWorkspaceProjectionStore
             UNION ALL
             SELECT 'subagent','claude_hook','native_run',
                    local_workspace_semantic_digest('claude_hook_subagent',native.native_session_id,run.native_run_id),
-                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,
+                   e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,e.type,e.occurred_at,NULL,NULL,run.native_run_id,
                    e.source_adapter||'|exact_hook_subagent|v1'
             FROM session_events e
             JOIN session_runs run ON run.session_id=e.session_id AND run.run_id=e.run_id
@@ -1475,7 +1475,7 @@ internal static class LocalWorkspaceProjectionStore
                        local_workspace_semantic_digest('otel_tool',e.trace_id,m.span_id),
                        e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,
                        CASE WHEN local_workspace_ticks(m.start_time) IS NOT NULL THEN 'otel.tool.started' ELSE 'otel.tool.observed' END,
-                       e.occurred_at,m.tool_name,m.mcp_tool_name,'otel-exact|normalized-tool-span|v1'
+                       e.occurred_at,m.tool_name,m.mcp_tool_name,NULL,'otel-exact|normalized-tool-span|v1'
                 FROM session_events e JOIN monitor_spans m
                   ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
                  AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
@@ -1494,7 +1494,7 @@ internal static class LocalWorkspaceProjectionStore
                        local_workspace_semantic_digest('otel_tool',e.trace_id,m.span_id),
                        e.session_id,e.run_id,e.event_id,e.source_adapter,e.source_event_id,
                        CASE WHEN m.status='error' COLLATE BINARY THEN 'otel.tool.failed' ELSE 'otel.tool.completed' END,
-                       e.occurred_at,m.tool_name,m.mcp_tool_name,'otel-exact|normalized-tool-span|v1'
+                       e.occurred_at,m.tool_name,m.mcp_tool_name,NULL,'otel-exact|normalized-tool-span|v1'
                 FROM session_events e JOIN monitor_spans m
                   ON e.source_adapter='otel-exact' COLLATE BINARY AND e.trace_id=m.trace_id COLLATE BINARY
                  AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
@@ -1556,7 +1556,8 @@ internal static class LocalWorkspaceProjectionStore
                      MIN(c.authority_receipt) authority_receipt,COUNT(DISTINCT c.authority_receipt) authority_count,COUNT(DISTINCT c.event_id) reference_count,
                      SUM(c.type IN ('PreToolUse','SubagentStart','tool.execution_start','otel.tool.started')) started_count,SUM(c.type IN ('PostToolUse','SubagentStop','tool.execution_complete','otel.tool.completed')) completed_count,SUM(c.type IN ('PostToolUseFailure','otel.tool.failed')) failed_count,
                      COUNT(DISTINCT c.tool_name) tool_name_count,MIN(c.tool_name) tool_name,
-                     COUNT(DISTINCT c.mcp_tool_name) mcp_tool_name_count,MIN(c.mcp_tool_name) mcp_tool_name
+                     COUNT(DISTINCT c.mcp_tool_name) mcp_tool_name_count,MIN(c.mcp_tool_name) mcp_tool_name,
+                     COUNT(DISTINCT c.subagent_name) subagent_name_count,MIN(c.subagent_name) subagent_name
               FROM local_workspace_semantic_candidates c GROUP BY c.semantic_kind,c.source_family,c.scope_kind,c.carrier_digest),
             candidate_rows AS (
               SELECT g.*,h.execution_id,(SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id)+
@@ -1571,8 +1572,11 @@ internal static class LocalWorkspaceProjectionStore
             SELECT local_workspace_node_id(CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest),session_id,execution_id,
                    CASE semantic_kind WHEN 'tool' THEN 'semantic_tool' ELSE 'semantic_subagent' END,carrier_digest,source_ordinal,
                    local_workspace_node_id('execution_root',run_id),'exact',semantic_kind,
-                   CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN 'recorded' ELSE 'not_observed' END,
-                   CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN tool_name END,
+                   CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN 'recorded'
+                        WHEN semantic_kind='subagent' AND subagent_name_count=1 AND trim(subagent_name)<>'' AND length(CAST(subagent_name AS BLOB))<=256 THEN 'recorded'
+                        ELSE 'not_observed' END,
+                   CASE WHEN semantic_kind='tool' AND tool_name_count=1 THEN tool_name
+                        WHEN semantic_kind='subagent' AND subagent_name_count=1 AND trim(subagent_name)<>'' AND length(CAST(subagent_name AS BLOB))<=256 THEN subagent_name END,
                    CASE WHEN semantic_kind='tool' AND authority_count=1 AND failed_count=1 AND completed_count=0 AND started_count<=1 THEN 'failed'
                         WHEN semantic_kind='tool' AND authority_count=1 AND completed_count=1 AND failed_count=0 AND started_count<=1 THEN 'completed'
                         WHEN semantic_kind='tool' AND authority_count=1 AND started_count=1 AND completed_count=0 AND failed_count=0 THEN 'started'

@@ -1445,7 +1445,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         WITH candidates AS (
           SELECT local_workspace_semantic_digest('session_sdk_subagent',native.native_session_id,run.native_run_id) carrier_digest,
                  event.session_id,event.run_id,event.event_id,event.source_adapter,event.source_event_id,event.type,event.occurred_at,
-                 event.trace_id,event.source_adapter||'|native_run|v1' authority_receipt
+                 event.trace_id,run.native_run_id subagent_name,event.source_adapter||'|native_run|v1' authority_receipt
           FROM session_events event
           JOIN session_runs run ON run.session_id=event.session_id AND run.run_id=event.run_id
           JOIN session_native_ids native ON native.session_id=event.session_id AND native.source_surface='copilot-sdk' COLLATE BINARY
@@ -1466,7 +1466,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                  SUM(type='subagent.selected') selected_count,SUM(type='subagent.started') started_count,
                  SUM(type='subagent.completed') completed_count,SUM(type='subagent.failed') failed_count,
                  SUM(type='subagent.deselected') deselected_count,
-                 SUM(trace_id IS NOT NULL) technical_identity_count
+                 SUM(trace_id IS NOT NULL) technical_identity_count,
+                 COUNT(DISTINCT subagent_name) subagent_name_count,MIN(subagent_name) subagent_name
           FROM candidates GROUP BY carrier_digest
         ),
         expected_references AS (
@@ -1494,7 +1495,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR execution.session_id<>owner.session_id OR execution.source_kind<>'session_run' OR execution.source_identity<>owner.run_id
               OR node.trace_id IS NOT NULL OR node.span_id IS NOT NULL OR node.event_id IS NOT NULL
               OR node.parent_node_id<>local_workspace_node_id('execution_root',owner.run_id) OR node.relationship_authority<>'exact'
-              OR node.name_state<>'not_observed' OR node.name_text IS NOT NULL OR node.lifecycle<>'unknown' OR node.status<>'unknown'
+              OR node.name_state<>CASE WHEN owner.subagent_name_count=1 AND trim(owner.subagent_name)<>'' AND length(CAST(owner.subagent_name AS BLOB))<=256 THEN 'recorded' ELSE 'not_observed' END
+              OR node.name_text IS NOT CASE WHEN owner.subagent_name_count=1 AND trim(owner.subagent_name)<>'' AND length(CAST(owner.subagent_name AS BLOB))<=256 THEN owner.subagent_name END
+              OR node.lifecycle<>'unknown' OR node.status<>'unknown'
               OR node.time_authority<>'missing' OR node.start_utc_ticks IS NOT NULL OR node.end_utc_ticks IS NOT NULL OR node.duration_ms IS NOT NULL
               OR lifecycle.node_id IS NULL
               OR lifecycle.selected_state<>CASE WHEN owner.selected_count>1 OR owner.selected_count>0 AND (owner.reference_count>16 OR owner.authority_count>1) THEN 'inconsistent'
@@ -1586,7 +1589,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               OR owner.carrier_digest<>local_workspace_semantic_digest('claude_hook_subagent',owner.native_session_id,owner.native_run_id)
               OR owner.node_id<>local_workspace_node_id('semantic_subagent',owner.carrier_digest)
               OR owner.subagent_started_count<>1 OR owner.subagent_completed_count<>1
-              OR owner.name_state<>'not_observed' OR owner.name_text IS NOT NULL OR owner.lifecycle<>'unknown' OR owner.status<>'unknown'
+              OR owner.name_state<>CASE WHEN trim(owner.native_run_id)<>'' AND length(CAST(owner.native_run_id AS BLOB))<=256 THEN 'recorded' ELSE 'not_observed' END
+              OR owner.name_text IS NOT CASE WHEN trim(owner.native_run_id)<>'' AND length(CAST(owner.native_run_id AS BLOB))<=256 THEN owner.native_run_id END
+              OR owner.lifecycle<>'unknown' OR owner.status<>'unknown'
               OR subagent.node_id IS NULL OR subagent.selected_state<>'not_observed' OR subagent.started_state<>'recorded'
               OR subagent.completed_state<>'recorded' OR subagent.failed_state<>'not_observed'
               OR subagent.deselected_state<>'not_observed' OR subagent.input_state<>'source_unsupported')),

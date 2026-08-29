@@ -132,7 +132,25 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
 
         var uncheckedPreview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, uncheckedBody, "", default);
         using (var json = JsonDocument.Parse(uncheckedPreview.Entity))
-            Assert.Equal("session_archived", json.RootElement.GetProperty("excluded")[0].GetProperty("reason").GetString());
+        {
+            var excluded = json.RootElement.GetProperty("excluded")[0];
+            Assert.Equal("session_archived", excluded.GetProperty("reason").GetString());
+            var metadata = excluded.GetProperty("metadata");
+            Assert.Equal("archived", metadata.GetProperty("archive_state").GetString());
+            Assert.Equal(1, metadata.GetProperty("session_archive_revision").GetInt64());
+            Assert.Equal("active", metadata.GetProperty("assigned_repository_archive_state").GetString());
+            Assert.Equal(0, metadata.GetProperty("assigned_repository_archive_revision").GetInt64());
+            Assert.Equal("session_archived", metadata.GetProperty("archive_exclusion_reason").GetString());
+            Assert.Equal(JsonValueKind.Null, metadata.GetProperty("source").ValueKind);
+            Assert.Equal(JsonValueKind.Null, metadata.GetProperty("model").ValueKind);
+            Assert.Equal(1, metadata.GetProperty("projection_version").GetInt64());
+            Assert.Equal("partial", metadata.GetProperty("completeness").GetString());
+            Assert.NotEmpty(metadata.GetProperty("metric_coverage").EnumerateArray());
+            Assert.Empty(metadata.GetProperty("source_application_versions").EnumerateArray());
+            Assert.Empty(metadata.GetProperty("adapter_versions").EnumerateArray());
+            Assert.True(metadata.GetProperty("session_revision").GetInt64() > 0);
+            Assert.Matches("^[0-9a-f]{64}$", metadata.GetProperty("projection_revision").GetString());
+        }
         var checkedPreview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, checkedBody, "", default);
         using var checkedJson = JsonDocument.Parse(checkedPreview.Entity);
         Assert.True(checkedJson.RootElement.GetProperty("valid").GetBoolean());
@@ -209,21 +227,131 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
             new SqliteLocalComparisonStore(storeDb.Path, clock),
             clock,
             cursorKey: new byte[32]);
-        var subagent = Assert.Single(frozen.Results, result => result.RowKind == "subagent" && result.Values.ToDictionary()["display_name"] == "識別名なし");
-        Assert.Equal("識別名なし", subagent.Values.ToDictionary()["sort_key"]);
+        var subagent = Assert.Single(frozen.Results, result => result.RowKind == "subagent" && result.Values.ToDictionary()["display_name"] == "native-child-sdk");
+        Assert.Equal("native-child-sdk", subagent.Values.ToDictionary()["sort_key"]);
         var subagentRows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=subagent&limit=1", default);
         Assert.Equal(200, subagentRows.StatusCode);
         using (var subagentJson = JsonDocument.Parse(subagentRows.Entity))
         {
             var persistedSubagent = Assert.Single(subagentJson.RootElement.GetProperty("items").EnumerateArray());
-            Assert.Equal("識別名なし", persistedSubagent.GetProperty("display_name").GetString());
-            Assert.Equal("識別名なし", persistedSubagent.GetProperty("values").EnumerateArray().Single(item => item.GetProperty("key").GetString() == "sort_key").GetProperty("value").GetString());
+            Assert.Equal("native-child-sdk", persistedSubagent.GetProperty("display_name").GetString());
+            Assert.Equal("native-child-sdk", persistedSubagent.GetProperty("values").EnumerateArray().Single(item => item.GetProperty("key").GetString() == "sort_key").GetProperty("value").GetString());
         }
         var rows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=tool&q=Read&limit=1", default);
         var expected = (await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-production-rows.response.json")))
             .AsSpan().TrimEnd([(byte)'\r', (byte)'\n']).ToArray();
 
         Assert.Equal(expected, rows.Entity);
+    }
+
+    [Fact]
+    public async Task ProductionSqliteRepeatedSkillPersistsOneSummedRowAcrossRestart()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("skill-a", "review-skill");
+        fixture.SeedSdkOnly("skill-a", "review-skill");
+        fixture.SeedSdkOnly("skill-b", "review-skill");
+        fixture.RefreshWorkspace();
+        var a = fixture.SessionId("skill-a");
+        var b = fixture.SessionId("skill-b");
+        AssignRepository(fixture.DatabasePath, a, b);
+        using var storeDb = new Database(); storeDb.Initialize();
+        var clock = new FixedClock(new(2026, 1, 1, 1, 0, 0, TimeSpan.Zero));
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            fixture.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: fixture.RegistryAuthority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: fixture.RegistryAuthority, timeProvider: clock),
+            skillRegistryAuthority: fixture.RegistryAuthority,
+            timeProvider: clock);
+        var store = new SqliteLocalComparisonStore(storeDb.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, store, clock, _ => ComparisonId, CursorKey);
+        var previewBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":false}}");
+        var preview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, previewBody, "", default);
+        using var previewJson = JsonDocument.Parse(preview.Entity);
+        Assert.True(previewJson.RootElement.GetProperty("valid").GetBoolean(), Encoding.UTF8.GetString(preview.Entity));
+        Assert.True(previewJson.RootElement.GetProperty("valid").GetBoolean(), Encoding.UTF8.GetString(preview.Entity));
+        var createBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{a}\"],\"b\":[\"{b}\"]}},\"include_archived\":false,\"selection_sha256\":\"{previewJson.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{previewJson.RootElement.GetProperty("preview_revision").GetString()}\"}}");
+        var created = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
+        Assert.True(created.StatusCode == 201, Encoding.UTF8.GetString(created.Entity));
+
+        var restarted = new LocalMonitorV1ComparisonProductionApplication(new ThrowingInput(), new SqliteLocalComparisonStore(storeDb.Path, clock), clock, cursorKey: CursorKey);
+        var rows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, "?family=skill&q=review-skill&limit=1", default);
+        using var rowsJson = JsonDocument.Parse(rows.Entity);
+        var item = Assert.Single(rowsJson.RootElement.GetProperty("items").EnumerateArray());
+        var values = item.GetProperty("values").EnumerateArray().ToDictionary(value => value.GetProperty("key").GetString()!, value => value.GetProperty("value").GetString()!);
+        Assert.Equal("review-skill", item.GetProperty("display_name").GetString());
+        Assert.Equal("2", values["a_invocation_count_total"]);
+        Assert.Equal("1", values["b_invocation_count_total"]);
+    }
+
+    [Fact]
+    public async Task ProductionSqliteNamedLifecycleFailureRetryAndTokensRemainExactAfterRestart()
+    {
+        using var db = new Database();
+        using var storeDb = new Database(); storeDb.Initialize();
+        const string a = SessionA, b = SessionB;
+        db.InitializeProductionNamedComparison(a, b);
+        var clock = new FixedClock(new(2026, 8, 26, 0, 10, 0, TimeSpan.Zero));
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(db.Path,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority, timeProvider: clock);
+        var store = new SqliteLocalComparisonStore(storeDb.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, store, clock, _ => ComparisonId, CursorKey);
+        await CreateComparison(application);
+        var restarted = new LocalMonitorV1ComparisonProductionApplication(new ThrowingInput(), new SqliteLocalComparisonStore(storeDb.Path, clock), clock, cursorKey: CursorKey);
+
+        var toolRows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, "?family=tool&q=Read&limit=1", default);
+        using var toolJson = JsonDocument.Parse(toolRows.Entity);
+        var tool = Assert.Single(toolJson.RootElement.GetProperty("items").EnumerateArray());
+        var toolValues = Values(tool);
+        Assert.Equal("0", toolValues["a_failure_count_total"]);
+        Assert.Equal("not_available", toolValues["a_retry_count_total"]);
+        Assert.Contains("not_observed", toolValues["a_retry_count_unavailable_states"], StringComparison.Ordinal);
+
+        var subagentRows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, "?family=subagent&limit=10", default);
+        using var subagentJson = JsonDocument.Parse(subagentRows.Entity);
+        var subagents = subagentJson.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        var named = Assert.Single(subagents, item => item.GetProperty("display_name").GetString() == "native-child-sdk");
+        var otherNamed = Assert.Single(subagents, item => item.GetProperty("display_name").GetString() == "native-child-sdk-b");
+        var namedValues = Values(named);
+        Assert.Equal("1", namedValues["a_start_count_total"]);
+        Assert.Equal("1", namedValues["a_completed_count_total"]);
+        Assert.Equal("not_available", namedValues["a_failed_count_total"]);
+        Assert.Equal("not_available", namedValues["a_recorded_tokens_total"]);
+        Assert.Contains("not_observed", namedValues["a_recorded_tokens_unavailable_states"], StringComparison.Ordinal);
+        Assert.Equal("1", Values(otherNamed)["b_start_count_total"]);
+    }
+
+    [Fact]
+    public async Task ProductionSqlitePositiveToolAggregateWithoutNamedDetailPersistsUnavailableNotZero()
+    {
+        using var db = new Database();
+        using var storeDb = new Database(); storeDb.Initialize();
+        db.InitializeProductionNamedComparison(SessionA, SessionB);
+        db.HideNamedToolDetail(SessionA);
+        var clock = new FixedClock(new(2026, 8, 26, 0, 10, 0, TimeSpan.Zero));
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var service = new SqliteLocalRepositoryScopeSnapshotService(db.Path,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock),
+            skillRegistryAuthority: authority, timeProvider: clock);
+        var store = new SqliteLocalComparisonStore(storeDb.Path, clock);
+        var application = new LocalMonitorV1ComparisonProductionApplication(service, store, clock, _ => ComparisonId, CursorKey);
+        await CreateComparison(application);
+        var restarted = new LocalMonitorV1ComparisonProductionApplication(new ThrowingInput(), new SqliteLocalComparisonStore(storeDb.Path, clock), clock, cursorKey: CursorKey);
+        var rows = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, ComparisonId, ReadOnlyMemory<byte>.Empty, "?family=tool&q=Read&limit=1", default);
+        using var json = JsonDocument.Parse(rows.Entity);
+        var item = Assert.Single(json.RootElement.GetProperty("items").EnumerateArray());
+        var values = Values(item);
+        Assert.Equal("0", values["a_available_session_count"]);
+        Assert.Equal("0", values["a_called_session_count"]);
+        Assert.Equal("not_available", values["a_call_count_total"]);
+        Assert.Contains("capture_gap", values["a_call_count_unavailable_states"], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -567,10 +695,23 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         var previewBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{SessionA}\"],\"b\":[\"{SessionB}\"]}},\"include_archived\":false}}");
         var preview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, previewBody, "", default);
         using var previewJson = JsonDocument.Parse(preview.Entity);
+        Assert.True(previewJson.RootElement.GetProperty("valid").GetBoolean(), Encoding.UTF8.GetString(preview.Entity));
         var createBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{SessionA}\"],\"b\":[\"{SessionB}\"]}},\"include_archived\":false,\"selection_sha256\":\"{previewJson.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{previewJson.RootElement.GetProperty("preview_revision").GetString()}\"}}");
         var created = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
-        Assert.Equal(201, created.StatusCode);
+        Assert.True(created.StatusCode == 201, Encoding.UTF8.GetString(created.Entity));
     }
+
+    private static void AssignRepository(string databasePath, params string[] sessionIds)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"INSERT INTO local_repositories(repository_id,display_name,revision,created_at,updated_at) VALUES('{LocalComparisonInputProjectionTests.RepositoryId}','Repository',1,'2026-01-01T01:00:00.0000000+00:00','2026-01-01T01:00:00.0000000+00:00');" + string.Concat(sessionIds.Select(id => $"INSERT INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES('{id}',1,'2026-01-01T01:00:00.0000000+00:00'); INSERT INTO session_repository_manual_overrides(session_id,state,repository_id,revision,updated_at) VALUES('{id}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-01-01T01:00:00.0000000+00:00');"));
+        command.ExecuteNonQuery();
+    }
+
+    private static Dictionary<string, string> Values(JsonElement item) =>
+        item.GetProperty("values").EnumerateArray().ToDictionary(value => value.GetProperty("key").GetString()!, value => value.GetProperty("value").GetString()!);
 
     private static LocalRepositoryComparisonSessionInput Input(string id, bool archived = false) { var s = LocalComparisonInputProjectionTests.ScopeSession(id, archived); var detail = LocalComparisonInputProjectionTests.Detail(id, false); return new(s, detail, new string(id[^1], 64), new(detail.Nodes, detail.Versions ?? [], [], detail.CanonicalRevisionInput!, detail.SkillRegistryGenerationIdentity!)); }
     private sealed class FakeInput(IReadOnlyList<LocalRepositoryComparisonSessionInput> sessions, bool repositoryArchived = false) : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) { var repo = new LocalRepositoryCatalogSnapshot(LocalComparisonInputProjectionTests.RepositoryId, "Repository", 1, null, 0, repositoryArchived ? LocalArchiveState.Archived : LocalArchiveState.Active, repositoryArchived ? 2 : 1); return ValueTask.FromResult(new LocalRepositoryComparisonInputSnapshot(new(request, [repo], sessions.Select(x => x.Session).ToArray()), sessions)); } }
@@ -623,6 +764,13 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
                 INSERT INTO session_repository_manual_overrides(session_id,state,repository_id,revision,updated_at) VALUES('{a}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-08-26T00:10:00.0000000+00:00'),('{b}','assigned','{LocalComparisonInputProjectionTests.RepositoryId}',1,'2026-08-26T00:10:00.0000000+00:00');
                 """;
             assignment.ExecuteNonQuery();
+        }
+        internal void HideNamedToolDetail(string sessionId)
+        {
+            using var c = Open(); using var command = c.CreateCommand();
+            command.CommandText = "DELETE FROM monitor_spans WHERE trace_id IN (SELECT trace_id FROM session_runs WHERE session_id=$session); DELETE FROM session_events WHERE session_id=$session AND (type='otel.span' OR type='tool.execution_complete');";
+            command.Parameters.AddWithValue("$session", sessionId); command.ExecuteNonQuery();
+            using var refresh = c.BeginTransaction(); LocalWorkspaceProjectionStore.RefreshStructural(c, refresh, DateTimeOffset.Parse("2026-08-26T00:10:00Z")); refresh.Commit();
         }
         private SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path, Pooling = false }.ToString()); c.Open(); return c; } public void Dispose() { SqliteConnection.ClearAllPools(); Directory.Delete(dir, true); } }
 }
