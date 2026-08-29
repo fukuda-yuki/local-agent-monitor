@@ -22,13 +22,6 @@ public sealed class LocalMonitorV1ComparisonContractTests
         "local-monitor-comparison-evidence.response.v1",
     ];
 
-    private static readonly string[] FactStates =
-    [
-        "recorded", "explicit_zero", "not_observed", "source_unsupported", "capture_gap",
-        "certification_pending", "not_captured", "expired", "deleted", "read_denied",
-        "inconsistent", "projection_invalid", "too_large",
-    ];
-
     private static readonly (int Ordinal, string Key, string Label)[] Sections =
     [
         (1, "target", "対象"), (2, "tokens", "トークン"),
@@ -84,19 +77,59 @@ public sealed class LocalMonitorV1ComparisonContractTests
     {
         using var readSchema = ReadSchema("local-monitor-comparison-read.response");
         using var rowsSchema = ReadSchema("local-monitor-comparison-rows.response");
-        Assert.Equal(FactStates, readSchema.RootElement.GetProperty("$defs").GetProperty("factState").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
-        Assert.Equal(FactStates, rowsSchema.RootElement.GetProperty("$defs").GetProperty("factState").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
-        Assert.False(readSchema.RootElement.GetRawText().Contains("projection_unavailable", StringComparison.Ordinal));
-        Assert.False(rowsSchema.RootElement.GetRawText().Contains("projection_unavailable", StringComparison.Ordinal));
+        Assert.Equal(["key", "value"], readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("required").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(["key", "value"], rowsSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("required").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(128, readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("properties").GetProperty("key").GetProperty("maxLength").GetInt32());
+        Assert.Equal(16_384, readSchema.RootElement.GetProperty("$defs").GetProperty("value").GetProperty("properties").GetProperty("value").GetProperty("maxLength").GetInt32());
 
         using var read = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-read.response.json")));
         Assert.Equal(["基準", "比較対象"], read.RootElement.GetProperty("cohorts").EnumerateObject().Select(item => item.Value.GetProperty("label").GetString()));
         Assert.Equal(Sections, read.RootElement.GetProperty("sections").EnumerateArray().Select(section => (
             section.GetProperty("ordinal").GetInt32(), section.GetProperty("key").GetString()!, section.GetProperty("label").GetString()!)));
-        Assert.All(read.RootElement.GetProperty("results").EnumerateArray(), result => Assert.True(result.GetProperty("values").GetArrayLength() >= 8));
+        Assert.All(read.RootElement.GetProperty("results").EnumerateArray(), result => Assert.All(result.GetProperty("values").EnumerateArray(), value => Assert.Equal(["key", "value"], value.EnumerateObject().Select(p => p.Name))));
 
         using var rows = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "local-monitor-comparison-rows.response.json")));
-        Assert.All(rows.RootElement.GetProperty("items").EnumerateArray(), item => Assert.True(item.GetProperty("values").GetArrayLength() >= 8));
+        Assert.All(rows.RootElement.GetProperty("items").EnumerateArray(), item => Assert.All(item.GetProperty("values").EnumerateArray(), value => Assert.Equal(["key", "value"], value.EnumerateObject().Select(p => p.Name))));
+    }
+
+    [Fact]
+    public void PreviewLabelsAndClosedEnumsAreExact()
+    {
+        using var preview = ReadSchema("local-monitor-comparison-preview.response");
+        var summaries = preview.RootElement.GetProperty("$defs");
+        Assert.Equal("基準", summaries.GetProperty("summaryA").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
+        Assert.Equal("比較対象", summaries.GetProperty("summaryB").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
+        Assert.NotEqual("Baseline", summaries.GetProperty("summaryA").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
+        Assert.NotEqual("Candidate", summaries.GetProperty("summaryB").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
+        Assert.Equal(["session_not_found", "repository_mismatch", "duplicate", "cohort_overlap", "session_archived", "repository_archived", "projection_unavailable", "unsupported_selection", "workspace_too_large"], summaries.GetProperty("excluded").GetProperty("properties").GetProperty("reason").GetProperty("enum").EnumerateArray().Select(x => x.GetString()));
+        using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
+        Assert.Equal([null, "value", "available_count", "median", "minimum", "maximum", "total", "absolute_difference", "relative_difference_percent", "condition", "count", "duration_ms", "input_tokens", "output_tokens", "total_tokens", "cache_read", "cache_creation", "new_input", "error_count", "retry_count"], evidence.RootElement.GetProperty("properties").GetProperty("field_key").GetProperty("enum").EnumerateArray().Select(x => x.ValueKind == JsonValueKind.Null ? null : x.GetString()));
+    }
+
+    [Fact]
+    public void EverySchemaUuidGrammarRejectsCanonicalNearMisses()
+    {
+        string[] invalid = ["018F0000-0000-7000-8000-000000000001", "018f0000-0000-4000-8000-000000000001", "018f0000-0000-7000-7000-000000000001", "018f00000000-7000-8000-000000000001"];
+        foreach (var token in Tokens)
+        {
+            using var schema = ReadSchema(token[..^3]);
+            if (!schema.RootElement.GetProperty("$defs").TryGetProperty("uuidv7", out var uuid)) continue;
+            var pattern = uuid.GetProperty("pattern").GetString()!;
+            Assert.All(invalid, value => Assert.DoesNotMatch(pattern, value));
+        }
+    }
+
+    [Fact]
+    public void SchemaAcceptsOverAggregateShapeOnlyForTask2ParserRejection()
+    {
+        var idsA = Enumerable.Repeat("018f0000-0000-7000-8000-000000000001", 101);
+        var idsB = Enumerable.Repeat("018f0000-0000-7000-8000-000000000002", 100);
+        var json = JsonSerializer.Serialize(new { schema_version = "local-monitor-comparison-preview.request.v1", cohorts = new { a = idsA, b = idsB }, include_archived = false });
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.json");
+        try { File.WriteAllText(path, json, new UTF8Encoding(false)); Assert.True(ValidateWithPowerShellJsonSchema(path, Path.Combine(ContractRoot, "local-monitor-comparison-preview.request.schema.json"))); }
+        finally { File.Delete(path); }
+        var specification = Regex.Replace(File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "specifications", "interfaces", "local-monitor-v1-comparison.md")), @"\s+", " ");
+        Assert.Contains("⚠️ Task 2 obligation: `LocalMonitorV1ComparisonPreviewRequestParserTests.RejectsAggregateOccurrenceCountAbove200` MUST reject the schema-valid 101+100 request", specification, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -108,8 +141,6 @@ public sealed class LocalMonitorV1ComparisonContractTests
         using var read = ReadSchema("local-monitor-comparison-read.response");
         Assert.Equal("基準", read.RootElement.GetProperty("$defs").GetProperty("cohortA").GetProperty("properties").GetProperty("label").GetProperty("const").GetString());
         Assert.Equal("target", read.RootElement.GetProperty("$defs").GetProperty("section1").GetProperty("properties").GetProperty("key").GetProperty("const").GetString());
-        using var rows = ReadSchema("local-monitor-comparison-rows.response");
-        Assert.DoesNotContain("projection_unavailable", rows.RootElement.GetProperty("$defs").GetProperty("factState").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
         using var evidence = ReadSchema("local-monitor-comparison-evidence.response");
         Assert.Equal("#/$defs/uuidv7", evidence.RootElement.GetProperty("$defs").GetProperty("item").GetProperty("properties").GetProperty("execution_id").GetProperty("oneOf")[0].GetProperty("$ref").GetString());
     }

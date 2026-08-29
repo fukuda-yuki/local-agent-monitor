@@ -42,6 +42,11 @@ then Session-ID ordinal bytes. The exclusion enum is exactly
 `valid:false`; archive exclusions may remain valid only with two nonempty
 included cohorts.
 
+⚠️ Task 2 obligation:
+`LocalMonitorV1ComparisonPreviewRequestParserTests.RejectsAggregateOccurrenceCountAbove200`
+MUST reject the schema-valid 101+100 request. Task 1 deliberately carries this
+forward; independent per-cohort schema validity is not aggregate parser proof.
+
 Create repeats the coherent read from the exact selection and requires
 byte-equal `selection_sha256` and `preview_revision`; browser facts are never
 trusted. Changed authority/projection is `409 comparison_preview_stale`.
@@ -92,8 +97,11 @@ stored sections (`target`, `tokens`, `input_token_breakdown`,
 `conditions`), and stored result rows. Their exact labels are `対象`,
 `トークン`, `入力トークンの内訳`, `時間・実行量`, `スキル`, `ツール`,
 `サブエージェント`, `エラー・再試行`, `比較条件`. Each result and named row
-publishes the existing stored ordered key/value facts as the closed `values`
-collection; scalar facts include `session_count`, `available_count`, `median`,
+publishes the existing stored ordered facts losslessly as the closed `values`
+collection. Each item is exactly `{ "key": <bounded-token>, "value":
+<bounded-string> }`: key is 1..128 lowercase token characters and value is
+0..16,384 characters. Existing `not_available` and `*_unavailable_states`
+strings pass through unchanged; no state field or mapping is invented. Scalar facts include `session_count`, `available_count`, `median`,
 `minimum`, `maximum`, `total`, `absolute_difference`, and
 `relative_difference` keys with their existing stored prefixes. The client
 never recomputes them and this transport introduces no formula vocabulary.
