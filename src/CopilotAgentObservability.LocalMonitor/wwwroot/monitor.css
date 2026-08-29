@@ -11,6 +11,20 @@
     src: url(/vendor/fonts/noto-sans-jp-japanese-400-normal.woff2) format('woff2');
 }
 
+.local-monitor-session-workspace { display: grid; grid-template-rows: minmax(0, 72px) 104px minmax(0, 1fr); height: calc(100vh - 32px); overflow: hidden; }
+.local-monitor-session-context { padding: 8px 16px; overflow: hidden; }
+.local-monitor-session-context [data-session-context-content] { display: flex; gap: 8px; align-items: baseline; }
+.local-monitor-session-summary { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 8px; padding: 8px 16px; overflow-x: auto; }
+.local-monitor-session-summary-card { min-width: 0; }
+.local-monitor-session-summary-card h2 { font-size: .78rem; margin: 0 0 4px; }
+.local-monitor-session-bar { display: flex; height: 6px; overflow: hidden; border-radius: 4px; background: var(--surface-muted, #ddd); }
+.local-monitor-session-bar span:first-child { background: var(--accent, #526de8); }
+.local-monitor-session-bar span:last-child { background: var(--accent-muted, #93a4ef); }
+.local-monitor-session-execution-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 380px); gap: 16px; min-height: 0; padding: 8px 16px; }
+.local-monitor-session-executions, .local-monitor-session-inspector { overflow: auto; min-width: 0; }
+.local-monitor-session-execution { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+@media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--surface, white); } }
+
 /* Issue #95: contextual estimated-cost surface. */
 .cost-page {
   display: grid;

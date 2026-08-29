@@ -1,0 +1,15 @@
+@model CopilotAgentObservability.LocalMonitor.Pages.LocalMonitorV1PageModel
+
+<main class="local-monitor-session-workspace"
+      data-session-workspace
+      data-session-id="@Model.Path!.SessionId">
+    <header class="local-monitor-session-context" data-session-context>
+        <nav aria-label="パンくず"><a href="/sessions">Session Explorer</a> / <span data-session-breadcrumb>Session</span></nav>
+        <div data-session-context-content role="status" aria-live="polite">Session を読み込んでいます</div>
+    </header>
+    <section class="local-monitor-session-summary" data-session-summary aria-label="Session 全体の概要"></section>
+    <section class="local-monitor-session-execution-workspace">
+        <div class="local-monitor-session-executions" data-session-executions aria-label="実行一覧"></div>
+        <aside class="local-monitor-session-inspector" data-session-overview aria-label="Session overview"></aside>
+    </section>
+</main>

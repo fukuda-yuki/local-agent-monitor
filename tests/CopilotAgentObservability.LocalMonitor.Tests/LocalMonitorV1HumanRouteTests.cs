@@ -72,8 +72,7 @@ public sealed class LocalMonitorV1HumanRouteTests
         {
             var data = new TheoryData<string>();
             foreach (var path in ExactPrimaryPathValues.Where(path =>
-                         path == $"/sessions/{SessionId}"
-                         || path == $"/repositories/{RepositoryId}/comparisons/{ComparisonId}")) data.Add(path);
+                         path == $"/repositories/{RepositoryId}/comparisons/{ComparisonId}")) data.Add(path);
             return data;
         }
     }
@@ -468,6 +467,40 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.Equal(HttpStatusCode.NotFound, future.StatusCode);
         Assert.Equal(0, future.Content.Headers.ContentLength);
         Assert.Null(future.Content.Headers.ContentType);
+    }
+
+    [Fact]
+    public async Task RawDefault_SessionDetailRendersItsWorkspaceAndDedicatedAssetOnlyOnItsRoute()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions());
+
+        using var detail = await host.Client.GetAsync($"/sessions/{SessionId}");
+        using var explorer = await host.Client.GetAsync("/sessions");
+        var detailHtml = await detail.Content.ReadAsStringAsync();
+        var explorerHtml = await explorer.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+        Assert.Contains($"data-session-id=\"{SessionId}\"", detailHtml, StringComparison.Ordinal);
+        Assert.Contains("data-session-workspace", detailHtml, StringComparison.Ordinal);
+        Assert.Contains("/local-monitor-session-workspace.js", detailHtml, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-session-workspace", explorerHtml, StringComparison.Ordinal);
+        Assert.DoesNotContain("/local-monitor-session-workspace.js", explorerHtml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SanitizedOnly_DoesNotExposeSessionWorkspaceAssetOrSurface()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true);
+
+        using var route = await host.Client.GetAsync($"/sessions/{SessionId}");
+        using var asset = await host.Client.GetAsync("/local-monitor-session-workspace.js");
+
+        Assert.Equal(HttpStatusCode.NotFound, route.StatusCode);
+        Assert.DoesNotContain("data-session-workspace", await route.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.NotFound, asset.StatusCode);
+        Assert.Equal(0, asset.Content.Headers.ContentLength);
     }
 
     [Fact]

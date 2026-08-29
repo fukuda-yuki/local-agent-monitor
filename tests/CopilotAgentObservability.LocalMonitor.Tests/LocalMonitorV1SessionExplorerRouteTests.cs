@@ -49,7 +49,7 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
     }
 
     [Fact]
-    public async Task ExplorerPartialCannotActivateUnintegratedWorkspaceOrCompareRoutes()
+    public async Task IntegratedWorkspaceDoesNotActivateUnintegratedCompareRoute()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new RecordingScopeService()));
@@ -57,7 +57,10 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
         using var workspace = await host.Client.GetAsync("/sessions/018f0000-0000-7000-8000-000000000139");
         using var compare = await host.Client.GetAsync($"/repositories/{RepositoryId}/comparisons/018f0000-0000-7000-8000-000000000166");
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, workspace.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, workspace.StatusCode);
+        var workspaceHtml = await workspace.Content.ReadAsStringAsync();
+        Assert.Contains("data-session-workspace", workspaceHtml, StringComparison.Ordinal);
+        Assert.Contains("/local-monitor-session-workspace.js", workspaceHtml, StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, compare.StatusCode);
     }
 
