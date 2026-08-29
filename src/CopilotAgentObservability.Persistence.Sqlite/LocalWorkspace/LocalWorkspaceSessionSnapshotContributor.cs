@@ -62,21 +62,30 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         CancellationToken cancellationToken)
     {
         var rows = new List<ILocalRepositorySessionSnapshotRow>(exactTargetSessionIds.Count);
+        var projectionErrors = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var sessionId in exactTargetSessionIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var contribution = await ReadRowsAsync(
-                connection,
-                transaction,
-                acceptedAt,
-                now,
-                sessionId,
-                statementObserver,
-                registryAuthority,
-                cancellationToken).ConfigureAwait(false);
-            rows.AddRange(contribution.Sessions);
+            try
+            {
+                var contribution = await ReadRowsAsync(
+                    connection,
+                    transaction,
+                    acceptedAt,
+                    now,
+                    sessionId,
+                    statementObserver,
+                    registryAuthority,
+                    cancellationToken).ConfigureAwait(false);
+                rows.AddRange(contribution.Sessions);
+            }
+            catch (LocalWorkspaceSessionDetailException exception) when (exception.Error != "workspace_too_large")
+            {
+                rows.Add(new LocalUnavailableRepositorySessionSnapshotRow(sessionId));
+                projectionErrors.Add(sessionId, exception.Error);
+            }
         }
-        return new(Array.AsReadOnly(rows.ToArray()));
+        return new(Array.AsReadOnly(rows.ToArray()), projectionErrors);
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(

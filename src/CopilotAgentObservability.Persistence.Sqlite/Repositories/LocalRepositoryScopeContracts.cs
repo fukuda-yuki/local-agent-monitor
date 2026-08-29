@@ -94,6 +94,8 @@ internal interface ILocalRepositorySessionSnapshotRow
     string SessionId { get; }
 }
 
+internal sealed record LocalUnavailableRepositorySessionSnapshotRow(string SessionId) : ILocalRepositorySessionSnapshotRow;
+
 internal enum LocalRepositoryScopeKind
 {
     All,
@@ -157,7 +159,8 @@ internal static class LocalRepositoryScopeRequestValidation
 }
 
 internal sealed record LocalRepositorySessionContribution(
-    IReadOnlyList<ILocalRepositorySessionSnapshotRow> Sessions);
+    IReadOnlyList<ILocalRepositorySessionSnapshotRow> Sessions,
+    IReadOnlyDictionary<string, string>? ProjectionErrors = null);
 
 internal sealed record LocalRepositoryArchiveInput(
     IReadOnlyList<string> SessionIds,

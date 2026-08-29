@@ -3,6 +3,33 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalWorkspaceSessionSnapshotContributorTests
 {
     [Fact]
+    public async Task ExactComparisonReadIsolatesTypedInitialProjectionFailurePerTarget()
+    {
+        const string unavailable = "0198f5b8-0c00-7000-8000-000000000001";
+        const string available = "0198f5b8-0c00-7000-8000-000000000002";
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"""
+            INSERT INTO sessions VALUES('{unavailable}','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO sessions VALUES('{available}','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"PRAGMA ignore_check_constraints=ON; UPDATE local_workspace_sessions SET label_state='invalid_owner_state' WHERE session_id='{unavailable}'; PRAGMA ignore_check_constraints=OFF;");
+        var contributor = new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(DateTimeOffset.Parse("2026-08-25T00:00:00Z")));
+
+        var result = await contributor.ReadAsync(
+            new TestReadTransaction(connection),
+            new(LocalRepositoryScopeKind.Repository, "01900000-0000-7000-8000-000000000001", ExactTargetSessionIds: [unavailable, available]),
+            CancellationToken.None);
+
+        Assert.Equal([unavailable, available], result.Sessions.Select(static row => row.SessionId));
+        Assert.IsType<LocalUnavailableRepositorySessionSnapshotRow>(result.Sessions[0]);
+        Assert.IsType<LocalWorkspaceProjectionRow>(result.Sessions[1]);
+        var failure = Assert.Single(result.ProjectionErrors!);
+        Assert.Equal(unavailable, failure.Key);
+        Assert.Equal("local_monitor_ui_unavailable", failure.Value);
+    }
+
+    [Fact]
     public async Task ContributorReturnsTypedImmutableRowsInStableOrder()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

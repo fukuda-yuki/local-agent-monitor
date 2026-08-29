@@ -189,6 +189,11 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     var inputs = new List<LocalRepositoryComparisonSessionInput>(snapshot.Sessions.Count);
                     foreach (var currentSession in snapshot.Sessions.OrderBy(static item => item.SessionId, StringComparer.Ordinal))
                     {
+                        if (sessionContribution.ProjectionErrors?.TryGetValue(currentSession.SessionId, out var projectionError) == true)
+                        {
+                            inputs.Add(new(currentSession, null, ComputeUnavailableRevision(currentSession, projectionError), projectionError));
+                            continue;
+                        }
                         var summaryRequest = new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Summary, currentSession.SessionId);
                         try
                         {

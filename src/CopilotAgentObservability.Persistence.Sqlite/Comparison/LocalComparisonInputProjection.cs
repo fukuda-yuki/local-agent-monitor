@@ -19,13 +19,13 @@ internal sealed record LocalComparisonProjectionCandidate(
     LocalComparisonCandidateState State,
     bool IsArchived,
     string ArchiveState,
-    IReadOnlyList<string> Sources,
-    string SourcesState,
-    IReadOnlyList<string> Models,
-    string ModelsState,
-    int ProjectionVersion,
-    string Completeness,
-    IReadOnlyList<string> MetricCoverage,
+    IReadOnlyList<string>? Sources,
+    string? SourcesState,
+    IReadOnlyList<string>? Models,
+    string? ModelsState,
+    int? ProjectionVersion,
+    string? Completeness,
+    IReadOnlyList<string>? MetricCoverage,
     long SessionRevision,
     string ProjectionRevision);
 
@@ -83,15 +83,15 @@ internal static class LocalComparisonInputProjection
             previewValues.Add(candidate.SessionId);
             previewValues.Add(candidate.RepositoryId);
             previewValues.Add(candidate.ArchiveState);
-            previewValues.Add(candidate.ProjectionVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            previewValues.Add(candidate.Completeness);
+            previewValues.Add(candidate.ProjectionVersion!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            previewValues.Add(candidate.Completeness!);
             previewValues.Add(candidate.SessionRevision.ToString(System.Globalization.CultureInfo.InvariantCulture));
             previewValues.Add(candidate.ProjectionRevision);
-            previewValues.Add(candidate.SourcesState);
-            previewValues.AddRange(candidate.Sources.Order(StringComparer.Ordinal));
-            previewValues.Add(candidate.ModelsState);
-            previewValues.AddRange(candidate.Models.Order(StringComparer.Ordinal));
-            previewValues.AddRange(candidate.MetricCoverage.Order(StringComparer.Ordinal));
+            previewValues.Add(candidate.SourcesState!);
+            previewValues.AddRange(candidate.Sources!.Order(StringComparer.Ordinal));
+            previewValues.Add(candidate.ModelsState!);
+            previewValues.AddRange(candidate.Models!.Order(StringComparer.Ordinal));
+            previewValues.AddRange(candidate.MetricCoverage!.Order(StringComparer.Ordinal));
         }
         foreach (var item in excluded)
             previewValues.AddRange([item.Cohort, item.RequestOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture), item.SessionId, item.Reason]);
