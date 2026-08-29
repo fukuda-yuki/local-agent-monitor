@@ -43,6 +43,9 @@ internal static class LocalComparisonInputProjection
 {
     private const string SelectionDomain = "copilot-agent-observability/local-comparison-selection/v1";
     private const string PreviewDomain = "copilot-agent-observability/local-comparison-preview/v1";
+    private const string NamedIdentityDomain = "copilot-agent-observability/local-comparison-named-identity/v1";
+    private const string UnidentifiedSubagentIdentity = "unidentified-subagent";
+    private const string UnidentifiedDisplayName = "識別名なし";
 
     internal static LocalComparisonProjectionPreview Project(
         string repositoryId,
@@ -137,11 +140,13 @@ internal static class LocalComparisonInputProjection
     internal static LocalComparisonSessionFact MapSessionFact(
         LocalRepositoryScopeSessionSnapshot session,
         LocalWorkspaceSessionDetailContribution detail,
+        LocalWorkspaceComparisonDetailContribution comparisonDetail,
         string workspaceRevision,
         bool includeArchived)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(detail);
+        ArgumentNullException.ThrowIfNull(comparisonDetail);
         if (session.Session is not LocalWorkspaceProjectionRow row || workspaceRevision.Length != 64)
             throw new LocalComparisonSelectionUnavailableException();
         var sessionReference = new LocalComparisonSourceReference("workspace_session", session.SessionId, null, null, null, workspaceRevision);
@@ -195,36 +200,120 @@ internal static class LocalComparisonInputProjection
 
         LocalComparisonNamedFamilyFact Family(string family, LocalWorkspaceFact<long> aggregate)
         {
-            var items = detail.Nodes.Where(node => node.Kind == family).Select(node =>
+            var admitted = comparisonDetail.Nodes
+                .Where(node => node.Kind == family)
+                .Select(node => (Node: node, Identity: SemanticIdentity(node, family)))
+                .Where(static item => item.Identity is not null)
+                .GroupBy(static item => item.Identity!, StringComparer.Ordinal);
+            var items = admitted.Select(group =>
             {
-                var reference = new LocalComparisonSourceReference("workspace_node", node.NodeId, null, null, node.ExecutionId, workspaceRevision);
-                var display = node.NameState == "recorded" && !string.IsNullOrWhiteSpace(node.NameText) ? node.NameText! : "識別名なし";
+                var observations = group.OrderBy(static item => CanonicalNodeReference(item.Node), StringComparer.Ordinal).ToArray();
+                var display = observations[0].Node.NameState == "recorded" ? observations[0].Node.NameText! : UnidentifiedDisplayName;
+                var identityKey = Hash(NamedIdentityDomain, [family, group.Key]);
+                var reference = References(observations[0].Node, workspaceRevision)[0];
                 var values = LocalComparisonRegistryV1.NamedFieldKeys[family].ToDictionary(
                     static key => key, _ => Missing(LocalComparisonFactState.SourceUnsupported), StringComparer.Ordinal);
-                if (family == "skill") values["invocation_count"] = Count(1, reference);
+                if (family == "skill") values["invocation_count"] = Aggregate(observations, _ => (LocalComparisonFactState.Recorded, 1m), workspaceRevision);
                 if (family == "tool")
                 {
-                    values["call_count"] = Count(1, reference);
-                    values["failure_count"] = Count(node.Status == "failed" ? 1 : 0, reference);
-                    values["retry_count"] = Observed(node.Activity.Retry, reference);
+                    values["call_count"] = Aggregate(observations, _ => (LocalComparisonFactState.Recorded, 1m), workspaceRevision);
+                    values["failure_count"] = Aggregate(observations, item => ToolFailure(item.Node), workspaceRevision);
+                    values["retry_count"] = Aggregate(observations, item => Observation(item.Node.Activity.Retry), workspaceRevision);
                 }
                 if (family == "subagent")
                 {
-                    values["start_count"] = Lifecycle(node.SubagentLifecycle?.StartedState, reference);
-                    values["completed_count"] = Lifecycle(node.SubagentLifecycle?.CompletedState, reference);
-                    values["failed_count"] = Lifecycle(node.SubagentLifecycle?.FailedState, reference);
-                    values["recorded_tokens"] = Observed(node.Tokens.Total, reference);
+                    values["start_count"] = Aggregate(observations, item => LifecycleObservation(item.Node.SubagentLifecycle?.StartedState), workspaceRevision);
+                    values["completed_count"] = Aggregate(observations, item => LifecycleObservation(item.Node.SubagentLifecycle?.CompletedState), workspaceRevision);
+                    values["failed_count"] = Aggregate(observations, item => LifecycleObservation(item.Node.SubagentLifecycle?.FailedState), workspaceRevision);
+                    values["recorded_tokens"] = Aggregate(observations, item => Observation(item.Node.Tokens.Total), workspaceRevision);
                 }
-                return new LocalComparisonNamedItem(family, node.NodeId, node.NodeId, display, values, reference);
-            }).OrderBy(static item => item.SortKey, StringComparer.Ordinal).ToArray();
+                return new LocalComparisonNamedItem(family, identityKey, Normalize(display), display, values, reference);
+            }).OrderBy(static item => item.SortKey, StringComparer.Ordinal).ThenBy(static item => item.IdentityKey, StringComparer.Ordinal).ToArray();
             var state = items.Length > 0 ? LocalComparisonFactState.Recorded : State(aggregate.State);
-            if (items.Length == 0 && state == LocalComparisonFactState.Recorded) state = LocalComparisonFactState.ExplicitZero;
+            if (items.Length == 0 && state == LocalComparisonFactState.Recorded)
+                state = aggregate.Value == 0 ? LocalComparisonFactState.ExplicitZero : LocalComparisonFactState.CaptureGap;
             return new(family, state, Array.AsReadOnly(items), state is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero ? sessionReference : null);
         }
     }
 
-    private static LocalComparisonObservedScalar Lifecycle(string? state, LocalComparisonSourceReference reference) =>
-        state == "recorded" ? Count(1, reference) : Missing(State(state ?? "source_unsupported"));
+    private static string? SemanticIdentity(LocalWorkspaceNodeDetail node, string family) =>
+        node.NameState == "recorded" && node.NameText is not null
+            ? node.NameText
+            : family == "subagent" ? UnidentifiedSubagentIdentity : null;
+
+    private static string Normalize(string value) =>
+        string.Join(' ', value.Normalize(NormalizationForm.FormKC)
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+
+    private static string CanonicalNodeReference(LocalWorkspaceNodeDetail node) =>
+        string.Join('\n', node.SourceKind, node.SourceIdentity, node.TraceId, node.SpanId, node.EventId, node.ExecutionId, node.NodeId);
+
+    private static IReadOnlyList<LocalComparisonSourceReference> References(LocalWorkspaceNodeDetail node, string workspaceRevision)
+    {
+        var references = new List<LocalComparisonSourceReference>
+        {
+            new("workspace_node", node.NodeId, node.TraceId, node.SpanId, node.ExecutionId, workspaceRevision),
+        };
+        foreach (var source in (node.SourceReferences ?? []).Concat(node.ToolMetadata?.SourceReferences ?? []).Concat(node.SubagentLifecycle?.SourceReferences ?? []))
+        {
+            references.Add(new(
+                source.SourceKind,
+                source.SourceIdentity,
+                source.TraceId,
+                source.SpanId,
+                source.EventId,
+                source.RevisionInput is { Length: 64 } ? source.RevisionInput : workspaceRevision));
+        }
+        return Array.AsReadOnly(references
+            .Distinct()
+            .OrderBy(static item => item.SourceKind, StringComparer.Ordinal)
+            .ThenBy(static item => item.SourceIdentity, StringComparer.Ordinal)
+            .ThenBy(static item => item.TraceId, StringComparer.Ordinal)
+            .ThenBy(static item => item.SpanId, StringComparer.Ordinal)
+            .ThenBy(static item => item.EventId, StringComparer.Ordinal)
+            .ThenBy(static item => item.RevisionSha256, StringComparer.Ordinal)
+            .ToArray());
+    }
+
+    private static LocalComparisonObservedScalar Aggregate(
+        IReadOnlyList<(LocalWorkspaceNodeDetail Node, string? Identity)> observations,
+        Func<(LocalWorkspaceNodeDetail Node, string? Identity), (LocalComparisonFactState State, decimal? Value)> selector,
+        string workspaceRevision)
+    {
+        var selected = observations.Select(item => (Item: item, Fact: selector(item))).ToArray();
+        var unavailable = selected
+            .Where(static item => item.Fact.State is not LocalComparisonFactState.Recorded and not LocalComparisonFactState.ExplicitZero)
+            .OrderBy(static item => item.Fact.State)
+            .FirstOrDefault();
+        var state = unavailable.Item.Node is null ? LocalComparisonFactState.Recorded : unavailable.Fact.State;
+        var value = unavailable.Item.Node is null ? selected.Sum(static item => item.Fact.Value!.Value) : (decimal?)null;
+        if (state == LocalComparisonFactState.Recorded && value == 0) state = LocalComparisonFactState.ExplicitZero;
+        var evidence = selected.SelectMany(item => References(item.Item.Node, workspaceRevision).Select(reference =>
+            new LocalComparisonFactEvidence(
+                item.Fact.State,
+                reference,
+                item.Fact.Value is null ? null : LocalComparisonScalarCalculator.CanonicalDecimal(item.Fact.Value.Value))))
+            .ToArray();
+        return new(new(state, value), Array.AsReadOnly(evidence));
+    }
+
+    private static (LocalComparisonFactState State, decimal? Value) ToolFailure(LocalWorkspaceNodeDetail node) => node.Status switch
+    {
+        "failed" => (LocalComparisonFactState.Recorded, 1m),
+        _ when node.Lifecycle == "completed" => (LocalComparisonFactState.ExplicitZero, 0m),
+        _ => (LocalComparisonFactState.SourceUnsupported, null),
+    };
+
+    private static (LocalComparisonFactState State, decimal? Value) LifecycleObservation(string? state) =>
+        state == "recorded" ? (LocalComparisonFactState.Recorded, 1m) : (State(state ?? "source_unsupported"), null);
+
+    private static (LocalComparisonFactState State, decimal? Value) Observation(LocalWorkspaceFact<long> fact)
+    {
+        var state = State(fact.State);
+        if (state == LocalComparisonFactState.Recorded && fact.Value == 0) state = LocalComparisonFactState.ExplicitZero;
+        return state is LocalComparisonFactState.Recorded or LocalComparisonFactState.ExplicitZero
+            ? (state, fact.Value) : (state, null);
+    }
 
     private static LocalComparisonObservedScalar Presence(LocalComparisonObservedScalar input, LocalComparisonSourceReference reference) =>
         input.Observation.Value is decimal value ? Count(value > 0 ? 1 : 0, reference) : Missing(input.Observation.State);

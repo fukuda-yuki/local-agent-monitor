@@ -83,7 +83,7 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
         var candidates = snapshot.Sessions.Select(session => Candidate(session, archivedRepositories.Contains(session.Session.RepositoryId ?? ""))).ToArray();
         var revision = Hash(snapshot.Scope.Repositories.OrderBy(x => x.RepositoryId).SelectMany(x => new[] { x.RepositoryId, x.Revision.ToString(CultureInfo.InvariantCulture), x.ArchiveRevision.ToString(CultureInfo.InvariantCulture) }).Concat(snapshot.Sessions.Select(x => x.WorkspaceRevision)));
         var preview = LocalComparisonInputProjection.Project(repositoryId, a, b, archived, candidates, revision); var map = snapshot.Sessions.ToDictionary(x => x.Session.SessionId, StringComparer.Ordinal);
-        LocalComparisonSessionFact Fact(string id) { var x = map[id]; return LocalComparisonInputProjection.MapSessionFact(x.Session, x.Detail!, x.WorkspaceRevision, archived); }
+        LocalComparisonSessionFact Fact(string id) { var x = map[id]; return LocalComparisonInputProjection.MapSessionFact(x.Session, x.Detail!, x.ComparisonDetail, x.WorkspaceRevision, archived); }
         var aa = preview.Included.Where(x => a.Contains(x.SessionId)).Select(x => Fact(x.SessionId)).ToArray(); var bb = preview.Included.Where(x => b.Contains(x.SessionId) && !a.Contains(x.SessionId)).Select(x => Fact(x.SessionId)).ToArray();
         var draft = new LocalComparisonDraft(repositoryId, new(Array.AsReadOnly(aa), preview.Excluded.Count(x => x.Cohort == "a")), new(Array.AsReadOnly(bb), preview.Excluded.Count(x => x.Cohort == "b")), SHA256.HashData(Encoding.ASCII.GetBytes(preview.PreviewRevision)));
         return new(preview, draft);

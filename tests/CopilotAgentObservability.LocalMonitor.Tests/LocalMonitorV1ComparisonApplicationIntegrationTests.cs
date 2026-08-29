@@ -83,7 +83,8 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         Assert.Equal(201, created.StatusCode);
 
         var rows = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Rows, LocalComparisonInputProjectionTests.RepositoryId, "018f0000-0000-7000-8000-000000000010", ReadOnlyMemory<byte>.Empty, "?family=tool&q=tool-helper", default);
-        var expected = await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-rows.response.json"));
+        var expected = (await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", "local-monitor-comparison-rows.response.json")))
+            .AsSpan().TrimEnd([(byte)'\r', (byte)'\n']).ToArray();
 
         Assert.Equal(expected, rows.Entity);
     }

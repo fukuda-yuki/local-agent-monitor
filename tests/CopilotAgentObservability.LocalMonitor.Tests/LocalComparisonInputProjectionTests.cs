@@ -90,7 +90,7 @@ public sealed class LocalComparisonInputProjectionTests
         var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
         var detail = Detail(session.SessionId, unidentifiedSubagent: true);
 
-        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, new string('a', 64), includeArchived: false);
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(detail.Nodes), new string('a', 64), includeArchived: false);
 
         Assert.Equal(LocalComparisonFactState.Recorded, fact.Scalars["input_tokens"].Observation.State);
         Assert.Equal(10m, fact.Scalars["input_tokens"].Observation.Value);
@@ -103,13 +103,136 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     [Fact]
+    public void WorkspaceAdapterGroupsExactSemanticNamesAndPreservesEveryObservation()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var tool = detail.Nodes.Single(node => node.Kind == "tool");
+        var repeated = tool with
+        {
+            NodeId = "node-00000000000000000000000000000004",
+            ExecutionId = "018f0000-0000-7000-8000-000000000011",
+            Activity = tool.Activity with { Retry = Fact(2) },
+            SourceReferences = [new("source_event", "source-1", "trace-1", "span-1", "event-1", new string('c', 64), true)],
+        };
+        var comparisonDetail = ComparisonDetail([tool, repeated]);
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, comparisonDetail, new string('a', 64), includeArchived: false);
+
+        var item = Assert.Single(fact.NamedFamilies.Single(family => family.Family == "tool").Items);
+        Assert.Equal("tool-helper", item.DisplayName);
+        Assert.Matches("^[0-9a-f]{64}$", item.IdentityKey);
+        Assert.Equal("tool-helper", item.SortKey);
+        Assert.Equal(2m, item.Values["call_count"].Observation.Value);
+        Assert.Equal(2m, item.Values["retry_count"].Observation.Value);
+        Assert.Equal(3, item.Values["call_count"].Evidence.Count);
+        Assert.Contains(item.Values["call_count"].Evidence, evidence => evidence.Reference!.EventId == "event-1" && evidence.Reference.RevisionSha256 == new string('c', 64));
+    }
+
+    [Fact]
+    public void WorkspaceAdapterAggregatesRepeatedSkillAndSubagentLifecycleAndTokens()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var skill = detail.Nodes.Single(node => node.Kind == "skill");
+        var subagent = detail.Nodes.Single(node => node.Kind == "subagent") with
+        {
+            Tokens = detail.Nodes.Single(node => node.Kind == "subagent").Tokens with { Total = Fact(7) },
+        };
+        var nodes = new[]
+        {
+            skill,
+            skill with { NodeId = "skill-repeat", ExecutionId = "018f0000-0000-7000-8000-000000000011" },
+            subagent,
+            subagent with
+            {
+                NodeId = "subagent-repeat",
+                ExecutionId = "018f0000-0000-7000-8000-000000000012",
+                Tokens = subagent.Tokens with { Total = new("capture_gap", null) },
+                SubagentLifecycle = subagent.SubagentLifecycle! with { FailedState = "recorded" },
+            },
+        };
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(nodes), new string('a', 64), false);
+
+        var skillItem = Assert.Single(fact.NamedFamilies.Single(family => family.Family == "skill").Items);
+        Assert.Equal(2m, skillItem.Values["invocation_count"].Observation.Value);
+        var subagentItem = Assert.Single(fact.NamedFamilies.Single(family => family.Family == "subagent").Items);
+        Assert.Equal(2m, subagentItem.Values["start_count"].Observation.Value);
+        Assert.Equal(2m, subagentItem.Values["completed_count"].Observation.Value);
+        Assert.Equal(LocalComparisonFactState.NotObserved, subagentItem.Values["failed_count"].Observation.State);
+        Assert.Equal(LocalComparisonFactState.CaptureGap, subagentItem.Values["recorded_tokens"].Observation.State);
+        Assert.Equal(2, subagentItem.Values["recorded_tokens"].Evidence.Count);
+    }
+
+    [Fact]
+    public void WorkspaceAdapterUsesExactNamesAndOneFixedUnidentifiedSubagentIdentity()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var prototype = detail.Nodes.Single(node => node.Kind == "subagent");
+        var nodes = new[]
+        {
+            prototype with { NodeId = "skill-missing", Kind = "skill", NameState = "not_observed", NameText = null },
+            prototype with { NodeId = "tool-missing", Kind = "tool", NameState = "not_observed", NameText = null },
+            prototype with { NodeId = "subagent-missing-1", NameState = "not_observed", NameText = null },
+            prototype with { NodeId = "subagent-missing-2", ExecutionId = "018f0000-0000-7000-8000-000000000011", NameState = "source_unsupported", NameText = null },
+            prototype with { NodeId = "subagent-named", NameState = "recorded", NameText = "  Helper\u3000Agent " },
+        };
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(nodes), new string('a', 64), false);
+
+        Assert.Empty(fact.NamedFamilies.Single(family => family.Family == "skill").Items);
+        Assert.Empty(fact.NamedFamilies.Single(family => family.Family == "tool").Items);
+        var subagents = fact.NamedFamilies.Single(family => family.Family == "subagent").Items;
+        Assert.Equal(2, subagents.Count);
+        var unidentified = Assert.Single(subagents, item => item.DisplayName == "識別名なし");
+        Assert.Equal(2m, unidentified.Values["start_count"].Observation.Value);
+        var named = Assert.Single(subagents, item => item.DisplayName == "  Helper\u3000Agent ");
+        Assert.Equal("helper agent", named.SortKey);
+    }
+
+    [Fact]
+    public void WorkspaceAdapterAggregatesOnlyCompleteNamedFactsAndKeepsUnavailableEvidence()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var tool = detail.Nodes.Single(node => node.Kind == "tool") with { Lifecycle = "active", Status = "active", Activity = detail.Nodes.Single(node => node.Kind == "tool").Activity with { Retry = new("not_observed", null) } };
+        var completed = tool with { NodeId = "tool-completed", Lifecycle = "completed", Status = "succeeded", Activity = tool.Activity with { Retry = Fact(1) } };
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail([tool, completed]), new string('a', 64), false);
+
+        var item = Assert.Single(fact.NamedFamilies.Single(family => family.Family == "tool").Items);
+        Assert.Equal(LocalComparisonFactState.SourceUnsupported, item.Values["failure_count"].Observation.State);
+        Assert.Null(item.Values["failure_count"].Observation.Value);
+        Assert.Equal(LocalComparisonFactState.NotObserved, item.Values["retry_count"].Observation.State);
+        Assert.Equal(2, item.Values["failure_count"].Evidence.Count);
+        Assert.Contains(item.Values["failure_count"].Evidence, evidence => evidence.State == LocalComparisonFactState.ExplicitZero && evidence.Reference!.SourceIdentity == completed.NodeId);
+        Assert.Equal(2, item.Values["retry_count"].Evidence.Count);
+    }
+
+    [Fact]
+    public void WorkspaceAdapterDistinguishesProvedEmptyFamilyFromPositiveMissingDetail()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+        var zeroSession = session with { Session = ((LocalWorkspaceProjectionRow)session.Session!) with { Activity = ((LocalWorkspaceProjectionRow)session.Session!).Activity with { Tool = Fact(0) } } };
+
+        var positive = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail([]), new string('a', 64), false);
+        var zero = LocalComparisonInputProjection.MapSessionFact(zeroSession, detail, ComparisonDetail([]), new string('a', 64), false);
+
+        Assert.Equal(LocalComparisonFactState.CaptureGap, positive.NamedFamilies.Single(family => family.Family == "tool").State);
+        Assert.Equal(LocalComparisonFactState.ExplicitZero, zero.NamedFamilies.Single(family => family.Family == "tool").State);
+    }
+
+    [Fact]
     public void WorkspaceAdapterMarksArchiveInclusionOnlyWhenExplicit()
     {
         var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: true);
         var detail = Detail(session.SessionId, unidentifiedSubagent: false);
 
-        Assert.False(LocalComparisonInputProjection.MapSessionFact(session, detail, new string('a', 64), false).IsArchiveInclusionExplicit);
-        Assert.True(LocalComparisonInputProjection.MapSessionFact(session, detail, new string('a', 64), true).IsArchiveInclusionExplicit);
+        Assert.False(LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(detail.Nodes), new string('a', 64), false).IsArchiveInclusionExplicit);
+        Assert.True(LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(detail.Nodes), new string('a', 64), true).IsArchiveInclusionExplicit);
     }
 
     internal static LocalRepositoryScopeSessionSnapshot ScopeSession(string sessionId, bool archived)
@@ -131,6 +254,9 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     private static LocalWorkspaceFact<long> Fact(long value) => new("recorded", value);
+
+    private static LocalWorkspaceComparisonDetailContribution ComparisonDetail(IReadOnlyList<LocalWorkspaceNodeDetail> nodes) =>
+        new(nodes, [], [], "revision", new string('b', 64));
 
     [Fact]
     public void RepositoryScopeRequestKeepsSingleAndBatchTargetsMutuallyExclusive()
