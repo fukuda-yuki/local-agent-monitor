@@ -93,6 +93,32 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Fact]
+    public Task RecordedSourceReferenceAllowsNullKindWithExactIdentity() => AssertValidNodeShape(node =>
+    {
+        node["node"]!["source_references"]!["references"]![0]!["source_kind"] = null;
+        node["node"]!["metadata"]!["source_references"]!["references"]![0]!["source_kind"] = null;
+    });
+
+    [Fact]
+    public Task ToolMetadataAcceptsRecordedEmptyNodeSetsAndCompleteChildActivity() => AssertValidNodeShape(node =>
+    {
+        node["node"]!["kind"] = "tool";
+        node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"tool","caller":{"state":"recorded","node_id":"node-2db4028cf76015c954848d7dcbb5deca"},"lifecycle":{"state":"recorded","value":"completed"},"status":{"state":"recorded","value":"completed"},"exit":{"state":"not_observed"},"mcp_server_identity":{"state":"not_observed","value":null},"mcp_server_name":{"state":"not_observed","value":null},"mcp_tool_name":{"state":"recorded","value":"demo"},"input":{"state":"not_captured","available":false},"result":{"state":"not_captured","available":false},"error":{"state":"not_captured","available":false},"retry":{"state":"recorded","node_ids":[]},"recovery":{"state":"recorded","node_ids":[]},"child_activity":{"skill":{"state":"not_observed","count":null},"tool":{"state":"recorded","count":0},"subagent":{"state":"not_observed","count":null},"error":{"state":"not_observed","count":null},"retry":{"state":"not_observed","count":null}},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"018f0000-0000-7000-8000-000000000004","trace_id":null,"span_id":null,"event_id":"018f0000-0000-7000-8000-000000000004"}]}}""");
+    });
+
+    [Theory]
+    [InlineData("allowed")]
+    [InlineData("denied")]
+    [InlineData("asked")]
+    [InlineData("unknown")]
+    public Task PermissionMetadataAcceptsClosedDecisionVocabulary(string decision) => AssertValidNodeShape(node =>
+    {
+        node["node"]!["kind"] = "permission";
+        node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"permission","decision":{"state":"recorded","value":"unknown"},"wait":{"state":"not_observed"},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"018f0000-0000-7000-8000-000000000004","trace_id":null,"span_id":null,"event_id":"018f0000-0000-7000-8000-000000000004"}]}}""");
+        node["node"]!["metadata"]!["decision"]!["value"] = decision;
+    });
+
+    [Fact]
     public async Task ExecutionScrollPositionSurvivesCollapseAndRerender()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -487,6 +513,16 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         foreach (var label in new[] { "入力トークン 10", "出力トークン 5", "cache read 4", "new input 6" })
             await Expect(page.GetByLabel(label)).ToHaveCountAsync(1);
+    }
+
+    private static async Task AssertValidNodeShape(Action<JsonObject> mutate)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision; mutate(node);
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: '9a5590c8-46e3-7069-af48-3844d2bf17a4', node: 'node-a8a773d6614d5030f505ff195b452dd6' })");
+        await Expect(page.Locator("[data-session-overview]")).Not.ToContainTextAsync("Session overview"); Assert.Equal("node-a8a773d6614d5030f505ff195b452dd6", await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId"));
     }
 
     private static string Summary(string name) => File.ReadAllText(Path.GetFullPath(Path.Combine(
