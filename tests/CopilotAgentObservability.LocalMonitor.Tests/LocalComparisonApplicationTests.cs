@@ -783,6 +783,42 @@ public sealed class LocalComparisonApplicationTests
         }
     }
 
+    [Fact]
+    public void PrepareDoesNotTreatExactEvidenceReferencesBeyondNodeCeilingAsInvalid()
+    {
+        var scope = LocalComparisonInputProjectionTests.ScopeSession(SessionA, archived: false) with { RepositoryId = RepositoryId };
+        var detail = LocalComparisonInputProjectionTests.Detail(SessionA, unidentifiedSubagent: false);
+        var tool = detail.Nodes.Single(node => node.Kind == "tool") with
+        {
+            Lifecycle = "completed",
+            Status = "completed",
+            SourceReferences = Enumerable.Range(0, 4_100).Select(index => new LocalWorkspaceNodeSourceReferenceDetail(
+                "workspace_node", $"node-{index + 256:x32}", null, null, null, RevisionA, true)).ToArray(),
+        };
+        var mapped = LocalComparisonInputProjection.MapSessionFact(
+            scope,
+            detail,
+            new([tool], [], [], "revision-a", new string('d', 64)),
+            RevisionA,
+            false);
+        var referenceB = new LocalComparisonSourceReference(
+            "workspace_session", SessionB, null, null, null, RevisionB);
+        var draft = new LocalComparisonDraft(
+            RepositoryId,
+            new([mapped], 0),
+            new([Session(SessionB, RevisionB, referenceB,
+                Recorded(20m, referenceB), ExplicitZero(referenceB), [])], 0),
+            ScopeConditionDigest());
+        var application = new LocalComparisonApplicationService(
+            store: null,
+            new FixedTimeProvider(CreatedAt),
+            _ => ComparisonId);
+
+        var prepared = application.Prepare(draft);
+
+        Assert.Equal(LocalComparisonCreateStatus.TooLarge, prepared.Status);
+    }
+
     private static SqliteConnection Open(string path)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder

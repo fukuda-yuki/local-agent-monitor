@@ -110,7 +110,7 @@ internal sealed record LocalComparisonCreateResult(
 internal sealed class LocalComparisonApplicationService
 {
     private const int MaximumReceiptBytes = 1_048_576;
-    private const int MaximumEvidenceRows = 1_048_576 / 64;
+    internal const int MaximumEvidenceRows = 1_048_576 / 64;
     private readonly SqliteLocalComparisonStore? store;
     private readonly TimeProvider timeProvider;
     private readonly Func<DateTimeOffset, string> comparisonIdFactory;
@@ -1131,10 +1131,12 @@ internal static class LocalComparisonApplicationValidation
         string sessionId)
     {
         if (fact is null || fact.Observation is null
-            || fact.Evidence is null || fact.Evidence.Count is < 1 or > 4096
+            || fact.Evidence is null || fact.Evidence.Count < 1
             || fact.Evidence.Any(static item => item is null)
             || fact.Evidence.Distinct().Count() != fact.Evidence.Count)
             throw new ArgumentException("local_comparison_input_scalar_invalid");
+        if (fact.Evidence.Count > LocalComparisonApplicationService.MaximumEvidenceRows)
+            throw new LocalComparisonTooLargeException();
         if (fact.Observation.Value < 0m)
             throw new ArgumentException("local_comparison_input_scalar_invalid");
         if (fact.Observation.Value is not null
@@ -1553,7 +1555,7 @@ internal static class LocalComparisonFactFrame
             }
             value = parsed;
         }
-        var count = ReadCount(ref reader, 4096);
+        var count = ReadCount(ref reader, LocalComparisonApplicationService.MaximumEvidenceRows);
         if (count == 0)
             Reject();
         var evidence = new LocalComparisonFactEvidence[count];
