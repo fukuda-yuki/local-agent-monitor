@@ -64,6 +64,16 @@ internal interface ILocalWorkspaceSessionDetailSnapshotContributor
         CancellationToken cancellationToken);
 }
 
+internal interface ILocalWorkspaceComparisonDetailSnapshotContributor
+{
+    ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
+        ILocalRepositoryReadTransaction transaction,
+        string sessionId,
+        DateTimeOffset acceptedAt,
+        LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority pinnedRegistry,
+        CancellationToken cancellationToken);
+}
+
 internal enum LocalRepositorySessionDetailRequestKind
 {
     Summary,

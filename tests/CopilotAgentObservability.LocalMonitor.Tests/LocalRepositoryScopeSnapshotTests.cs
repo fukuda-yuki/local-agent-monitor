@@ -13,7 +13,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
     private const string LocatorC = "01900000-0000-7000-8000-000000000013";
 
     [Fact]
-    public async Task ComparisonBatchRejectsAContributorWithoutThePinnedCompareInputSeam()
+    public async Task ComparisonBatchKeepsTypedPerTargetCompareFailureAsProjectionUnavailable()
     {
         using var database = new ScopeDatabase();
         var unavailable = SessionId(1);
@@ -36,14 +36,17 @@ public sealed class LocalRepositoryScopeSnapshotTests
             if (request.SessionId == unavailable) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
             return LocalComparisonInputProjectionTests.Detail(available, false);
         });
-        var service = new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive, detail);
+        var service = new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive, detail,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
         var application = new LocalMonitorV1ComparisonProductionApplication(service, new SqliteLocalComparisonStore(database.Path), cursorKey: new byte[32]);
         var body = System.Text.Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{unavailable}\"],\"b\":[\"{available}\"]}},\"include_archived\":false}}");
 
-        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(() =>
-            application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, RepositoryA, null, body, "", default).AsTask());
+        var response = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, RepositoryA, null, body, "", default);
 
-        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+        Assert.Equal(200, response.StatusCode);
+        using var json = System.Text.Json.JsonDocument.Parse(response.Entity);
+        Assert.Equal("projection_unavailable", json.RootElement.GetProperty("excluded")[0].GetProperty("reason").GetString());
+        Assert.DoesNotContain("500", System.Text.Encoding.UTF8.GetString(response.Entity), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1765,12 +1768,24 @@ public sealed class LocalRepositoryScopeSnapshotTests
 
     private sealed class FakeDetailContributor(
         Func<ILocalRepositoryReadTransaction, LocalRepositorySessionDetailRequest, CancellationToken, ValueTask<LocalWorkspaceSessionDetailContribution>> read)
-        : ILocalWorkspaceSessionDetailSnapshotContributor
+        : ILocalWorkspaceSessionDetailSnapshotContributor, ILocalWorkspaceComparisonDetailSnapshotContributor
     {
         public ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
             ILocalRepositoryReadTransaction transaction,
             LocalRepositorySessionDetailRequest request,
             CancellationToken cancellationToken) => read(transaction, request, cancellationToken);
+
+        public async ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
+            ILocalRepositoryReadTransaction transaction,
+            string sessionId,
+            DateTimeOffset acceptedAt,
+            LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority pinnedRegistry,
+            CancellationToken cancellationToken)
+        {
+            var detail = await read(transaction,
+                new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), cancellationToken);
+            return new(detail.Nodes, detail.Versions ?? [], [], detail.CanonicalRevisionInput!, detail.SkillRegistryGenerationIdentity!);
+        }
     }
 
     private sealed class CountingPublicationGate : ILocalWorkspacePublicationGate

@@ -186,7 +186,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 IReadOnlyList<LocalRepositoryComparisonSessionInput>? comparisonSessions = null;
                 if (comparisonBatch)
                 {
-                    if (detailContributor is not LocalWorkspaceSessionDetailSnapshotContributor workspaceComparison
+                    if (detailContributor is not ILocalWorkspaceComparisonDetailSnapshotContributor workspaceComparison
                         || pinnedRegistry is null)
                         throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
                     var inputs = new List<LocalRepositoryComparisonSessionInput>(snapshot.Sessions.Count);

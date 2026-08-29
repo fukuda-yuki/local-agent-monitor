@@ -1248,6 +1248,22 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         latestWrites[sessionKey] = write;
     }
 
+    internal void SeedSdkOnlyWithFixedReference(string sessionKey, string skillName)
+    {
+        var write = NewWrite(sessionKey, skillName, "1.0.65", "available", "none", expired: false) with
+        {
+            SourceEventId = "018f0000-0000-4000-8000-000000000030",
+            EventId = Guid.Parse("018f0000-0000-7000-8000-000000000031"),
+            SnapshotId = Guid.Parse("018f0000-0000-7000-8000-000000000032"),
+            ClaimId = Guid.Parse("018f0000-0000-7000-8000-000000000033"),
+            NewSessionId = Guid.Parse("018f0000-0000-7000-8000-000000000034"),
+            NewRunId = Guid.Parse("018f0000-0000-7000-8000-000000000035"),
+        };
+        Commit(write);
+        sessions[sessionKey] = ResolveSession(sessionKey);
+        latestWrites[sessionKey] = write;
+    }
+
     internal void SeedSdkClaims(string sessionKey, int count)
     {
         using var connection = Open();

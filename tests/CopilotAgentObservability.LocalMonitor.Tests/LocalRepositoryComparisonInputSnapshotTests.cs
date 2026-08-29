@@ -95,7 +95,7 @@ public sealed class LocalRepositoryComparisonInputSnapshotTests
     public async Task ProductionComparisonInputFreezesAdmittedSkillFactsAndExactReference()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
-        fixture.SeedSdkOnly("compare-skill", "review-skill");
+        fixture.SeedSdkOnlyWithFixedReference("compare-skill", "review-skill");
         fixture.RefreshWorkspace();
         var sessionId = fixture.SessionId("compare-skill");
         var clock = new SkillClock();
@@ -115,6 +115,7 @@ public sealed class LocalRepositoryComparisonInputSnapshotTests
         var comparison = input.ComparisonDetail;
         var skill = Assert.Single(comparison.Nodes, node => node.Kind == "skill");
         Assert.Equal("review-skill", skill.NameText);
+        Assert.Equal("recorded", skill.NameState);
         Assert.Equal("completed", skill.Lifecycle);
         Assert.Equal("completed", skill.Status);
         Assert.Equal("recorded", skill.Activity.Skill.State);
@@ -124,8 +125,8 @@ public sealed class LocalRepositoryComparisonInputSnapshotTests
         Assert.Equal("not_observed", skill.Tokens.Total.State);
         var reference = Assert.Single(skill.SourceReferences!);
         Assert.Equal("skill_claim", reference.SourceKind);
-        Assert.StartsWith("sdk:", reference.SourceIdentity, StringComparison.Ordinal);
-        Assert.NotNull(reference.EventId);
+        Assert.Equal("sdk:018f0000-0000-7000-8000-000000000033", reference.SourceIdentity);
+        Assert.Equal("018f0000-0000-7000-8000-000000000031", reference.EventId);
         Assert.Null(reference.TraceId);
         Assert.Null(reference.SpanId);
         Assert.True(reference.AuthorityValidated);

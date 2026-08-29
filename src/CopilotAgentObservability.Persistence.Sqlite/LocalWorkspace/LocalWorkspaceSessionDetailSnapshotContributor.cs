@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor
+internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor, ILocalWorkspaceComparisonDetailSnapshotContributor
 {
     internal const string BoundsSql = """
         SELECT
@@ -59,7 +59,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         transaction.ReadAsync((connection, sqliteTransaction, token) =>
             ReadAsync(connection, sqliteTransaction, request, acceptedAt, pinnedRegistry, revisionSession, token), cancellationToken);
 
-    internal ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
+    public ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
         ILocalRepositoryReadTransaction transaction, string sessionId, DateTimeOffset acceptedAt,
         PinnedRegistryAuthority pinnedRegistry, CancellationToken cancellationToken) =>
         transaction.ReadAsync<LocalWorkspaceComparisonDetailContribution>(async (connection, sqliteTransaction, token) =>
