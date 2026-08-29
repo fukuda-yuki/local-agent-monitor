@@ -273,7 +273,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     [InlineData(12)]
     [InlineData(13)]
     [InlineData(14)]
-    public async Task MalformedNodeFailsClosedAndRestoresCanonicalOverview(int mutation)
+    public async Task MalformedNodeFailsClosedAndPreservesExactRecovery(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
@@ -293,8 +293,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         else if (mutation == 12) node["node"]!["metadata"]!["source_time"]!["value"] = "2026-08-26T01:02:03Z";
         else if (mutation == 13) node["parent_path"]![0]!["node_id"] = "node-00000000000000000000000000000009";
         else node["parent_path"]![0]!["node_id"] = node["node"]!["node_id"]!.GetValue<string>();
-        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
-        await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}");
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: '9a5590c8-46e3-7069-af48-3844d2bf17a4', node: 'node-a8a773d6614d5030f505ff195b452dd6' })");
+        await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("retry"); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6");
     }
 
     [Fact]
@@ -677,6 +677,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview");
+        await Expect(page.Locator("[data-session-overview-source]")).ToContainTextAsync("今回の記録にはありません");
+        await Expect(page.Locator("[data-session-overview-time]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("今回の記録にはありません");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input", "coverage" })

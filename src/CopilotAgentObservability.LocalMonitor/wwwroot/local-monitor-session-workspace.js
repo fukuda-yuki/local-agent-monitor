@@ -136,7 +136,6 @@
         || !tokens(detail.execution.tokens) || !activity(detail.execution.activity) || !nonnegative(detail.execution.child_count) || detail.execution.child_count > 4096
         || !exact(detail.node, [...ITEM_KEYS, "technical_references", "metadata"])
         || !timelineItem(Object.fromEntries(ITEM_KEYS.map(key => [key, detail.node[key]])), detail.execution.execution_id)
-        || detail.node.node_id !== nodeId || expectedExecutionId && detail.execution.execution_id !== expectedExecutionId
         || !exact(detail.node.technical_references, ["source_kind", "source_identity", "trace_id", "span_id", "event_id"])
         || detail.node.technical_references.source_kind !== null && (typeof detail.node.technical_references.source_kind !== "string" || detail.node.technical_references.source_kind.length === 0)
         || ["source_identity", "trace_id", "span_id", "event_id"].some(key => detail.node.technical_references[key] !== null && (typeof detail.node.technical_references[key] !== "string" || detail.node.technical_references[key].length === 0))
@@ -156,6 +155,9 @@
         || !Object.values(detail.content).every(value => exact(value, ["state", "available"])
           && oneOf(value.state, ["available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid"])
           && value.available === (value.state === "available"))) throw new TypeError("invalid node");
+    if (detail.node.node_id !== nodeId || expectedExecutionId && detail.execution.execution_id !== expectedExecutionId) {
+      const mismatch = new Error("Session detail unavailable"); mismatch.status = 404; throw mismatch;
+    }
     return detail;
   }
 
@@ -641,7 +643,7 @@
     if (!state.summary) return;
     if (route.node) {
       try { await selectNode(route.execution ?? null, route.node, false); }
-      catch (error) { if (error instanceof TypeError || error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
+      catch (error) { if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
     } else if (route.execution) {
       const execution = state.summary.executions.find(item => item.execution_id === route.execution);
       if (!execution) { fallbackSelection(true); return; }
@@ -667,8 +669,13 @@
     overview.append(el("p", null, session.instruction.additional_count === null
       ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
     overview.append(el("p", null, `状態 ${session.status} · 実行 ${format(summary.executions.length)}件`));
-    const source = session.source.state === "recorded" ? session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ") : session.source.state;
-    overview.append(el("p", null, `Source ${source}`), el("p", null, `Time ${timingLabel(session)}`));
+    const sourceRow = el("p"); sourceRow.append(document.createTextNode("Source ")); const source = sourceRow.appendChild(el("span")); source.dataset.sessionOverviewSource = "";
+    if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
+    else renderFact(source, { state: session.source.state, count: null });
+    const timeRow = el("p"); timeRow.append(document.createTextNode("Time ")); const time = timeRow.appendChild(el("span")); time.dataset.sessionOverviewTime = "";
+    if (session.timing.state === "recorded") time.textContent = timingLabel(session);
+    else renderFact(time, { state: session.timing.state, count: null });
+    overview.append(sourceRow, timeRow);
     const coverage = el("ul"); for (const item of session.capture.coverage) coverage.append(el("li", null, `${item.signal_family}: ${item.state}`));
     overview.append(el("h3", null, "取得範囲"), coverage);
     const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`));
