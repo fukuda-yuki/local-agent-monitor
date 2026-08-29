@@ -45,6 +45,17 @@
     "repository_id", "display_name", "archive_state", "archive_revision",
     "active_session_count", "last_observed_at", "assignment_conflict_count", "repository_revision",
   ];
+  const COMPARISON_EXCLUSIONS = new Map([
+    ["session_not_found", "セッションが見つかりません"],
+    ["repository_mismatch", "対象リポジトリのセッションではありません"],
+    ["duplicate", "同じ対象内で重複しています"],
+    ["cohort_overlap", "基準と比較対象の両方に含まれています"],
+    ["session_archived", "セッションがアーカイブ済みです"],
+    ["repository_archived", "リポジトリがアーカイブ済みです"],
+    ["projection_unavailable", "比較用データを利用できません"],
+    ["unsupported_selection", "このセッションは比較できません"],
+    ["workspace_too_large", "比較対象が大きすぎます"],
+  ]);
   const state = {
     generation: 0,
     controller: null,
@@ -64,6 +75,7 @@
     browserTraversal: false,
     initiatingControl: null,
     focusAfterRender: null,
+    comparison: { generation: 0, controller: null, preview: null, selection: null, invoker: null },
   };
   const assignmentPicker = {
     generation: 0,
@@ -105,6 +117,12 @@
   const compareValidationDetails = root.querySelector("[data-compare-validation-details]");
   const compareValidationList = root.querySelector("[data-compare-validation-list]");
   const comparePreview = root.querySelector("#session-compare-preview");
+  const comparisonDialog = root.querySelector("#session-comparison-preview-dialog");
+  const comparisonStatus = root.querySelector("#session-comparison-preview-status");
+  const comparisonCreate = root.querySelector("#session-comparison-create");
+  const comparisonCancel = root.querySelector("#session-comparison-cancel");
+  const comparisonExcluded = root.querySelector("[data-comparison-preview-excluded]");
+  const comparisonExcludedList = root.querySelector("[data-comparison-preview-excluded-list]");
   const assignmentDialog = root.querySelector("#session-assignment-dialog");
   const assignmentForm = root.querySelector("#session-assignment-form");
   const assignmentStatus = root.querySelector("#session-assignment-status");
@@ -861,6 +879,7 @@
     input.checked = state.cohorts[cohort].has(item.session_id);
     input.setAttribute("aria-label", `${item.label.state === "recorded" ? item.label.text : fallbackLabel(item)}: ${label}`);
     input.addEventListener("change", () => {
+      if (comparisonDialog.open) clearComparisonDialog(false);
       state.selectionNotice = null;
       if (input.checked) {
         state.cohorts[cohort].add(item.session_id);
@@ -1382,7 +1401,9 @@
     if (repositoryArchived) messages.push(`リポジトリのアーカイブ除外 ${repositoryArchived}件を選択から外してください。`);
     if (a.size > 0 && availableA.length === 0) messages.push("アーカイブ除外後に基準が空になります。");
     if (b.size > 0 && availableB.length === 0) messages.push("アーカイブ除外後に比較対象が空になります。");
-    const validMessage = "選択は有効です。比較機能の接続を待っています。";
+    const valid = messages.length === 0 && UUID_V7.test(root.dataset.repositoryId ?? "");
+    if (messages.length === 0 && !valid) messages.push("リポジトリ別の一覧から比較を作成してください。");
+    const validMessage = "選択は有効です。比較内容を確認できます。";
     compareValidationPrimary.textContent = messages.length === 0
       ? validMessage
       : messages.length === 1 ? messages[0] : `${messages[0]}（ほか${messages.length - 1}件）`;
@@ -1390,9 +1411,165 @@
     compareValidationDetails.hidden = messages.length <= 1;
     if (compareValidationDetails.hidden) compareValidationDetails.open = false;
     comparePreview.disabled = false;
-    comparePreview.setAttribute("aria-disabled", "true");
+    comparePreview.setAttribute("aria-disabled", valid ? "false" : "true");
     comparePreview.setAttribute("aria-describedby", "session-compare-validation");
-    comparePreview.dataset.ownerBoundary = "missing";
+    comparePreview.removeAttribute("data-owner-boundary");
+  }
+
+  function comparisonSelection() {
+    return {
+      cohorts: { a: [...state.cohorts.a], b: [...state.cohorts.b] },
+      include_archived: includeArchived.checked,
+    };
+  }
+
+  function clearComparisonDialog(restoreFocus = true) {
+    state.comparison.controller?.abort();
+    state.comparison.controller = null;
+    state.comparison.preview = null;
+    state.comparison.selection = null;
+    comparisonStatus.textContent = "";
+    root.querySelectorAll("[data-comparison-preview-included]").forEach(node => node.replaceChildren());
+    comparisonExcludedList.replaceChildren();
+    comparisonExcluded.hidden = true;
+    comparisonCreate.disabled = true;
+    if (comparisonDialog.open) comparisonDialog.close();
+    if (restoreFocus && state.comparison.invoker?.isConnected) state.comparison.invoker.focus();
+    state.comparison.invoker = null;
+  }
+
+  function comparisonLabel(sessionId) {
+    const item = state.items.find(candidate => candidate.session_id === sessionId);
+    return item?.label.state === "recorded" ? item.label.text : "選択したセッション";
+  }
+
+  function validateComparisonPreview(value, selection) {
+    if (!exactKeys(value, ["schema_version", "valid", "selection_sha256", "preview_revision", "cohorts", "requested", "included", "excluded"])
+        || value.schema_version !== "local-monitor-comparison-preview.response.v1"
+        || typeof value.valid !== "boolean"
+        || !(value.selection_sha256 === null || REVISION.test(value.selection_sha256))
+        || (value.valid && value.selection_sha256 === null)
+        || !REVISION.test(value.preview_revision) || !Array.isArray(value.requested)
+        || !Array.isArray(value.included) || !Array.isArray(value.excluded)) throw new TypeError("invalid comparison preview");
+    const summary = (candidate, label, requested) => exactKeys(candidate, ["label", "requested_count", "included_count", "excluded_count"])
+      && candidate.label === label && candidate.requested_count === BigInt(requested)
+      && typeof candidate.included_count === "bigint" && candidate.included_count >= 0n
+      && typeof candidate.excluded_count === "bigint" && candidate.excluded_count >= 0n
+      && candidate.included_count + candidate.excluded_count === candidate.requested_count;
+    if (!exactKeys(value.cohorts, ["a", "b"])
+        || !summary(value.cohorts.a, "基準", selection.cohorts.a.length)
+        || !summary(value.cohorts.b, "比較対象", selection.cohorts.b.length)) throw new TypeError("invalid comparison preview");
+    const expected = [...selection.cohorts.a.map((session_id, index) => ({ cohort: "a", request_ordinal: BigInt(index + 1), session_id })),
+      ...selection.cohorts.b.map((session_id, index) => ({ cohort: "b", request_ordinal: BigInt(index + 1), session_id }))];
+    if (value.requested.length !== expected.length || value.requested.some((item, index) =>
+      !exactKeys(item, ["cohort", "request_ordinal", "session_id"])
+      || item.cohort !== expected[index].cohort || item.request_ordinal !== expected[index].request_ordinal
+      || item.session_id !== expected[index].session_id)) throw new TypeError("invalid comparison preview");
+    const metadata = candidate => exactKeys(candidate, ["archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"])
+      && ["active", "archived"].includes(candidate.archive_state)
+      && (candidate.source === null || typeof candidate.source === "string")
+      && (candidate.model === null || typeof candidate.model === "string")
+      && (candidate.projection_version === null || typeof candidate.projection_version === "bigint")
+      && ["unbound", "partial", "rich", "full", null].includes(candidate.completeness)
+      && Array.isArray(candidate.metric_coverage)
+      && (candidate.session_revision === null || typeof candidate.session_revision === "bigint")
+      && (candidate.projection_revision === null || REVISION.test(candidate.projection_revision));
+    if (value.included.some(item => !exactKeys(item, ["cohort", "session_id", "metadata"])
+        || !["a", "b"].includes(item.cohort) || !UUID_V7.test(item.session_id) || !metadata(item.metadata))
+        || value.excluded.some(item => !exactKeys(item, ["cohort", "request_ordinal", "session_id", "reason", "metadata"])
+          || !["a", "b"].includes(item.cohort) || typeof item.request_ordinal !== "bigint"
+          || !UUID_V7.test(item.session_id) || !COMPARISON_EXCLUSIONS.has(item.reason)
+          || !(item.metadata === null || metadata(item.metadata)))) throw new TypeError("invalid comparison preview");
+    return value;
+  }
+
+  async function comparisonPost(path, body, signal) {
+    const response = await fetch(path, {
+      method: "POST", credentials: "same-origin", cache: "no-store", redirect: "manual", signal,
+      headers: { "Content-Type": "application/json; charset=utf-8", "x-monitor-csrf": "local-monitor" },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      let code = null;
+      try { code = parseClosedJson(text).error; } catch { /* fail closed below */ }
+      throw new ApiFailure(response.status, code);
+    }
+    return { response, value: parseClosedJson(text) };
+  }
+
+  function renderComparisonPreview(preview) {
+    for (const cohort of ["a", "b"]) {
+      const list = root.querySelector(`[data-comparison-preview-included='${cohort}']`);
+      list.replaceChildren(...preview.included.filter(item => item.cohort === cohort)
+        .map(item => element("li", null, comparisonLabel(item.session_id))));
+    }
+    comparisonExcludedList.replaceChildren(...preview.excluded.map(item =>
+      element("li", null, `${item.cohort === "a" ? "基準" : "比較対象"}: ${comparisonLabel(item.session_id)} — ${COMPARISON_EXCLUSIONS.get(item.reason)}`)));
+    comparisonExcluded.hidden = preview.excluded.length === 0;
+    comparisonStatus.textContent = preview.valid ? "比較内容を確認してください。" : "この選択では比較を作成できません。";
+    comparisonCreate.disabled = !preview.valid;
+  }
+
+  async function requestComparisonPreview(invoker = comparePreview) {
+    const selection = comparisonSelection();
+    const generation = ++state.comparison.generation;
+    state.comparison.controller?.abort();
+    const controller = new AbortController();
+    state.comparison.controller = controller;
+    state.comparison.invoker = invoker;
+    state.comparison.preview = null;
+    state.comparison.selection = selection;
+    comparisonCreate.disabled = true;
+    comparisonStatus.textContent = "比較内容を読み込んでいます。";
+    if (!comparisonDialog.open) comparisonDialog.showModal();
+    comparisonCancel.focus();
+    try {
+      const body = { schema_version: "local-monitor-comparison-preview.request.v1", cohorts: selection.cohorts, include_archived: selection.include_archived };
+      const result = await comparisonPost(`/api/local-monitor/v1/repositories/${root.dataset.repositoryId}/comparisons/preview`, body, controller.signal);
+      if (generation !== state.comparison.generation) return;
+      state.comparison.preview = validateComparisonPreview(result.value, selection);
+      renderComparisonPreview(state.comparison.preview);
+    } catch (error) {
+      if (controller.signal.aborted || generation !== state.comparison.generation) return;
+      comparisonStatus.textContent = error instanceof ApiFailure && error.code === "workspace_too_large"
+        ? "比較対象が大きすぎます。" : "比較内容を読み込めませんでした。";
+    }
+  }
+
+  async function createComparison() {
+    const preview = state.comparison.preview;
+    const selection = state.comparison.selection;
+    if (!preview?.valid || selection === null) return;
+    const generation = ++state.comparison.generation;
+    state.comparison.controller?.abort();
+    const controller = new AbortController();
+    state.comparison.controller = controller;
+    comparisonCreate.disabled = true;
+    comparisonStatus.textContent = "比較を作成しています。";
+    try {
+      const body = { schema_version: "local-monitor-comparison-create.request.v1", cohorts: selection.cohorts,
+        include_archived: selection.include_archived, selection_sha256: preview.selection_sha256, preview_revision: preview.preview_revision };
+      const result = await comparisonPost(`/api/local-monitor/v1/repositories/${root.dataset.repositoryId}/comparisons`, body, controller.signal);
+      if (generation !== state.comparison.generation
+          || !exactKeys(result.value, ["schema_version", "comparison_id", "location"])
+          || result.value.schema_version !== "local-monitor-comparison-create.response.v1"
+          || !UUID_V7.test(result.value.comparison_id)
+          || result.value.location !== `/repositories/${root.dataset.repositoryId}/comparisons/${result.value.comparison_id}`
+          || result.response.headers.get("Location") !== result.value.location) throw new TypeError("invalid comparison create");
+      const location = result.value.location;
+      clearComparisonDialog(false);
+      window.location.assign(location);
+    } catch (error) {
+      if (controller.signal.aborted || generation !== state.comparison.generation) return;
+      if (error instanceof ApiFailure && error.code === "comparison_preview_stale") {
+        comparisonStatus.textContent = "比較内容が更新されました。もう一度確認してください。";
+        await requestComparisonPreview(state.comparison.invoker ?? comparePreview);
+        return;
+      }
+      comparisonStatus.textContent = "比較を作成できませんでした。";
+      comparisonCreate.disabled = false;
+    }
   }
 
   function resetSelectionForFilterChange() {
@@ -1493,6 +1670,16 @@
     window.LocalMonitorV1History.push({ mode: "compare", cursor: null });
   });
 
+  comparePreview.addEventListener("click", () => {
+    if (comparePreview.getAttribute("aria-disabled") === "false") requestComparisonPreview(comparePreview);
+  });
+  comparisonCancel.addEventListener("click", () => clearComparisonDialog());
+  comparisonCreate.addEventListener("click", createComparison);
+  comparisonDialog.addEventListener("cancel", event => {
+    event.preventDefault();
+    clearComparisonDialog();
+  });
+
   root.querySelector("#session-compare-cancel").addEventListener("click", () => {
     state.pendingDynamic = state.dynamic;
     state.focusAfterRender = { kind: "compare-trigger" };
@@ -1537,6 +1724,7 @@
   });
 
   document.addEventListener("cao-route-popstate", () => {
+    if (comparisonDialog.open) clearComparisonDialog(false);
     state.browserTraversal = true;
     if (assignmentDialog.open) closeAssignmentPicker(false);
   });

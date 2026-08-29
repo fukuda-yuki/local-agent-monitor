@@ -109,6 +109,23 @@
         <button type="button" id="session-compare-preview" aria-disabled="true" aria-describedby="session-compare-validation">比較を確認</button>
     </aside>
 
+    <dialog id="session-comparison-preview-dialog" class="local-monitor-comparison-preview-dialog" aria-labelledby="session-comparison-preview-title" aria-describedby="session-comparison-preview-status">
+        <h2 id="session-comparison-preview-title">比較内容の確認</h2>
+        <p id="session-comparison-preview-status" role="status" aria-live="polite"></p>
+        <div class="local-monitor-comparison-preview-cohorts">
+            <section aria-labelledby="session-comparison-preview-a"><h3 id="session-comparison-preview-a">基準</h3><ul data-comparison-preview-included="a"></ul></section>
+            <section aria-labelledby="session-comparison-preview-b"><h3 id="session-comparison-preview-b">比較対象</h3><ul data-comparison-preview-included="b"></ul></section>
+        </div>
+        <section data-comparison-preview-excluded hidden aria-labelledby="session-comparison-preview-excluded-title">
+            <h3 id="session-comparison-preview-excluded-title">除外</h3>
+            <ul data-comparison-preview-excluded-list></ul>
+        </section>
+        <div class="local-monitor-comparison-preview-actions">
+            <button type="button" id="session-comparison-cancel">キャンセル</button>
+            <button type="button" id="session-comparison-create" disabled>比較を作成</button>
+        </div>
+    </dialog>
+
     <dialog id="session-assignment-dialog" class="local-monitor-session-assignment-dialog" aria-labelledby="session-assignment-title">
         <form id="session-assignment-form" autocomplete="off">
             <h2 id="session-assignment-title">リポジトリを割り当てる</h2>

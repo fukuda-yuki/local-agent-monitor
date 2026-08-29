@@ -4104,6 +4104,40 @@ a.kpi-card:hover {
 }
 #session-compare-preview[aria-disabled="true"] { opacity: .58; }
 
+.local-monitor-comparison-preview-dialog {
+  background: var(--surface-raised, #161b22);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 10px;
+  color: inherit;
+  max-height: calc(100vh - 48px);
+  max-width: min(720px, calc(100vw - 48px));
+  padding: 20px;
+  width: 640px;
+}
+
+.local-monitor-comparison-preview-dialog::backdrop { background: rgb(0 0 0 / 65%); }
+.local-monitor-comparison-preview-dialog h2,
+.local-monitor-comparison-preview-dialog h3,
+.local-monitor-comparison-preview-dialog p { margin: 0 0 12px; }
+.local-monitor-comparison-preview-cohorts {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.local-monitor-comparison-preview-cohorts ul,
+.local-monitor-comparison-preview-dialog [data-comparison-preview-excluded-list] {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding-inline-start: 24px;
+}
+.local-monitor-comparison-preview-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
 .local-monitor-session-assignment-dialog {
   background: var(--surface-raised, #161b22);
   border: 1px solid var(--border, #30363d);
