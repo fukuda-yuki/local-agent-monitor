@@ -197,7 +197,7 @@
     const response = await fetch(url, { headers: { Accept: "application/json" } });
     if (response.status === 409 && !state.staleAttempted) {
       state.staleAttempted = true;
-      await load(true);
+      await load(true, false);
       state.executionState.clear();
       return exactTarget();
     }
@@ -391,7 +391,7 @@
     const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`)); overview.append(technical);
   }
 
-  async function load(refresh = false) {
+  async function load(refresh = false, applyCurrentRoute = true) {
     try {
       const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error("Session summary unavailable");
@@ -399,7 +399,7 @@
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
       const route = window.LocalMonitorV1History.current();
-      if (route.execution && route.node) await applyRoute(route);
+      if (applyCurrentRoute && route.execution && route.node) await applyRoute(route);
       else {
         const latest = summary.executions.find(execution => execution.latest);
         if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
