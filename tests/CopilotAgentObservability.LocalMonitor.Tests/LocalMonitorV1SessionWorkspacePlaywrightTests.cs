@@ -58,6 +58,82 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Theory]
+    [InlineData("subagent", "Sub-agent input", "Children: 2")]
+    [InlineData("error", "Error message", "Error code: E_SAMPLE")]
+    [InlineData("permission", "Instruction", "Decision: denied")]
+    [InlineData("event", "Event content", "Event: sample.event")]
+    [InlineData("retry", "Tool result", "Attempt: 3")]
+    public async Task ClosedKindInspectorRendersOnlyDocumentedFactsAndExplicitContent(string kind, string contentLabel, string expected)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, revision) = InspectorDocuments(kind); var part = PartForLabel(contentLabel); node["content"]![part] = JsonNode.Parse("""{"state":"available","available":true}""");
+        var raw = kind == "subagent" ? "Claude delegated prompt without identifier" : $"{kind} raw"; var requestCount = 0; var console = new List<string>(); page.Console += (_, message) => console.Add(message.Text);
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/content?*", r => { requestCount++; var response = ContentDocument(revision, part, raw); return r.FulfillAsync(Json(response.ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var inspector = page.Locator($"[data-inspector-kind={kind}]"); await Expect(inspector).ToContainTextAsync(expected); await Expect(inspector).ToContainTextAsync("Parent path"); await Expect(inspector).ToContainTextAsync("Technical references"); await Expect(inspector).ToContainTextAsync("Retry"); await Expect(inspector).ToContainTextAsync("Recovery"); Assert.Equal(0, requestCount);
+        if (kind == "subagent") { await Expect(inspector).ToContainTextAsync("selected:"); await Expect(inspector).ToContainTextAsync("started:"); await Expect(inspector).ToContainTextAsync("completed:"); await Expect(inspector).ToContainTextAsync("failed:"); await Expect(inspector).ToContainTextAsync("deselected:"); await Expect(inspector).Not.ToContainTextAsync("agent_id"); }
+        var trigger = page.GetByRole(AriaRole.Button, new() { Name = $"{contentLabel} を表示" }); await trigger.ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync(raw); Assert.Equal(1, requestCount); Assert.Empty(console);
+        await page.Keyboard.PressAsync("Tab"); await page.Keyboard.PressAsync("Tab"); Assert.True(await page.EvaluateAsync<bool>("() => document.querySelector('[data-raw-content-dialog]').contains(document.activeElement)")); await page.Keyboard.PressAsync("Escape"); await Expect(trigger).ToBeFocusedAsync();
+        Assert.DoesNotContain(raw, page.Url); Assert.False(await page.EvaluateAsync<bool>("raw => [...document.querySelectorAll('*')].some(e => [...e.attributes].some(a => a.name.startsWith('data-') && a.value.includes(raw)))", raw));
+    }
+
+    [Theory]
+    [InlineData("instruction")]
+    [InlineData("tool_input")]
+    [InlineData("tool_result")]
+    [InlineData("error_message")]
+    [InlineData("subagent_input")]
+    [InlineData("event_content")]
+    public async Task EveryClosedContentPartUsesExactExplicitReadAndPublishesLengthsAndSource(string part)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, revision) = InspectorDocuments("permission"); node["content"]![part] = JsonNode.Parse("""{"state":"available","available":true}"""); var raw = $"{part} \ud83d\ude80"; var urls = new List<string>();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { urls.Add(r.Request.Url); return r.FulfillAsync(Json(ContentDocument(revision, part, raw).ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); Assert.Empty(urls); await page.GetByRole(AriaRole.Button, new() { Name = $"{PartLabel(part)} を表示" }).ClickAsync();
+        await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync($"{System.Text.Encoding.UTF8.GetByteCount(raw)} bytes"); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync($"{raw.EnumerateRunes().Count()} scalars"); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync("session_event_content · synthetic · revision 1"); Assert.Single(urls); Assert.EndsWith($"part={part}", urls[0]);
+    }
+
+    [Theory]
+    [InlineData("not_captured", "Raw content was not captured")]
+    [InlineData("expired", "Raw content has expired")]
+    [InlineData("deleted", "Raw content was deleted")]
+    [InlineData("read_denied", "Raw content read was denied")]
+    [InlineData("oversized", "Raw content is too large")]
+    [InlineData("invalid", "Raw content is invalid")]
+    public async Task EveryUnavailableContentStateIsDistinctAndNeverFetches(string contentState, string expected)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("permission"); node["content"]!["instruction"] = JsonNode.Parse($$"""{"state":"{{contentState}}","available":false}"""); var requests = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { requests++; return r.AbortAsync(); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await Expect(page.Locator("[data-inspector-kind=permission]")).ToContainTextAsync(expected); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction を表示" })).ToHaveCountAsync(0); Assert.Equal(0, requests);
+    }
+
+    [Theory]
+    [InlineData(404, "Raw content was not captured")]
+    [InlineData(410, "Raw content is no longer retained")]
+    [InlineData(403, "Raw content read was denied")]
+    [InlineData(413, "Raw content is too large")]
+    [InlineData(409, "Raw content changed while it was being read")]
+    [InlineData(503, "Raw content is temporarily unavailable")]
+    public async Task RawReadHttpStatesStayDistinctWithoutPublishingErrorBodies(int status, string expected)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("permission"); node["content"]!["instruction"] = JsonNode.Parse("""{"state":"available","available":true}"""); var secret = "raw-error-secret"; var count = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { count++; return r.FulfillAsync(new RouteFulfillOptions { Status = status, ContentType = "application/json", Body = $$"""{"error":"{{secret}}"}""" }); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var trigger = page.GetByRole(AriaRole.Button, new() { Name = "Instruction を表示" }); await trigger.ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync(expected); await Expect(page.GetByRole(AriaRole.Dialog)).Not.ToContainTextAsync(secret); Assert.Equal(1, count); await page.Keyboard.PressAsync("Escape"); await Expect(trigger).ToBeFocusedAsync();
+    }
+
+    [Fact]
+    public async Task SkillWithoutSnapshotOffersNoRawActionAndMakesNoSubstitutionRequest()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("skill"); node["node"]!["metadata"]!["historical_snapshot_reference"] = JsonNode.Parse("""{"state":"not_observed","value":null}"""); var rawRequests = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { rawRequests++; return r.AbortAsync(); }); await page.RouteAsync("**/skill-invocations/**", r => { rawRequests++; return r.AbortAsync(); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await Expect(page.Locator("[data-inspector-kind=skill]")).ToContainTextAsync("履歴スナップショットはありません"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" })).ToHaveCountAsync(0); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "現在のファイルを読み取る" })).ToHaveCountAsync(0); Assert.Equal(0, rawRequests);
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
@@ -591,6 +667,31 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: '9a5590c8-46e3-7069-af48-3844d2bf17a4', node: 'node-a8a773d6614d5030f505ff195b452dd6' })");
         await Expect(page.Locator("[data-session-overview]")).Not.ToContainTextAsync("Session overview"); Assert.Equal("node-a8a773d6614d5030f505ff195b452dd6", await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId"));
     }
+
+    private static (string Summary, JsonObject Timeline, JsonObject Node, string Revision) InspectorDocuments(string kind)
+    {
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision; node["node"]!["kind"] = kind;
+        node["node"]!["metadata"] = kind switch
+        {
+            "subagent" => JsonNode.Parse("""{"kind":"subagent","lifecycle":{"selected":{"state":"recorded"},"started":{"state":"recorded"},"completed":{"state":"recorded"},"failed":{"state":"not_observed"},"deselected":{"state":"not_observed"}},"input":{"state":"available","available":true},"activity":{"skill":{"state":"recorded","count":1},"tool":{"state":"recorded","count":2},"subagent":{"state":"recorded","count":0},"error":{"state":"recorded","count":0},"retry":{"state":"recorded","count":0}},"tokens":{"authority":"llm_span","state":"recorded","available_execution_count":1,"total_execution_count":1,"input":{"state":"recorded","value":5},"output":{"state":"recorded","value":3},"total":{"state":"recorded","value":8},"reasoning":{"state":"not_observed","value":null},"cache_read":{"state":"recorded","value":0},"cache_creation":{"state":"not_observed","value":null},"new_input":{"state":"recorded","value":5},"cache_read_ratio_basis_points":{"state":"recorded","value":0}},"children":{"state":"recorded","count":2},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-subagent","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
+            "error" => JsonNode.Parse("""{"kind":"error","error_code":{"state":"recorded","value":"E_SAMPLE"},"message":{"state":"available","available":true},"status":{"state":"recorded","value":"failed"},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-error","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
+            "permission" => JsonNode.Parse("""{"kind":"permission","decision":{"state":"recorded","value":"denied"},"wait":{"state":"recorded"},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-permission","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
+            "event" => JsonNode.Parse("""{"kind":"event","event_name":{"state":"recorded","value":"sample.event"},"source_time":{"state":"recorded","value":"2026-08-26T01:02:03.0000000+00:00"},"content":{"state":"available","available":true},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-event","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
+            "retry" => JsonNode.Parse("""{"kind":"retry","attempt":{"state":"recorded","value":3},"target":{"state":"recorded","node_id":"node-2db4028cf76015c954848d7dcbb5deca"},"recovered":{"state":"recorded","value":true},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-retry","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
+            "skill" => JsonNode.Parse("""{"kind":"skill","current_valid_state":"stale","source":{"state":"recorded","value":"copilot-sdk"},"trigger":{"state":"recorded","value":"explicit"},"inventory_reference":{"state":"recorded","value":"inventory-1"},"historical_snapshot_reference":{"state":"recorded","value":"018f0000-0000-7000-8000-000000000099"}}"""),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+        var retry = timeline["items"]![0]!.DeepClone(); retry["node_id"] = "node-11111111111111111111111111111111"; retry["relationship_authority"] = "exact"; var recovery = timeline["items"]![0]!.DeepClone(); recovery["node_id"] = "node-22222222222222222222222222222222"; recovery["relationship_authority"] = "explicit"; node["related"]!["retry"]!.AsArray().Add(retry); node["related"]!["recovery"]!.AsArray().Add(recovery);
+        return (summary, timeline, node, revision);
+    }
+
+    private static JsonObject ContentDocument(string revision, string part, string text)
+    {
+        var document = JsonNode.Parse("""{"schema_version":"local-monitor-node-content.response.v2","workspace_revision":"REVISION","session_id":"018f0000-0000-7000-8000-000000000001","node_id":"node-a8a773d6614d5030f505ff195b452dd6","part":"PART","state":"available","source_reference":{"store_kind":"session_event_content","source_item_id":"synthetic","revision":1},"text":"TEXT","utf8_byte_length":0,"unicode_scalar_length":0,"truncation":false}""")!.AsObject(); document["workspace_revision"] = revision; document["part"] = part; document["text"] = text; document["utf8_byte_length"] = System.Text.Encoding.UTF8.GetByteCount(text); document["unicode_scalar_length"] = text.EnumerateRunes().Count(); return document;
+    }
+
+    private static string PartForLabel(string label) => label switch { "Instruction" => "instruction", "Tool input" => "tool_input", "Tool result" => "tool_result", "Error message" => "error_message", "Sub-agent input" => "subagent_input", "Event content" => "event_content", _ => throw new ArgumentOutOfRangeException(nameof(label)) };
+    private static string PartLabel(string part) => part switch { "instruction" => "Instruction", "tool_input" => "Tool input", "tool_result" => "Tool result", "error_message" => "Error message", "subagent_input" => "Sub-agent input", "event_content" => "Event content", _ => throw new ArgumentOutOfRangeException(nameof(part)) };
 
     private static string Summary(string name) => File.ReadAllText(Path.GetFullPath(Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "TestData", "LocalMonitorV1SessionDetail", name)));

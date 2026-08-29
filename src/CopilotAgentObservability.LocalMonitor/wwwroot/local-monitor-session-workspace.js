@@ -367,7 +367,7 @@
       const response = await fetch(requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part }), { headers: { Accept: "application/json" } });
       if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "Raw content could not be read"); return; }
       const document = validateContent(JSON.parse(await response.text()), nodeId, part);
-      publishRawText(document.text, `${format(document.utf8_byte_length)} bytes · ${format(document.unicode_scalar_length)} scalars`);
+      publishRawText(document.text, `${format(document.utf8_byte_length)} bytes · ${format(document.unicode_scalar_length)} scalars · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · revision ${format(document.source_reference.revision)}`);
     } catch { publishRawText("", "Raw content could not be read"); }
   }
 
