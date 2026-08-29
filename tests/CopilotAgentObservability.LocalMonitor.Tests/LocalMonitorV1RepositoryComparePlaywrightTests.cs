@@ -131,8 +131,18 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         });
         read["results"]!.AsArray().Add(new JsonObject
         {
-            ["result_ordinal"] = 3, ["section_key"] = "conditions", ["row_kind"] = "scalar", ["row_key"] = "archived_inclusion",
-            ["values"] = new JsonArray(new JsonObject { ["key"] = "a_value", ["value"] = "0" }),
+            ["result_ordinal"] = 3, ["section_key"] = "target", ["row_kind"] = "condition", ["row_key"] = "archived_inclusion",
+            ["values"] = new JsonArray(
+                new JsonObject { ["key"] = "a_included_count", ["value"] = "0" },
+                new JsonObject { ["key"] = "a_includes_archived", ["value"] = "false" },
+                new JsonObject { ["key"] = "b_included_count", ["value"] = "1" },
+                new JsonObject { ["key"] = "b_includes_archived", ["value"] = "true" },
+                new JsonObject { ["key"] = "absolute_difference", ["value"] = "1" }),
+        });
+        read["results"]!.AsArray().Add(new JsonObject
+        {
+            ["result_ordinal"] = 4, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "archived_inclusion",
+            ["values"] = new JsonArray(new JsonObject { ["key"] = "a_includes_archived", ["value"] = "false" }),
         });
         var readBody = read.ToJsonString();
         var evidenceGolden = await Golden("local-monitor-comparison-evidence.response.json");
@@ -213,15 +223,21 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true })).ToBeVisibleAsync();
-        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        var archivedRows = page.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "archived_inclusion" }) });
+        await Expect(archivedRows).ToHaveCountAsync(2);
+        var validArchivedRow = archivedRows.Nth(0);
+        var invalidArchivedRow = archivedRows.Nth(1);
+        await Expect(validArchivedRow.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        Assert.Equal(0, await invalidArchivedRow.GetByRole(AriaRole.Button).CountAsync());
         Assert.Equal(0, await page.GetByRole(AriaRole.Button, new() { Name = "a_session_countの根拠を表示", Exact = true }).CountAsync());
 
-        foreach (var label in new[] { "中央値の根拠を表示", "条件の根拠を表示" })
-        {
-            await page.GetByRole(AriaRole.Button, new() { Name = label, Exact = true }).ClickAsync();
-            await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
-            await page.Keyboard.PressAsync("Escape");
-        }
+        await page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true }).ClickAsync();
+        await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
+        await page.Keyboard.PressAsync("Escape");
+        await validArchivedRow.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true }).ClickAsync();
+        await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
+        await page.Keyboard.PressAsync("Escape");
+        Assert.DoesNotContain(evidenceQueries, query => query.Contains("result_ordinal=4", StringComparison.Ordinal));
 
         var targetEvidence = page.Locator(".local-monitor-compare-section").First.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true });
         await targetEvidence.ClickAsync();

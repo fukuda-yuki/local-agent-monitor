@@ -79,6 +79,8 @@ public sealed class LocalMonitorV1ComparisonSerializerTests
     {
         Assert.Equal(["count"], Fields(1, "scalar", "included_session_count"));
         Assert.Equal(["condition"], Fields(1, "condition", "archived_inclusion"));
+        Assert.Empty(Fields(1, "scalar", "archived_inclusion"));
+        Assert.Empty(Fields(1, "condition", "unsupported_target"));
         Assert.Equal(["count"], Fields(5, "skill", "skill.synthetic"));
         Assert.Equal(["count", "error_count", "retry_count"], Fields(6, "tool", "tool.synthetic"));
         Assert.Equal(["count", "total_tokens"], Fields(7, "subagent", "subagent.synthetic"));

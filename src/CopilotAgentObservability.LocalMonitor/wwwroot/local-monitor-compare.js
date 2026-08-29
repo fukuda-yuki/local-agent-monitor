@@ -125,13 +125,13 @@
   function evidenceFields(result) {
     if (result.section_key === "target") {
       if (["included_session_count", "available_session_count"].includes(result.row_key)) return ["count"];
-      if (["period", "archived_inclusion"].includes(result.row_key)) return ["condition"];
+      if (result.row_kind === "condition" && ["period", "archived_inclusion"].includes(result.row_key)) return ["condition"];
       return [];
     }
     if (result.row_kind === "skill") return ["count"];
     if (result.row_kind === "tool") return ["count", "error_count", "retry_count"];
     if (result.row_kind === "subagent") return ["count", "total_tokens"];
-    if (result.row_kind === "condition" || result.section_key === "conditions") return ["condition"];
+    if (result.row_kind === "condition") return ["condition"];
     if (result.row_kind !== "scalar") return [];
     const fields = ["value", "available_count", "median", "minimum", "maximum", "total", "absolute_difference", "relative_difference_percent"];
     const specialized = new Map([
