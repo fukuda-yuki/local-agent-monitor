@@ -175,6 +175,7 @@ internal static class LocalMonitorV1HumanRoutes
             query!,
             scopeService,
             detailService,
+            context.RequestServices.GetRequiredService<ILocalMonitorV1ComparisonApplication>(),
             context.RequestServices.GetRequiredService<IRazorViewEngine>(),
             context.RequestAborted);
         await Page(context, resolution.Model, resolution.StatusCode);
@@ -210,6 +211,7 @@ internal static class LocalMonitorV1HumanRoutes
         LocalMonitorV1PageQuery query,
         ILocalRepositoryScopeSnapshotService scopeService,
         ILocalRepositorySessionDetailSnapshotService detailService,
+        ILocalMonitorV1ComparisonApplication comparisonApplication,
         IRazorViewEngine viewEngine,
         CancellationToken cancellationToken)
     {
@@ -246,8 +248,24 @@ internal static class LocalMonitorV1HumanRoutes
                         return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.ComparisonDetail:
-                    await scopeService.ReadAsync(new(LocalRepositoryScopeKind.Repository, path.RepositoryId), cancellationToken);
-                    return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
+                    scopeSnapshot = await scopeService.ReadAsync(
+                        new(LocalRepositoryScopeKind.Repository, path.RepositoryId), cancellationToken);
+                    var comparison = await comparisonApplication.ExecuteAsync(
+                        LocalMonitorV1ComparisonOperation.Read,
+                        path.RepositoryId!,
+                        path.ComparisonId,
+                        ReadOnlyMemory<byte>.Empty,
+                        string.Empty,
+                        cancellationToken);
+                    if (comparison.StatusCode == 404)
+                        return (LocalMonitorV1PageModel.ResolvedError(path, query, "comparison_not_found", "open_repository_selection"), 404);
+                    if (comparison.StatusCode == 410)
+                        return (LocalMonitorV1PageModel.ResolvedError(path, query, "comparison_expired", "open_repository_selection"), 410);
+                    if (comparison.StatusCode == 503)
+                        return (LocalMonitorV1PageModel.ResolvedError(path, query, "persistence_busy", "retry"), 503);
+                    if (comparison.StatusCode != 200)
+                        return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
+                    break;
             }
         }
         catch (InvalidOperationException exception) when (exception.Message == "local_repository_scope_repository_not_found")
@@ -294,6 +312,8 @@ internal static class LocalMonitorV1HumanRoutes
             ("repository", snapshot!.Repositories.Single(item => item.RepositoryId == path.RepositoryId).DisplayName),
         LocalMonitorV1PrimaryRouteKind.AllSessions => ("all", "すべてのセッション"),
         LocalMonitorV1PrimaryRouteKind.UnassignedSessions => ("unassigned", "リポジトリ未設定のセッション"),
+        LocalMonitorV1PrimaryRouteKind.ComparisonDetail =>
+            ("comparison", snapshot!.Repositories.Single(item => item.RepositoryId == path.RepositoryId).DisplayName),
         _ => (null, null),
     };
 

@@ -1,0 +1,29 @@
+@model CopilotAgentObservability.LocalMonitor.Pages.LocalMonitorV1PageModel
+<section id="local-monitor-repository-compare"
+         class="local-monitor-repository-compare"
+         data-repository-compare
+         data-repository-id="@Model.Path?.RepositoryId"
+         data-comparison-id="@Model.Path?.ComparisonId"
+         aria-labelledby="repository-compare-title">
+    <header class="local-monitor-repository-compare-header">
+        <div>
+            <p>@Model.ComparisonHeading</p>
+            <h1 id="repository-compare-title">セッション比較</h1>
+        </div>
+        <dl class="local-monitor-repository-compare-cohorts">
+            <div><dt>基準</dt><dd data-compare-cohort-count="a">読み込み中</dd></div>
+            <div><dt>比較対象</dt><dd data-compare-cohort-count="b">読み込み中</dd></div>
+        </dl>
+    </header>
+    <p id="repository-compare-status" role="status" aria-live="polite">比較結果を読み込んでいます。</p>
+    <div class="local-monitor-repository-compare-body" data-compare-sections></div>
+
+    <dialog id="repository-compare-evidence-dialog" class="local-monitor-comparison-preview-dialog" aria-labelledby="repository-compare-evidence-title" aria-describedby="repository-compare-evidence-status">
+        <h2 id="repository-compare-evidence-title">根拠</h2>
+        <p id="repository-compare-evidence-status" role="status" aria-live="polite"></p>
+        <div data-compare-evidence-items></div>
+        <div class="local-monitor-comparison-preview-actions">
+            <button type="button" id="repository-compare-evidence-close">閉じる</button>
+        </div>
+    </dialog>
+</section>

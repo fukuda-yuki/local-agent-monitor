@@ -4138,6 +4138,51 @@ a.kpi-card:hover {
   margin-top: 20px;
 }
 
+.local-monitor-repository-compare {
+  display: grid;
+  gap: 8px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: calc(100vh - var(--monitor-header-height, 64px) - 32px);
+  min-height: 480px;
+  overflow: hidden;
+}
+.local-monitor-repository-compare-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  max-height: 112px;
+  min-height: 72px;
+}
+.local-monitor-repository-compare-header h1,
+.local-monitor-repository-compare-header p { margin: 0; }
+.local-monitor-repository-compare-cohorts { display: flex; gap: 24px; margin: 0; }
+.local-monitor-repository-compare-cohorts div { min-width: 96px; }
+.local-monitor-repository-compare-cohorts dt { color: var(--muted, #8b949e); font-size: .78rem; }
+.local-monitor-repository-compare-cohorts dd { font-size: 1.1rem; font-weight: 650; margin: 2px 0 0; }
+.local-monitor-repository-compare-body {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+.local-monitor-compare-section { margin-bottom: 20px; scroll-margin-top: 8px; }
+.local-monitor-compare-section h2 { margin: 0 0 8px; }
+.local-monitor-compare-table { border-collapse: collapse; table-layout: fixed; width: 100%; }
+.local-monitor-compare-table caption { text-align: left; }
+.local-monitor-compare-table th,
+.local-monitor-compare-table td { border-bottom: 1px solid var(--border, #30363d); overflow-wrap: anywhere; padding: 8px; text-align: left; }
+.local-monitor-compare-table thead th { background: var(--surface-raised, #161b22); position: sticky; top: 0; z-index: 2; }
+.local-monitor-compare-table th:first-child { width: 34%; }
+.local-monitor-compare-table td:last-child { width: 120px; }
+.local-monitor-compare-search { display: flex; gap: 8px; margin-bottom: 8px; }
+.local-monitor-compare-search input { min-width: 0; width: min(360px, 100%); }
+.local-monitor-compare-evidence-list { margin: 0; max-height: 420px; overflow: auto; padding-inline-start: 24px; }
+
+@media (max-width: 700px) {
+  .local-monitor-repository-compare-header { align-items: flex-start; flex-direction: column; }
+  .local-monitor-repository-compare-cohorts { gap: 12px; }
+  .local-monitor-compare-table th:first-child { width: 42%; }
+}
+
 .local-monitor-session-assignment-dialog {
   background: var(--surface-raised, #161b22);
   border: 1px solid var(--border, #30363d);

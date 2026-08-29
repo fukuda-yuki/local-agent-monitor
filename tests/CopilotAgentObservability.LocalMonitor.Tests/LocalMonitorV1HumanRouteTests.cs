@@ -123,7 +123,7 @@ public sealed class LocalMonitorV1HumanRouteTests
 
     [Theory]
     [MemberData(nameof(UnintegratedPrimaryPaths))]
-    public async Task UnintegratedOwnerRoutesReturnClosedUnavailableInsteadOfPlaceholderSuccess(string path)
+    public async Task UnknownComparisonReturnsClosedNotFoundInsteadOfPlaceholderUnavailable(string path)
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions());
@@ -131,11 +131,11 @@ public sealed class LocalMonitorV1HumanRouteTests
         using var response = await host.Client.GetAsync(path);
         var html = await response.Content.ReadAsStringAsync();
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.Equal("text/html; charset=utf-8", response.Content.Headers.ContentType?.ToString());
-        Assert.Contains("data-page-state=\"local_monitor_ui_unavailable\"", html, StringComparison.Ordinal);
-        Assert.Contains("data-recovery-action=\"retry\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-page-state=\"comparison_not_found\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-recovery-action=\"open_repository_selection\"", html, StringComparison.Ordinal);
         Assert.Contains("data-local-monitor-v1-host", html, StringComparison.Ordinal);
         Assert.Contains("data-route-kind", html, StringComparison.Ordinal);
         Assert.DoesNotContain("data-requested-section", html, StringComparison.Ordinal);
@@ -156,7 +156,10 @@ public sealed class LocalMonitorV1HumanRouteTests
         foreach (var path in ExactPrimaryPathValues)
         {
             using var response = await host.Client.GetAsync(path);
-            Assert.Equal(ownedRoutes.Contains(path) ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            var expected = path == $"/repositories/{RepositoryId}/comparisons/{ComparisonId}"
+                ? HttpStatusCode.NotFound
+                : ownedRoutes.Contains(path) ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable;
+            Assert.Equal(expected, response.StatusCode);
         }
     }
 
@@ -230,17 +233,66 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.Equal(status, (int)response.StatusCode);
     }
 
-    [Fact]
-    public async Task ComparisonRendererRemainsUnavailableUntilItsResourceResolverExists()
+    [Theory]
+    [InlineData(200, null, 200, null)]
+    [InlineData(404, "comparison_not_found", 404, "comparison_not_found")]
+    [InlineData(410, "comparison_expired", 410, "comparison_expired")]
+    [InlineData(503, "persistence_busy", 503, "persistence_busy")]
+    public async Task ComparisonRendererMapsImmutableReadDispositionToClosedHumanState(
+        int applicationStatus,
+        string? applicationError,
+        int expectedStatus,
+        string? expectedPageState)
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(
             temp,
-            testOptions: RendererOptions(RepositoryCompareRenderer));
+            testOptions: RendererOptions(
+                RepositoryCompareRenderer,
+                comparisonApplication: new StubComparisonApplication(applicationStatus, applicationError)));
+
+        using var response = await host.Client.GetAsync($"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        Assert.Equal(expectedStatus, (int)response.StatusCode);
+        _ = expectedPageState;
+    }
+
+    [Theory]
+    [InlineData(404, "comparison_not_found", "open_repository_selection")]
+    [InlineData(410, "comparison_expired", "open_repository_selection")]
+    [InlineData(503, "persistence_busy", "retry")]
+    public async Task ComparisonFailuresRenderClosedHumanState(
+        int applicationStatus,
+        string pageState,
+        string recoveryAction)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: OwnerReadyOptions(comparisonApplication: new StubComparisonApplication(applicationStatus, pageState)));
+
+        using var response = await host.Client.GetAsync($"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(applicationStatus, (int)response.StatusCode);
+        Assert.Contains($"data-page-state=\"{pageState}\"", html, StringComparison.Ordinal);
+        Assert.Contains($"data-recovery-action=\"{recoveryAction}\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("internal_error", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ComparisonResolvesRepositoryBeforeReadingComparison()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: RendererOptions(
+                RepositoryCompareRenderer,
+                scopeService: new ThrowingScopeService("repository_not_found"),
+                comparisonApplication: new FailOnCallComparisonApplication()));
 
         using var response = await host.Client.GetAsync($"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -456,6 +508,7 @@ public sealed class LocalMonitorV1HumanRouteTests
 
         using var shared = await host.Client.GetAsync("/local-monitor-v1-shared.js");
         using var explorer = await host.Client.GetAsync("/local-monitor-explorer.js");
+        using var compare = await host.Client.GetAsync("/local-monitor-compare.js");
         using var future = await host.Client.GetAsync("/local-monitor-future.js");
 
         Assert.Equal(HttpStatusCode.OK, shared.StatusCode);
@@ -464,6 +517,9 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.Equal(HttpStatusCode.OK, explorer.StatusCode);
         Assert.Equal("no-store", explorer.Headers.CacheControl?.ToString());
         Assert.Contains("local-monitor-session-search.request.v1", await explorer.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, compare.StatusCode);
+        Assert.Equal("no-store", compare.Headers.CacheControl?.ToString());
+        Assert.Contains("local-monitor-comparison-read.response.v1", await compare.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.NotFound, future.StatusCode);
         Assert.Equal(0, future.Content.Headers.ContentLength);
         Assert.Null(future.Content.Headers.ContentType);
@@ -496,11 +552,14 @@ public sealed class LocalMonitorV1HumanRouteTests
 
         using var route = await host.Client.GetAsync($"/sessions/{SessionId}");
         using var asset = await host.Client.GetAsync("/local-monitor-session-workspace.js");
+        using var compareAsset = await host.Client.GetAsync("/local-monitor-compare.js");
 
         Assert.Equal(HttpStatusCode.NotFound, route.StatusCode);
         Assert.DoesNotContain("data-session-workspace", await route.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.NotFound, asset.StatusCode);
         Assert.Equal(0, asset.Content.Headers.ContentLength);
+        Assert.Equal(HttpStatusCode.NotFound, compareAsset.StatusCode);
+        Assert.Equal(0, compareAsset.Content.Headers.ContentLength);
     }
 
     [Fact]
@@ -684,8 +743,10 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     private static MonitorHostTestOptions OwnerReadyOptions(
-        ILocalRepositorySessionDetailSnapshotService? detailService = null) => new()
+        ILocalRepositorySessionDetailSnapshotService? detailService = null,
+        ILocalMonitorV1ComparisonApplication? comparisonApplication = null) => new()
     {
+        LocalMonitorV1ComparisonApplication = comparisonApplication,
         AdditionalServices = services =>
         {
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
@@ -707,14 +768,17 @@ public sealed class LocalMonitorV1HumanRouteTests
         string renderer,
         RendererLookupOutcome outcome = RendererLookupOutcome.Available,
         ILocalRepositoryScopeSnapshotService? scopeService = null,
-        ILocalRepositorySessionDetailSnapshotService? detailService = null) =>
-        RendererOptions(new ControlledRazorViewEngine(renderer, outcome), scopeService, detailService);
+        ILocalRepositorySessionDetailSnapshotService? detailService = null,
+        ILocalMonitorV1ComparisonApplication? comparisonApplication = null) =>
+        RendererOptions(new ControlledRazorViewEngine(renderer, outcome), scopeService, detailService, comparisonApplication);
 
     private static MonitorHostTestOptions RendererOptions(
         ControlledRazorViewEngine viewEngine,
         ILocalRepositoryScopeSnapshotService? scopeService = null,
-        ILocalRepositorySessionDetailSnapshotService? detailService = null) => new()
+        ILocalRepositorySessionDetailSnapshotService? detailService = null,
+        ILocalMonitorV1ComparisonApplication? comparisonApplication = null) => new()
     {
+        LocalMonitorV1ComparisonApplication = comparisonApplication,
         AdditionalServices = services =>
         {
             services.AddSingleton(scopeService ?? new ReadyScopeService());
@@ -722,6 +786,38 @@ public sealed class LocalMonitorV1HumanRouteTests
             services.AddSingleton<IRazorViewEngine>(viewEngine);
         },
     };
+
+    private sealed class StubComparisonApplication(int status, string? error) : ILocalMonitorV1ComparisonApplication
+    {
+        public ValueTask<LocalMonitorV1ComparisonResponse> ExecuteAsync(
+            LocalMonitorV1ComparisonOperation operation,
+            string repositoryId,
+            string? comparisonId,
+            ReadOnlyMemory<byte> requestBody,
+            string query,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(LocalMonitorV1ComparisonOperation.Read, operation);
+            Assert.Equal(RepositoryId, repositoryId);
+            Assert.Equal(ComparisonId, comparisonId);
+            var entity = status == 200
+                ? "{}"u8.ToArray()
+                : Encoding.UTF8.GetBytes($"{{\"error\":\"{error}\"}}");
+            return ValueTask.FromResult(new LocalMonitorV1ComparisonResponse(status, entity));
+        }
+    }
+
+    private sealed class FailOnCallComparisonApplication : ILocalMonitorV1ComparisonApplication
+    {
+        public ValueTask<LocalMonitorV1ComparisonResponse> ExecuteAsync(
+            LocalMonitorV1ComparisonOperation operation,
+            string repositoryId,
+            string? comparisonId,
+            ReadOnlyMemory<byte> requestBody,
+            string query,
+            CancellationToken cancellationToken) =>
+            throw new Xunit.Sdk.XunitException("Comparison read must not run before repository resolution succeeds.");
+    }
 
     private sealed class ReadyScopeService : ILocalRepositoryScopeSnapshotService
     {

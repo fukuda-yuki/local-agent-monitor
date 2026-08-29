@@ -45,6 +45,10 @@ else
         {
             @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_SessionWorkspace.cshtml")
         }
+        else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.ComparisonDetail)
+        {
+            @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_RepositoryCompare.cshtml")
+        }
     </section>
 }
 
@@ -66,5 +70,9 @@ else
     else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.SessionDetail)
     {
         <script src="/local-monitor-session-workspace.js" defer></script>
+    }
+    else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.ComparisonDetail)
+    {
+        <script src="/local-monitor-compare.js" defer></script>
     }
 }
