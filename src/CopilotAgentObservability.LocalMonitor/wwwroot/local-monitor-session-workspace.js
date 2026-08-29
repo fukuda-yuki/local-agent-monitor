@@ -16,7 +16,7 @@
   const SOURCES = new Set(["copilot-sdk", "copilot-cli", "vscode", "hook-unknown", "claude-code"]);
   const CURSOR = /^[A-Za-z0-9_-]{159}$/;
   const ITEM_KEYS = ["node_id", "execution_id", "parent_node_id", "relationship_authority", "kind", "name", "lifecycle", "status", "timing", "activity", "tokens", "child_count", "has_more_children", "collapsed_children", "content_parts", "source_references"];
-  const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map() };
+  const state = { summary: null, revision: null, selectedNodeId: null, selectedExecutionId: null, executionState: new Map(), ignoreRouteEvent: false };
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -57,6 +57,46 @@
     return page;
   }
 
+  const valueFact = (value, key = "value") => exact(value, ["state", key]) && FACT_STATES.has(value.state)
+    && (value.state === "recorded" ? value[key] !== null : value[key] === null);
+  const availabilityFact = value => exact(value, ["state", "available"])
+    && oneOf(value.state, ["available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid", "source_unsupported", "not_observed"])
+    && value.available === (value.state === "available");
+  const lifecycleFacts = value => exact(value, ["selected", "started", "completed", "failed", "deselected"])
+    && Object.values(value).every(item => exact(item, ["state"]) && FACT_STATES.has(item.state));
+  const stateOnlyFact = value => exact(value, ["state"]) && FACT_STATES.has(value.state);
+  const referenceFact = value => exact(value, ["state", "references"]) && FACT_STATES.has(value.state) && Array.isArray(value.references)
+    && value.references.every(item => exact(item, ["source_kind", "source_identity", "trace_id", "span_id", "event_id"])
+      && typeof item.source_kind === "string" && ["source_identity", "trace_id", "span_id", "event_id"].every(key => item[key] === null || typeof item[key] === "string"));
+  const nodeSetFact = value => exact(value, ["state", "node_ids"]) && FACT_STATES.has(value.state) && Array.isArray(value.node_ids)
+    && value.node_ids.every(id => NODE.test(id)) && (value.state === "recorded" ? value.node_ids.length > 0 : value.node_ids.length === 0);
+
+  function metadata(value, kind) {
+    if (!value || value.kind !== kind) return false;
+    if (["execution", "agent", "unknown_relation_group"].includes(kind)) return exact(value, ["kind"]);
+    if (kind === "tool") return exact(value, ["kind", "caller", "lifecycle", "status", "exit", "mcp_server_identity", "mcp_server_name", "mcp_tool_name", "input", "result", "error", "retry", "recovery", "child_activity", "source_references"])
+      && valueFact(value.caller, "node_id") && NODE.test(value.caller.node_id ?? "node-00000000000000000000000000000000")
+      && valueFact(value.lifecycle) && valueFact(value.status) && stateOnlyFact(value.exit)
+      && valueFact(value.mcp_server_identity) && (value.mcp_server_identity.value === null || REVISION.test(value.mcp_server_identity.value))
+      && valueFact(value.mcp_server_name) && valueFact(value.mcp_tool_name)
+      && availabilityFact(value.input) && availabilityFact(value.result) && availabilityFact(value.error)
+      && nodeSetFact(value.retry) && nodeSetFact(value.recovery) && countFact(value.child_activity) && referenceFact(value.source_references);
+    if (kind === "skill") return exact(value, ["kind", "current_valid_state", "source", "trigger", "inventory_reference", "historical_snapshot_reference"])
+      && oneOf(value.current_valid_state, ["current", "stale", "invalid", "certification_pending", "unavailable"])
+      && valueFact(value.source) && valueFact(value.trigger) && valueFact(value.inventory_reference) && valueFact(value.historical_snapshot_reference);
+    if (kind === "subagent") return exact(value, ["kind", "lifecycle", "input", "activity", "tokens", "children", "source_references"])
+      && lifecycleFacts(value.lifecycle) && availabilityFact(value.input) && activity(value.activity) && tokens(value.tokens) && countFact(value.children) && referenceFact(value.source_references);
+    if (kind === "error") return exact(value, ["kind", "error_code", "message", "status", "source_references"])
+      && valueFact(value.error_code) && availabilityFact(value.message) && valueFact(value.status) && referenceFact(value.source_references);
+    if (kind === "permission") return exact(value, ["kind", "decision", "wait", "source_references"])
+      && valueFact(value.decision) && stateOnlyFact(value.wait) && referenceFact(value.source_references);
+    if (kind === "event") return exact(value, ["kind", "event_name", "source_time", "content", "source_references"])
+      && valueFact(value.event_name) && valueFact(value.source_time) && availabilityFact(value.content) && referenceFact(value.source_references);
+    if (kind === "retry") return exact(value, ["kind", "attempt", "target", "recovered", "source_references"])
+      && valueFact(value.attempt) && valueFact(value.target, "node_id") && valueFact(value.recovered) && referenceFact(value.source_references);
+    return false;
+  }
+
   function validateNode(detail, nodeId, expectedExecutionId) {
     if (!exact(detail, ["schema_version", "workspace_revision", "session_id", "execution", "node", "parent_path", "related", "content"])
         || detail.schema_version !== "local-monitor-session-node.response.v2" || detail.workspace_revision !== state.revision
@@ -68,6 +108,8 @@
         || !exact(detail.node, [...ITEM_KEYS, "technical_references", "metadata"])
         || !timelineItem(Object.fromEntries(ITEM_KEYS.map(key => [key, detail.node[key]])), detail.execution.execution_id)
         || detail.node.node_id !== nodeId || expectedExecutionId && detail.execution.execution_id !== expectedExecutionId
+        || !exact(detail.node.technical_references, ["source_kind", "source_identity", "trace_id", "span_id", "event_id"])
+        || !metadata(detail.node.metadata, detail.node.kind)
         || !Array.isArray(detail.parent_path) || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
         || !exact(detail.related, ["retry", "recovery", "children"])
         || ![...detail.related.retry, ...detail.related.recovery, ...detail.related.children].every(item => timelineItem(item, detail.execution.execution_id))
@@ -279,6 +321,7 @@
     const urlFactory = () => { parameters.workspace_revision = state.revision; return requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/timeline`, parameters); };
     const page = validateTimeline(await requestJson(urlFactory, attempted), executionId, parentNodeId);
     const memory = executionMemory(executionId);
+    memory.open = true;
     const key = parentNodeId ?? "root";
     const existing = after ? memory.pages.get(key)?.items ?? [] : [];
     memory.pages.set(key, { items: [...existing, ...page.items], nextCursor: page.next_cursor });
@@ -381,7 +424,7 @@
     const inspector = root.querySelector("[data-session-overview]");
     inspector.replaceChildren(el("h2", null, detail.node.name?.state === "recorded" ? detail.node.name.text : detail.node.kind),
       el("p", null, `${detail.node.kind} · ${detail.node.status} · ${timingLabel(detail.node)}`));
-    if (push) window.LocalMonitorV1History.push({ execution: executionId, node: nodeId });
+    if (push) { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: executionId, node: nodeId }); }
     else if (!window.LocalMonitorV1History.current().execution) window.LocalMonitorV1History.replace({ execution: executionId, node: nodeId });
     renderExecutions();
   }
@@ -489,6 +532,9 @@
     }
   }
 
-  document.addEventListener("cao-route-state", event => applyRoute(event.detail));
+  document.addEventListener("cao-route-state", event => {
+    if (state.ignoreRouteEvent) { state.ignoreRouteEvent = false; return; }
+    applyRoute(event.detail);
+  });
   load();
 })();

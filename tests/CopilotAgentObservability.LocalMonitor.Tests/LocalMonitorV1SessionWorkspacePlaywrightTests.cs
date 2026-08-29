@@ -34,12 +34,17 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-timeline-node]")).ToHaveCountAsync(0); Assert.Equal(0, await page.EvaluateAsync<int>("() => window.LocalMonitorSessionWorkspace.executionState.values().next().value.pages.size"));
     }
 
-    [Fact]
-    public async Task MalformedNodeFailsClosedAndRestoresCanonicalOverview()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task MalformedNodeFailsClosedAndRestoresCanonicalOverview(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
-        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision; node["node"]!["unexpected"] = true;
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision;
+        if (mutation == 0) node["node"]!["unexpected"] = true; else if (mutation == 1) node["node"]!["metadata"]!["kind"] = "tool"; else if (mutation == 2) node["node"]!["metadata"]!["source_references"]!["references"]![0]!["extra"] = true; else node["node"]!["metadata"]!["content"]!["available"] = true;
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}");
     }
@@ -171,6 +176,41 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var empty = JsonNode.Parse(Summary("timeline-empty.json"))!.AsObject(); empty["workspace_revision"] = revision; empty["execution_id"] = "9a5590c8-46e3-7069-af48-3844d2bf17a4";
         await page.RouteAsync("**/summary", r => { summaries++; return r.FulfillAsync(Json(summary)); }); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(empty.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => { nodes++; return r.FulfillAsync(new RouteFulfillOptions { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_too_large\"}" }); });
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: '9a5590c8-46e3-7069-af48-3844d2bf17a4', node: 'node-a8a773d6614d5030f505ff195b452dd6' })"); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}"); Assert.Equal(1, summaries); Assert.Equal(1, nodes);
+    }
+
+    [Fact]
+    public async Task TimelineStaleBudgetsAreIndependentAndRetryOnlySameExactRequest()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var revisions = new[] { new string('1', 64), new string('2', 64), new string('3', 64) }; var summaryTemplate = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); var summaries = 0; var timelineCalls = 0; var order = new List<string>(); var pageBody = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject();
+        await page.RouteAsync("**/summary", r => { var revision = revisions[Math.Min(summaries++, 2)]; var body = summaryTemplate.DeepClone(); body["workspace_revision"] = revision; order.Add("summary:" + revision[0]); return r.FulfillAsync(Json(body.ToJsonString())); });
+        await page.RouteAsync("**/timeline?*", r => { timelineCalls++; var uri = new Uri(r.Request.Url); var revision = uri.Query.Split("workspace_revision=")[1][0]; var after = uri.Query.Contains("after="); order.Add($"timeline:{revision}:{(after ? "after" : "root")}"); if (timelineCalls is 1 or 3) return r.FulfillAsync(new RouteFulfillOptions { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); var body = pageBody.DeepClone(); body["workspace_revision"] = revisions[revision - '1']; if (after) { body["items"] = new JsonArray(); body["next_cursor"] = null; } return r.FulfillAsync(Json(body.ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-load-more]").ClickAsync(); await Expect(page.Locator("[data-timeline-load-more]")).ToHaveCountAsync(0);
+        Assert.Equal(new[] { "summary:1", "timeline:1:root", "summary:2", "timeline:2:root", "timeline:2:after", "summary:3", "timeline:3:after" }, order); Assert.Equal(3, summaries); Assert.Equal(4, timelineCalls);
+    }
+
+    [Fact]
+    public async Task FailedStaleSummaryRefreshDoesNotRetryOldRevisionOrLoadDefaultTimeline()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync(); var summaries = 0; var timelines = 0;
+        await page.RouteAsync("**/summary", r => ++summaries == 1 ? r.FulfillAsync(Json(Summary("summary-full.json"))) : r.FulfillAsync(new RouteFulfillOptions { Status = 503, ContentType = "application/json", Body = "{\"error\":\"persistence_busy\"}" }));
+        await page.RouteAsync("**/timeline?*", r => { timelines++; return r.FulfillAsync(new RouteFulfillOptions { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Session overview"); await page.WaitForTimeoutAsync(200);
+        Assert.Equal(2, summaries); Assert.Equal(1, timelines); Assert.Equal("8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a", await page.EvaluateAsync<string>("() => window.LocalMonitorSessionWorkspace.revision"));
+    }
+
+    [Fact]
+    public async Task ChildTimelineStaleRetriesOnlySameExactParentWithFreshRevision()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var oldRevision = new string('1', 64); var freshRevision = new string('2', 64); var summaries = 0; var childCalls = 0; var order = new List<string>(); var summaryTemplate = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); var rootPage = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); rootPage["workspace_revision"] = oldRevision; rootPage["next_cursor"] = null; rootPage["items"]![0]!["child_count"] = 1; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = freshRevision;
+        await page.RouteAsync("**/summary", r => { var revision = ++summaries == 1 ? oldRevision : freshRevision; var body = summaryTemplate.DeepClone(); body["workspace_revision"] = revision; order.Add("summary:" + revision[0]); return r.FulfillAsync(Json(body.ToJsonString())); });
+        await page.RouteAsync("**/timeline?*", r => { var uri = new Uri(r.Request.Url); if (!uri.Query.Contains("parent_node_id=")) { var rootRevision = uri.Query.Split("workspace_revision=")[1][0]; order.Add("root:" + rootRevision); var root = rootPage.DeepClone(); root["workspace_revision"] = rootRevision == '1' ? oldRevision : freshRevision; return r.FulfillAsync(Json(root.ToJsonString())); } var revision = uri.Query.Split("workspace_revision=")[1][0]; order.Add("child:" + revision); if (++childCalls == 1) return r.FulfillAsync(new RouteFulfillOptions { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); var empty = JsonNode.Parse(Summary("timeline-empty.json"))!.AsObject(); empty["workspace_revision"] = freshRevision; empty["execution_id"] = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; empty["parent_node_id"] = "node-a8a773d6614d5030f505ff195b452dd6"; return r.FulfillAsync(Json(empty.ToJsonString())); });
+        await page.RouteAsync("**/nodes/*?*", r => { order.Add("node:2"); return r.FulfillAsync(Json(node.ToJsonString())); }); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("user.message");
+        Assert.Equal(new[] { "summary:1", "root:1", "child:1", "summary:2", "child:2", "node:2", "root:2" }, order); Assert.Equal(2, childCalls);
     }
 
     [Fact]
