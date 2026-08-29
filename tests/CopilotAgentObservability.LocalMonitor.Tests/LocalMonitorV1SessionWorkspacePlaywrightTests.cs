@@ -32,6 +32,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     [InlineData(8)]
     [InlineData(9)]
     [InlineData(10)]
+    [InlineData(11)]
     public async Task MalformedTimelineFailsClosedBeforeRowsOrCacheMutation(int mutation)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -47,7 +48,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         else if (mutation == 7) timeline["items"]![0]!["source_references"]!["references"] = new JsonArray();
         else if (mutation == 8) timeline["next_cursor"] = new string('A', 158) + "B";
         else if (mutation == 9) timeline["items"]![0]!["collapsed_children"]!["count"] = 4097;
-        else timeline["items"]![0]!["source_references"]!["references"]!.AsArray().Add(timeline["items"]![0]!["source_references"]!["references"]![0]!.DeepClone());
+        else if (mutation == 10) timeline["items"]![0]!["source_references"]!["references"]!.AsArray().Add(timeline["items"]![0]!["source_references"]!["references"]![0]!.DeepClone());
+        else
+        {
+            var reference = timeline["items"]![0]!["source_references"]!["references"]![0]!;
+            reference["source_kind"] = "session_event"; reference["source_identity"] = null; reference["trace_id"] = null; reference["span_id"] = null; reference["event_id"] = null;
+        }
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         await Expect(page.Locator("[data-timeline-node]")).ToHaveCountAsync(0); Assert.Equal(0, await page.EvaluateAsync<int>("() => window.LocalMonitorSessionWorkspace.executionState.values().next().value.pages.size"));
     }
@@ -97,6 +103,30 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     {
         node["node"]!["source_references"]!["references"]![0]!["source_kind"] = null;
         node["node"]!["metadata"]!["source_references"]!["references"]![0]!["source_kind"] = null;
+    });
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public Task TechnicalReferencesAllowIndependentNullability(int shape) => AssertValidNodeShape(node =>
+    {
+        var references = node["node"]!["technical_references"]!;
+        if (shape == 0)
+        {
+            references["source_kind"] = null;
+            references["source_identity"] = null;
+            references["trace_id"] = "00000000000000000000000000000001";
+            references["span_id"] = null;
+            references["event_id"] = null;
+        }
+        else
+        {
+            references["source_kind"] = "session_event";
+            references["source_identity"] = null;
+            references["trace_id"] = null;
+            references["span_id"] = null;
+            references["event_id"] = null;
+        }
     });
 
     [Fact]

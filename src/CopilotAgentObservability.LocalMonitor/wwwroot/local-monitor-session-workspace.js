@@ -78,7 +78,7 @@
       && (item.source_kind === null || typeof item.source_kind === "string" && item.source_kind.length > 0)
       && ["source_identity", "trace_id", "span_id", "event_id"].every(key => item[key] === null || typeof item[key] === "string" && item[key].length > 0)
       && (item.trace_id === null || /^[0-9a-f]{32}$/.test(item.trace_id)) && (item.span_id === null || /^[0-9a-f]{16}$/.test(item.span_id))
-      && ["source_kind", "source_identity", "trace_id", "span_id", "event_id"].some(key => item[key] !== null));
+      && ["source_identity", "trace_id", "span_id", "event_id"].some(key => item[key] !== null));
   const nodeSetFact = value => exact(value, ["state", "node_ids"]) && FACT_STATES.has(value.state) && Array.isArray(value.node_ids)
     && value.node_ids.length <= 200 && distinct(value.node_ids) && value.node_ids.every(id => NODE.test(id))
     && (value.state === "recorded" || value.node_ids.length === 0);
