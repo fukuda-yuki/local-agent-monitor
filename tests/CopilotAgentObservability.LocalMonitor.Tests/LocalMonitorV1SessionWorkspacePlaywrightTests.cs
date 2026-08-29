@@ -18,6 +18,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var (summary, timeline, node, _) = InspectorDocuments("event"); timeline["next_cursor"] = null;
+        var summaryDocument = JsonNode.Parse(summary)!; summaryDocument["executions"]![0]!["child_count"] = 2; summary = summaryDocument.ToJsonString();
         var first = timeline["items"]![0]!.AsObject(); first["child_count"] = 1; first["has_more_children"] = false; first["collapsed_children"]!["count"] = 1;
         var second = first.DeepClone().AsObject(); second["node_id"] = "node-11111111111111111111111111111111"; second["name"]!["text"] = "second"; second["child_count"] = 0; second["collapsed_children"]!["count"] = 0; timeline["items"]!.AsArray().Add(second);
         var childPage = timeline.DeepClone().AsObject(); childPage["parent_node_id"] = first["node_id"]!.GetValue<string>(); childPage["items"] = new JsonArray(second.DeepClone()); childPage["items"]![0]!["node_id"] = "node-22222222222222222222222222222222"; childPage["items"]![0]!["parent_node_id"] = first["node_id"]!.GetValue<string>(); childPage["items"]![0]!["name"]!["text"] = "child";
@@ -27,14 +28,40 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
 
         var tree = page.GetByRole(AriaRole.Tree); var rows = tree.GetByRole(AriaRole.Treeitem); await Expect(rows).ToHaveCountAsync(2);
+        await Expect(rows.First).ToHaveAttributeAsync("aria-level", "1"); await Expect(rows.First).ToHaveAttributeAsync("aria-setsize", "2"); await Expect(rows.First).ToHaveAttributeAsync("aria-posinset", "1"); await Expect(rows.Nth(1)).ToHaveAttributeAsync("aria-posinset", "2");
+        Assert.Equal(1, await tree.Locator("[role=treeitem][tabindex='0']").CountAsync()); await Expect(rows.Nth(1)).Not.ToHaveAttributeAsync("aria-expanded", "false");
         await rows.First.FocusAsync(); await page.Keyboard.PressAsync("ArrowRight"); await Expect(rows.First).ToHaveAttributeAsync("aria-expanded", "true"); await Expect(tree.GetByRole(AriaRole.Treeitem)).ToHaveCountAsync(3);
+        await Expect(rows.First).ToHaveAttributeAsync("aria-selected", "false"); Assert.DoesNotContain("node=", page.Url);
         await page.Keyboard.PressAsync("ArrowRight"); await Expect(tree.GetByRole(AriaRole.Treeitem).Nth(1)).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("ArrowUp"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("End"); await Expect(tree.GetByRole(AriaRole.Treeitem).Last).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Home"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToBeFocusedAsync();
-        await page.Keyboard.PressAsync("Enter"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToHaveAttributeAsync("aria-selected", "true"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Space"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToHaveAttributeAsync("aria-selected", "true"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("ArrowDown"); var child = tree.GetByRole(AriaRole.Treeitem).Nth(1); await Expect(child).ToBeFocusedAsync();
+        var selectedUrl = page.Url; await page.Keyboard.PressAsync("ArrowRight"); await Expect(child).ToBeFocusedAsync(); Assert.Equal(selectedUrl, page.Url); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToHaveAttributeAsync("aria-selected", "true");
         await page.Keyboard.PressAsync("ArrowLeft"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToBeFocusedAsync();
-        await page.Keyboard.PressAsync("ArrowLeft"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToHaveAttributeAsync("aria-expanded", "false");
+        await page.Keyboard.PressAsync("ArrowLeft"); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToHaveAttributeAsync("aria-expanded", "false"); Assert.Equal(selectedUrl, page.Url); await Expect(tree.GetByRole(AriaRole.Treeitem).First).ToHaveAttributeAsync("aria-selected", "true");
+    }
+
+    [Fact]
+    public async Task SessionWorkspaceHasOneMainPageHeadingAndExecutionLandmark()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await Expect(page.GetByRole(AriaRole.Main)).ToHaveCountAsync(1); await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("Review the retained instruction"); await Expect(page.GetByRole(AriaRole.Region, new() { Name = "実行タイムライン" })).ToHaveCountAsync(1); await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "実行タイムライン", Level = 2 })).ToHaveCountAsync(1);
+    }
+
+    [Fact]
+    public async Task PaginatedTreeKeepsAuthoritativeSetSizeAndStablePositions()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); summary["executions"]![0]!["child_count"] = 3;
+        var firstPage = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); firstPage["workspace_revision"] = summary["workspace_revision"]!.GetValue<string>();
+        var second = firstPage["items"]![0]!.DeepClone().AsObject(); second["node_id"] = "node-11111111111111111111111111111111"; second["name"]!["text"] = "second"; firstPage["items"]!.AsArray().Add(second);
+        var finalPage = firstPage.DeepClone().AsObject(); var third = second.DeepClone().AsObject(); third["node_id"] = "node-22222222222222222222222222222222"; third["name"]!["text"] = "third"; finalPage["items"] = new JsonArray(third); finalPage["next_cursor"] = null;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString()))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(r.Request.Url.Contains("after=") ? finalPage.ToJsonString() : firstPage.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        var rows = page.GetByRole(AriaRole.Treeitem); await Expect(rows).ToHaveCountAsync(2); await Expect(rows.First).ToHaveAttributeAsync("aria-setsize", "3"); await Expect(rows.Nth(1)).ToHaveAttributeAsync("aria-posinset", "2");
+        await page.GetByRole(AriaRole.Button, new() { Name = "さらに読み込む" }).ClickAsync(); await Expect(rows).ToHaveCountAsync(3); await Expect(rows.First).ToHaveAttributeAsync("aria-posinset", "1"); await Expect(rows.Nth(1)).ToHaveAttributeAsync("aria-posinset", "2"); await Expect(rows.Nth(2)).ToHaveAttributeAsync("aria-posinset", "3"); await Expect(rows.Nth(2)).ToHaveAttributeAsync("aria-setsize", "3");
     }
 
     [Fact]
@@ -43,19 +70,29 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync(new BrowserNewPageOptions { ViewportSize = new() { Width = 1366, Height = 768 } }); var (summary, timeline, node, revision) = InspectorDocuments("event"); timeline["next_cursor"] = null; var summaryBody = summary;
+        var timelineItems = timeline["items"]!.AsArray(); var relatedChildren = node["related"]!["children"]!.AsArray();
+        for (var index = 1; index <= 18; index++) { var item = timelineItems[0]!.DeepClone().AsObject(); item["node_id"] = $"node-{index:x32}"; item["name"]!["text"] = $"activity {index}"; timelineItems.Add(item); relatedChildren.Add(item.DeepClone()); }
+        var tallSummary = JsonNode.Parse(summary)!.AsObject(); tallSummary["executions"]![0]!["child_count"] = timelineItems.Count; summary = tallSummary.ToJsonString(); summaryBody = summary;
         node["content"]!["event_content"] = JsonNode.Parse("""{"state":"available","available":true}""");
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summaryBody))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
         await page.RouteAsync("**/content?*", r => r.FulfillAsync(Json(ContentDocument(revision, "event_content", "sanitized screenshot content").ToJsonString())));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
         Assert.InRange(await page.Locator("[data-session-overview]").EvaluateAsync<float>("e => e.getBoundingClientRect().width"), 360, 420);
+        var executionScroll = page.Locator("[data-execution-scroll]"); Assert.True(await executionScroll.EvaluateAsync<bool>("e => e.scrollHeight > e.clientHeight")); await executionScroll.EvaluateAsync("e => e.scrollTop = e.scrollHeight"); Assert.True(await executionScroll.EvaluateAsync<double>("e => e.scrollTop") > 0);
         await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-normal-1366x768.png"), FullPage = true });
-        await page.Locator("[data-timeline-node]").ClickAsync(); await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-deep-link-inspector.png"), FullPage = true });
+        await page.Locator("[data-timeline-node]").First.ClickAsync(); await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-deep-link-inspector.png"), FullPage = true });
+        var inspectorScroll = page.Locator("[data-session-overview]"); Assert.True(await inspectorScroll.EvaluateAsync<bool>("e => e.scrollHeight > e.clientHeight")); await inspectorScroll.EvaluateAsync("e => e.scrollTop = e.scrollHeight"); Assert.True(await inspectorScroll.EvaluateAsync<double>("e => e.scrollTop") > 0);
         await page.GetByRole(AriaRole.Button, new() { Name = "Event content を表示" }).ClickAsync(); await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-raw-dialog.png"), FullPage = true }); await page.Keyboard.PressAsync("Escape");
         var archived = JsonNode.Parse(summary)!.AsObject(); archived["session"]!["archive"]!["state"] = "archived"; archived["session"]!["archive"]!["revision"] = 1; archived["session"]!["archive"]!["effectively_eligible"] = false; archived["session"]!["archive"]!["exclusion_reason"] = "session_archived"; summaryBody = archived.ToJsonString(); await page.ReloadAsync(); await Expect(page.Locator("[data-session-context-content]")).ToContainTextAsync("アーカイブ済み"); await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-archived.png"), FullPage = true });
-        await page.SetViewportSizeAsync(1000, 700); await page.Locator("[data-timeline-node]").ClickAsync(); await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-narrow-overlay.png"), FullPage = true });
+        await page.SetViewportSizeAsync(1000, 700); await page.Locator("[data-timeline-node]").First.ClickAsync(); await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-narrow-overlay.png"), FullPage = true });
         var inspector = page.Locator("[data-session-overview]"); await Expect(inspector).ToHaveAttributeAsync("role", "dialog"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "インスペクターを閉じる" })).ToBeVisibleAsync();
-        await page.Keyboard.PressAsync("Escape"); await Expect(inspector).ToHaveAttributeAsync("aria-hidden", "true"); await Expect(page.Locator("[data-timeline-node]")).ToBeFocusedAsync();
+        var close = page.GetByRole(AriaRole.Button, new() { Name = "インスペクターを閉じる" }); await Expect(close).ToBeFocusedAsync(); Assert.True(await page.EvaluateAsync<bool>("() => document.querySelector('[data-session-executions]').inert && document.querySelector('.monitor-shell-header').inert"));
+        var colors = await inspector.EvaluateAsync<string[]>("e => { const s=getComputedStyle(e); return [s.backgroundColor,s.color]; }"); Assert.Equal("rgb(22, 26, 34)", colors[0]); Assert.Equal("rgb(229, 233, 242)", colors[1]);
+        Assert.True(await inspector.EvaluateAsync<double>("e => { const parse=v=>v.match(/\\d+/g).slice(0,3).map(Number); const lum=v=>{ const c=parse(v).map(x=>x/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4); return .2126*c[0]+.7152*c[1]+.0722*c[2]; }; const s=getComputedStyle(e), a=lum(s.backgroundColor), b=lum(s.color); return (Math.max(a,b)+.05)/(Math.min(a,b)+.05); }") >= 4.5);
+        await page.Keyboard.PressAsync("Shift+Tab"); Assert.True(await inspector.EvaluateAsync<bool>("e => e.contains(document.activeElement)")); await page.Keyboard.PressAsync("Tab"); await Expect(close).ToBeFocusedAsync();
+        await close.ClickAsync(); await Expect(inspector).ToHaveAttributeAsync("aria-hidden", "true"); await Expect(page.Locator("[data-timeline-node]").First).ToBeFocusedAsync();
+        await page.SetViewportSizeAsync(1366, 768); await Expect(inspector).Not.ToHaveAttributeAsync("role", "dialog"); await Expect(inspector).Not.ToHaveAttributeAsync("aria-hidden", "true"); Assert.False(await page.EvaluateAsync<bool>("() => document.querySelector('[data-session-executions]').inert || document.querySelector('.monitor-shell-header').inert"));
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
     }
 

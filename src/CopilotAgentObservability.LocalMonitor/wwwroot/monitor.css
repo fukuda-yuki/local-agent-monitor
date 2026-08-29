@@ -13,6 +13,8 @@
 
 .local-monitor-session-workspace { display: grid; grid-template-rows: minmax(0, 72px) 104px minmax(0, 1fr); height: calc(100vh - 32px); overflow: hidden; }
 .local-monitor-session-context { padding: 8px 16px; overflow: hidden; }
+.local-monitor-session-context h1 { margin: 2px 0; font-size: 1.1rem; }
+.local-monitor-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .local-monitor-session-context [data-session-context-content] { display: flex; gap: 8px; align-items: baseline; }
 .local-monitor-session-summary { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 8px; padding: 8px 16px; overflow-x: auto; }
 .local-monitor-session-summary-card { min-width: 0; }
@@ -32,7 +34,7 @@
 .local-monitor-session-load-more { margin: 8px 0 0 20px; }
 .local-monitor-session-execution-scroll { max-height: 420px; overflow: auto; }
 .local-monitor-session-time-bar { display: block; height: 4px; min-width: 2px; border-radius: 2px; background: var(--accent, #526de8); }
-@media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--surface, white); box-shadow: -8px 0 24px rgb(0 0 0 / 24%); } .local-monitor-session-inspector[aria-hidden="true"] { display: none; } }
+@media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--monitor-surface-panel); color: var(--monitor-ink); box-shadow: -8px 0 24px rgb(0 0 0 / 24%); } .local-monitor-session-inspector[aria-hidden="true"] { display: none; } }
 .local-monitor-session-inspector-close { float: right; }
 .local-monitor-session-timeline-node[aria-selected="true"] { outline: 2px solid var(--accent, #526de8); outline-offset: -2px; }
 

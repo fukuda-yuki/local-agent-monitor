@@ -439,7 +439,7 @@
     return node.timing.duration_ms === null ? node.timing.started_at : `${format(node.timing.duration_ms)} ms`;
   }
 
-  function renderNodes(execution, memory, parentNodeId, depth) {
+  function renderNodes(execution, memory, parentNodeId, depth, authoritativeSetSize) {
     const fragment = document.createDocumentFragment();
     const page = memory.pages.get(parentNodeId ?? "root");
     if (!page) return fragment;
@@ -451,9 +451,9 @@
       const row = el("button", "local-monitor-session-timeline-node");
       row.type = "button"; row.dataset.timelineNode = node.node_id; row.style.setProperty("--timeline-depth", depth);
       row.setAttribute("role", "treeitem"); row.setAttribute("aria-level", String(depth + 1));
-      row.setAttribute("aria-setsize", String(siblings.length)); row.setAttribute("aria-posinset", String(siblings.indexOf(node) + 1));
+      row.setAttribute("aria-setsize", String(authoritativeSetSize ?? siblings.length)); row.setAttribute("aria-posinset", String(siblings.indexOf(node) + 1));
       row.setAttribute("aria-selected", String(state.selectedNodeId === node.node_id)); row.tabIndex = -1;
-      row.setAttribute("aria-expanded", node.child_count > 0 ? String(memory.expanded.has(node.node_id)) : "false");
+      if (node.child_count > 0) row.setAttribute("aria-expanded", String(memory.expanded.has(node.node_id)));
       const label = node.name?.state === "recorded" ? node.name.text : node.kind;
       row.append(el("strong", null, label), el("span", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
       if (node.timing.state === "recorded" && node.timing.started_at && node.timing.duration_ms !== null
@@ -466,15 +466,11 @@
         wrapper.append(bar);
       }
       row.addEventListener("click", async () => {
-        if (node.child_count > 0) {
-          if (memory.expanded.has(node.node_id)) memory.expanded.delete(node.node_id);
-          else { memory.expanded.add(node.node_id); if (!memory.pages.has(node.node_id)) await loadTimeline(execution.execution_id, node.node_id); }
-        }
+        if (node.child_count > 0) await setExpanded(execution.execution_id, node.node_id, !memory.expanded.has(node.node_id));
         await selectNode(execution.execution_id, node.node_id, true);
-        renderExecutions();
       });
       wrapper.append(row);
-      if (memory.expanded.has(node.node_id)) wrapper.append(renderNodes(execution, memory, node.node_id, depth + 1));
+      if (memory.expanded.has(node.node_id)) wrapper.append(renderNodes(execution, memory, node.node_id, depth + 1, node.child_count));
       target.append(wrapper);
     };
     known.forEach(node => appendRow(node));
@@ -491,6 +487,13 @@
       fragment.append(more);
     }
     return fragment;
+  }
+
+  async function setExpanded(executionId, nodeId, expanded) {
+    const memory = executionMemory(executionId);
+    if (expanded) { memory.expanded.add(nodeId); if (!memory.pages.has(nodeId)) await loadTimeline(executionId, nodeId); }
+    else memory.expanded.delete(nodeId);
+    renderExecutions();
   }
 
   function renderExecutions() {
@@ -515,7 +518,7 @@
       section.append(toggle);
       if (memory.open) {
         const scroll = el("div", "local-monitor-session-execution-scroll"); scroll.dataset.executionScroll = ""; scroll.setAttribute("role", "tree"); scroll.setAttribute("aria-label", "実行タイムライン");
-        scroll.append(renderNodes(execution, memory, null, 0)); scroll.addEventListener("scroll", () => { memory.scrollTop = scroll.scrollTop; }); section.append(scroll);
+        scroll.append(renderNodes(execution, memory, null, 0, execution.child_count)); scroll.addEventListener("scroll", () => { memory.scrollTop = scroll.scrollTop; }); section.append(scroll);
         requestAnimationFrame(() => { scroll.scrollTop = memory.scrollTop; });
       }
       executions.append(section);
@@ -537,8 +540,8 @@
     else if (event.key === "Home") target = rows[0];
     else if (event.key === "End") target = rows.at(-1);
     else if (event.key === "ArrowRight" && expanded) target = rows[index + 1]?.getAttribute("aria-level") > row.getAttribute("aria-level") ? rows[index + 1] : row;
-    else if (event.key === "ArrowRight" && row.getAttribute("aria-expanded") === "false") { event.preventDefault(); row.click(); return; }
-    else if (event.key === "ArrowLeft" && expanded) { event.preventDefault(); row.click(); return; }
+    else if (event.key === "ArrowRight" && row.hasAttribute("aria-expanded")) { event.preventDefault(); await setExpanded(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, true); return; }
+    else if (event.key === "ArrowLeft" && expanded) { event.preventDefault(); await setExpanded(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, false); return; }
     else if (event.key === "ArrowLeft") target = rows.slice(0, index).reverse().find(candidate => Number(candidate.getAttribute("aria-level")) < Number(row.getAttribute("aria-level"))) ?? row;
     else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); await selectNode(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, true); return; }
     else return;
@@ -565,9 +568,10 @@
   function renderInspector(detail) {
     const node = detail.node; const metadata = node.metadata; inspector.replaceChildren();
     if (narrowInspector.matches) {
-      inspectorReturnFocus = document.activeElement;
-      const close = el("button", "local-monitor-session-inspector-close", "閉じる"); close.type = "button"; close.setAttribute("aria-label", "インスペクターを閉じる"); close.addEventListener("click", closeInspector); inspector.append(close);
+      inspectorReturnFocus = { executionId: detail.execution.execution_id, nodeId: node.node_id };
+      const close = el("button", "local-monitor-session-inspector-close", "閉じる"); close.type = "button"; close.dataset.inspectorClose = ""; close.setAttribute("aria-label", "インスペクターを閉じる"); close.addEventListener("click", closeInspector); inspector.append(close);
       inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
+      setBackgroundInert(true);
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
     section.append(el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
@@ -601,6 +605,7 @@
     appendRelated(section, "Retry", detail.related.retry); appendRelated(section, "Recovery", detail.related.recovery); appendRelated(section, "Children", detail.related.children);
     const refs = node.technical_references; const technical = el("details"); technical.append(el("summary", null, "Technical references")); for (const key of ["source_kind", "source_identity", "trace_id", "span_id", "event_id"]) if (refs[key] !== null) technical.append(el("p", null, `${key}: ${refs[key]}`)); section.append(technical);
     inspector.append(section);
+    if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
 
   async function selectNode(executionId, nodeId, push, attempted = false) {
@@ -649,12 +654,26 @@
   function closeInspector() {
     if (!narrowInspector.matches) return;
     inspector.setAttribute("aria-hidden", "true");
-    const target = inspectorReturnFocus; inspectorReturnFocus = null; target?.focus();
+    setBackgroundInert(false);
+    const target = inspectorReturnFocus; inspectorReturnFocus = null;
+    root.querySelector(`[data-execution-id='${target?.executionId}'] [data-timeline-node='${target?.nodeId}']`)?.focus();
+  }
+
+  function setBackgroundInert(value) {
+    for (const target of root.querySelectorAll("[data-session-context], [data-session-summary], [data-session-executions]")) target.inert = value;
+    document.querySelector(".monitor-shell-header").inert = value;
+  }
+
+  function normalizeInspectorBreakpoint(event) {
+    if (event.matches) return;
+    inspector.removeAttribute("role"); inspector.removeAttribute("aria-modal"); inspector.removeAttribute("aria-hidden");
+    setBackgroundInert(false); inspectorReturnFocus = null;
   }
 
   function render(summary, openLatest = true) {
     const session = summary.session;
     root.querySelector("[data-session-breadcrumb]").textContent = session.instruction.label || "Session";
+    root.querySelector("[data-session-title]").textContent = session.instruction.label || "Session";
     const context = root.querySelector("[data-session-context-content]");
     context.replaceChildren(el("strong", null, session.instruction.label || "Session"), el("span", null, ` ${session.status}`));
     const source = el("span"); source.dataset.sessionSource = "";
@@ -735,6 +754,14 @@
   });
   root.querySelector("[data-session-executions]").addEventListener("keydown", handleTreeKey);
   document.addEventListener("keydown", event => { if (event.key === "Escape" && narrowInspector.matches && inspector.getAttribute("aria-hidden") === "false") { event.preventDefault(); closeInspector(); } });
+  inspector.addEventListener("keydown", event => {
+    if (event.key !== "Tab" || !narrowInspector.matches || inspector.getAttribute("aria-hidden") === "true") return;
+    const focusable = [...inspector.querySelectorAll("button, a[href], summary, [tabindex]:not([tabindex='-1'])")].filter(item => !item.disabled);
+    if (!focusable.length) return; const first = focusable[0]; const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
+  narrowInspector.addEventListener("change", normalizeInspectorBreakpoint);
   rawDialog?.querySelector("[data-raw-content-close]")?.addEventListener("click", closeRawDialog);
   rawDialog?.addEventListener("cancel", event => { event.preventDefault(); closeRawDialog(); });
   rawDialog?.addEventListener("keydown", event => {
