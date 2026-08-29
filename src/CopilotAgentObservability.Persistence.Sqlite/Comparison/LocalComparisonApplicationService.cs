@@ -376,9 +376,34 @@ internal sealed class LocalComparisonApplicationService
                     new KeyValuePair<string, string>("b_includes_archived", b == 0 ? "false" : "true"),
                     Pair("absolute_difference", b - a),
                 }));
-            AddSelectionEvidence(comparisonId, ordinal, "a", input.CohortA, evidence);
-            AddSelectionEvidence(comparisonId, ordinal, "b", input.CohortB, evidence);
+            AddArchivedConditionEvidence(comparisonId, ordinal, "a", input.CohortA, evidence);
+            AddArchivedConditionEvidence(comparisonId, ordinal, "b", input.CohortB, evidence);
         }
+    }
+
+    private static void AddArchivedConditionEvidence(
+        string comparisonId,
+        int resultOrdinal,
+        string cohort,
+        IReadOnlyList<LocalComparisonSessionFact> sessions,
+        List<LocalComparisonStoredEvidence> destination)
+    {
+        var evidenceOrdinal = destination.Count > 0
+            && destination[^1].ResultOrdinal == resultOrdinal
+            ? destination[^1].EvidenceOrdinal + 1
+            : 0;
+        var facts = sessions.Select(session =>
+            (IReadOnlyList<LocalComparisonFactEvidence>)Array.AsReadOnly(new[]
+            {
+                new LocalComparisonFactEvidence(
+                    LocalComparisonFactState.Recorded,
+                    new LocalComparisonSourceReference(
+                        "workspace_session", session.SessionId, null, null, null,
+                        session.WorkspaceRevision),
+                    session.IsArchived ? "1" : "0"),
+            })).ToArray();
+        AddEvidence(comparisonId, resultOrdinal, "selection", cohort, sessions,
+            facts, destination, ref evidenceOrdinal);
     }
 
     private static void AddScalarRow(

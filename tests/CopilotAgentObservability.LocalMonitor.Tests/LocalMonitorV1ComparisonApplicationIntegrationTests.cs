@@ -8,6 +8,34 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
 {
     [Fact]
+    public async Task ArchivedInclusionEvidencePreservesEachFrozenMembershipIndicatorAcrossRestart()
+    {
+        using var db = new Database(); db.Initialize();
+        const string active = "018f0000-0000-7000-8000-000000000001", archived = "018f0000-0000-7000-8000-000000000002";
+        var store = new SqliteLocalComparisonStore(db.Path, new FixedClock());
+        var application = new LocalMonitorV1ComparisonProductionApplication(new FakeInput([Input(active), Input(archived, archived: true)]), store, new FixedClock(), cursorKey: new byte[32]);
+        var previewBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-preview.request.v1\",\"cohorts\":{{\"a\":[\"{active}\"],\"b\":[\"{archived}\"]}},\"include_archived\":true}}");
+        var preview = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Preview, LocalComparisonInputProjectionTests.RepositoryId, null, previewBody, "", default);
+        using var previewJson = JsonDocument.Parse(preview.Entity);
+        var createBody = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"local-monitor-comparison-create.request.v1\",\"cohorts\":{{\"a\":[\"{active}\"],\"b\":[\"{archived}\"]}},\"include_archived\":true,\"selection_sha256\":\"{previewJson.RootElement.GetProperty("selection_sha256").GetString()}\",\"preview_revision\":\"{previewJson.RootElement.GetProperty("preview_revision").GetString()}\"}}");
+        var created = await application.ExecuteAsync(LocalMonitorV1ComparisonOperation.Create, LocalComparisonInputProjectionTests.RepositoryId, null, createBody, "", default);
+        using var createdJson = JsonDocument.Parse(created.Entity);
+        var comparisonId = createdJson.RootElement.GetProperty("comparison_id").GetString()!;
+        var frozen = store.Read(LocalComparisonInputProjectionTests.RepositoryId, comparisonId, default).Snapshot!;
+        var archivedResult = frozen.Results.Single(result => result.RowKey == "archived_inclusion");
+        var restarted = new LocalMonitorV1ComparisonProductionApplication(new ThrowingInput(), new SqliteLocalComparisonStore(db.Path, new FixedClock()), new FixedClock(), cursorKey: new byte[32]);
+
+        var evidence = await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, comparisonId, ReadOnlyMemory<byte>.Empty, $"?result_ordinal={archivedResult.ResultOrdinal}&field_key=condition", default);
+        using var evidenceJson = JsonDocument.Parse(evidence.Entity);
+        var items = evidenceJson.RootElement.GetProperty("items").EnumerateArray().ToArray();
+
+        Assert.Equal([active, archived], items.Select(item => item.GetProperty("session_id").GetString()));
+        Assert.Equal(["0", "1"], items.Select(item => item.GetProperty("consumed_value").GetString()));
+        Assert.All(items, item => Assert.Equal("included", item.GetProperty("state").GetString()));
+        Assert.Equal([new string('1', 64), new string('2', 64)], items.Select(item => item.GetProperty("consumed_revision").GetString()));
+    }
+
+    [Fact]
     public async Task PreviewKeepsUnavailableSourceAndModelMetadataNull()
     {
         using var db = new Database(); db.Initialize();
@@ -143,7 +171,7 @@ public sealed class LocalMonitorV1ComparisonApplicationIntegrationTests
         Assert.Equal(400, (await restarted.ExecuteAsync(LocalMonitorV1ComparisonOperation.Evidence, LocalComparisonInputProjectionTests.RepositoryId, id, ReadOnlyMemory<byte>.Empty, $"?result_ordinal=1&after={cursor}x&limit=1", default)).StatusCode);
     }
 
-    private static LocalRepositoryComparisonSessionInput Input(string id) { var s = LocalComparisonInputProjectionTests.ScopeSession(id, false); return new(s, LocalComparisonInputProjectionTests.Detail(id, false), new string(id[^1], 64)); }
+    private static LocalRepositoryComparisonSessionInput Input(string id, bool archived = false) { var s = LocalComparisonInputProjectionTests.ScopeSession(id, archived); return new(s, LocalComparisonInputProjectionTests.Detail(id, false), new string(id[^1], 64)); }
     private sealed class FakeInput(IReadOnlyList<LocalRepositoryComparisonSessionInput> sessions) : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) { var repo = new LocalRepositoryCatalogSnapshot(LocalComparisonInputProjectionTests.RepositoryId, "Repository", 1, null, 0, LocalArchiveState.Active, 1); return ValueTask.FromResult(new LocalRepositoryComparisonInputSnapshot(new(request, [repo], sessions.Select(x => x.Session).ToArray()), sessions)); } }
     private sealed class ThrowingInput : ILocalRepositoryComparisonInputSnapshotService { public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException("current_session_state_was_queried"); }
     private sealed class FixedClock : TimeProvider { public override DateTimeOffset GetUtcNow() => new(2026, 8, 29, 0, 0, 0, TimeSpan.Zero); }
