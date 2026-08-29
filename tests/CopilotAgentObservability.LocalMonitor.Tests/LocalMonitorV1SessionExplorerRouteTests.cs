@@ -49,7 +49,7 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
     }
 
     [Fact]
-    public async Task IntegratedWorkspaceDoesNotActivateUnintegratedCompareRoute()
+    public async Task IntegratedRawDefaultWorkspaceActivatesCompareRouteWithClosedUnknownState()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new RecordingScopeService()));
@@ -61,7 +61,12 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
         var workspaceHtml = await workspace.Content.ReadAsStringAsync();
         Assert.Contains("data-session-workspace", workspaceHtml, StringComparison.Ordinal);
         Assert.Contains("/local-monitor-session-workspace.js", workspaceHtml, StringComparison.Ordinal);
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, compare.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, compare.StatusCode);
+        Assert.Equal("no-store", compare.Headers.CacheControl?.ToString());
+        var compareHtml = await compare.Content.ReadAsStringAsync();
+        Assert.Contains("data-page-state=\"comparison_not_found\"", compareHtml, StringComparison.Ordinal);
+        Assert.Contains("data-recovery-action=\"open_repository_selection\"", compareHtml, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-page-state=\"comparison_unavailable\"", compareHtml, StringComparison.Ordinal);
     }
 
     [Fact]
