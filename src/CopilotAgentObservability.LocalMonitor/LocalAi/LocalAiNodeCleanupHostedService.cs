@@ -8,7 +8,7 @@ internal sealed class LocalAiNodeCleanupHostedService(
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
 
-    internal int RunOnce() => LocalAiAnalysisStoreV1.DeleteExpiredNodeRunsIfPresent(databasePath,clock.GetUtcNow());
+    internal int RunOnce() => LocalAiAnalysisStoreV1.DeleteExpiredTransientRunsIfPresent(databasePath,clock.GetUtcNow());
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

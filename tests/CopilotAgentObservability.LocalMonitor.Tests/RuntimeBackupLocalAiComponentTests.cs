@@ -47,7 +47,7 @@ public sealed class RuntimeBackupLocalAiComponentTests
         finally{SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
     }
     [Theory]
-    [InlineData("UPDATE schema_version SET version=2 WHERE component='local_ai_analysis';")]
+    [InlineData("UPDATE schema_version SET version=3 WHERE component='local_ai_analysis';")]
     [InlineData("DROP TABLE local_ai_results;")]
     [InlineData("CREATE TABLE local_ai_unknown(value TEXT);")]
     public void Preflight_RejectsNewerPartialOrInvalidLocalAiNamespace(string mutation)
@@ -58,17 +58,18 @@ public sealed class RuntimeBackupLocalAiComponentTests
     }
 
     [Fact]
-    public void Backup_ExcludesNodeRowsFromStagingWithoutMutatingSourceAndRestoresSessionRows()
+    public void Backup_ExcludesEveryTransientScopeFromStagingWithoutMutatingSourceAndRestoresSessionRows()
     {
         var root=Path.Combine(Path.GetTempPath(),$"runtime-backup-local-ai-{Guid.NewGuid():N}"); Directory.CreateDirectory(root);
         try
         {
             var source=Path.Combine(root,"source.db"); using(var connection=Open(source)){using var transaction=connection.BeginTransaction();MonitorSchemaMigrator.ApplyBaseSchema(connection,transaction);transaction.Commit();}
             var time=new MutableTimeProvider(new DateTimeOffset(2026,8,30,1,0,0,TimeSpan.Zero));var context=RetentionCatalogContext.InitializeNewOwnedDatabase(source,time);var catalog=new RetentionCatalogStore(context,time);using(var connection=Open(source))LocalAiAnalysisSchemaV1.Ensure(connection);var store=new LocalAiAnalysisStoreV1(source,catalog,time);store.InsertSnapshot(new(SessionSnapshot,"session",SessionId,null,SessionId,"{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray()));store.InsertSnapshot(new(NodeSnapshot,"node",SessionId,"node-1","node-1","{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray()));
+            const string repository="0198f5c0-1b89-7d41-8c2f-4ecba0b54431",comparison="0198f5c0-1b89-7d41-8c2f-4ecba0b54432";store.InsertSnapshot(new(Guid.CreateVersion7().ToString(),"repository_selection",null,null,repository,"{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),repository));store.InsertSnapshot(new(Guid.CreateVersion7().ToString(),"comparison",null,null,comparison,"{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),repository,comparison,time.GetUtcNow().AddHours(4)));
             var archive=Path.Combine(root,"backup.zip"); var service=new SqliteRuntimeBackupService(); var created=service.CreateAndPublish(source,archive); Assert.True(created.Success,created.ErrorCode);
-            using(var unchanged=Open(source)) Assert.Equal(2L,Scalar(unchanged,"SELECT COUNT(*) FROM local_ai_snapshots;"));
+            using(var unchanged=Open(source)) Assert.Equal(4L,Scalar(unchanged,"SELECT COUNT(*) FROM local_ai_snapshots;"));
             var restored=Path.Combine(root,"restored.db"); var result=service.Restore(archive,restored,new RuntimeRestoreOptions()); Assert.True(result.Success,result.ErrorCode);
-            using var read=Open(restored); Assert.Equal(1L,Scalar(read,"SELECT version FROM schema_version WHERE component='local_ai_analysis';")); Assert.Equal(1L,Scalar(read,"SELECT COUNT(*) FROM local_ai_snapshots WHERE scope_kind='session';")); Assert.Equal(0L,Scalar(read,"SELECT COUNT(*) FROM local_ai_snapshots WHERE scope_kind='node';"));
+            using var read=Open(restored); Assert.Equal(2L,Scalar(read,"SELECT version FROM schema_version WHERE component='local_ai_analysis';")); Assert.Equal(1L,Scalar(read,"SELECT COUNT(*) FROM local_ai_snapshots WHERE scope_kind='session';")); Assert.Equal(0L,Scalar(read,"SELECT COUNT(*) FROM local_ai_snapshots WHERE scope_kind<>'session';"));
         }
         finally{SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
     }

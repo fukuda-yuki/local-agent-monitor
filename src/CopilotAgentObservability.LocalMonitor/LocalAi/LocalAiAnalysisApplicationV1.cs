@@ -9,10 +9,10 @@ internal sealed record LocalAiPriorTurnV1(string Question, string Answer);
 internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, int TimeoutSeconds = 60,
     string? Question = null, IReadOnlyList<LocalAiPriorTurnV1>? PriorTurns = null);
 internal sealed record LocalAiStartResponseV1(string? RunId, string? ErrorCode);
-internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string SessionId,
+internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string? SessionId,
     string? NodeId, string? ErrorCode, byte[]? ResultJson = null, string? RequestedAt = null,
     string? StartedAt = null, string? Model = null, string? ConfigurationSha256 = null,
-    string? PromptTemplateVersion = null);
+    string? PromptTemplateVersion = null, string? RepositoryId = null, string? ComparisonId = null);
 internal sealed record LocalAiReportItemResponseV1(string RunId, string State, byte[]? ResultJson, string ContentState, bool SnapshotChanged);
 internal sealed record LocalAiReportPageResponseV1(IReadOnlyList<LocalAiReportItemResponseV1> Reports, string? NextCursor);
 
@@ -137,7 +137,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         {
             var raw = new LocalAiRawReadCapabilityV1(snapshot.RawEvidence?.Keys ?? [],
                 (identifier, cancellationToken) => snapshot.RawEvidence?.TryGetValue(identifier, out var evidence) == true && rawReader is not null
-                    ? rawReader(snapshot.SessionId, evidence, cancellationToken)
+                    ? rawReader(snapshot.SessionId!, evidence, cancellationToken)
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));
             var startedRun = runs.Read(runId);
             var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), admission.Cancellation.Token).ConfigureAwait(false);
@@ -237,9 +237,16 @@ internal static class LocalAiResultEnvelopeV1
                 || content.GetProperty("findings").ValueKind != JsonValueKind.Array
                 || content.GetProperty("improvement_suggestions").ValueKind != JsonValueKind.Array
                 || content.GetProperty("limitations").ValueKind != JsonValueKind.Array) return [];
+            object scope = snapshot.ScopeKind switch
+            {
+                "session" or "node" => new { kind=snapshot.ScopeKind, session_id=snapshot.SessionId, node_id=snapshot.NodeId, anchor_id=snapshot.AnchorId },
+                "repository_selection" => new { kind=snapshot.ScopeKind, repository_id=snapshot.RepositoryId, anchor_id=snapshot.AnchorId },
+                "comparison" => new { kind=snapshot.ScopeKind, repository_id=snapshot.RepositoryId, comparison_id=snapshot.ComparisonId, anchor_id=snapshot.AnchorId },
+                _ => throw new InvalidOperationException("local_ai_scope_invalid"),
+            };
             var entity = new
             {
-                scope = new { kind=snapshot.ScopeKind, session_id=snapshot.SessionId, node_id=snapshot.NodeId, anchor_id=snapshot.AnchorId },
+                scope,
                 snapshot = new { snapshot_id=snapshot.SnapshotId, payload_sha256=snapshot.PayloadSha256 },
                 summary = content.GetProperty("summary").Clone(),
                 findings = content.GetProperty("findings").Clone(),

@@ -33,7 +33,10 @@ internal sealed record LocalAiSnapshotProjectionV1(
     byte[] EvidenceIndexCanonicalJson,
     string PayloadSha256,
     IReadOnlySet<string> EvidenceIdentifiers,
-    IReadOnlyDictionary<string, LocalAiRawEvidenceV1>? RawEvidence = null);
+    IReadOnlyDictionary<string, LocalAiRawEvidenceV1>? RawEvidence = null,
+    string? RepositoryId = null,
+    string? ComparisonId = null,
+    DateTimeOffset? ExpiresAt = null);
 
 internal sealed class LocalAiScopeTooLargeException : Exception
 {

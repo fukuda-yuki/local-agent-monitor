@@ -10,6 +10,27 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalAiAnalysisFoundationTests
 {
+    [Theory]
+    [InlineData("repository_selection", "0198f5c0-1b89-7d41-8c2f-4ecba0b54431", null)]
+    [InlineData("comparison", "0198f5c0-1b89-7d41-8c2f-4ecba0b54431", "0198f5c0-1b89-7d41-8c2f-4ecba0b54432")]
+    public void ResultScope_AdmitsExactRepositoryDiscriminants(string kind, string repositoryId, string? comparisonId)
+    {
+        var scope = comparisonId is null
+            ? $"{{\"anchor_id\":\"{repositoryId}\",\"kind\":\"{kind}\",\"repository_id\":\"{repositoryId}\"}}"
+            : $"{{\"anchor_id\":\"{comparisonId}\",\"comparison_id\":\"{comparisonId}\",\"kind\":\"{kind}\",\"repository_id\":\"{repositoryId}\"}}";
+
+        Assert.Equal(LocalAiResultValidationCodeV1.Valid, LocalAiResultValidatorV1.Validate(Result(scope: scope), ["ev-1"]).Code);
+    }
+
+    [Theory]
+    [InlineData("{\"anchor_id\":\"0198f5c0-1b89-7d41-8c2f-4ecba0b54431\",\"kind\":\"repository_selection\",\"repository_id\":\"not-canonical\"}")]
+    [InlineData("{\"anchor_id\":\"0198f5c0-1b89-7d41-8c2f-4ecba0b54432\",\"comparison_id\":\"0198f5c0-1b89-7d41-8c2f-4ecba0b54432\",\"kind\":\"comparison\",\"repository_id\":\"0198f5c0-1b89-7d41-8c2f-4ecba0b54431\",\"session_id\":null}")]
+    [InlineData("{\"anchor_id\":\"0198f5c0-1b89-7d41-8c2f-4ecba0b54432\",\"kind\":\"comparison\",\"repository_id\":\"0198f5c0-1b89-7d41-8c2f-4ecba0b54431\"}")]
+    public void ResultScope_RejectsInvalidDiscriminatedShapes(string scope)
+    {
+        Assert.Equal(LocalAiResultValidationCodeV1.InvalidResult, LocalAiResultValidatorV1.Validate(Result(scope: scope), ["ev-1"]).Code);
+    }
+
     [Fact]
     public void StoredResultWithoutSnapshotEvidence_SkipsOnlyMembershipResolution()
     {
@@ -139,6 +160,27 @@ public sealed class LocalAiAnalysisFoundationTests
     }
 
     [Fact]
+    public void TransientCleanup_UsesCanonicalExpiryForRepositorySelectionAndComparison()
+    {
+        var createdAt=DateTimeOffset.Parse("2026-08-30T01:00:00Z");var time=new MutableTimeProvider(createdAt);using var database=new Database();var store=database.NodeStore(time);
+        var repositoryId="0198f5c0-1b89-7d41-8c2f-4ecba0b54431";var comparisonId="0198f5c0-1b89-7d41-8c2f-4ecba0b54432";var repositorySnapshot=Guid.CreateVersion7().ToString();var comparisonSnapshot=Guid.CreateVersion7().ToString();
+        store.InsertSnapshot(new(repositorySnapshot,"repository_selection",null,null,repositoryId,"{\"value\":1}"u8.ToArray(),"{\"evidence_refs\":[\"ev-1\"]}"u8.ToArray(),repositoryId));
+        store.InsertSnapshot(new(comparisonSnapshot,"comparison",null,null,comparisonId,"{\"value\":1}"u8.ToArray(),"{\"evidence_refs\":[\"ev-1\"]}"u8.ToArray(),repositoryId,comparisonId,createdAt.AddHours(3)));
+        var repositoryRun=store.CreateRun(new(repositorySnapshot,"repository_selection",null,null,"github_copilot_sdk","synthetic-model",Hash64,"local-ai-analysis.prompt.v1",createdAt,null,repositoryId));
+        var comparisonRun=store.CreateRun(new(comparisonSnapshot,"comparison",null,null,"github_copilot_sdk","synthetic-model",Hash64,"local-ai-analysis.prompt.v1",createdAt,null,repositoryId,comparisonId));
+        store.TransitionRun(comparisonRun.RunId,LocalAiRunStateV1.Running,null,StartedAt);
+        var comparisonScope=$"{{\"anchor_id\":\"{comparisonId}\",\"comparison_id\":\"{comparisonId}\",\"kind\":\"comparison\",\"repository_id\":\"{repositoryId}\"}}";
+        Assert.Equal(LocalAiRunStateV1.Succeeded,store.Complete(comparisonRun.RunId,Result(scope:comparisonScope,snapshotId:comparisonSnapshot),CompletedAt));
+
+        Assert.Equal(0,store.DeleteExpiredTransientRuns(createdAt.AddHours(3).AddTicks(-1)));
+        Assert.Equal(1,store.DeleteExpiredTransientRuns(createdAt.AddHours(3)));
+        Assert.Equal(1L,database.Scalar($"SELECT COUNT(*) FROM local_ai_runs WHERE run_id='{repositoryRun.RunId}';"));
+        Assert.Equal(0L,database.Scalar($"SELECT COUNT(*) FROM local_ai_runs WHERE run_id='{comparisonRun.RunId}';"));
+        Assert.Equal(1,store.DeleteExpiredTransientRuns(createdAt.AddHours(24)));
+        Assert.Equal(0L,database.Scalar("SELECT COUNT(*) FROM local_ai_snapshots WHERE scope_kind<>'session';"));
+    }
+
+    [Fact]
     public void Snapshot_EnforcesOneMiBPayloadAndEvidenceAdmissionBoundary()
     {
         using var database = new Database(); var store = database.NodeStore();
@@ -156,11 +198,36 @@ public sealed class LocalAiAnalysisFoundationTests
         using var migration = new Database(); using var connection = migration.Open();
         Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session',14);");
         LocalAiAnalysisSchemaV1.Ensure(connection); LocalAiAnalysisSchemaV1.Ensure(connection);
-        Assert.Equal(1L, Scalar(connection, "SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
+        Assert.Equal(2L, Scalar(connection, "SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
+        Assert.Equal(3L, Scalar(connection, "SELECT COUNT(*) FROM pragma_table_info('local_ai_snapshots') WHERE name IN ('repository_id','comparison_id','expires_at');"));
 
         using var corrupt = new Database(); using var corruptConnection = corrupt.Open();
         Execute(corruptConnection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('local_ai_analysis',1); CREATE TABLE local_ai_snapshots(id TEXT); CREATE TABLE local_ai_runs(id TEXT); CREATE TABLE local_ai_results(id TEXT);");
         Assert.Throws<InvalidOperationException>(() => LocalAiAnalysisSchemaV1.Ensure(corruptConnection));
+    }
+
+    [Fact]
+    public void Schema_MigratesExactVersionOneRowsWithoutChangingSessionOrNodeContent()
+    {
+        using var database = new Database();
+        using var connection = database.Open();
+        CreateVersionOneSchema(connection);
+        var owner = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        var emptyPayloadHash=Convert.ToHexStringLower(SHA256.HashData("{}"u8));
+        Execute(connection, $"""
+            INSERT INTO local_ai_snapshots VALUES('{SnapshotId}','session','{SessionId}',NULL,'{SessionId}',x'7B7D','{emptyPayloadHash}',x'7B2265766964656E63655F72656673223A5B5D7D','{Convert.ToHexStringLower(SHA256.HashData("{\"evidence_refs\":[]}"u8))}',x'{owner}','2026-08-30T01:00:00.0000000+00:00');
+            INSERT INTO local_ai_snapshots VALUES('{NodeSnapshotId}','node','{SessionId}','node-1','node-1',x'7B7D','{emptyPayloadHash}',x'7B2265766964656E63655F72656673223A5B5D7D','{Convert.ToHexStringLower(SHA256.HashData("{\"evidence_refs\":[]}"u8))}',x'{owner}','2026-08-30T01:00:00.0000000+00:00');
+            INSERT INTO local_ai_runs VALUES('{RegeneratedSnapshotId}','{SnapshotId}','session','{SessionId}',NULL,'queued','github_copilot_sdk','model','{Hash64}','template','2026-08-30T01:00:00.0000000+00:00',NULL,NULL,60,NULL,NULL,'2026-08-30T01:00:00.0000000+00:00','2026-08-30T01:00:00.0000000+00:00');
+            INSERT INTO local_ai_runs VALUES('{FreshOrphanSnapshotId}','{NodeSnapshotId}','node','{SessionId}','node-1','queued','github_copilot_sdk','model','{Hash64}','template','2026-08-30T01:00:00.0000000+00:00',NULL,NULL,60,NULL,NULL,'2026-08-30T01:00:00.0000000+00:00','2026-08-30T01:00:00.0000000+00:00');
+            """);
+
+        LocalAiAnalysisSchemaV1.Ensure(connection);
+
+        Assert.Equal(2L, Scalar(connection, "SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
+        Assert.Equal(2L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots;"));
+        Assert.Equal(2L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs;"));
+        Assert.Equal("2026-08-31T01:00:00.0000000+00:00", Text(connection, $"SELECT expires_at FROM local_ai_snapshots WHERE snapshot_id='{NodeSnapshotId}';"));
+        Assert.Equal(1L, Scalar(connection, $"SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='{SnapshotId}' AND expires_at IS NULL AND payload_json=x'7B7D';"));
     }
 
     [Fact]
@@ -191,7 +258,7 @@ public sealed class LocalAiAnalysisFoundationTests
         using var database = new Database(); using var connection = database.Open(); LocalAiAnalysisSchemaV1.Ensure(connection);
         Execute(connection, "PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(replace(sql,'CREATE TABLE','CREATE  '||char(10)||' TABLE'),'(', ' ( ') WHERE name='local_ai_results'; PRAGMA writable_schema=OFF;");
         LocalAiAnalysisSchemaV1.Ensure(connection);
-        Assert.Equal(1L, Scalar(connection, "SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
+        Assert.Equal(2L, Scalar(connection, "SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
     }
 
     [Theory]
@@ -330,5 +397,16 @@ public sealed class LocalAiAnalysisFoundationTests
     private static readonly string PayloadHash=Convert.ToHexStringLower(SHA256.HashData("{\"value\":1}"u8));
     private static readonly DateTimeOffset StartedAt=DateTimeOffset.Parse("2026-08-30T01:00:01Z"),CompletedAt=DateTimeOffset.Parse("2026-08-30T01:00:02Z");
     private static long Scalar(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return Convert.ToInt64(q.ExecuteScalar());} private static string Text(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return(string)q.ExecuteScalar()!;} private static void Execute(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}
+    private static void CreateVersionOneSchema(SqliteConnection connection) => Execute(connection, """
+        CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES('local_ai_analysis',1);
+        CREATE TABLE local_ai_snapshots(snapshot_id TEXT PRIMARY KEY,scope_kind TEXT NOT NULL CHECK(scope_kind IN ('session','node')),session_id TEXT NOT NULL,node_id TEXT,anchor_id TEXT NOT NULL,payload_json BLOB,payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256=lower(payload_sha256)),evidence_index_json BLOB,evidence_index_sha256 TEXT NOT NULL CHECK(length(evidence_index_sha256)=64 AND evidence_index_sha256=lower(evidence_index_sha256)),retention_owner_token BLOB NOT NULL CHECK(length(retention_owner_token)=32),created_at TEXT NOT NULL,CHECK((scope_kind='session' AND node_id IS NULL) OR (scope_kind='node' AND node_id IS NOT NULL)),CHECK((payload_json IS NULL)=(evidence_index_json IS NULL)));
+        CREATE TABLE local_ai_runs(run_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL REFERENCES local_ai_snapshots(snapshot_id),scope_kind TEXT NOT NULL,session_id TEXT NOT NULL,node_id TEXT,state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','zero_findings','provider_failed','provider_partial','invalid_result','invalid_evidence','stale_snapshot','scope_too_large','timed_out','canceled')),provider TEXT NOT NULL,model TEXT NOT NULL,configuration_sha256 TEXT NOT NULL CHECK(length(configuration_sha256)=64 AND configuration_sha256=lower(configuration_sha256)),prompt_template_version TEXT NOT NULL,requested_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 600),error_code TEXT,result_id TEXT UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE local_ai_results(result_id TEXT PRIMARY KEY,run_id TEXT NOT NULL UNIQUE REFERENCES local_ai_runs(run_id),result_json BLOB,result_sha256 TEXT NOT NULL CHECK(length(result_sha256)=64 AND result_sha256=lower(result_sha256)),retention_owner_token BLOB NOT NULL CHECK(length(retention_owner_token)=32),created_at TEXT NOT NULL);
+        CREATE INDEX IX_local_ai_session_reports ON local_ai_runs(scope_kind,session_id,state,completed_at DESC,run_id DESC);
+        CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots WHEN NOT (local_ai_retention_delete_authorized('snapshot',OLD.snapshot_id)=1 AND OLD.scope_kind='session' AND OLD.payload_json IS NOT NULL AND OLD.evidence_index_json IS NOT NULL AND NEW.payload_json IS NULL AND NEW.evidence_index_json IS NULL AND NEW.snapshot_id=OLD.snapshot_id AND NEW.scope_kind=OLD.scope_kind AND NEW.session_id=OLD.session_id AND NEW.node_id IS OLD.node_id AND NEW.anchor_id=OLD.anchor_id AND NEW.payload_sha256=OLD.payload_sha256 AND NEW.evidence_index_sha256=OLD.evidence_index_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END;
+        CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results WHEN NOT (local_ai_retention_delete_authorized('result',OLD.result_id)=1 AND OLD.result_json IS NOT NULL AND NEW.result_json IS NULL AND NEW.result_id=OLD.result_id AND NEW.run_id=OLD.run_id AND NEW.result_sha256=OLD.result_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END;
+        CREATE TRIGGER local_ai_terminal_run_update_rejected BEFORE UPDATE ON local_ai_runs WHEN OLD.state NOT IN ('queued','running') BEGIN SELECT RAISE(ABORT,'local_ai_terminal_run_immutable'); END;
+        """);
     private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(RetentionCatalogStore? catalog=null,TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);catalog??=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(Path,time),time);return new(Path,catalog,time);}internal LocalAiAnalysisStoreV1 NodeStore(TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path,timeProvider:time);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
 }
