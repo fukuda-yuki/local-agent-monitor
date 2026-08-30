@@ -68,19 +68,17 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
     {
         using var connection = Open(databasePath); using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT r.run_id,r.state,r.scope_kind,r.session_id,r.node_id,r.error_code,x.result_json,
+            SELECT r.run_id,r.state,r.scope_kind,r.session_id,r.node_id,r.error_code,x.result_id,x.result_sha256,
               r.requested_at,r.started_at,r.model,r.configuration_sha256,r.prompt_template_version
             FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run;
             """; command.Parameters.AddWithValue("$run", runId); using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new InvalidOperationException("local_ai_run_missing");
-        var scope=reader.GetString(2); var direct=reader.IsDBNull(6)?null:(byte[])reader[6]; var resultId=scope=="session"?ReadResultId(runId):null; var content=scope=="session"?(resultId is null?null:store.ReadRetainedResult(resultId)):direct;
-        return new(reader.GetString(0), reader.GetString(1), scope, reader.GetString(3),
-            reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
-            content, reader.GetString(7), reader.IsDBNull(8)?null:reader.GetString(8),
-            reader.GetString(9),reader.GetString(10),reader.GetString(11));
+        var id=reader.GetString(0);var state=reader.GetString(1);var scope=reader.GetString(2);var session=reader.GetString(3);var node=reader.IsDBNull(4)?null:reader.GetString(4);var error=reader.IsDBNull(5)?null:reader.GetString(5);var resultId=reader.IsDBNull(6)?null:reader.GetString(6);var requested=reader.GetString(8);var started=reader.IsDBNull(9)?null:reader.GetString(9);var readModel=reader.GetString(10);var configuration=reader.GetString(11);var template=reader.GetString(12);reader.Close();
+        var content=scope=="session"?(resultId is null?null:store.ReadRetainedResult(resultId)):ReadNodeResult(runId);
+        return new(id,state,scope,session,node,error,content,requested,started,readModel,configuration,template);
     }
 
-    private string? ReadResultId(string runId){using var connection=Open(databasePath);using var command=connection.CreateCommand();command.CommandText="SELECT result_id FROM local_ai_runs WHERE run_id=$run;";command.Parameters.AddWithValue("$run",runId);return command.ExecuteScalar() as string;}
+    private byte[]? ReadNodeResult(string runId){using var connection=Open(databasePath);using var command=connection.CreateCommand();command.CommandText="SELECT x.result_json FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run AND r.scope_kind='node';";command.Parameters.AddWithValue("$run",runId);return command.ExecuteScalar() as byte[];}
 
     public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256)
     {

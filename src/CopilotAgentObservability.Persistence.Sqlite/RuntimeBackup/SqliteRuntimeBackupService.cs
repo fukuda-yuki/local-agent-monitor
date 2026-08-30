@@ -2241,7 +2241,7 @@ public sealed class SqliteRuntimeBackupService
         return true;
     }
 
-    private static bool ValidateLocalAiRows(SqliteConnection connection,SqliteTransaction transaction)
+    internal static bool ValidateLocalAiRows(SqliteConnection connection,SqliteTransaction transaction)
     {
         using(var invalid=connection.CreateCommand())
         {
@@ -2250,21 +2250,29 @@ public sealed class SqliteRuntimeBackupService
                   SELECT 1 FROM local_ai_snapshots s WHERE typeof(snapshot_id)<>'text' OR typeof(session_id)<>'text' OR typeof(anchor_id)<>'text'
                     OR typeof(created_at)<>'text' OR typeof(payload_sha256)<>'text' OR typeof(evidence_index_sha256)<>'text'
                     OR length(retention_owner_token)<>32 OR (scope_kind='session')<>(node_id IS NULL)
+                    OR payload_sha256 GLOB '*[^0-9a-f]*' OR evidence_index_sha256 GLOB '*[^0-9a-f]*' OR (scope_kind='node' AND payload_json IS NULL)
                     OR (payload_json IS NOT NULL AND (length(payload_json)>1048576 OR length(evidence_index_json)>1048576))
-                    OR (scope_kind='session' AND NOT EXISTS(SELECT 1 FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:snapshot:'||s.snapshot_id))
+                    OR (scope_kind='session' AND (SELECT COUNT(*) FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:snapshot:'||s.snapshot_id)<>1)
                     OR (scope_kind='node' AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:snapshot:'||s.snapshot_id))
                   UNION ALL SELECT 1 FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id
                     WHERE r.scope_kind<>s.scope_kind OR r.session_id<>s.session_id OR r.node_id IS NOT s.node_id OR typeof(r.requested_at)<>'text'
-                      OR r.started_at<r.requested_at OR r.completed_at<r.started_at OR (r.state IN('queued','running') AND r.completed_at IS NOT NULL)
-                      OR (r.result_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_ai_results x WHERE x.result_id=r.result_id AND x.run_id=r.run_id))
+                      OR r.provider<>'github_copilot_sdk' OR length(r.model) NOT BETWEEN 1 AND 200 OR length(r.prompt_template_version) NOT BETWEEN 1 AND 200 OR r.configuration_sha256 GLOB '*[^0-9a-f]*'
+                      OR r.timeout_seconds NOT BETWEEN 1 AND 600 OR r.requested_at<s.created_at OR r.started_at<r.requested_at OR r.completed_at<r.started_at OR r.updated_at<r.created_at OR r.updated_at<coalesce(r.completed_at,r.started_at,r.requested_at)
+                      OR (r.state='queued' AND (r.started_at IS NOT NULL OR r.completed_at IS NOT NULL OR r.error_code IS NOT NULL OR r.result_id IS NOT NULL))
+                      OR (r.state='running' AND (r.started_at IS NULL OR r.completed_at IS NOT NULL OR r.error_code IS NOT NULL OR r.result_id IS NOT NULL))
+                      OR (r.state IN('succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code IS NOT NULL OR r.result_id IS NULL OR (SELECT COUNT(*) FROM local_ai_results x WHERE x.result_id=r.result_id AND x.run_id=r.run_id)<>1))
+                      OR (r.state NOT IN('queued','running','succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code<>r.state OR r.result_id IS NOT NULL))
                   UNION ALL SELECT 1 FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id
-                    WHERE length(x.retention_owner_token)<>32 OR length(x.result_json)>1048576 OR r.result_id<>x.result_id
-                      OR (r.scope_kind='session' AND NOT EXISTS(SELECT 1 FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:result:'||x.result_id))
+                    WHERE length(x.retention_owner_token)<>32 OR x.result_sha256 GLOB '*[^0-9a-f]*' OR length(x.result_json)>1048576 OR r.result_id<>x.result_id OR r.state NOT IN('succeeded','zero_findings') OR x.created_at<>r.completed_at OR (r.scope_kind='node' AND x.result_json IS NULL)
+                      OR (r.scope_kind='session' AND (SELECT COUNT(*) FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:result:'||x.result_id)<>1)
                       OR (r.scope_kind='node' AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:result:'||x.result_id))
+                  UNION ALL SELECT 1 FROM local_ai_results x LEFT JOIN local_ai_runs r ON r.run_id=x.run_id WHERE r.run_id IS NULL
                 );
                 """; if(Convert.ToInt64(invalid.ExecuteScalar(),CultureInfo.InvariantCulture)!=0)return false;
         }
         using(var ids=connection.CreateCommand()){ids.Transaction=transaction;ids.CommandText="SELECT snapshot_id FROM local_ai_snapshots UNION ALL SELECT run_id FROM local_ai_runs UNION ALL SELECT result_id FROM local_ai_results;";using var reader=ids.ExecuteReader();var count=0;while(reader.Read()){if(++count>1_000_000 || !LocalAiResultValidatorV1.CanonicalUuid7(reader.GetString(0)))return false;}}
+        using(var facts=connection.CreateCommand()){facts.Transaction=transaction;facts.CommandText="SELECT scope_kind,session_id,node_id,created_at FROM local_ai_snapshots UNION ALL SELECT scope_kind,session_id,node_id,requested_at FROM local_ai_runs;";using var reader=facts.ExecuteReader();while(reader.Read()){if(!LocalAiResultValidatorV1.CanonicalUuid7(reader.GetString(1))||!CanonicalTimestamp(reader.GetString(3)))return false;}}
+        using(var times=connection.CreateCommand()){times.Transaction=transaction;times.CommandText="SELECT requested_at,started_at,completed_at,created_at,updated_at FROM local_ai_runs;";using var reader=times.ExecuteReader();while(reader.Read()){for(var i=0;i<5;i++)if(!reader.IsDBNull(i)&&!CanonicalTimestamp(reader.GetString(i)))return false;}}
         using(var snapshots=connection.CreateCommand())
         {
             snapshots.Transaction=transaction;snapshots.CommandText="SELECT payload_json,payload_sha256,evidence_index_json,evidence_index_sha256 FROM local_ai_snapshots WHERE payload_json IS NOT NULL;";using var reader=snapshots.ExecuteReader();
@@ -2272,14 +2280,14 @@ public sealed class SqliteRuntimeBackupService
         }
         using(var results=connection.CreateCommand())
         {
-            results.Transaction=transaction;results.CommandText="SELECT x.result_json,x.result_sha256,s.evidence_index_json FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE x.result_json IS NOT NULL;";using var reader=results.ExecuteReader();
-            while(reader.Read()){var json=(byte[])reader[0];if(reader.IsDBNull(2)||Convert.ToHexStringLower(SHA256.HashData(json))!=reader.GetString(1)||!TryEvidenceRefs((byte[])reader[2],out var refs))return false;var validation=LocalAiResultValidatorV1.Validate(json,refs);if(validation.Code!=LocalAiResultValidationCodeV1.Valid||!validation.CanonicalBytes!.SequenceEqual(json))return false;}
+            results.Transaction=transaction;results.CommandText="SELECT x.result_json,x.result_sha256,s.evidence_index_json,s.payload_sha256,s.snapshot_id,s.scope_kind,s.session_id,s.node_id,s.anchor_id,r.provider,r.model,r.configuration_sha256,r.prompt_template_version,r.requested_at,r.started_at,r.completed_at,x.created_at FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE x.result_json IS NOT NULL;";using var reader=results.ExecuteReader();
+            while(reader.Read()){var json=(byte[])reader[0];if(reader.IsDBNull(2)||Convert.ToHexStringLower(SHA256.HashData(json))!=reader.GetString(1)||!CanonicalTimestamp(reader.GetString(16))||reader.GetString(16)!=reader.GetString(15))return false;var expected=new LocalAiStoredResultInvariantV1((byte[])reader[2],reader.GetString(3),reader.GetString(4),reader.GetString(5),reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),reader.GetString(8),reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.GetString(12),reader.GetString(13),reader.GetString(14),reader.GetString(15));if(!LocalAiAnalysisStoreV1.ValidateStoredResult(json,expected))return false;}
         }
         return true;
     }
 
     private static bool CanonicalJson(byte[] bytes){try{using var document=JsonDocument.Parse(bytes,new JsonDocumentOptions{MaxDepth=16});return LocalAiCanonicalJsonV1.Serialize(document.RootElement).SequenceEqual(bytes);}catch(JsonException){return false;}}
-    private static bool TryEvidenceRefs(byte[] bytes,out IReadOnlyCollection<string> refs){refs=[];try{using var document=JsonDocument.Parse(bytes,new JsonDocumentOptions{MaxDepth=16});var root=document.RootElement;if(root.ValueKind!=JsonValueKind.Object||!root.EnumerateObject().Select(x=>x.Name).SequenceEqual(["evidence_refs"])||root.GetProperty("evidence_refs").ValueKind!=JsonValueKind.Array)return false;var values=root.GetProperty("evidence_refs").EnumerateArray().Select(x=>x.ValueKind==JsonValueKind.String?x.GetString():null).ToArray();if(values.Any(string.IsNullOrWhiteSpace)||values.Distinct(StringComparer.Ordinal).Count()!=values.Length)return false;refs=values!;return true;}catch(JsonException){return false;}}
+    private static bool CanonicalTimestamp(string value)=>DateTimeOffset.TryParseExact(value,"O",CultureInfo.InvariantCulture,DateTimeStyles.None,out var parsed)&&parsed.ToString("O",CultureInfo.InvariantCulture)==value;
 
     private static bool HasUndeclaredLocalRepositoryCatalogObjects(
         SqliteConnection connection,

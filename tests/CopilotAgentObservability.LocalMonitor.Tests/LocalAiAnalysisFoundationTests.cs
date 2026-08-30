@@ -3,6 +3,7 @@ using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.LocalMonitor.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -27,9 +28,10 @@ public sealed class LocalAiAnalysisFoundationTests
             Assert.Equal(2L, Scalar(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='analysis_run_raw' AND source_item_id IN ('local_ai:snapshot:' || '" + SnapshotId + "','local_ai:result:' || (SELECT result_id FROM local_ai_runs WHERE run_id='" + run.RunId + "')) AND policy_id='raw-default-90d';"));
         }
 
-        var report = Assert.Single(new LocalAiAnalysisStoreV1(database.Path,catalog,time).GetSessionReports(SessionId, null, null).Items);
+        var materialized=0;var report = Assert.Single(new LocalAiAnalysisStoreV1(database.Path,catalog,time,()=>materialized++).GetSessionReports(SessionId, null, null).Items);
         Assert.Equal("retained", report.ContentState);
         Assert.NotNull(report.CanonicalResult);
+        Assert.Equal(1,materialized);
         using var read = database.Open();
         Assert.Equal(1L, Scalar(read, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + run.RunId + "' AND state='succeeded' AND result_id IS NOT NULL AND completed_at IS NOT NULL;"));
     }
@@ -39,13 +41,23 @@ public sealed class LocalAiAnalysisFoundationTests
     {
         using var database=new Database();var now=new DateTimeOffset(2026,8,30,1,0,0,TimeSpan.Zero);var time=new MutableTimeProvider(now);var context=RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path,time);var catalog=new RetentionCatalogStore(context,time);var store=database.Store(catalog,time);store.InsertSnapshot(Snapshot());var run=Complete(store,Request(),Result());
         using(var connection=database.Open()){using var deny=connection.CreateCommand();deny.CommandText="UPDATE retention_items SET state='deletion_queued',read_denied_at=$now,queued_at=$now,revision=revision+1 WHERE source_item_id='local_ai:result:'||(SELECT result_id FROM local_ai_runs WHERE run_id=$run);";deny.Parameters.AddWithValue("$now",now.ToString("O"));deny.Parameters.AddWithValue("$run",run.RunId);Assert.Equal(1,deny.ExecuteNonQuery());Assert.Equal(1L,Scalar(connection,"SELECT COUNT(*) FROM local_ai_results WHERE result_json IS NOT NULL;"));}
-        var report=Assert.Single(store.GetSessionReports(SessionId,null,null).Items);Assert.Equal("expired",report.ContentState);Assert.Null(report.CanonicalResult);
+        var materialized=0;var deniedStore=new LocalAiAnalysisStoreV1(database.Path,catalog,time,()=>materialized++);var report=Assert.Single(deniedStore.GetSessionReports(SessionId,null,null).Items);Assert.Equal("expired",report.ContentState);Assert.Null(report.CanonicalResult);Assert.Equal(0,materialized);
     }
 
     [Fact]
     public void SessionWrites_RequireRetentionBeforeAnyWrite()
     {
         using var database=new Database();var store=database.NodeStore();var error=Assert.Throws<InvalidOperationException>(()=>store.InsertSnapshot(Snapshot()));Assert.Equal("local_ai_retention_required",error.Message);Assert.Equal(0L,database.Scalar("SELECT COUNT(*) FROM local_ai_snapshots;"));
+    }
+
+    [Theory]
+    [InlineData("DROP TRIGGER local_ai_terminal_run_update_rejected; UPDATE local_ai_runs SET result_id=NULL;")]
+    [InlineData("DROP TRIGGER local_ai_results_update_rejected; UPDATE local_ai_results SET result_sha256='2222222222222222222222222222222222222222222222222222222222222222';")]
+    [InlineData("DROP TRIGGER local_ai_terminal_run_update_rejected; UPDATE local_ai_runs SET completed_at='not-a-timestamp';")]
+    [InlineData("DROP TRIGGER local_ai_snapshots_update_rejected; UPDATE local_ai_snapshots SET evidence_index_json=x'7B7D';")]
+    public void BackupSemanticValidation_RejectsMalformedGraphLifecycleHashesAndEvidence(string mutation)
+    {
+        using var database=new Database();var store=database.Store();store.InsertSnapshot(Snapshot());Complete(store,Request(),Result());using var connection=database.Open();Execute(connection,mutation);using var transaction=connection.BeginTransaction();Assert.False(SqliteRuntimeBackupService.ValidateLocalAiRows(connection,transaction));transaction.Commit();
     }
 
     [Fact]

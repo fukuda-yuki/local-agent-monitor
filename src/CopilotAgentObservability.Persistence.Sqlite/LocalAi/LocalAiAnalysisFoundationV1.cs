@@ -21,6 +21,7 @@ internal sealed record LocalAiRunRequestV1(string SnapshotId, string ScopeKind, 
 internal sealed record LocalAiRunV1(string RunId, int TimeoutSeconds);
 internal sealed record LocalAiReportV1(string RunId, string? ResultId, LocalAiRunStateV1 State, DateTimeOffset CreatedAt, byte[]? CanonicalResult, string? Sha256, string ContentState);
 internal sealed record LocalAiReportPageV1(IReadOnlyList<LocalAiReportV1> Items, string? NextCursor);
+internal sealed record LocalAiStoredResultInvariantV1(byte[] EvidenceIndex,string PayloadSha256,string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,string Provider,string Model,string ConfigurationSha256,string Template,string RequestedAt,string StartedAt,string CompletedAt);
 
 internal static class LocalAiAnalysisSchemaV1
 {
@@ -230,7 +231,8 @@ internal sealed class LocalAiAnalysisStoreV1
     private readonly string databasePath;
     private readonly RetentionCatalogStore? retentionCatalog;
     private readonly TimeProvider clock;
-    internal LocalAiAnalysisStoreV1(string databasePath, RetentionCatalogStore? retentionCatalog = null, TimeProvider? timeProvider = null) { ArgumentException.ThrowIfNullOrWhiteSpace(databasePath); this.databasePath = databasePath; this.retentionCatalog = retentionCatalog; clock = timeProvider ?? TimeProvider.System; }
+    private readonly Action? retainedResultMaterialized;
+    internal LocalAiAnalysisStoreV1(string databasePath, RetentionCatalogStore? retentionCatalog = null, TimeProvider? timeProvider = null,Action? retainedResultMaterializedForTesting=null) { ArgumentException.ThrowIfNullOrWhiteSpace(databasePath); this.databasePath = databasePath; this.retentionCatalog = retentionCatalog; clock = timeProvider ?? TimeProvider.System; retainedResultMaterialized=retainedResultMaterializedForTesting; }
 
     internal void InsertSnapshot(LocalAiSnapshotV1 snapshot)
     {
@@ -286,7 +288,7 @@ internal sealed class LocalAiAnalysisStoreV1
         using var evidenceCommand=connection.CreateCommand(); evidenceCommand.CommandText="SELECT s.evidence_index_json,s.payload_sha256,s.snapshot_id,s.scope_kind,s.session_id,s.node_id,s.anchor_id,r.provider,r.model,r.configuration_sha256,r.prompt_template_version,r.requested_at,r.started_at FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE r.run_id=$id;"; evidenceCommand.Parameters.AddWithValue("$id",runId);
         using var expectedReader=evidenceCommand.ExecuteReader(); if(!expectedReader.Read()) throw new InvalidOperationException("local_ai_run_missing");
         var completion=(completedAt??DateTimeOffset.UtcNow).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture);
-        var expected=new ExpectedResult((byte[])expectedReader[0],expectedReader.GetString(1),expectedReader.GetString(2),expectedReader.GetString(3),expectedReader.GetString(4),expectedReader.IsDBNull(5)?null:expectedReader.GetString(5),expectedReader.GetString(6),expectedReader.GetString(7),expectedReader.GetString(8),expectedReader.GetString(9),expectedReader.GetString(10),expectedReader.GetString(11),expectedReader.GetString(12),completion);
+        var expected=new LocalAiStoredResultInvariantV1((byte[])expectedReader[0],expectedReader.GetString(1),expectedReader.GetString(2),expectedReader.GetString(3),expectedReader.GetString(4),expectedReader.IsDBNull(5)?null:expectedReader.GetString(5),expectedReader.GetString(6),expectedReader.GetString(7),expectedReader.GetString(8),expectedReader.GetString(9),expectedReader.GetString(10),expectedReader.GetString(11),expectedReader.GetString(12),completion);
         if(expected.ScopeKind=="session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
         expectedReader.Close(); var refs=ReadEvidence(expected.EvidenceIndex); var validation=LocalAiResultValidatorV1.Validate(result,refs);
         if(validation.Code==LocalAiResultValidationCodeV1.Valid && !MatchesExpected(validation.CanonicalBytes!,expected)) validation=new(LocalAiResultValidationCodeV1.InvalidResult);
@@ -337,10 +339,10 @@ internal sealed class LocalAiAnalysisStoreV1
                 JOIN retention_leases l ON l.item_id=i.item_id AND l.lease_kind=$retention_read_lease_kind AND l.owner=$retention_read_lease_owner
                   AND l.generation=$retention_read_lease_generation AND l.expires_at=$retention_read_lease_expires_at
                 WHERE x.result_id=$id AND x.retention_owner_token=$retention_read_source_token AND x.result_json IS NOT NULL;
-                """; command.Parameters.AddWithValue("$id",resultId); command.Parameters.AddWithValue("$retention_store_instance_id",retentionCatalog.StoreInstanceId); grant.BindAdmissionSelectorCapability(command); return ValueTask.FromResult(command.ExecuteScalar() as byte[]);
+                """; command.Parameters.AddWithValue("$id",resultId); command.Parameters.AddWithValue("$retention_store_instance_id",retentionCatalog.StoreInstanceId); grant.BindAdmissionSelectorCapability(command); var bytes=command.ExecuteScalar() as byte[];if(bytes is not null)retainedResultMaterialized?.Invoke();return ValueTask.FromResult(bytes);
         },CancellationToken.None).AsTask().GetAwaiter().GetResult();
         if(result.Lease is null) return null; var lease=result.Lease;
-        try { using var reference=lease.AcquireValueReference(); var bytes=reference.Value.ToArray(); if(lease.TrySealRawResponse()!=RetentionRawTerminalResult.Completed) return null; return bytes; }
+        try { byte[] bytes; using(var reference=lease.AcquireValueReference()) bytes=reference.Value.ToArray(); if(lease.TrySealRawResponse()!=RetentionRawTerminalResult.Sealed) return null; return bytes; }
         finally { lease.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
@@ -375,7 +377,7 @@ internal sealed class LocalAiAnalysisStoreV1
     private static string EncodeCursor(string value)=>Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
     private static string? DecodeCursor(string? value)
     { try{return value is null?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));}catch(FormatException){throw new ArgumentException("local_ai_cursor_invalid");} }
-    private static bool MatchesExpected(byte[] bytes,ExpectedResult expected)
+    private static bool MatchesExpected(byte[] bytes,LocalAiStoredResultInvariantV1 expected)
     {
         using var document=JsonDocument.Parse(bytes); var root=document.RootElement; var scope=root.GetProperty("scope"); var snapshot=root.GetProperty("snapshot"); var provenance=root.GetProperty("provenance");
         return scope.GetProperty("kind").GetString()==expected.ScopeKind && scope.GetProperty("session_id").GetString()==expected.SessionId
@@ -387,5 +389,8 @@ internal sealed class LocalAiAnalysisStoreV1
             && provenance.GetProperty("snapshot_sha256").GetString()==expected.PayloadSha256 && provenance.GetProperty("started_at").GetString()==expected.StartedAt
             && provenance.GetProperty("completed_at").GetString()==expected.CompletedAt;
     }
-    private sealed record ExpectedResult(byte[] EvidenceIndex,string PayloadSha256,string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,string Provider,string Model,string ConfigurationSha256,string Template,string RequestedAt,string StartedAt,string CompletedAt);
+    internal static bool ValidateStoredResult(byte[] bytes,LocalAiStoredResultInvariantV1 expected)
+    {
+        var validation=LocalAiResultValidatorV1.Validate(bytes,ReadEvidence(expected.EvidenceIndex));return validation.Code==LocalAiResultValidationCodeV1.Valid&&validation.CanonicalBytes!.SequenceEqual(bytes)&&MatchesExpected(bytes,expected);
+    }
 }
