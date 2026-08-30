@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
@@ -12,7 +13,7 @@ internal sealed record LocalAiRunStatusV1(string RunId, string State, string Sco
     string? NodeId, string? ErrorCode, byte[]? ResultJson = null, string? RequestedAt = null,
     string? StartedAt = null, string? Model = null, string? ConfigurationSha256 = null,
     string? PromptTemplateVersion = null);
-internal sealed record LocalAiReportItemResponseV1(string RunId, string State, byte[] ResultJson, bool SnapshotChanged);
+internal sealed record LocalAiReportItemResponseV1(string RunId, string State, byte[]? ResultJson, string ContentState, bool SnapshotChanged);
 internal sealed record LocalAiReportPageResponseV1(IReadOnlyList<LocalAiReportItemResponseV1> Reports, string? NextCursor);
 
 internal sealed record LocalAiProviderRequestV1(LocalAiSnapshotProjectionV1 Snapshot,
@@ -35,11 +36,11 @@ internal interface ILocalAiRunRepositoryV1
 {
     LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout);
     void Start(string runId);
-    LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome);
+    LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt);
     LocalAiRunStatusV1 Fail(string runId, string errorCode);
     LocalAiRunStatusV1 Read(string runId);
     bool Cancel(string runId);
-    LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentRevision);
+    LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256);
 }
 
 internal interface ILocalAiAnalysisApplicationV1
@@ -56,9 +57,13 @@ internal sealed class LocalAiAnalysisApplicationV1(
     ILocalAiSnapshotProjectionServiceV1 snapshots,
     ILocalAiRunRepositoryV1 runs,
     ILocalAiProviderAdapterV1 provider,
-    Func<string, LocalAiRawEvidenceV1, CancellationToken, ValueTask<byte[]>>? rawReader = null) : ILocalAiAnalysisApplicationV1
+    Func<string, LocalAiRawEvidenceV1, CancellationToken, ValueTask<byte[]>>? rawReader = null,
+    TimeProvider? timeProvider = null) : ILocalAiAnalysisApplicationV1, IHostedService
 {
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> active = new(StringComparer.Ordinal);
+    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private readonly object lifecycleGate = new();
+    private readonly Dictionary<string, (CancellationTokenSource Cancellation, Task Task)> active = new(StringComparer.Ordinal);
+    private bool accepting = true;
     public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) =>
         StartAsync(request.SessionId, null, request.TimeoutSeconds, null, [], token);
 
@@ -72,6 +77,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns, CancellationToken token)
     {
         if (timeout is < 1 or > 600) return new(null, "invalid_request");
+        lock (lifecycleGate) if (!accepting) return new(null, "provider_unavailable");
         if (!await providerReady(token).ConfigureAwait(false)) return new(null, "provider_unavailable");
         LocalAiSnapshotProjectionV1 snapshot;
         try
@@ -84,9 +90,22 @@ internal sealed class LocalAiAnalysisApplicationV1(
         var run = runs.Create(snapshot, timeout);
         runs.Start(run.RunId);
         var execution = new CancellationTokenSource(); execution.CancelAfter(TimeSpan.FromSeconds(timeout));
-        if (!active.TryAdd(run.RunId, execution)) throw new InvalidOperationException("local_ai_run_duplicate");
-        _ = ExecuteAsync(run.RunId, snapshot, question, priorTurns, execution);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (lifecycleGate)
+        {
+            if (!accepting) { runs.Cancel(run.RunId); execution.Dispose(); return new(null, "provider_unavailable"); }
+            active.Add(run.RunId, (execution, completion.Task));
+        }
+        _ = ExecuteAndSignalAsync(run.RunId, snapshot, question, priorTurns, execution, completion);
         return new(run.RunId, null);
+    }
+
+    private async Task ExecuteAndSignalAsync(string runId, LocalAiSnapshotProjectionV1 snapshot,
+        string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns, CancellationTokenSource execution,
+        TaskCompletionSource completion)
+    {
+        try { await ExecuteAsync(runId, snapshot, question, priorTurns, execution).ConfigureAwait(false); }
+        finally { completion.TrySetResult(); }
     }
 
     private async Task ExecuteAsync(string runId, LocalAiSnapshotProjectionV1 snapshot,
@@ -102,13 +121,20 @@ internal sealed class LocalAiAnalysisApplicationV1(
             var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), execution.Token).ConfigureAwait(false);
             if (!await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false))
                 runs.Fail(runId, "stale_snapshot");
-            else runs.Complete(runId, outcome);
+            else
+            {
+                var completedAt = clock.GetUtcNow();
+                var normalized = outcome.Kind == LocalAiProviderOutcomeKindV1.Complete
+                    ? outcome with { ResultJson = LocalAiResultEnvelopeV1.Compose(outcome.ResultJson, snapshot, startedRun, completedAt) }
+                    : outcome;
+                runs.Complete(runId, normalized, completedAt);
+            }
         }
         catch (OperationCanceledException) when (execution.IsCancellationRequested)
         { if (runs.Read(runId).State == "canceled") return; runs.Fail(runId, "timed_out"); }
         catch (OperationCanceledException) { runs.Cancel(runId); }
         catch { runs.Fail(runId, "provider_failed"); }
-        finally { active.TryRemove(runId, out _); execution.Dispose(); }
+        finally { lock (lifecycleGate) active.Remove(runId); execution.Dispose(); }
     }
 
     public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token)
@@ -120,14 +146,16 @@ internal sealed class LocalAiAnalysisApplicationV1(
     public ValueTask<bool> CancelAsync(string runId, CancellationToken token)
     {
         var canceled = runs.Cancel(runId);
-        if (canceled && active.TryGetValue(runId, out var execution)) execution.Cancel();
+        CancellationTokenSource? execution = null;
+        lock (lifecycleGate) if (canceled && active.TryGetValue(runId, out var item)) execution = item.Cancellation;
+        execution?.Cancel();
         return ValueTask.FromResult(canceled);
     }
 
     public async ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token)
     {
         var current = await snapshots.ReadSessionAsync(sessionId, token).ConfigureAwait(false);
-        return runs.Reports(sessionId, limit, cursor, current.Revision);
+        return runs.Reports(sessionId, limit, cursor, current.PayloadSha256);
     }
 
     private static void ValidateTranscript(LocalAiNodeStartRequestV1 request)
@@ -137,5 +165,51 @@ internal sealed class LocalAiAnalysisApplicationV1(
             || turns.Any(turn => System.Text.Encoding.UTF8.GetByteCount(turn.Question) > 4096
                 || System.Text.Encoding.UTF8.GetByteCount(turn.Answer) > 32768))
             throw new ArgumentException("invalid_request");
+    }
+
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        KeyValuePair<string, (CancellationTokenSource Cancellation, Task Task)>[] pending;
+        lock (lifecycleGate) { accepting = false; pending = active.ToArray(); }
+        foreach (var item in pending)
+        {
+            runs.Cancel(item.Key);
+            item.Value.Cancellation.Cancel();
+        }
+        await Task.WhenAll(pending.Select(static item => item.Value.Task)).ConfigureAwait(false);
+    }
+}
+
+internal static class LocalAiResultEnvelopeV1
+{
+    internal static byte[] Compose(byte[]? providerJson, LocalAiSnapshotProjectionV1 snapshot,
+        LocalAiRunStatusV1 run, DateTimeOffset completedAt)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(providerJson ?? [], new JsonDocumentOptions { MaxDepth = 16 });
+            var root = document.RootElement;
+            var content = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("summary", out _) ? root : default;
+            if (content.ValueKind == JsonValueKind.Undefined) return [];
+            var entity = new
+            {
+                scope = new { kind=snapshot.ScopeKind, session_id=snapshot.SessionId, node_id=snapshot.NodeId, anchor_id=snapshot.AnchorId },
+                snapshot = new { snapshot_id=snapshot.SnapshotId, payload_sha256=snapshot.PayloadSha256 },
+                summary = content.GetProperty("summary").Clone(),
+                findings = content.GetProperty("findings").Clone(),
+                improvement_suggestions = content.GetProperty("improvement_suggestions").Clone(),
+                limitations = content.GetProperty("limitations").Clone(),
+                provenance = new { provider="github_copilot_sdk", model=run.Model, configuration_sha256=run.ConfigurationSha256,
+                    prompt_template_version=run.PromptTemplateVersion, requested_at=run.RequestedAt, started_at=run.StartedAt,
+                    completed_at=completedAt.ToUniversalTime().ToString("O"), snapshot_id=snapshot.SnapshotId,
+                    snapshot_sha256=snapshot.PayloadSha256, coverage=new { included=snapshot.EvidenceIdentifiers.Count, excluded=0,
+                        content_available=snapshot.RawEvidence is { Count: > 0 } } },
+            };
+            return JsonSerializer.SerializeToUtf8Bytes(entity);
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or KeyNotFoundException)
+        { return []; }
     }
 }

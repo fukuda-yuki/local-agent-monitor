@@ -18,7 +18,7 @@ internal sealed record LocalAiResultValidationV1(LocalAiResultValidationCodeV1 C
 internal sealed record LocalAiSnapshotV1(string SnapshotId, string ScopeKind, string SessionId, string? NodeId, string AnchorId, byte[] PayloadCanonicalJson, byte[] EvidenceIndexCanonicalJson);
 internal sealed record LocalAiRunRequestV1(string SnapshotId, string ScopeKind, string SessionId, string? NodeId, string Provider, string Model, string ConfigurationSha256, string PromptTemplateVersion, DateTimeOffset RequestedAt, int? TimeoutSeconds);
 internal sealed record LocalAiRunV1(string RunId, int TimeoutSeconds);
-internal sealed record LocalAiReportV1(string RunId, string ResultId, LocalAiRunStateV1 State, DateTimeOffset CreatedAt, byte[] CanonicalResult, string Sha256);
+internal sealed record LocalAiReportV1(string RunId, string? ResultId, LocalAiRunStateV1 State, DateTimeOffset CreatedAt, byte[]? CanonicalResult, string? Sha256, string ContentState);
 internal sealed record LocalAiReportPageV1(IReadOnlyList<LocalAiReportV1> Items, string? NextCursor);
 
 internal static class LocalAiAnalysisSchemaV1
@@ -284,13 +284,13 @@ internal sealed class LocalAiAnalysisStoreV1
     {
         var take=Math.Min(limit??20,100); if(take<1) throw new ArgumentOutOfRangeException(nameof(limit)); var cursorValue=DecodeCursor(cursor);
         using var connection=Open(); using var command=connection.CreateCommand(); command.CommandText="""
-            SELECT r.run_id,x.result_id,r.state,x.created_at,x.result_json,x.result_sha256
-            FROM local_ai_runs r JOIN local_ai_results x ON x.run_id=r.run_id
+            SELECT r.run_id,x.result_id,r.state,COALESCE(x.created_at,r.completed_at),x.result_json,x.result_sha256
+            FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.run_id=r.run_id
             WHERE r.scope_kind='session' AND r.session_id=$session AND r.state IN ('succeeded','zero_findings')
-              AND ($cursor IS NULL OR (x.created_at || '|' || r.run_id) < $cursor)
-            ORDER BY x.created_at DESC,r.run_id DESC LIMIT $limit;
+              AND ($cursor IS NULL OR (COALESCE(x.created_at,r.completed_at) || '|' || r.run_id) < $cursor)
+            ORDER BY COALESCE(x.created_at,r.completed_at) DESC,r.run_id DESC LIMIT $limit;
             """; command.Parameters.AddWithValue("$session",sessionId); command.Parameters.AddWithValue("$cursor",(object?)cursorValue??DBNull.Value); command.Parameters.AddWithValue("$limit",take+1);
-        using var reader=command.ExecuteReader(); var rows=new List<LocalAiReportV1>(); while(reader.Read()) rows.Add(new(reader.GetString(0),reader.GetString(1),Parse(reader.GetString(2)),DateTimeOffset.Parse(reader.GetString(3),CultureInfo.InvariantCulture), (byte[])reader[4],reader.GetString(5)));
+        using var reader=command.ExecuteReader(); var rows=new List<LocalAiReportV1>(); while(reader.Read()) rows.Add(new(reader.GetString(0),reader.IsDBNull(1)?null:reader.GetString(1),Parse(reader.GetString(2)),DateTimeOffset.Parse(reader.GetString(3),CultureInfo.InvariantCulture),reader.IsDBNull(4)?null:(byte[])reader[4],reader.IsDBNull(5)?null:reader.GetString(5),reader.IsDBNull(4)?"expired":"retained"));
         var hasMore=rows.Count>take; if(hasMore) rows.RemoveAt(rows.Count-1); var next=hasMore?EncodeCursor(rows[^1].CreatedAt.ToString("O",CultureInfo.InvariantCulture)+"|"+rows[^1].RunId):null; return new(rows,next);
     }
 
@@ -322,7 +322,9 @@ internal sealed class LocalAiAnalysisStoreV1
     private static string Wire(LocalAiRunStateV1 value)=>value switch{LocalAiRunStateV1.Queued=>"queued",LocalAiRunStateV1.Running=>"running",LocalAiRunStateV1.Succeeded=>"succeeded",LocalAiRunStateV1.ZeroFindings=>"zero_findings",LocalAiRunStateV1.ProviderFailed=>"provider_failed",LocalAiRunStateV1.ProviderPartial=>"provider_partial",LocalAiRunStateV1.InvalidResult=>"invalid_result",LocalAiRunStateV1.InvalidEvidence=>"invalid_evidence",LocalAiRunStateV1.StaleSnapshot=>"stale_snapshot",LocalAiRunStateV1.ScopeTooLarge=>"scope_too_large",LocalAiRunStateV1.TimedOut=>"timed_out",LocalAiRunStateV1.Canceled=>"canceled",_=>throw new ArgumentOutOfRangeException(nameof(value))};
     private static LocalAiRunStateV1 Parse(string value)=>value switch{"queued"=>LocalAiRunStateV1.Queued,"running"=>LocalAiRunStateV1.Running,"succeeded"=>LocalAiRunStateV1.Succeeded,"zero_findings"=>LocalAiRunStateV1.ZeroFindings,"provider_failed"=>LocalAiRunStateV1.ProviderFailed,"provider_partial"=>LocalAiRunStateV1.ProviderPartial,"invalid_result"=>LocalAiRunStateV1.InvalidResult,"invalid_evidence"=>LocalAiRunStateV1.InvalidEvidence,"stale_snapshot"=>LocalAiRunStateV1.StaleSnapshot,"scope_too_large"=>LocalAiRunStateV1.ScopeTooLarge,"timed_out"=>LocalAiRunStateV1.TimedOut,"canceled"=>LocalAiRunStateV1.Canceled,_=>throw new InvalidOperationException("local_ai_state_invalid")};
     private static string Hash(byte[] bytes)=>Convert.ToHexStringLower(SHA256.HashData(bytes)); private static string Now()=>DateTimeOffset.UtcNow.ToString("O",CultureInfo.InvariantCulture);
-    private static string EncodeCursor(string value)=>Convert.ToBase64String(Encoding.UTF8.GetBytes(value)); private static string? DecodeCursor(string? value)=>value is null?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));
+    private static string EncodeCursor(string value)=>Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
+    private static string? DecodeCursor(string? value)
+    { try{return value is null?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));}catch(FormatException){throw new ArgumentException("local_ai_cursor_invalid");} }
     private static bool MatchesExpected(byte[] bytes,ExpectedResult expected)
     {
         using var document=JsonDocument.Parse(bytes); var root=document.RootElement; var scope=root.GetProperty("scope"); var snapshot=root.GetProperty("snapshot"); var provenance=root.GetProperty("provenance");

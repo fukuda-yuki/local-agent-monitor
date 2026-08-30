@@ -128,8 +128,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         nodes = await ReadV5NodeFacts(connection, transaction, request, nodes, skillProjection, token);
         nodes = ApplyCurrentSkillMetadata(nodes, skillProjection);
-        var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
-            ? await ReadEdges(connection, transaction, [request.NodeId!], token)
+        var edges = request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.AiProjection
+            ? await ReadEdges(connection, transaction, request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [request.NodeId!] : nodeIds, token)
             : [];
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Node && syntheticSkillTarget)
         {
@@ -137,7 +137,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             if (selected.ParentNodeId is not null)
                 edges = [.. edges, new(selected.NodeId, selected.ParentNodeId, "parent", "exact", selected.SourceOrdinal)];
         }
-        var metadata = request.Kind is LocalRepositorySessionDetailRequestKind.Summary or LocalRepositorySessionDetailRequestKind.Compare
+        var metadata = request.Kind is LocalRepositorySessionDetailRequestKind.Summary or LocalRepositorySessionDetailRequestKind.Compare or LocalRepositorySessionDetailRequestKind.AiProjection
             ? await ReadMetadata(connection, transaction, sessionId, token)
             : new Metadata([], [], null, null);
         var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
@@ -2472,6 +2472,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         {
             LocalRepositorySessionDetailRequestKind.Summary => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Compare => "session_id=$session_id AND kind IN ('skill','tool','subagent')",
+            LocalRepositorySessionDetailRequestKind.AiProjection => "session_id=$session_id",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ExecutionId is null => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
             LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND parent_node_id=$parent_node_id",
@@ -2507,6 +2508,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LocalRepositorySessionDetailRequestKind.Summary => 257,
             LocalRepositorySessionDetailRequestKind.Node => 4097,
             LocalRepositorySessionDetailRequestKind.Compare => 4097,
+            LocalRepositorySessionDetailRequestKind.AiProjection => 4097,
             _ => request.Limit + 1
         };
         var orderPrefix = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ExecutionId is null

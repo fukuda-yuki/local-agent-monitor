@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.AspNetCore.Builder;
@@ -39,6 +40,40 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
         Assert.Equal(["node-anchor", "node-child", "node-reference", "node-root"], snapshot.EvidenceIdentifiers.Order());
         Assert.DoesNotContain("node-other", snapshot.EvidenceIdentifiers);
+    }
+
+    [Fact]
+    public void NodeProjectionExcludesSpanOwnedByUnadmittedNode()
+    {
+        var input = ProjectionInput(2, 2, 0) with
+        {
+            AnchorNodeId = "node-anchor",
+            Nodes =
+            [
+                new("node-anchor", "execution-0", null, [], SanitizedSpanObservation: "trace-a:span-a"),
+                new("node-other", "execution-1", null, [], SanitizedSpanObservation: "trace-b:span-b"),
+            ],
+        };
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
+        var payload = Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson);
+        Assert.Contains("trace-a:span-a", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("trace-b:span-b", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResultEnvelopeReplacesProviderOwnedProvenanceWithApplicationFacts()
+    {
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null,
+            RequestedAt: "2026-01-01T00:00:00.0000000+00:00", StartedAt: "2026-01-01T00:00:01.0000000+00:00",
+            Model: "model-a", ConfigurationSha256: new string('a',64), PromptTemplateVersion: "template-a");
+        var provider = Encoding.UTF8.GetBytes("""{"summary":"ok","findings":[],"improvement_suggestions":[],"limitations":[],"provenance":{"completed_at":"2099-01-01T00:00:00.0000000+00:00"}}""");
+        var bytes = LocalAiResultEnvelopeV1.Compose(provider, snapshot, run, new DateTimeOffset(2026,1,1,0,0,2,TimeSpan.Zero));
+        using var document = JsonDocument.Parse(bytes);
+        var provenance = document.RootElement.GetProperty("provenance");
+        Assert.Equal("2026-01-01T00:00:02.0000000+00:00", provenance.GetProperty("completed_at").GetString());
+        Assert.Equal("model-a", provenance.GetProperty("model").GetString());
+        Assert.Equal(snapshot.SnapshotId, provenance.GetProperty("snapshot_id").GetString());
     }
 
     [Fact]
@@ -107,6 +142,22 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
 
     [Fact]
+    public async Task HostStopClosesAdmissionCancelsAndDrainsActiveProvider()
+    {
+        var runs = new LifecycleRuns(); var provider = new BlockingProvider();
+        var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), new FixedSnapshots(true), runs, provider);
+        var started = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        Assert.NotNull(started.RunId);
+        await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await application.StopAsync(CancellationToken.None);
+
+        Assert.Equal("canceled", runs.State);
+        var rejected = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        Assert.Equal("provider_unavailable", rejected.ErrorCode);
+    }
+
+    [Fact]
     public async Task RoutesAreClosedStrictNoStoreAndEnforceMethodCsrfAndCanonicalUuid()
     {
         var application = new StubApplication();
@@ -124,8 +175,61 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         using var unknownResponse = await host.SendAsync(unknown);
         Assert.Equal(HttpStatusCode.BadRequest, unknownResponse.StatusCode);
 
-        using var invalidId = await host.GetAsync("/api/local-monitor/v1/ai/runs/018F0000-0000-7000-8000-000000000001");
+        using var invalidId = await host.GetAsync("/api/local-monitor/v1/ai/runs/018f0000-0000-6000-8000-000000000001");
         Assert.Equal(HttpStatusCode.BadRequest, invalidId.StatusCode);
+    }
+
+    [Fact]
+    public async Task MutationValidationUsesSecurityThenMediaAndBodyPrecedence()
+    {
+        await using var host = await Host(new StubApplication());
+        using var crossSite = new HttpRequestMessage(HttpMethod.Post, "/api/local-monitor/v1/ai/session-runs")
+        { Content = new StringContent("{}", Encoding.UTF8, "text/plain") };
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        using var crossSiteResponse = await host.SendAsync(crossSite);
+        Assert.Equal(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+
+        using var unsupported = Request(HttpMethod.Post, "/api/local-monitor/v1/ai/session-runs", "{}");
+        unsupported.Content = new StringContent("{}", Encoding.UTF8, "text/plain");
+        using var unsupportedResponse = await host.SendAsync(unsupported);
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, unsupportedResponse.StatusCode);
+        Assert.Equal("{\"error\":\"unsupported_media_type\"}", await unsupportedResponse.Content.ReadAsStringAsync());
+
+        using var oversized = Request(HttpMethod.Post, "/api/local-monitor/v1/ai/session-runs", new string('x', 16_385));
+        using var oversizedResponse = await host.SendAsync(oversized);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversizedResponse.StatusCode);
+        Assert.Equal("{\"error\":\"request_too_large\"}", await oversizedResponse.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("{\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\"}")]
+    [InlineData("{\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"timeout_seconds\":\"60\"}")]
+    public async Task SessionMutationRejectsDuplicateAndWrongTypedJson(string body)
+    {
+        await using var host = await Host(new StubApplication());
+        using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/session-runs", body));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_request\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("/API/local-monitor/v1/ai/session-runs")]
+    [InlineData("/api/local-monitor/v1/ai/session-runs/")]
+    public async Task RouteAliasesReturnEmptyNoStoreNotFound(string path)
+    {
+        await using var host = await Host(new StubApplication());
+        using var response = await host.SendAsync(Request(HttpMethod.Post, path, $$"""{"session_id":"{{SessionId}}"}"""));
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(0, response.Content.Headers.ContentLength);
+        Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+    }
+
+    [Fact]
+    public async Task CanonicalUuidRequiresRfcVariant()
+    {
+        await using var host = await Host(new StubApplication());
+        using var response = await host.GetAsync("/api/local-monitor/v1/ai/runs/018f0000-0000-7000-0000-000000000001");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
@@ -169,7 +273,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public int Creates { get; private set; }
         public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout) { Creates++; throw new Xunit.Sdk.XunitException("must not create"); }
         public void Start(string runId) => throw new NotSupportedException();
-        public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome) => throw new NotSupportedException();
+        public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt) => throw new NotSupportedException();
         public LocalAiRunStatusV1 Fail(string runId, string errorCode) => throw new NotSupportedException();
         public LocalAiRunStatusV1 Read(string runId) => throw new NotSupportedException();
         public bool Cancel(string runId) => throw new NotSupportedException();
@@ -182,6 +286,12 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         internal LocalAiProviderRequestV1? Request { get; private set; }
         public ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
         { Request=request; return ValueTask.FromResult(LocalAiProviderOutcomeV1.Partial()); }
+    }
+    private sealed class BlockingProvider : ILocalAiProviderAdapterV1
+    {
+        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
+        { Entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return LocalAiProviderOutcomeV1.Failed(); }
     }
     private sealed class FixedSnapshots(bool current) : ILocalAiSnapshotProjectionServiceV1
     {
@@ -197,7 +307,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         internal string PersistedText { get; private set; }=string.Empty;
         public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout) { PersistedText=Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson); return Status(); }
         public void Start(string runId)=>State="running";
-        public LocalAiRunStatusV1 Complete(string runId,LocalAiProviderOutcomeV1 outcome) { State=outcome.Kind==LocalAiProviderOutcomeKindV1.Partial?"provider_partial":outcome.Kind==LocalAiProviderOutcomeKindV1.Failed?"provider_failed":"succeeded"; return Status(); }
+        public LocalAiRunStatusV1 Complete(string runId,LocalAiProviderOutcomeV1 outcome,DateTimeOffset completedAt) { State=outcome.Kind==LocalAiProviderOutcomeKindV1.Partial?"provider_partial":outcome.Kind==LocalAiProviderOutcomeKindV1.Failed?"provider_failed":"succeeded"; return Status(); }
         public LocalAiRunStatusV1 Fail(string runId,string errorCode){State=errorCode;return Status();}
         public LocalAiRunStatusV1 Read(string runId)=>Status();
         public bool Cancel(string runId){State="canceled";return true;}

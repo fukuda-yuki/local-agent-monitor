@@ -5,7 +5,8 @@ using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed record LocalAiProjectionNodeV1(
-    string NodeId, string ExecutionId, string? ParentNodeId, IReadOnlyList<string> ExactReferences, JsonElement? Metadata = null);
+    string NodeId, string ExecutionId, string? ParentNodeId, IReadOnlyList<string> ExactReferences, JsonElement? Metadata = null,
+    string? SanitizedSpanObservation = null);
 internal sealed record LocalAiRawEvidenceV1(string EvidenceId, string NodeId, LocalWorkspaceContentAvailability Locator);
 
 internal sealed record LocalAiProjectionInputV1(
@@ -46,7 +47,8 @@ internal static class LocalAiSnapshotProjectionBuilderV1
         Validate(input);
         return Build(input, "session", null, input.SessionId,
             input.Nodes.Select(static node => node.NodeId).Concat(input.SanitizedSpanObservations)
-                .Concat((input.RawEvidence ?? []).Select(static item => item.EvidenceId)), input.RawEvidence ?? []);
+                .Concat(input.Nodes.Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
+                .Concat((input.RawEvidence ?? []).Select(static item => item.EvidenceId)), input.RawEvidence ?? [], input.Nodes);
     }
 
     internal static LocalAiSnapshotProjectionV1 BuildNode(LocalAiProjectionInputV1 input)
@@ -69,7 +71,10 @@ internal static class LocalAiSnapshotProjectionBuilderV1
         foreach (var reference in admitted.SelectMany(id => byId[id].ExactReferences).Distinct(StringComparer.Ordinal).ToArray())
             if (byId.TryGetValue(reference, out var related) && related.ExecutionId == anchor.ExecutionId) admitted.Add(reference);
         var raw = (input.RawEvidence ?? []).Where(item => admitted.Contains(item.NodeId)).ToArray();
-        return Build(input, "node", anchor.NodeId, anchor.NodeId, admitted.Concat(raw.Select(static item => item.EvidenceId)), raw);
+        var admittedNodes = input.Nodes.Where(node => admitted.Contains(node.NodeId)).ToArray();
+        return Build(input, "node", anchor.NodeId, anchor.NodeId,
+            admitted.Concat(admittedNodes.Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
+                .Concat(raw.Select(static item => item.EvidenceId)), raw, admittedNodes);
     }
 
     private static void Validate(LocalAiProjectionInputV1 input)
@@ -83,7 +88,8 @@ internal static class LocalAiSnapshotProjectionBuilderV1
     }
 
     private static LocalAiSnapshotProjectionV1 Build(LocalAiProjectionInputV1 input, string kind, string? nodeId,
-        string anchorId, IEnumerable<string> identifiers, IReadOnlyList<LocalAiRawEvidenceV1> rawEvidence)
+        string anchorId, IEnumerable<string> identifiers, IReadOnlyList<LocalAiRawEvidenceV1> rawEvidence,
+        IReadOnlyList<LocalAiProjectionNodeV1> projectedNodes)
     {
         var evidence = identifiers.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var payload = LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new
@@ -99,7 +105,9 @@ internal static class LocalAiSnapshotProjectionBuilderV1
                 .OrderBy(static node => node.NodeId, StringComparer.Ordinal)
                 .Select(static node => new { node_id = node.NodeId, execution_id = node.ExecutionId,
                     parent_node_id = node.ParentNodeId, facts = node.Metadata }).ToArray(),
-            sanitized_span_observations = input.SanitizedSpanObservations.Order(StringComparer.Ordinal).ToArray(),
+            sanitized_span_observations = (kind == "session" ? input.SanitizedSpanObservations : []).Concat(projectedNodes
+                .Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
             raw_content = rawEvidence.OrderBy(static item => item.EvidenceId, StringComparer.Ordinal)
                 .Select(static item => new { evidence_id=item.EvidenceId, state=item.Locator.State,
                     selected_utf8_bytes=item.Locator.SelectedUtf8Bytes }).ToArray(),

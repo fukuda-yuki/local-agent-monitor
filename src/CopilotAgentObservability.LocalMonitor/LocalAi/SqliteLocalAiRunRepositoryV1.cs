@@ -30,13 +30,13 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
 
     public void Start(string runId) => store.TransitionRun(runId, LocalAiRunStateV1.Running, occurredAt: clock.GetUtcNow());
 
-    public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome)
+    public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt)
     {
         if (outcome.Kind == LocalAiProviderOutcomeKindV1.Partial)
             store.TransitionRun(runId, LocalAiRunStateV1.ProviderPartial, "provider_partial", clock.GetUtcNow());
         else if (outcome.Kind == LocalAiProviderOutcomeKindV1.Failed)
             store.TransitionRun(runId, LocalAiRunStateV1.ProviderFailed, "provider_failed", clock.GetUtcNow());
-        else store.Complete(runId, outcome.ResultJson ?? [], CompletionTime(outcome.ResultJson));
+        else store.Complete(runId, outcome.ResultJson ?? [], completedAt);
         return Read(runId);
     }
 
@@ -76,17 +76,16 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
             reader.GetString(9),reader.GetString(10),reader.GetString(11));
     }
 
-    public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentRevision)
+    public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256)
     {
         var page = store.GetSessionReports(sessionId, limit, cursor);
         using var connection = Open(databasePath); var rows = new List<LocalAiReportItemResponseV1>(page.Items.Count);
         foreach (var report in page.Items)
         {
-            using var command = connection.CreateCommand(); command.CommandText = "SELECT s.payload_json FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE r.run_id=$run;";
-            command.Parameters.AddWithValue("$run", report.RunId); var payload = (byte[])command.ExecuteScalar()!;
-            using var document = JsonDocument.Parse(payload); var revision = document.RootElement.GetProperty("revision").GetString();
-            rows.Add(new(report.RunId, Wire(report.State), report.CanonicalResult,
-                !string.Equals(revision, currentRevision, StringComparison.Ordinal)));
+            using var command = connection.CreateCommand(); command.CommandText = "SELECT s.payload_sha256 FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE r.run_id=$run;";
+            command.Parameters.AddWithValue("$run", report.RunId); var payloadHash = (string)command.ExecuteScalar()!;
+            rows.Add(new(report.RunId, Wire(report.State), report.CanonicalResult, report.ContentState,
+                !string.Equals(payloadHash, currentPayloadSha256, StringComparison.Ordinal)));
         }
         return new(rows, page.NextCursor);
     }
@@ -94,13 +93,4 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
     private static string Wire(LocalAiRunStateV1 state) => state switch
     { LocalAiRunStateV1.Succeeded=>"succeeded", LocalAiRunStateV1.ZeroFindings=>"zero_findings", _=>throw new ArgumentOutOfRangeException(nameof(state)) };
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=path,Pooling=false}.ToString()); connection.Open(); return connection; }
-    private DateTimeOffset CompletionTime(byte[]? result)
-    {
-        try
-        {
-            using var document=JsonDocument.Parse(result!); var value=document.RootElement.GetProperty("provenance").GetProperty("completed_at").GetString();
-            return DateTimeOffset.Parse(value!,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind);
-        }
-        catch { return clock.GetUtcNow(); }
-    }
 }
