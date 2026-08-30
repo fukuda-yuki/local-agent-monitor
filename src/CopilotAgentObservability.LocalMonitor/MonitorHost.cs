@@ -540,7 +540,7 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
-        builder.Services.AddHostedService(_ => new LocalAiNodeCleanupHostedService(options.DatabasePath,timeProvider));
+        builder.Services.AddHostedService(_ => new LocalAiTransientCleanupHostedService(options.DatabasePath,timeProvider));
         if (!options.SanitizedOnly)
         {
             var repositoryExistenceAuthority = SqliteLocalRepositoryTargetExistenceAuthority.Instance;

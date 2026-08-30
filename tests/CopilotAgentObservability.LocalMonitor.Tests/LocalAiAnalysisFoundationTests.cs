@@ -147,8 +147,8 @@ public sealed class LocalAiAnalysisFoundationTests
         sessionStore.InsertSnapshot(Snapshot(sessionSnapshotId));
         var sessionRun = sessionStore.CreateRun(Request(sessionSnapshotId) with { RequestedAt = createdAt });
 
-        Assert.Equal(0, store.DeleteExpiredNodeRuns(createdAt.AddHours(24).AddTicks(-1)));
-        Assert.Equal(3, store.DeleteExpiredNodeRuns(createdAt.AddHours(24)));
+        Assert.Equal(0, store.DeleteExpiredTransientRuns(createdAt.AddHours(24).AddTicks(-1)));
+        Assert.Equal(3, store.DeleteExpiredTransientRuns(createdAt.AddHours(24)));
         using var connection = database.Open();
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + run.RunId + "';"));
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id IN ('" + queued.RunId + "','" + running.RunId + "');"));
@@ -228,6 +228,44 @@ public sealed class LocalAiAnalysisFoundationTests
         Assert.Equal(2L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs;"));
         Assert.Equal("2026-08-31T01:00:00.0000000+00:00", Text(connection, $"SELECT expires_at FROM local_ai_snapshots WHERE snapshot_id='{NodeSnapshotId}';"));
         Assert.Equal(1L, Scalar(connection, $"SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='{SnapshotId}' AND expires_at IS NULL AND payload_json=x'7B7D';"));
+    }
+
+    [Fact]
+    public void Schema_MigratesCompletedNodeResultWithRunExpiryAndPreservesSevenDigitTicks()
+    {
+        using var database=new Database();using var connection=database.Open();using(var transaction=connection.BeginTransaction()){MonitorSchemaMigrator.ApplyBaseSchema(connection,transaction);transaction.Commit();}_=RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);CreateVersionOneSchema(connection);
+        const string created="2026-08-30T01:00:00.1234567+00:00",started="2026-08-30T01:00:01.1234567+00:00",completed="2026-08-30T01:00:02.1234567+00:00";var owner=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));var payload="{\"value\":1}"u8.ToArray();var evidence="{\"evidence_refs\":[\"ev-1\"]}"u8.ToArray();var result=Result(scope:Scope("node","node-1"),snapshotId:NodeSnapshotId,requestedAt:created,startedAt:started,completedAt:completed);var canonical=LocalAiResultValidatorV1.Validate(result,["ev-1"]).CanonicalBytes!;var resultId=Guid.CreateVersion7().ToString();
+        using(var command=connection.CreateCommand()){command.CommandText="INSERT INTO local_ai_snapshots VALUES($snapshot,'node',$session,'node-1','node-1',$payload,$payload_hash,$evidence,$evidence_hash,$owner,$created); INSERT INTO local_ai_runs VALUES($run,$snapshot,'node',$session,'node-1','succeeded','github_copilot_sdk','synthetic-model',$configuration,'local-ai-analysis.prompt.v1',$created,$started,$completed,60,NULL,$result,$created,$completed); INSERT INTO local_ai_results VALUES($result,$run,$json,$result_hash,$owner,$completed);";command.Parameters.AddWithValue("$snapshot",NodeSnapshotId);command.Parameters.AddWithValue("$session",SessionId);command.Parameters.AddWithValue("$payload",payload);command.Parameters.AddWithValue("$payload_hash",Convert.ToHexStringLower(SHA256.HashData(payload)));command.Parameters.AddWithValue("$evidence",evidence);command.Parameters.AddWithValue("$evidence_hash",Convert.ToHexStringLower(SHA256.HashData(evidence)));command.Parameters.AddWithValue("$owner",Convert.FromHexString(owner));command.Parameters.AddWithValue("$created",created);command.Parameters.AddWithValue("$run",RegeneratedSnapshotId);command.Parameters.AddWithValue("$configuration",Hash64);command.Parameters.AddWithValue("$started",started);command.Parameters.AddWithValue("$completed",completed);command.Parameters.AddWithValue("$result",resultId);command.Parameters.AddWithValue("$json",canonical);command.Parameters.AddWithValue("$result_hash",Convert.ToHexStringLower(SHA256.HashData(canonical)));command.ExecuteNonQuery();}
+
+        LocalAiAnalysisSchemaV1.Ensure(connection);
+
+        Assert.Equal("2026-08-31T01:00:00.1234567+00:00",Text(connection,$"SELECT expires_at FROM local_ai_runs WHERE run_id='{RegeneratedSnapshotId}';"));
+        Assert.Equal(Text(connection,$"SELECT expires_at FROM local_ai_runs WHERE run_id='{RegeneratedSnapshotId}';"),Text(connection,$"SELECT expires_at FROM local_ai_results WHERE result_id='{resultId}';"));
+        using var validation=connection.BeginTransaction();Assert.True(SqliteRuntimeBackupService.ValidateLocalAiRows(connection,validation));validation.Commit();
+    }
+
+    [Fact]
+    public void TransientSnapshotRetry_AfterClockAdvanceRemainsIdempotent()
+    {
+        var time=new MutableTimeProvider(DateTimeOffset.Parse("2026-08-30T01:00:00Z"));using var database=new Database();var store=database.NodeStore(time);var snapshot=Snapshot(NodeSnapshotId,"node","node-1");store.InsertSnapshot(snapshot);time.Advance(TimeSpan.FromHours(1));
+
+        store.InsertSnapshot(snapshot);
+
+        Assert.Equal(1L,database.Scalar($"SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='{NodeSnapshotId}';"));
+        Assert.Equal("2026-08-31T01:00:00.0000000+00:00",database.Text($"SELECT expires_at FROM local_ai_snapshots WHERE snapshot_id='{NodeSnapshotId}';"));
+    }
+
+    [Fact]
+    public void Schema_CorruptVersionOneGraphRollsBackWithoutPartialMigration()
+    {
+        using var database=new Database();using var connection=database.Open();CreateVersionOneSchema(connection);var owner=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));var payloadHash=Convert.ToHexStringLower(SHA256.HashData("{}"u8));var evidenceHash=Convert.ToHexStringLower(SHA256.HashData("{\"evidence_refs\":[]}"u8));
+        Execute(connection,$"INSERT INTO local_ai_snapshots VALUES('{NodeSnapshotId}','node','{SessionId}','node-1','node-1',x'7B7D','{payloadHash}',x'7B2265766964656E63655F72656673223A5B5D7D','{evidenceHash}',x'{owner}','2026-08-30T01:00:00.0000000+00:00'); INSERT INTO local_ai_runs VALUES('{RegeneratedSnapshotId}','{NodeSnapshotId}','session','{SessionId}',NULL,'queued','github_copilot_sdk','model','{Hash64}','template','2026-08-30T01:00:00.0000000+00:00',NULL,NULL,60,NULL,NULL,'2026-08-30T01:00:00.0000000+00:00','2026-08-30T01:00:00.0000000+00:00');");
+
+        Assert.Throws<InvalidOperationException>(()=>LocalAiAnalysisSchemaV1.Ensure(connection));
+
+        Assert.Equal(1L,Scalar(connection,"SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
+        Assert.Equal(0L,Scalar(connection,"SELECT COUNT(*) FROM pragma_table_info('local_ai_snapshots') WHERE name='expires_at';"));
+        Assert.Equal(1L,Scalar(connection,"SELECT COUNT(*) FROM local_ai_runs;"));
     }
 
     [Fact]
@@ -391,14 +429,14 @@ public sealed class LocalAiAnalysisFoundationTests
     private static LocalAiSnapshotV1 Snapshot(string id=SnapshotId,string kind="session",string? node=null)=>new(id,kind,SessionId,node,node??SessionId,"{\"value\":1}"u8.ToArray(),"{\"evidence_refs\":[\"ev-1\"]}"u8.ToArray());
     private static LocalAiRunRequestV1 Request(string snapshotId=SnapshotId,string kind="session",string? node=null)=>new(snapshotId,kind,SessionId,node,"github_copilot_sdk","synthetic-model",Hash64,"local-ai-analysis.prompt.v1",DateTimeOffset.Parse("2026-08-30T01:00:00Z"),null);
     private static string Scope(string kind="session",string? node=null)=>$"{{\"anchor_id\":\"{node??SessionId}\",\"kind\":\"{kind}\",\"node_id\":{(node is null?"null":"\""+node+"\"")},\"session_id\":\"{SessionId}\"}}";
-    private static byte[] Result(string evidenceRef="ev-1",bool zero=false,string? scope=null,string snapshotId=SnapshotId,string targetKind="skill",string configurationHash=Hash64,string summary="synthetic",string provenanceExtra="",string provider="github_copilot_sdk",string startedAt="2026-08-30T01:00:01.0000000+00:00",string completedAt="2026-08-30T01:00:02.0000000+00:00",string limitations="[]",string? findingEvidenceRefs=null)=>Encoding.UTF8.GetBytes("{\"findings\":"+(zero?"[]":"[{\"evidence_refs\":"+(findingEvidenceRefs??"[\""+evidenceRef+"\"]")+",\"evidence_state\":\"supported\",\"explanation\":\"explanation\",\"finding_id\":\"f-1\",\"limitation\":\"none\",\"title\":\"title\"}]") + ",\"improvement_suggestions\":[{\"concrete_change\":\"change\",\"evidence_refs\":[\""+evidenceRef+"\"],\"expected_effect\":\"effect\",\"rationale\":\"reason\",\"risks_or_limitations\":\"risk\",\"suggestion_id\":\"s-1\",\"target_kind\":\""+targetKind+"\",\"target_label\":\"target\"}],\"limitations\":"+limitations+",\"provenance\":{\"completed_at\":\""+completedAt+"\",\"configuration_sha256\":\""+configurationHash+"\",\"coverage\":{\"content_available\":true,\"excluded\":0,\"included\":1},\"model\":\"synthetic-model\",\"prompt_template_version\":\"local-ai-analysis.prompt.v1\",\"provider\":\""+provider+"\",\"requested_at\":\"2026-08-30T01:00:00.0000000+00:00\",\"snapshot_id\":\""+snapshotId+"\",\"snapshot_sha256\":\""+PayloadHash+"\",\"started_at\":\""+startedAt+"\""+provenanceExtra+"},\"scope\":"+(scope??Scope())+",\"snapshot\":{\"payload_sha256\":\""+PayloadHash+"\",\"snapshot_id\":\""+snapshotId+"\"},\"summary\":\""+summary+"\"}");
+    private static byte[] Result(string evidenceRef="ev-1",bool zero=false,string? scope=null,string snapshotId=SnapshotId,string targetKind="skill",string configurationHash=Hash64,string summary="synthetic",string provenanceExtra="",string provider="github_copilot_sdk",string requestedAt="2026-08-30T01:00:00.0000000+00:00",string startedAt="2026-08-30T01:00:01.0000000+00:00",string completedAt="2026-08-30T01:00:02.0000000+00:00",string limitations="[]",string? findingEvidenceRefs=null)=>Encoding.UTF8.GetBytes("{\"findings\":"+(zero?"[]":"[{\"evidence_refs\":"+(findingEvidenceRefs??"[\""+evidenceRef+"\"]")+",\"evidence_state\":\"supported\",\"explanation\":\"explanation\",\"finding_id\":\"f-1\",\"limitation\":\"none\",\"title\":\"title\"}]") + ",\"improvement_suggestions\":[{\"concrete_change\":\"change\",\"evidence_refs\":[\""+evidenceRef+"\"],\"expected_effect\":\"effect\",\"rationale\":\"reason\",\"risks_or_limitations\":\"risk\",\"suggestion_id\":\"s-1\",\"target_kind\":\""+targetKind+"\",\"target_label\":\"target\"}],\"limitations\":"+limitations+",\"provenance\":{\"completed_at\":\""+completedAt+"\",\"configuration_sha256\":\""+configurationHash+"\",\"coverage\":{\"content_available\":true,\"excluded\":0,\"included\":1},\"model\":\"synthetic-model\",\"prompt_template_version\":\"local-ai-analysis.prompt.v1\",\"provider\":\""+provider+"\",\"requested_at\":\""+requestedAt+"\",\"snapshot_id\":\""+snapshotId+"\",\"snapshot_sha256\":\""+PayloadHash+"\",\"started_at\":\""+startedAt+"\""+provenanceExtra+"},\"scope\":"+(scope??Scope())+",\"snapshot\":{\"payload_sha256\":\""+PayloadHash+"\",\"snapshot_id\":\""+snapshotId+"\"},\"summary\":\""+summary+"\"}");
     private static string NestedEvidenceRefs(int depth)=>new string('[',depth)+"0"+new string(']',depth);
     private const string SnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54410",RegeneratedSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54412",NodeSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54413",FreshOrphanSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54414",SessionId="0198f5c0-1b89-7d41-8c2f-4ecba0b54411",Hash64="1111111111111111111111111111111111111111111111111111111111111111";
     private static readonly string PayloadHash=Convert.ToHexStringLower(SHA256.HashData("{\"value\":1}"u8));
     private static readonly DateTimeOffset StartedAt=DateTimeOffset.Parse("2026-08-30T01:00:01Z"),CompletedAt=DateTimeOffset.Parse("2026-08-30T01:00:02Z");
     private static long Scalar(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return Convert.ToInt64(q.ExecuteScalar());} private static string Text(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return(string)q.ExecuteScalar()!;} private static void Execute(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}
     private static void CreateVersionOneSchema(SqliteConnection connection) => Execute(connection, """
-        CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);
         INSERT INTO schema_version VALUES('local_ai_analysis',1);
         CREATE TABLE local_ai_snapshots(snapshot_id TEXT PRIMARY KEY,scope_kind TEXT NOT NULL CHECK(scope_kind IN ('session','node')),session_id TEXT NOT NULL,node_id TEXT,anchor_id TEXT NOT NULL,payload_json BLOB,payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256=lower(payload_sha256)),evidence_index_json BLOB,evidence_index_sha256 TEXT NOT NULL CHECK(length(evidence_index_sha256)=64 AND evidence_index_sha256=lower(evidence_index_sha256)),retention_owner_token BLOB NOT NULL CHECK(length(retention_owner_token)=32),created_at TEXT NOT NULL,CHECK((scope_kind='session' AND node_id IS NULL) OR (scope_kind='node' AND node_id IS NOT NULL)),CHECK((payload_json IS NULL)=(evidence_index_json IS NULL)));
         CREATE TABLE local_ai_runs(run_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL REFERENCES local_ai_snapshots(snapshot_id),scope_kind TEXT NOT NULL,session_id TEXT NOT NULL,node_id TEXT,state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','zero_findings','provider_failed','provider_partial','invalid_result','invalid_evidence','stale_snapshot','scope_too_large','timed_out','canceled')),provider TEXT NOT NULL,model TEXT NOT NULL,configuration_sha256 TEXT NOT NULL CHECK(length(configuration_sha256)=64 AND configuration_sha256=lower(configuration_sha256)),prompt_template_version TEXT NOT NULL,requested_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 600),error_code TEXT,result_id TEXT UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);

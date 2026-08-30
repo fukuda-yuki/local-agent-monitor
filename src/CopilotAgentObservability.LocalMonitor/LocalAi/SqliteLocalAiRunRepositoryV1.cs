@@ -20,7 +20,7 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
         return new(databasePath, model, configurationSha256, timeProvider, retentionCatalog);
     }
 
-    internal int CleanupExpiredNodes() => store.DeleteExpiredTransientRuns(clock.GetUtcNow());
+    internal int CleanupExpiredTransientRuns() => store.DeleteExpiredTransientRuns(clock.GetUtcNow());
 
     public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout)
     {

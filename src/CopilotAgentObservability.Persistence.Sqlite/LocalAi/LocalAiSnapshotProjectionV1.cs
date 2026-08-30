@@ -25,7 +25,7 @@ internal sealed record LocalAiProjectionContributionV1(LocalAiProjectionInputV1 
 internal sealed record LocalAiSnapshotProjectionV1(
     string SnapshotId,
     string ScopeKind,
-    string SessionId,
+    string? SessionId,
     string? NodeId,
     string AnchorId,
     string Revision,

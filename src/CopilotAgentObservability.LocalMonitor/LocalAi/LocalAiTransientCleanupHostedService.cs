@@ -2,7 +2,7 @@ using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
-internal sealed class LocalAiNodeCleanupHostedService(
+internal sealed class LocalAiTransientCleanupHostedService(
     string databasePath,
     TimeProvider? timeProvider = null) : BackgroundService
 {

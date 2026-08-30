@@ -19,12 +19,13 @@ public sealed class LocalAiProductionStackTests
     public void ResultEnvelope_ComposesExactComparisonScope()
     {
         const string repositoryId="0198f5c0-1b89-7d41-8c2f-4ecba0b54431",comparisonId="0198f5c0-1b89-7d41-8c2f-4ecba0b54432",snapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54433";
-        var snapshot=new LocalAiSnapshotProjectionV1(snapshotId,"comparison",null!,null,comparisonId,"revision","{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),RepositoryId:repositoryId,ComparisonId:comparisonId,ExpiresAt:DateTimeOffset.Parse("2026-08-30T04:00:00Z"));
+        var snapshot=new LocalAiSnapshotProjectionV1(snapshotId,"comparison",null,null,comparisonId,"revision","{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),RepositoryId:repositoryId,ComparisonId:comparisonId,ExpiresAt:DateTimeOffset.Parse("2026-08-30T04:00:00Z"));
         var run=new LocalAiRunStatusV1("0198f5c0-1b89-7d41-8c2f-4ecba0b54434","running","comparison",null,null,null,RequestedAt:"2026-08-30T01:00:00.0000000+00:00",StartedAt:"2026-08-30T01:00:01.0000000+00:00",Model:"model",ConfigurationSha256:new string('a',64),PromptTemplateVersion:"template",RepositoryId:repositoryId,ComparisonId:comparisonId);
 
         using var document=JsonDocument.Parse(LocalAiResultEnvelopeV1.Compose("{\"summary\":\"s\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}"u8.ToArray(),snapshot,run,DateTimeOffset.Parse("2026-08-30T01:00:02Z")));
 
         Assert.Equal(new[]{"anchor_id","comparison_id","kind","repository_id"},document.RootElement.GetProperty("scope").EnumerateObject().Select(item=>item.Name).Order().ToArray());
+        Assert.Null(snapshot.SessionId);
         Assert.Equal(comparisonId,document.RootElement.GetProperty("scope").GetProperty("comparison_id").GetString());
     }
 

@@ -172,6 +172,8 @@ internal static class LocalAiAnalysisSchemaV1
     }
     private static void MigrateVersionOne(SqliteConnection connection, SqliteTransaction transaction)
     {
+        if (!ValidateVersionOneRows(connection,transaction)) Reject();
+        connection.CreateFunction<string,string>("local_ai_add_24h",static value=>DateTimeOffset.ParseExact(value,"O",CultureInfo.InvariantCulture,DateTimeStyles.None).AddHours(24).ToString("O",CultureInfo.InvariantCulture),isDeterministic:true);
         foreach (var name in new[] { "local_ai_snapshots_update_rejected", "local_ai_results_update_rejected", "local_ai_terminal_run_update_rejected" })
             Execute(connection, transaction, $"DROP TRIGGER {name};");
         Execute(connection, transaction, "DROP INDEX IX_local_ai_session_reports;");
@@ -182,24 +184,57 @@ internal static class LocalAiAnalysisSchemaV1
         Execute(connection, transaction, """
             INSERT INTO local_ai_snapshots(snapshot_id,scope_kind,session_id,node_id,repository_id,comparison_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256,retention_owner_token,created_at,expires_at)
             SELECT snapshot_id,scope_kind,session_id,node_id,NULL,NULL,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256,retention_owner_token,created_at,
-              CASE scope_kind WHEN 'node' THEN strftime('%Y-%m-%dT%H:%M:%f0000+00:00',created_at,'+24 hours') END
+              CASE scope_kind WHEN 'node' THEN local_ai_add_24h(created_at) END
             FROM local_ai_snapshots_v1;
             INSERT INTO local_ai_runs(run_id,snapshot_id,scope_kind,session_id,node_id,repository_id,comparison_id,state,provider,model,configuration_sha256,prompt_template_version,requested_at,started_at,completed_at,timeout_seconds,error_code,result_id,created_at,updated_at,expires_at)
             SELECT run_id,snapshot_id,scope_kind,session_id,node_id,NULL,NULL,state,provider,model,configuration_sha256,prompt_template_version,requested_at,started_at,completed_at,timeout_seconds,error_code,result_id,created_at,updated_at,
-              CASE scope_kind WHEN 'node' THEN strftime('%Y-%m-%dT%H:%M:%f0000+00:00',requested_at,'+24 hours') END
+              CASE scope_kind WHEN 'node' THEN local_ai_add_24h(requested_at) END
             FROM local_ai_runs_v1;
             INSERT INTO local_ai_results(result_id,run_id,result_json,result_sha256,retention_owner_token,created_at,expires_at)
-            SELECT x.result_id,x.run_id,x.result_json,x.result_sha256,x.retention_owner_token,x.created_at,
-              CASE r.scope_kind WHEN 'node' THEN strftime('%Y-%m-%dT%H:%M:%f0000+00:00',x.created_at,'+24 hours') END
-            FROM local_ai_results_v1 x JOIN local_ai_runs_v1 r ON r.run_id=x.run_id;
-            DROP TABLE local_ai_results_v1;
-            DROP TABLE local_ai_runs_v1;
-            DROP TABLE local_ai_snapshots_v1;
+            SELECT x.result_id,x.run_id,x.result_json,x.result_sha256,x.retention_owner_token,x.created_at,r.expires_at
+            FROM local_ai_results_v1 x JOIN local_ai_runs r ON r.run_id=x.run_id;
             """);
+        if(!ValidateMigratedRows(connection,transaction))Reject();
+        Execute(connection,transaction,"DROP TABLE local_ai_results_v1; DROP TABLE local_ai_runs_v1; DROP TABLE local_ai_snapshots_v1;");
         foreach (var definition in AdditionalDefinitions) Execute(connection, transaction, definition + ";");
         Execute(connection, transaction, "UPDATE schema_version SET version=2 WHERE component='local_ai_analysis' AND version=1;");
         if (!HasExactSchema(connection, transaction)) Reject();
     }
+    private static bool ValidateVersionOneRows(SqliteConnection connection,SqliteTransaction transaction)
+    {
+        using(var invalid=connection.CreateCommand()){invalid.Transaction=transaction;invalid.CommandText="""
+            SELECT EXISTS(
+              SELECT 1 FROM local_ai_runs r LEFT JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id
+              WHERE s.snapshot_id IS NULL OR r.scope_kind<>s.scope_kind OR r.session_id<>s.session_id OR r.node_id IS NOT s.node_id
+                OR (r.state='queued' AND (r.started_at IS NOT NULL OR r.completed_at IS NOT NULL OR r.error_code IS NOT NULL OR r.result_id IS NOT NULL))
+                OR (r.state='running' AND (r.started_at IS NULL OR r.completed_at IS NOT NULL OR r.error_code IS NOT NULL OR r.result_id IS NOT NULL))
+                OR (r.state IN('succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code IS NOT NULL OR r.result_id IS NULL))
+                OR (r.state NOT IN('queued','running','succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code<>r.state OR r.result_id IS NOT NULL))
+              UNION ALL SELECT 1 FROM local_ai_results x LEFT JOIN local_ai_runs r ON r.run_id=x.run_id
+              WHERE r.run_id IS NULL OR r.result_id<>x.result_id OR r.state NOT IN('succeeded','zero_findings') OR x.created_at<>r.completed_at
+              UNION ALL SELECT 1 FROM local_ai_runs r WHERE r.result_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_ai_results x WHERE x.result_id=r.result_id AND x.run_id=r.run_id)
+            );
+            """;if(Convert.ToInt64(invalid.ExecuteScalar(),CultureInfo.InvariantCulture)!=0)return false;}
+        using(var snapshots=connection.CreateCommand()){snapshots.Transaction=transaction;snapshots.CommandText="SELECT snapshot_id,scope_kind,session_id,node_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256,created_at FROM local_ai_snapshots;";using var reader=snapshots.ExecuteReader();while(reader.Read()){var node=reader.IsDBNull(3)?null:reader.GetString(3);if(!CanonicalTimestamp(reader.GetString(9))||!LocalAiAnalysisStoreV1.ValidateStoredSnapshotMetadata(reader.GetString(0),reader.GetString(1),reader.GetString(2),node,reader.GetString(4),reader.GetString(6),reader.GetString(8)))return false;if(!reader.IsDBNull(5)&&!LocalAiAnalysisStoreV1.ValidateStoredSnapshot(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),node,reader.GetString(4),(byte[])reader[5],reader.GetString(6),(byte[])reader[7],reader.GetString(8))))return false;}}
+        using(var runs=connection.CreateCommand()){runs.Transaction=transaction;runs.CommandText="SELECT run_id,requested_at,started_at,completed_at,created_at,updated_at FROM local_ai_runs;";using var reader=runs.ExecuteReader();while(reader.Read()){if(!LocalAiResultValidatorV1.CanonicalUuid7(reader.GetString(0)))return false;for(var i=1;i<6;i++)if(!reader.IsDBNull(i)&&!CanonicalTimestamp(reader.GetString(i)))return false;}}
+        using(var results=connection.CreateCommand()){results.Transaction=transaction;results.CommandText="SELECT result_id,result_json,result_sha256 FROM local_ai_results;";using var reader=results.ExecuteReader();while(reader.Read()){if(!LocalAiResultValidatorV1.CanonicalUuid7(reader.GetString(0))||!reader.IsDBNull(1)&&Convert.ToHexStringLower(SHA256.HashData((byte[])reader[1]))!=reader.GetString(2))return false;}}
+        return true;
+    }
+    private static bool ValidateMigratedRows(SqliteConnection connection,SqliteTransaction transaction)
+    {
+        using var command=connection.CreateCommand();command.Transaction=transaction;command.CommandText="""
+            SELECT
+              (SELECT COUNT(*) FROM local_ai_snapshots)=(SELECT COUNT(*) FROM local_ai_snapshots_v1)
+              AND (SELECT COUNT(*) FROM local_ai_runs)=(SELECT COUNT(*) FROM local_ai_runs_v1)
+              AND (SELECT COUNT(*) FROM local_ai_results)=(SELECT COUNT(*) FROM local_ai_results_v1)
+              AND NOT EXISTS(SELECT 1 FROM local_ai_runs r LEFT JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE s.snapshot_id IS NULL OR r.scope_kind<>s.scope_kind OR r.session_id IS NOT s.session_id OR r.node_id IS NOT s.node_id)
+              AND NOT EXISTS(SELECT 1 FROM local_ai_results x LEFT JOIN local_ai_runs r ON r.run_id=x.run_id WHERE r.run_id IS NULL OR r.result_id<>x.result_id OR x.expires_at IS NOT r.expires_at)
+              AND NOT EXISTS(SELECT 1 FROM local_ai_snapshots n JOIN local_ai_snapshots_v1 o USING(snapshot_id) WHERE n.scope_kind<>o.scope_kind OR n.session_id<>o.session_id OR n.node_id IS NOT o.node_id OR n.anchor_id<>o.anchor_id OR n.payload_json IS NOT o.payload_json OR n.payload_sha256<>o.payload_sha256 OR n.evidence_index_json IS NOT o.evidence_index_json OR n.evidence_index_sha256<>o.evidence_index_sha256 OR n.retention_owner_token<>o.retention_owner_token OR n.created_at<>o.created_at)
+              AND NOT EXISTS(SELECT 1 FROM local_ai_runs n JOIN local_ai_runs_v1 o USING(run_id) WHERE n.snapshot_id<>o.snapshot_id OR n.scope_kind<>o.scope_kind OR n.session_id<>o.session_id OR n.node_id IS NOT o.node_id OR n.state<>o.state OR n.provider<>o.provider OR n.model<>o.model OR n.configuration_sha256<>o.configuration_sha256 OR n.prompt_template_version<>o.prompt_template_version OR n.requested_at<>o.requested_at OR n.started_at IS NOT o.started_at OR n.completed_at IS NOT o.completed_at OR n.timeout_seconds<>o.timeout_seconds OR n.error_code IS NOT o.error_code OR n.result_id IS NOT o.result_id OR n.created_at<>o.created_at OR n.updated_at<>o.updated_at)
+              AND NOT EXISTS(SELECT 1 FROM local_ai_results n JOIN local_ai_results_v1 o USING(result_id) WHERE n.run_id<>o.run_id OR n.result_json IS NOT o.result_json OR n.result_sha256<>o.result_sha256 OR n.retention_owner_token<>o.retention_owner_token OR n.created_at<>o.created_at);
+            """;return Convert.ToInt64(command.ExecuteScalar(),CultureInfo.InvariantCulture)==1;
+    }
+    private static bool CanonicalTimestamp(string value)=>DateTimeOffset.TryParseExact(value,"O",CultureInfo.InvariantCulture,DateTimeStyles.None,out var parsed)&&parsed.ToString("O",CultureInfo.InvariantCulture)==value;
     private static string Normalize(string sql)
     {
         var normalized=new StringBuilder(sql.Length); var previousWord=false;
@@ -389,8 +424,8 @@ internal sealed class LocalAiAnalysisStoreV1
         command.Parameters.Add("$payload", SqliteType.Blob).Value=payload; command.Parameters.AddWithValue("$payloadHash", Hash(payload)); command.Parameters.Add("$evidence",SqliteType.Blob).Value=evidence;
         command.Parameters.AddWithValue("$evidenceHash",Hash(evidence)); command.Parameters.Add("$owner",SqliteType.Blob).Value=ownerToken; command.Parameters.AddWithValue("$created",created.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture));
         if (command.ExecuteNonQuery() == 1) { if(snapshot.ScopeKind=="session") retentionCatalog?.RegisterLocalAiRaw(connection,transaction,"snapshot",snapshot.SnapshotId,created,ownerToken); transaction.Commit(); return; }
-        using var read=connection.CreateCommand(); read.Transaction=transaction; read.CommandText="SELECT scope_kind,session_id,node_id,repository_id,comparison_id,anchor_id,payload_json,evidence_index_json,expires_at FROM local_ai_snapshots WHERE snapshot_id=$id;"; read.Parameters.AddWithValue("$id",snapshot.SnapshotId);
-        using var reader=read.ExecuteReader(); if (!reader.Read() || reader.GetString(0)!=snapshot.ScopeKind || (reader.IsDBNull(1)?null:reader.GetString(1))!=snapshot.SessionId || (reader.IsDBNull(2)?null:reader.GetString(2))!=snapshot.NodeId || (reader.IsDBNull(3)?null:reader.GetString(3))!=snapshot.RepositoryId || (reader.IsDBNull(4)?null:reader.GetString(4))!=snapshot.ComparisonId || reader.GetString(5)!=snapshot.AnchorId || reader.IsDBNull(6) || reader.IsDBNull(7) || !((byte[])reader[6]).SequenceEqual(payload) || !((byte[])reader[7]).SequenceEqual(evidence) || (reader.IsDBNull(8)?null:reader.GetString(8))!=(expires is null?null:expires.Value.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture))) throw new InvalidOperationException("local_ai_snapshot_conflict"); reader.Close(); transaction.Commit();
+        using var read=connection.CreateCommand(); read.Transaction=transaction; read.CommandText="SELECT scope_kind,session_id,node_id,repository_id,comparison_id,anchor_id,payload_json,evidence_index_json,created_at,expires_at FROM local_ai_snapshots WHERE snapshot_id=$id;"; read.Parameters.AddWithValue("$id",snapshot.SnapshotId);
+        using var reader=read.ExecuteReader(); if(!reader.Read())throw new InvalidOperationException("local_ai_snapshot_conflict");var storedCreated=DateTimeOffset.Parse(reader.GetString(8),CultureInfo.InvariantCulture);var expectedStoredExpiry=identity.Kind switch{LocalAiScopeKindV1.Session=>(DateTimeOffset?)null,LocalAiScopeKindV1.Comparison=>snapshot.ExpiresAt is { } bound?Min(storedCreated.AddHours(24),bound):throw new ArgumentException("local_ai_comparison_expiry_required"),_=>storedCreated.AddHours(24)};if(reader.GetString(0)!=snapshot.ScopeKind || (reader.IsDBNull(1)?null:reader.GetString(1))!=snapshot.SessionId || (reader.IsDBNull(2)?null:reader.GetString(2))!=snapshot.NodeId || (reader.IsDBNull(3)?null:reader.GetString(3))!=snapshot.RepositoryId || (reader.IsDBNull(4)?null:reader.GetString(4))!=snapshot.ComparisonId || reader.GetString(5)!=snapshot.AnchorId || reader.IsDBNull(6) || reader.IsDBNull(7) || !((byte[])reader[6]).SequenceEqual(payload) || !((byte[])reader[7]).SequenceEqual(evidence) || (reader.IsDBNull(9)?null:reader.GetString(9))!=(expectedStoredExpiry is null?null:expectedStoredExpiry.Value.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture))) throw new InvalidOperationException("local_ai_snapshot_conflict"); reader.Close(); transaction.Commit();
     }
 
     internal LocalAiRunV1 CreateRun(LocalAiRunRequestV1 request)
@@ -440,8 +475,6 @@ internal sealed class LocalAiAnalysisStoreV1
         using var update=connection.CreateCommand(); update.Transaction=transaction; update.CommandText="UPDATE local_ai_runs SET state=$state,completed_at=$now,result_id=$result,error_code=NULL,updated_at=$now WHERE run_id=$run AND state='running' AND completed_at IS NULL AND result_id IS NULL;"; update.Parameters.AddWithValue("$state",Wire(state)); update.Parameters.AddWithValue("$now",now); update.Parameters.AddWithValue("$result",resultId); update.Parameters.AddWithValue("$run",runId); if(update.ExecuteNonQuery()!=1) throw new InvalidOperationException("local_ai_run_transition_conflict"); if(expected.ScopeKind=="session") retentionCatalog?.RegisterLocalAiRaw(connection,transaction,"result",resultId,DateTimeOffset.Parse(completion,CultureInfo.InvariantCulture),ownerToken); transaction.Commit(); return state;
     }
 
-    internal int DeleteExpiredNodeRuns(DateTimeOffset now) => DeleteExpiredTransientRuns(now);
-
     internal int DeleteExpiredTransientRuns(DateTimeOffset now)
     {
         var cutoff=now.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture); using var connection=Open(); using var transaction=connection.BeginTransaction();
@@ -449,12 +482,9 @@ internal sealed class LocalAiAnalysisStoreV1
         using var count=connection.CreateCommand(); count.Transaction=transaction; count.CommandText="SELECT COUNT(*) FROM local_ai_cleanup_candidates;"; var deleted=Convert.ToInt32(count.ExecuteScalar(),CultureInfo.InvariantCulture); transaction.Commit(); return deleted;
     }
 
-    internal static int DeleteExpiredNodeRunsIfPresent(string path,DateTimeOffset now)
-        => DeleteExpiredTransientRunsIfPresent(path,now);
-
     internal static int DeleteExpiredTransientRunsIfPresent(string path,DateTimeOffset now)
     {
-        var store=new LocalAiAnalysisStoreV1(path); using var connection=store.Open(); using(var validation=connection.BeginTransaction()){if(!LocalAiAnalysisSchemaV1.ValidateExisting(connection,validation)){validation.Commit();return 0;}validation.Commit();} return store.DeleteExpiredNodeRuns(now);
+        var store=new LocalAiAnalysisStoreV1(path); using var connection=store.Open(); using(var validation=connection.BeginTransaction()){if(!LocalAiAnalysisSchemaV1.ValidateExisting(connection,validation)){validation.Commit();return 0;}validation.Commit();} return store.DeleteExpiredTransientRuns(now);
     }
 
     internal LocalAiReportPageV1 GetSessionReports(string sessionId, int? limit, string? cursor)
