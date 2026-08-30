@@ -294,8 +294,11 @@ JavaScript memory and the POST request body. They are not written to:
 - errors, diagnostics or reusable evidence.
 
 The controls use `autocomplete="off"`; the request uses Fetch
-`cache: "no-store"`. Reload and back/forward restore only URL-safe state and
-reset `q` to null, `model` to an empty array and `limit` to null/default 50.
+`cache: "no-store"`. Reload resets `q` to null, `model` to an empty array and
+`limit` to null/default 50. Browser traversal also resets them except when the
+only changed URL-safe value is Repository Explorer `analysis`; that
+analysis-only back/forward transition preserves the current document's
+`q`/`model`/`limit`, list, filters, cohorts, selection and assignment state.
 The UI must not claim that a copied URL reproduces those transient values.
 
 A returned cursor may be placed in the human URL only when `q` is null,

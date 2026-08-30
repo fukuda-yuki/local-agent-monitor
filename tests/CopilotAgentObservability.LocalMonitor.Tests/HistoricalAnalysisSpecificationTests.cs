@@ -66,14 +66,9 @@ public sealed class HistoricalAnalysisSpecificationTests
             "before the #72 owner",
             security,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "長寿命 browser state は `extraction_id`、`raw_local_sha256`、`repository_safe_sha256` の3フィールドだけ",
-            requirements,
-            StringComparison.Ordinal);
-        const string BrowserBindingInvariant =
-            "long-lived browser state contains exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`";
-        Assert.Contains(BrowserBindingInvariant, specification.ReplaceLineEndings(" "), StringComparison.Ordinal);
-        Assert.Contains(BrowserBindingInvariant, security.ReplaceLineEndings(" "), StringComparison.Ordinal);
+        Assert.Contains("standalone `/historical-analysis` human page", requirements, StringComparison.Ordinal);
+        Assert.Contains("only active route family is `/api/historical-analysis/v1/*`", specification, StringComparison.Ordinal);
+        Assert.Contains("The retired surface creates no browser state or storage.", security, StringComparison.Ordinal);
     }
 
     [Fact]

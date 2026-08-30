@@ -20,7 +20,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [Theory]
     [InlineData("{\"readiness_state\":\"ready\"}")]
     [InlineData("{\"provider\":\"github_copilot\",\"selected_model\":\"model\",\"selected_configuration\":\"test\",\"readiness_state\":\"ready\",\"last_check_result\":\"ready\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action\",\"extra\":true}")]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRejectsMalformedReadyPayload(string readiness)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -43,7 +43,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("scope")]
     [InlineData("external")]
     [InlineData("duplicate")]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRejectsMalformedSuccessfulResult(string mutation)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -75,7 +75,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("accepted")]
     [InlineData("rejected")]
     [InlineData("duplicate")]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiCancellationRequiresExactSuccessfulReceipt(string outcome)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -117,7 +117,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("nested_duplicate")]
     [InlineData("oversized")]
     [InlineData("depth")]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRejectsInvalidRunWireBeforeRendering(string mutation)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -150,7 +150,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("zero_findings", true, true)]
     [InlineData("zero_findings", false, false)]
     [InlineData("succeeded", true, false)]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRequiresStateFindingCardinality(string runState, bool emptyFindings, bool accepted)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -173,7 +173,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Fact]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRouteClearInvalidatesStartedSurfaceAndForwardRestoresOnce()
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -205,7 +205,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("over_envelope", false)]
     [InlineData("late_result_text", false)]
     [InlineData("escape_heavy", false)]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiUsesSeparateRunEnvelopeAndResultWireLimits(string sizeCase, bool accepted)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -236,7 +236,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Fact]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRouteClearMakesDelayedPollFailureANoOp()
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -266,7 +266,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRouteClearMakesPendingCancelCompletionANoOp(bool success)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -298,7 +298,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Fact]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiIsHiddenUntilReadyThenStartsFromExactReceiptAndRendersSafeResult()
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
@@ -340,7 +340,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("scope")]
     [InlineData("repository")]
     [InlineData("comparison")]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiFailureAndWrongOwnershipLeaveDeterministicComparisonUsable(string mismatch)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");

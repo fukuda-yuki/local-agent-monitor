@@ -13,7 +13,8 @@ internal sealed record LocalAiStartResponseV1(string? RunId, string? ErrorCode);
 internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string? SessionId,
     string? NodeId, string? ErrorCode, byte[]? ResultJson = null, string? RequestedAt = null,
     string? StartedAt = null, string? Model = null, string? ConfigurationSha256 = null,
-    string? PromptTemplateVersion = null, string? RepositoryId = null, string? ComparisonId = null);
+    string? PromptTemplateVersion = null, string? RepositoryId = null, string? ComparisonId = null,
+    DateTimeOffset? ExpiresAt = null);
 internal sealed record LocalAiReportItemResponseV1(string RunId, string State, byte[]? ResultJson, string ContentState, bool SnapshotChanged);
 internal sealed record LocalAiReportPageResponseV1(IReadOnlyList<LocalAiReportItemResponseV1> Reports, string? NextCursor);
 

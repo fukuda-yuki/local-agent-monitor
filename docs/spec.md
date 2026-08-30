@@ -711,11 +711,12 @@ proposal, effect, or apply behavior.
 
 ## Historical analysis
 
-Issue #75 freezes the Local Monitor presentation contract at
+Issue #75 freezes the Local Monitor machine contract at
 [historical analysis](specifications/interfaces/historical-analysis.md). The
-page is `GET /historical-analysis`; its only API family is
-`/api/historical-analysis/v1/*`. Preview consumes only the #72 owner and
-shows included/excluded exact reasons before either independent instruction or
+only active route family is `/api/historical-analysis/v1/*`; standalone
+`/historical-analysis` and its asset are retired as empty 404 without redirect,
+alias or compatibility path. Preview consumes only the #72 owner and returns
+included/excluded exact reasons before either independent instruction or
 efficiency execution. Instruction reads preserve the exact #73
 `historical-instruction-analysis.read.v1` DTO and canonical #59 nested bytes;
 efficiency reads preserve the exact #74 DTO/canonical bytes without formula or
@@ -727,13 +728,10 @@ postures; normal provider-free composition returns the fixed public
 `--sanitized-only`, preview accepts only an exact
 `selection.sanitized_only=true` request; `false` is rejected as
 `400 invalid_historical_analysis_request` before opening the #72 owner and is
-never silently rewritten. The surface retains loopback/Host,
+never silently rewritten. The machine surface retains loopback/Host,
 same-origin, CSRF-on-POST, JSON-only bounded strict requests, no CORS,
-`Cache-Control: no-store`, escaped inert text, and no browser storage/full
-history. After transient preview rendering, long-lived browser state contains
-exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`; it
-retains no selection, included/excluded Session data, or other preview response
-fields. It neither adds a provider nor absorbs import, apply, effect, pricing,
+`Cache-Control: no-store`, and repository-safe bounded DTOs. It neither adds a
+provider nor absorbs import, apply, effect, pricing,
 Alert Center, portability, raw analysis, or content-enabled capture.
 
 ## Versioned pricing estimation

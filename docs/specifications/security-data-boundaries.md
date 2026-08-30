@@ -1599,8 +1599,8 @@ provenance. Issue #75 consumes this safe receipt without formula recomputation.
 
 ## Historical Analysis Boundary
 
-Issue #75's `GET /historical-analysis` and
-`/api/historical-analysis/v1/*` surface is loopback-only, validates Host,
+Issue #75's surviving `/api/historical-analysis/v1/*` machine surface is
+loopback-only, validates Host,
 emits no CORS headers, and sets `Cache-Control: no-store` on every response.
 An invalid Host is rejected before routing with the fixed `400`
 `invalid_host` error; no route-specific detail is returned.
@@ -1619,15 +1619,12 @@ It never performs heuristic history lookup and never returns a raw body.
 Raw-default is a validation profile, not authorization to return raw content.
 Both raw-default and `--sanitized-only` responses are repository-safe;
 sanitized-only retains the frozen preview/status/resolution machine APIs and
-preserves unavailable or expired state, but does not register the standalone
-human page. A `--sanitized-only` host accepts only an exact
+preserves unavailable or expired state. No posture registers the retired
+standalone human page or asset. A `--sanitized-only` host accepts only an exact
 `selection.sanitized_only=true` historical-analysis preview; `false` is
 rejected as `400 invalid_historical_analysis_request` before the #72 owner
 opens a snapshot or reads descriptors and is never silently rewritten.
-After transient preview rendering, long-lived browser state contains exactly
-`extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`; selection,
-included/excluded Session data, and every other preview response field are
-discarded rather than retained in that binding. Browser storage, URLs, logs,
+The retired surface creates no browser state or storage. Machine API logs,
 artifacts, tests, and
 repository-safe evidence contain no full raw history, raw descriptors, prompt,
 response, tool body, provider input, local path, credentials, or PII. All

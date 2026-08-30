@@ -623,7 +623,8 @@ public sealed class LocalMonitorV1HumanRouteTests
         string scopeKind, string? repositoryId, string? comparisonId, int expectedStatus)
     {
         var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", scopeKind,
-            null, null, null, RepositoryId: repositoryId ?? RepositoryId, ComparisonId: comparisonId);
+            null, null, null, RepositoryId: repositoryId ?? RepositoryId, ComparisonId: comparisonId,
+            ExpiresAt: DateTimeOffset.MaxValue);
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
             localAiApplication: new StubLocalAiApplication(run)));
@@ -645,7 +646,8 @@ public sealed class LocalMonitorV1HumanRouteTests
         string scopeKind, string? repositoryId, string? comparisonId, int expectedStatus)
     {
         var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", scopeKind,
-            null, null, null, RepositoryId: repositoryId ?? RepositoryId, ComparisonId: comparisonId ?? ComparisonId);
+            null, null, null, RepositoryId: repositoryId ?? RepositoryId, ComparisonId: comparisonId ?? ComparisonId,
+            ExpiresAt: DateTimeOffset.MaxValue);
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
             comparisonApplication: new StubComparisonApplication(200, null),
@@ -657,6 +659,52 @@ public sealed class LocalMonitorV1HumanRouteTests
 
         Assert.Equal(expectedStatus, (int)response.StatusCode);
         Assert.Contains(expectedStatus == 200 ? "data-repository-compare" : "data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("repository")]
+    [InlineData("comparison")]
+    public async Task RepositoryAndComparisonAnalysis_RejectJustExpiredRetainedRun(string route)
+    {
+        var now = new DateTimeOffset(2026, 8, 31, 12, 0, 0, TimeSpan.Zero);
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded",
+            route == "repository" ? "repository_selection" : "comparison", null, null, null,
+            RepositoryId: RepositoryId, ComparisonId: route == "comparison" ? ComparisonId : null,
+            ExpiresAt: now);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            comparisonApplication: new StubComparisonApplication(200, null),
+            localAiApplication: new StubLocalAiApplication(run),
+            timeProvider: new FixedTimeProvider(now)));
+
+        var path = route == "repository"
+            ? $"/repositories/{RepositoryId}/sessions"
+            : $"/repositories/{RepositoryId}/comparisons/{ComparisonId}";
+        using var response = await host.Client.GetAsync($"{path}?analysis={run.RunId}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("data-page-state=\"analysis_run_not_found\"", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("repository")]
+    [InlineData("comparison")]
+    public async Task RepositoryAndComparisonAnalysis_MapBusyOwnershipReadToClosedPersistenceBusy(string route)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            comparisonApplication: new StubComparisonApplication(200, null),
+            localAiApplication: new BusyLocalAiApplication()));
+        var path = route == "repository"
+            ? $"/repositories/{RepositoryId}/sessions"
+            : $"/repositories/{RepositoryId}/comparisons/{ComparisonId}";
+
+        using var response = await host.Client.GetAsync($"{path}?analysis=018f0000-0000-7000-8000-000000000071");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("data-page-state=\"persistence_busy\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic busy", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -861,10 +909,12 @@ public sealed class LocalMonitorV1HumanRouteTests
     private static MonitorHostTestOptions OwnerReadyOptions(
         ILocalRepositorySessionDetailSnapshotService? detailService = null,
         ILocalMonitorV1ComparisonApplication? comparisonApplication = null,
-        ILocalAiAnalysisApplicationV1? localAiApplication = null) => new()
+        ILocalAiAnalysisApplicationV1? localAiApplication = null,
+        TimeProvider? timeProvider = null) => new()
     {
         LocalMonitorV1ComparisonApplication = comparisonApplication,
         LocalAiAnalysisApplication = localAiApplication,
+        TimeProvider = timeProvider,
         AdditionalServices = services =>
         {
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
@@ -872,13 +922,24 @@ public sealed class LocalMonitorV1HumanRouteTests
         },
     };
 
-    private sealed class StubLocalAiApplication(LocalAiRunStatusV1? run) : ILocalAiAnalysisApplicationV1
+    private class StubLocalAiApplication(LocalAiRunStatusV1? run) : ILocalAiAnalysisApplicationV1
     {
         public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
-        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(run?.RunId == runId ? run : null);
+        public virtual ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(run?.RunId == runId ? run : null);
         public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
+
+    private sealed class BusyLocalAiApplication() : StubLocalAiApplication(null)
+    {
+        public override ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) =>
+            throw new Microsoft.Data.Sqlite.SqliteException("synthetic busy", 5);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private static MonitorHostTestOptions AssetOptions(IFileProvider provider) => new()

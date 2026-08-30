@@ -1154,7 +1154,7 @@ internal static class MonitorHost
                 if (await LocalMonitorV1HumanRoutes.TryDispatchUnavailableAssetAsync(
                         context,
                         app.Environment.WebRootFileProvider)) return;
-                if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService)) return;
+                if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService, timeProvider)) return;
                 await next(context);
             });
             LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);

@@ -88,13 +88,14 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
         using var connection = Open(databasePath); using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT r.run_id,r.state,r.scope_kind,r.session_id,r.node_id,r.error_code,x.result_id,x.result_sha256,
-              r.requested_at,r.started_at,r.model,r.configuration_sha256,r.prompt_template_version,r.repository_id,r.comparison_id
-            FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run;
+              r.requested_at,r.started_at,r.model,r.configuration_sha256,r.prompt_template_version,r.repository_id,r.comparison_id,s.expires_at
+            FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id
+              LEFT JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run;
             """; command.Parameters.AddWithValue("$run", runId); using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new InvalidOperationException("local_ai_run_missing");
-        var id=reader.GetString(0);var state=reader.GetString(1);var scope=reader.GetString(2);var session=reader.IsDBNull(3)?null:reader.GetString(3);var node=reader.IsDBNull(4)?null:reader.GetString(4);var error=reader.IsDBNull(5)?null:reader.GetString(5);var resultId=reader.IsDBNull(6)?null:reader.GetString(6);var requested=reader.GetString(8);var started=reader.IsDBNull(9)?null:reader.GetString(9);var readModel=reader.GetString(10);var configuration=reader.GetString(11);var template=reader.GetString(12);var repository=reader.IsDBNull(13)?null:reader.GetString(13);var comparison=reader.IsDBNull(14)?null:reader.GetString(14);reader.Close();
+        var id=reader.GetString(0);var state=reader.GetString(1);var scope=reader.GetString(2);var session=reader.IsDBNull(3)?null:reader.GetString(3);var node=reader.IsDBNull(4)?null:reader.GetString(4);var error=reader.IsDBNull(5)?null:reader.GetString(5);var resultId=reader.IsDBNull(6)?null:reader.GetString(6);var requested=reader.GetString(8);var started=reader.IsDBNull(9)?null:reader.GetString(9);var readModel=reader.GetString(10);var configuration=reader.GetString(11);var template=reader.GetString(12);var repository=reader.IsDBNull(13)?null:reader.GetString(13);var comparison=reader.IsDBNull(14)?null:reader.GetString(14);var expires=reader.IsDBNull(15)?(DateTimeOffset?)null:DateTimeOffset.Parse(reader.GetString(15),CultureInfo.InvariantCulture);reader.Close();
         var content=scope=="session"?(resultId is null?null:store.ReadRetainedResult(resultId)):ReadNodeResult(runId);
-        return new(id,state,scope,session,node,error,content,requested,started,readModel,configuration,template,repository,comparison);
+        return new(id,state,scope,session,node,error,content,requested,started,readModel,configuration,template,repository,comparison,expires);
     }
 
     private byte[]? ReadNodeResult(string runId){using var connection=Open(databasePath);using var command=connection.CreateCommand();command.CommandText="SELECT x.result_json FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run AND r.scope_kind<>'session';";command.Parameters.AddWithValue("$run",runId);return command.ExecuteScalar() as byte[];}
