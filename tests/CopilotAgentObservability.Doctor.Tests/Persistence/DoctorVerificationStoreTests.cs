@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Doctor.Tests.Persistence;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class DoctorVerificationStoreTests
 {
     public static TheoryData<string> RepositoryUnsafeEvidenceReferences => new()

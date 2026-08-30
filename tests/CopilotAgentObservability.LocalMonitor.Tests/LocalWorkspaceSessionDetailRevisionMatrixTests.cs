@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
 {
     public static TheoryData<string, string, bool> PersistedRevisionInputs => new()

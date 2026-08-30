@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Http;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RawReplaySurfaceTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 23, 0, 0, 0, TimeSpan.Zero);

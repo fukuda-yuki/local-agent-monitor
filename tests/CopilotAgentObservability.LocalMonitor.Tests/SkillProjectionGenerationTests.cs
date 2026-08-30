@@ -8,6 +8,7 @@ using System.Text;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SkillProjectionGenerationTests
 {
     private const string TraceId = "22222222222222222222222222222222";

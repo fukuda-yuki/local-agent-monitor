@@ -1,5 +1,6 @@
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryCatalogReadTests
 {
     [Fact]

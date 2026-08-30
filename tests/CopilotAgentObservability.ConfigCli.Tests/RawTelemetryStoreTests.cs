@@ -5,6 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public class RawTelemetryStoreTests
 {
     [Fact]

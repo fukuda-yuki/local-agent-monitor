@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Http.Features;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalMonitorV1RetiredTraceListRouteTests
 {
     public static TheoryData<string, string> RetiredSpellingsAndMethods

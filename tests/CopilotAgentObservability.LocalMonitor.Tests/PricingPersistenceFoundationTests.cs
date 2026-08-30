@@ -12,6 +12,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class PricingPersistenceFoundationTests
 {
     public static TheoryData<string> SupportedHistoricalSessionFixtures => new()

@@ -9,6 +9,7 @@ using CopilotAgentObservability.LocalMonitor.Settings;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RuntimeBackupSurfaceTests
 {
     [Fact]

@@ -5,6 +5,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public class LocalMonitorScriptTests
 {
     private static readonly string[] RequiredScripts =

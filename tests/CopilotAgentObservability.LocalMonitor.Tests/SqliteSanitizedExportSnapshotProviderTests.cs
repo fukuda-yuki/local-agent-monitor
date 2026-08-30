@@ -13,6 +13,7 @@ using CopilotAgentObservability.InstructionFindings;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SqliteSanitizedExportSnapshotProviderTests
 {
     private const string SessionA = "01900000-0000-7000-8000-0000000000a1";

@@ -6,6 +6,7 @@ using CopilotAgentObservability.Doctor;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class DoctorRoutesTests
 {
     private const string VerificationId = "0190c7a0-0000-7000-8000-000000000001";

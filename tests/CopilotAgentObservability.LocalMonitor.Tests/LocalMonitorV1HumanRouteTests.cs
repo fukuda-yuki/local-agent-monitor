@@ -13,6 +13,7 @@ using Microsoft.Extensions.Primitives;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalMonitorV1HumanRouteTests
 {
     private const string UnsupportedEndpoint =

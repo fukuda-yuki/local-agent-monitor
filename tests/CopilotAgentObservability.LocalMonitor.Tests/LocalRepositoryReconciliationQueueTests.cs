@@ -6,6 +6,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryReconciliationQueueTests
 {
     [Fact]

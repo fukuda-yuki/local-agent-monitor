@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SkillProjectionMigrationTests
 {
     private const string TraceId = "11111111111111111111111111111111";

@@ -30,6 +30,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.Doctor.Tests.ClaudeCode;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class ClaudeFirstTraceCrossSurfaceTests
 {
     private static readonly DateTimeOffset Now =

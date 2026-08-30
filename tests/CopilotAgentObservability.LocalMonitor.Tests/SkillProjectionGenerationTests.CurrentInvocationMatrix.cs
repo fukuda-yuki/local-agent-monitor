@@ -12,6 +12,7 @@ using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 {
     [Fact]

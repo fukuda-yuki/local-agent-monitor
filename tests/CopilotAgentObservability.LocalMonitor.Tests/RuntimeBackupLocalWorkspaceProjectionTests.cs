@@ -15,6 +15,7 @@ using System.Text;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RuntimeBackupLocalWorkspaceProjectionTests
 {
     private static readonly DateTimeOffset PublicationAt = DateTimeOffset.Parse("2026-08-26T00:00:00Z");
