@@ -1,3 +1,4 @@
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -17,13 +18,14 @@ public sealed class RetentionRawTerminalTests
             Assert.True(resume.Wait(TimeSpan.FromSeconds(5)));
         });
 
-        var winner = Task.Run(fixture.SingleLease.TrySealRawResponse);
+        var winner = BlockingTestActor.Start(fixture.SingleLease.TrySealRawResponse);
+        await winner.Entered;
         Assert.True(claimed.Wait(TimeSpan.FromSeconds(5)));
 
         Assert.Equal(RetentionRawTerminalResult.Lost, fixture.SingleLease.TryCompleteWithoutRaw());
 
         resume.Set();
-        Assert.Equal(RetentionRawTerminalResult.Sealed, await winner);
+        Assert.Equal(RetentionRawTerminalResult.Sealed, await winner.Completion);
         Assert.Equal(RetentionRawTerminalState.Sealed, fixture.SingleLease.TerminalState);
     }
 
@@ -118,12 +120,16 @@ public sealed class RetentionRawTerminalTests
         await using var fixture = await TerminalFixture.CreateSingleAsync(cancellation.Token);
         using (fixture.SingleLease.AcquireValueReference()) { }
 
-        cancellation.Cancel();
-
-        Assert.True(SpinWait.SpinUntil(
-            () => fixture.SingleLease.TerminalState == RetentionRawTerminalState.Lost
-                && fixture.SingleLease.IsValueBufferCleared,
-            TimeSpan.FromSeconds(5)));
+        var cancellationActor = BlockingTestActor.Start(() =>
+        {
+            cancellation.Cancel();
+            Assert.True(SpinWait.SpinUntil(
+                () => fixture.SingleLease.TerminalState == RetentionRawTerminalState.Lost
+                    && fixture.SingleLease.IsValueBufferCleared,
+                TimeSpan.FromSeconds(5)));
+        });
+        await cancellationActor.Entered;
+        await cancellationActor.Completion;
         Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
         Assert.Equal(RetentionRawTerminalResult.Lost, fixture.SingleLease.TrySealRawResponse());
     }
@@ -136,11 +142,15 @@ public sealed class RetentionRawTerminalTests
         var use = fixture.SingleLease.AcquireValueReference();
         try
         {
-            await Task.Run(cancellation.Cancel).WaitAsync(TimeSpan.FromSeconds(5));
-
-            Assert.True(SpinWait.SpinUntil(
-                () => fixture.LeaseCount() == 0,
-                TimeSpan.FromSeconds(5)));
+            var cancellationActor = BlockingTestActor.Start(() =>
+            {
+                cancellation.Cancel();
+                Assert.True(SpinWait.SpinUntil(
+                    () => fixture.LeaseCount() == 0,
+                    TimeSpan.FromSeconds(5)));
+            });
+            await cancellationActor.Entered;
+            await cancellationActor.Completion.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.False(fixture.SingleLease.IsValueBufferCleared);
             Assert.Equal("buffered", use.Value);
         }
@@ -183,12 +193,16 @@ public sealed class RetentionRawTerminalTests
         using var reference = fixture.SingleLease.AcquireValueReference();
 
         Assert.Equal("buffered", reference.Value);
-        cancellation.Cancel();
-
-        Assert.True(SpinWait.SpinUntil(
-            () => fixture.SingleLease.TerminalState == RetentionRawTerminalState.Lost
-                && fixture.LeaseCount() == 0,
-            TimeSpan.FromSeconds(5)));
+        var cancellationActor = BlockingTestActor.Start(() =>
+        {
+            cancellation.Cancel();
+            Assert.True(SpinWait.SpinUntil(
+                () => fixture.SingleLease.TerminalState == RetentionRawTerminalState.Lost
+                    && fixture.LeaseCount() == 0,
+                TimeSpan.FromSeconds(5)));
+        });
+        await cancellationActor.Entered;
+        await cancellationActor.Completion;
 
         Assert.Equal("buffered", reference.Value);
         Assert.False(fixture.SingleLease.IsValueBufferCleared);
@@ -223,12 +237,13 @@ public sealed class RetentionRawTerminalTests
             Assert.True(resume.Wait(TimeSpan.FromSeconds(5)));
         });
 
-        var terminal = Task.Run(fixture.SingleLease.TrySealRawResponse);
+        var terminal = BlockingTestActor.Start(fixture.SingleLease.TrySealRawResponse);
+        await terminal.Entered;
         Assert.True(pending.Wait(TimeSpan.FromSeconds(5)));
         cancellation.Cancel();
         resume.Set();
 
-        Assert.Equal(RetentionRawTerminalResult.Lost, await terminal);
+        Assert.Equal(RetentionRawTerminalResult.Lost, await terminal.Completion);
         Assert.Equal(RetentionRawTerminalState.Lost, fixture.SingleLease.TerminalState);
     }
 
@@ -299,19 +314,21 @@ public sealed class RetentionRawTerminalTests
             Assert.True(publishRenewal.Wait(TimeSpan.FromSeconds(5)));
         });
 
-        var renewal = Task.Run(() => fixture.Store.RenewOperationLease(fixture.SingleLease.Grant));
+        var renewal = BlockingTestActor.Start(() => fixture.Store.RenewOperationLease(fixture.SingleLease.Grant));
+        await renewal.Entered;
         Assert.True(renewalCommitted.Wait(TimeSpan.FromSeconds(5)));
-        var terminal = Task.Run(fixture.SingleLease.TrySealRawResponse);
+        var terminal = BlockingTestActor.Start(fixture.SingleLease.TrySealRawResponse);
+        await terminal.Entered;
         Assert.True(SpinWait.SpinUntil(
             () => fixture.Checkpoint.Contains(RetentionRawTerminalCheckpoint.AfterClaimBeforeTransaction),
             TimeSpan.FromSeconds(5)));
         publishRenewal.Set();
 
-        Assert.Equal(RetentionOperationRenewalDisposition.Renewed, await renewal);
+        Assert.Equal(RetentionOperationRenewalDisposition.Renewed, await renewal.Completion);
         var renewedExpiry = fixture.DatabaseExpiry(0);
         Assert.True(renewedExpiry > fixture.SingleLease.Grant.LeaseExpiresAt);
 
-        Assert.Equal(RetentionRawTerminalResult.Sealed, await terminal);
+        Assert.Equal(RetentionRawTerminalResult.Sealed, await terminal.Completion);
         Assert.Equal(renewedExpiry, fixture.DatabaseExpiry(0));
     }
 
@@ -329,14 +346,15 @@ public sealed class RetentionRawTerminalTests
             Assert.True(resume.Wait(TimeSpan.FromSeconds(5)));
         });
 
-        var terminal = Task.Run(fixture.SingleLease.TrySealRawResponse);
+        var terminal = BlockingTestActor.Start(fixture.SingleLease.TrySealRawResponse);
+        await terminal.Entered;
         Assert.True(claimed.Wait(TimeSpan.FromSeconds(5)));
         Assert.Equal(
             RetentionOperationRenewalDisposition.LeaseLost,
             fixture.Store.RenewOperationLease(fixture.SingleLease.Grant));
         Assert.Equal(originalExpiry, fixture.DatabaseExpiry(0));
         resume.Set();
-        Assert.Equal(RetentionRawTerminalResult.Sealed, await terminal);
+        Assert.Equal(RetentionRawTerminalResult.Sealed, await terminal.Completion);
     }
 
     [Fact]
@@ -418,13 +436,18 @@ public sealed class RetentionRawTerminalTests
         {
             fixture.Time.Set(fixture.SingleLease.Grant.LeaseExpiresAt);
 
-            await Task.Run(fixture.Time.FireScheduled).WaitAsync(TimeSpan.FromSeconds(5));
+            var expiryActor = BlockingTestActor.Start(() =>
+            {
+                fixture.Time.FireScheduled();
+                Assert.True(SpinWait.SpinUntil(
+                    () => fixture.LeaseCount() == 0,
+                    TimeSpan.FromSeconds(5)));
+            });
+            await expiryActor.Entered;
+            await expiryActor.Completion.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.False(fixture.SingleLease.IsValueBufferCleared);
             Assert.Equal("buffered", use.Value);
-            Assert.True(SpinWait.SpinUntil(
-                () => fixture.LeaseCount() == 0,
-                TimeSpan.FromSeconds(5)));
         }
         finally
         {

@@ -418,25 +418,21 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
             return lease!;
         };
 
-        var publicationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task? publication = null;
+        BlockingActor? publication = null;
         var publicationCompletedWhileHeld = true;
         var leasesHeldAtTerminal = -1;
 
         fixture.NativeReader.Result = SuccessRead("# current review\n");
         fixture.NativeReader.BeforeRead = () =>
         {
-            publication = Task.Run(() =>
-            {
-                publicationEntered.SetResult();
-                provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
-            });
-            publicationEntered.Task.GetAwaiter().GetResult();
+            publication = BlockingTestActor.Start(() =>
+                provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load()));
+            publication.Value.Entered.GetAwaiter().GetResult();
         };
         fixture.Grant.OnTerminalAttempt = () =>
         {
             leasesHeldAtTerminal = provider.OutstandingLeaseCount;
-            publicationCompletedWhileHeld = publication!.IsCompleted;
+            publicationCompletedWhileHeld = publication!.Value.Completion.IsCompleted;
         };
 
         var result = await fixture.ExecuteAsync();
@@ -445,9 +441,9 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         Assert.Equal(1, leasesHeldAtTerminal);
         Assert.False(publicationCompletedWhileHeld);
 
-        Assert.False(publication!.IsCompleted);
+        Assert.False(publication!.Value.Completion.IsCompleted);
         result.ResponseCapabilities!.Dispose();
-        await publication!.WaitAsync(TimeSpan.FromSeconds(30));
+        await publication.Value.Completion.WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Equal(0, provider.OutstandingLeaseCount);
     }
 

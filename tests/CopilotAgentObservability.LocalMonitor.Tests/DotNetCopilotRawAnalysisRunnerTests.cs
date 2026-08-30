@@ -657,7 +657,8 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
     {
         var shutdownGate = new SkillHostShutdownGateV1();
         var admission = new CopilotRuntimeAdmissionV1(shutdownGate);
-        return new(scope, null!, null!, admission, null, new Sessions.SessionEventQueue(), TimeSpan.FromSeconds(1), _ => null, _ => false, CancellationToken.None);
+        return new(scope, null!, null!, admission, null, new Sessions.SessionEventQueue(), TimeSpan.FromSeconds(1),
+            TimeProvider.System, _ => null, _ => false, CancellationToken.None);
     }
 
     private static OwnedSessionExecutionEvidenceV1 Evidence() => new(

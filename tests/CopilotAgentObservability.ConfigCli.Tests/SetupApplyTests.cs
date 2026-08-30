@@ -87,18 +87,20 @@ public sealed class SetupApplyTests
         var exclusive = new TrackingExclusiveLock();
         var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        await applying.Entered;
         mutation.WaitUntilReached(CancellationToken.None);
 
-        var disposing = Task.Run(setupLock.Dispose);
+        var disposing = BlockingTestActor.Start(setupLock.Dispose);
+        await disposing.Entered;
         Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(exclusive.IsDisposed);
         Assert.Null(exclusive.TryAcquire());
         mutation.Release();
 
-        var exception = await applying;
-        await disposing;
+        var exception = await applying.Completion;
+        await disposing.Completion;
 
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.True(exclusive.IsDisposed);
@@ -120,21 +122,23 @@ public sealed class SetupApplyTests
         var exclusive = new TrackingExclusiveLock();
         var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        await applying.Entered;
         beforeMutation.WaitUntilReached(CancellationToken.None);
         var temporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
         using var replace = fixture.Platform.AddBarrier($"file.replace:{temporary}->{fixture.TargetPath}");
         beforeMutation.Release();
         replace.WaitUntilReached(CancellationToken.None);
 
-        var disposing = Task.Run(setupLock.Dispose);
+        var disposing = BlockingTestActor.Start(setupLock.Dispose);
+        await disposing.Entered;
         Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(exclusive.IsDisposed);
         replace.Release();
 
-        var exception = await applying;
-        await disposing;
+        var exception = await applying.Completion;
+        await disposing.Completion;
 
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.True(exclusive.IsDisposed);
@@ -154,17 +158,19 @@ public sealed class SetupApplyTests
         var exclusive = new TrackingExclusiveLock();
         var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        await applying.Entered;
         notification.WaitUntilReached(CancellationToken.None);
 
-        var disposing = Task.Run(setupLock.Dispose);
+        var disposing = BlockingTestActor.Start(setupLock.Dispose);
+        await disposing.Entered;
         Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(exclusive.IsDisposed);
         notification.Release();
 
-        var exception = await applying;
-        await disposing;
+        var exception = await applying.Completion;
+        await disposing.Completion;
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
         Assert.True(exclusive.IsDisposed);
@@ -359,7 +365,8 @@ public sealed class SetupApplyTests
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
 
-        var retry = Task.Run(() => fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+        var retry = BlockingTestActor.Start(() => fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId));
+        await retry.Entered;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         barrier.WaitUntilReached(timeout.Token);
         var applying = fixture.LoadChangeSet();
@@ -367,7 +374,7 @@ public sealed class SetupApplyTests
         Assert.Equal(SetupChangeSetState.Applying, applying.State);
         Assert.Null(applying.OutcomeCode);
         barrier.Release();
-        Assert.Equal(SetupChangeSetState.Applied, (await retry).Value.State);
+        Assert.Equal(SetupChangeSetState.Applied, (await retry.Completion).Value.State);
     }
 
     [Theory]
@@ -808,14 +815,15 @@ public sealed class SetupApplyTests
         var operationCount = fixture.Platform.Operations.Count;
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
             fixture.ReopenCoordinator().Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         barrier.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedPathMetadata(
             invalidPath,
             new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
         barrier.Release();
-        var exception = await applying;
+        var exception = await applying.Completion;
 
         Assert.Equal(SetupCodes.InternalError, exception.Code);
         Assert.False(fixture.Platform.FileSystem.FileExists(missingPath));
@@ -1124,14 +1132,15 @@ public sealed class SetupApplyTests
         using var barrier = fixture.Platform.AddBarrier("environment.set:ENV_A");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        var applying = BlockingTestActor.Start(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        await applying.Entered;
         barrier.WaitUntilReached(CancellationToken.None);
         var journalAtApiBoundary = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
         Assert.Equal(SetupEnvironmentNotification.Pending, journalAtApiBoundary.EnvironmentNotification);
         Assert.Equal(SetupJournalStepPhase.MutationStarted, journalAtApiBoundary.Targets[1].Steps[0].Phase);
         barrier.Release();
 
-        var result = (await applying).Value;
+        var result = (await applying.Completion).Value;
         Assert.Equal(SetupCodes.ApplySucceeded, result.OutcomeCode);
     }
 
@@ -1142,13 +1151,14 @@ public sealed class SetupApplyTests
         using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterMutationBeforeCompletion}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         barrier.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third-party"));
         barrier.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
         Assert.Equal(SetupCodes.PartialApply, exception.Code);
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
         Assert.Equal(SetupJournalPhase.Partial, journal.Phase);
@@ -1166,13 +1176,14 @@ public sealed class SetupApplyTests
         using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         barrier.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third-party"));
         barrier.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
         Assert.Equal(SetupCodes.PartialApply, exception.Code);
         Assert.Equal("third-party", Encoding.UTF8.GetString(fixture.Platform.ReadSeededFile(fixture.TargetPath)));
         var journal = new SetupTransactionJournalStore(fixture.Platform, fixture.Paths).Load(fixture.ChangeSetId)!;
@@ -1722,13 +1733,14 @@ public sealed class SetupApplyTests
         using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterMutationBeforeCompletion}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         barrier.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedUserEnvironment("ENV_A", "third-party");
         barrier.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
         Assert.Equal(SetupCodes.PartialApply, exception.Code);
         Assert.Equal("third-party", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal("old-b", fixture.Platform.ReadUserEnvironment("ENV_B"));

@@ -292,8 +292,10 @@ public sealed class SetupJournalStoreTests
         using var barrier = context.Platform.AddBarrier($"file.flush:{temporary}");
         var operationsBefore = context.Platform.Operations.Count;
 
-        var supersede = Task.Run(() => Assert.Throws<SetupStorageException>(() =>
+        var supersedeActor = BlockingTestActor.Start(() => Assert.Throws<SetupStorageException>(() =>
             context.Store.SupersedeWithPreparedRollback(context.Lock, ChangeSetId, ValidTargets())));
+        await supersedeActor.Entered;
+        var supersede = supersedeActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
         var foreignBytes = Encoding.UTF8.GetBytes("foreign-destination-content");
         if (reboundKind == "reparse")
@@ -343,6 +345,8 @@ public sealed class SetupJournalStoreTests
         string boundary)
     {
         using var disposeRequested = new ManualResetEventSlim();
+        using var supersedeEntered = new ManualResetEventSlim();
+        using var disposeEntered = new ManualResetEventSlim();
         var context = CreateCommittedApplyContext(disposeRequested.Set);
         context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
@@ -350,6 +354,29 @@ public sealed class SetupJournalStoreTests
         var createdAt = context.Store.Load(ChangeSetId)!.CreatedAt;
         SetupTestBarrier? prerequisite = null;
         SetupTestBarrier? operationBarrier = null;
+        var harnessReady = false;
+        var operationBarrierReached = false;
+        var lockContended = false;
+        var lockReacquired = false;
+
+        string Checkpoints() =>
+            $"boundary={boundary} harness-ready={harnessReady} " +
+            $"supersede-entered={supersedeEntered.IsSet} dispose-entered={disposeEntered.IsSet} " +
+            $"operation-barrier-reached={operationBarrierReached} dispose-observer={disposeRequested.IsSet} " +
+            $"lock-contended={lockContended} lock-reacquired={lockReacquired}";
+
+        void WaitUntilReached(SetupTestBarrier barrier, string checkpoint)
+        {
+            try
+            {
+                barrier.WaitUntilReached(CancellationToken.None);
+            }
+            catch (TimeoutException exception)
+            {
+                throw new Xunit.Sdk.XunitException(
+                    $"SetupJournal diagnostic timed out awaiting {checkpoint}: {Checkpoints()}. {exception.Message}");
+            }
+        }
 
         try
         {
@@ -363,26 +390,44 @@ public sealed class SetupJournalStoreTests
                     boundary, destination, temporary));
             }
 
-            var supersede = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
-                context.Lock, ChangeSetId, ValidTargets()));
+            harnessReady = true;
+            var supersedeActor = BlockingTestActor.Start(() =>
+            {
+                supersedeEntered.Set();
+                return context.Store.SupersedeWithPreparedRollback(
+                    context.Lock, ChangeSetId, ValidTargets());
+            });
+            await supersedeActor.Entered;
+            var supersede = supersedeActor.Completion;
             if (prerequisite is not null)
             {
-                prerequisite.WaitUntilReached(CancellationToken.None);
+                WaitUntilReached(prerequisite, "destination-revalidation-prerequisite");
                 operationBarrier = context.Platform.AddBarrier($"file.metadata:{destination}");
                 prerequisite.Release();
             }
 
-            operationBarrier!.WaitUntilReached(CancellationToken.None);
-            var dispose = Task.Run(context.Lock.Dispose);
+            var blockingBarrier = operationBarrier!;
+            WaitUntilReached(blockingBarrier, "operation-barrier");
+            operationBarrierReached = true;
+            var disposeActor = BlockingTestActor.Start(() =>
+            {
+                disposeEntered.Set();
+                context.Lock.Dispose();
+            });
+            await disposeActor.Entered;
+            var dispose = disposeActor.Completion;
             try
             {
-                Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+                Assert.True(
+                    disposeRequested.Wait(TimeSpan.FromSeconds(10)),
+                    $"SetupJournal diagnostic timed out awaiting dispose-observer: {Checkpoints()}.");
                 using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
                 Assert.False(contended.Acquired);
+                lockContended = true;
             }
             finally
             {
-                operationBarrier.Release();
+                blockingBarrier.Release();
             }
 
             Assert.Equal(SetupPreparedJournalOpenResult.Created, await supersede);
@@ -394,6 +439,13 @@ public sealed class SetupJournalStoreTests
             Assert.Equivalent(ValidTargets(), rollback.Targets, strict: true);
             using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
             Assert.True(reacquired.Acquired);
+            lockReacquired = true;
+            Assert.True(supersedeEntered.IsSet, Checkpoints());
+            Assert.True(disposeEntered.IsSet, Checkpoints());
+            Assert.True(operationBarrierReached, Checkpoints());
+            Assert.True(disposeRequested.IsSet, Checkpoints());
+            Assert.True(lockContended, Checkpoints());
+            Assert.True(lockReacquired, Checkpoints());
         }
         finally
         {
@@ -414,13 +466,17 @@ public sealed class SetupJournalStoreTests
         var createdAt = context.Store.Load(ChangeSetId)!.CreatedAt;
         using var barrier = context.Platform.AddBarrier($"file.replace:{temporary}->{destination}");
 
-        var first = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
+        var firstActor = BlockingTestActor.Start(() => context.Store.SupersedeWithPreparedRollback(
             context.Lock, ChangeSetId, ValidTargets()));
+        await firstActor.Entered;
+        var first = firstActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
         using var secondStarted = new ManualResetEventSlim();
-        var second = Task.Run(() => new SetupTransactionJournalStore(context.Platform, context.Paths)
+        var secondActor = BlockingTestActor.Start(() => new SetupTransactionJournalStore(context.Platform, context.Paths)
             .SupersedeWithPreparedRollback(
                 StartedLock(secondStarted, context.Lock), ChangeSetId, ValidTargets()));
+        await secondActor.Entered;
+        var second = secondActor.Completion;
         Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(second.IsCompleted);
 
@@ -461,8 +517,10 @@ public sealed class SetupJournalStoreTests
 
         var retryTemporary = Temporary(destination, 12);
         using var retryBarrier = context.Platform.AddBarrier($"file.replace:{retryTemporary}->{destination}");
-        var retry = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
+        var retryActor = BlockingTestActor.Start(() => context.Store.SupersedeWithPreparedRollback(
             context.Lock, ChangeSetId, ValidTargets()));
+        await retryActor.Entered;
+        var retry = retryActor.Completion;
         retryBarrier.WaitUntilReached(CancellationToken.None);
         using (var contended = SetupLock.TryAcquire(context.Platform, context.Paths))
         {
@@ -587,13 +645,17 @@ public sealed class SetupJournalStoreTests
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
         using var barrier = context.Platform.AddBarrier($"file.try-write-new-flushed:{destination}");
 
-        var first = Task.Run(() => context.Store.OpenOrCreatePrepared(
+        var firstActor = BlockingTestActor.Start(() => context.Store.OpenOrCreatePrepared(
             context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        await firstActor.Entered;
+        var first = firstActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
 
         using var secondStarted = new ManualResetEventSlim();
-        var second = Task.Run(() => new SetupTransactionJournalStore(context.Platform, context.Paths).OpenOrCreatePrepared(
+        var secondActor = BlockingTestActor.Start(() => new SetupTransactionJournalStore(context.Platform, context.Paths).OpenOrCreatePrepared(
             StartedLock(secondStarted, context.Lock), ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        await secondActor.Entered;
+        var second = secondActor.Completion;
         Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(second.IsCompleted);
         barrier.Release();
@@ -613,10 +675,14 @@ public sealed class SetupJournalStoreTests
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
         using var barrier = context.Platform.AddBarrier($"file.try-write-new-flushed:{destination}");
 
-        var write = Task.Run(() => context.Store.OpenOrCreatePrepared(
+        var writeActor = BlockingTestActor.Start(() => context.Store.OpenOrCreatePrepared(
             context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets()));
+        await writeActor.Entered;
+        var write = writeActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
-        var dispose = Task.Run(context.Lock.Dispose);
+        var disposeActor = BlockingTestActor.Start(context.Lock.Dispose);
+        await disposeActor.Entered;
+        var dispose = disposeActor.Completion;
         try
         {
             Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
@@ -644,10 +710,14 @@ public sealed class SetupJournalStoreTests
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
         using var barrier = context.Platform.AddBarrier($"file.replace:{Temporary(destination, 1)}->{destination}");
 
-        var write = Task.Run(() => context.Store.MarkTransactionPhase(
+        var writeActor = BlockingTestActor.Start(() => context.Store.MarkTransactionPhase(
             context.Lock, ChangeSetId, SetupJournalPhase.Applying));
+        await writeActor.Entered;
+        var write = writeActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
-        var dispose = Task.Run(context.Lock.Dispose);
+        var disposeActor = BlockingTestActor.Start(context.Lock.Dispose);
+        await disposeActor.Entered;
+        var dispose = disposeActor.Completion;
         try
         {
             Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
@@ -778,8 +848,10 @@ public sealed class SetupJournalStoreTests
         using var barrier = context.Platform.AddBarrier(operation);
         var operationCount = context.Platform.Operations.Count;
 
-        var open = Task.Run(() => Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
+        var openActor = BlockingTestActor.Start(() => Assert.Throws<SetupStorageException>(() => context.Store.OpenOrCreatePrepared(
             context.Lock, ChangeSetId, SetupJournalOperation.Apply, ValidTargets())));
+        await openActor.Entered;
+        var open = openActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
         context.Platform.SeedPathMetadata(destination, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
         barrier.Release();

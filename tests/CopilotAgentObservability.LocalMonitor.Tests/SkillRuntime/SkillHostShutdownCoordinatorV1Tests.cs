@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.LocalMonitor.SkillNative;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using GitHub.Copilot;
 using Microsoft.Win32.SafeHandles;
 
@@ -69,15 +70,16 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         using var barrier = new Barrier(callerCount + 1);
         var results = new bool[callerCount];
         var callers = Enumerable.Range(0, callerCount)
-            .Select(index => Task.Run(() =>
+            .Select(index => BlockingTestActor.Start(() =>
             {
                 barrier.SignalAndWait();
                 results[index] = gate.TryStartNormalShutdown();
             }))
             .ToArray();
 
+        await Task.WhenAll(callers.Select(caller => caller.Entered));
         barrier.SignalAndWait();
-        await Task.WhenAll(callers);
+        await Task.WhenAll(callers.Select(caller => caller.Completion));
 
         Assert.Single(results, result => result);
         Assert.True(gate.IsNormalShutdownStarted);

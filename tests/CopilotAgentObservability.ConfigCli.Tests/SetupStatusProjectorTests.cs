@@ -195,7 +195,9 @@ public sealed class SetupStatusProjectorTests
         var fixture = StatusFixture.Create();
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
-        var apply = Task.Run(fixture.ApplyWithoutAssert);
+        var applyActor = BlockingTestActor.Start(fixture.ApplyWithoutAssert);
+        await applyActor.Entered;
+        var apply = applyActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
 
         var result = fixture.Project();
@@ -387,7 +389,9 @@ public sealed class SetupStatusProjectorTests
             new IOException("synthetic"));
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}");
-        var apply = Task.Run(fixture.ApplyWithoutAssert);
+        var applyActor = BlockingTestActor.Start(fixture.ApplyWithoutAssert);
+        await applyActor.Entered;
+        var apply = applyActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
 
         var result = fixture.Project();
@@ -407,7 +411,9 @@ public sealed class SetupStatusProjectorTests
         fixture.Apply();
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
-        var rollback = Task.Run(fixture.RollbackWithoutAssert);
+        var rollbackActor = BlockingTestActor.Start(fixture.RollbackWithoutAssert);
+        await rollbackActor.Entered;
+        var rollback = rollbackActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
 
         var result = fixture.Project();
@@ -599,7 +605,9 @@ public sealed class SetupStatusProjectorTests
         var fixture = StatusFixture.Create(additionalFileCount: 1);
         fixture.Apply();
         using var barrier = fixture.Platform.AddBarrier($"file.read:{fixture.AdditionalTargetPath}");
-        var projection = Task.Run(fixture.Project);
+        var projectionActor = BlockingTestActor.Start(fixture.Project);
+        await projectionActor.Entered;
+        var projection = projectionActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
         fixture.SeedTarget("third-party-after-first-observation");
         barrier.Release();

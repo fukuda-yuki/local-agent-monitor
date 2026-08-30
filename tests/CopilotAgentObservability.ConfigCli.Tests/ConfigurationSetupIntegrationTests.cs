@@ -158,11 +158,12 @@ public sealed class ConfigurationSetupIntegrationTests
         using var barrier = platform.AddBarrier($"file.read:{StableSettingsPath}");
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-        var applyTask = Task.Run(() => harness.Apply(changeSetId));
+        var applying = BlockingTestActor.Start(() => harness.Apply(changeSetId));
+        await applying.Entered;
         barrier.WaitUntilReached(cancellation.Token);
         platform.SeedFile(StableSettingsPath, externalBytes);
         barrier.Release();
-        var apply = await applyTask;
+        var apply = await applying.Completion;
 
         Assert.Equal(SetupCodes.StalePlan, apply.Code);
         Assert.Equal(externalBytes, platform.ReadSeededFile(StableSettingsPath));

@@ -252,10 +252,11 @@ public sealed class ProjectionDispositionContractTests
         var store = ProjectionStore(temp.DatabasePath);
         using var barrier = new Barrier(participantCount: 3);
 
-        var first = Task.Run(() => BeginAtBarrier(store, committed.RawRecordId, barrier));
-        var second = Task.Run(() => BeginAtBarrier(store, committed.RawRecordId, barrier));
+        var firstActor = BlockingTestActor.Start(() => BeginAtBarrier(store, committed.RawRecordId, barrier));
+        var secondActor = BlockingTestActor.Start(() => BeginAtBarrier(store, committed.RawRecordId, barrier));
+        await Task.WhenAll(firstActor.Entered, secondActor.Entered);
         barrier.SignalAndWait();
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(firstActor.Completion, secondActor.Completion);
 
         Assert.Single(results, result => result);
         AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Pending, 2, ObservedAt.AddMinutes(1));
@@ -439,17 +440,20 @@ public sealed class ProjectionDispositionContractTests
             ReadyHealth(),
             timeProvider: new MutableTimeProvider(ObservedAt.AddMinutes(2)));
 
-        var firstPass = Task.Run(() => firstWorker.RunProjectionPassAsync());
+        var firstPassActor = BlockingTestActor.Start(
+            () => firstWorker.RunProjectionPassAsync().GetAwaiter().GetResult());
+        await firstPassActor.Entered;
         Assert.True(firstClaimed.SignalAndWait(TimeSpan.FromSeconds(5)));
-        var secondPass = Task.Run(async () =>
+        var secondPassActor = BlockingTestActor.Start(() =>
         {
-            await secondWorker.RunProjectionPassAsync();
+            secondWorker.RunProjectionPassAsync().GetAwaiter().GetResult();
             Assert.True(firstPassCompleted.SignalAndWait(TimeSpan.FromSeconds(5)));
-            await secondWorker.RunProjectionPassAsync();
+            secondWorker.RunProjectionPassAsync().GetAwaiter().GetResult();
         });
-        await firstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        await secondPassActor.Entered;
+        await firstPassActor.Completion.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.True(firstPassCompleted.SignalAndWait(TimeSpan.FromSeconds(5)));
-        await secondPass.WaitAsync(TimeSpan.FromSeconds(10));
+        await secondPassActor.Completion.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(new[] { 1, 3 }, interleavedStore.BeginExpectedRevisions);
         Assert.Equal(2, interleavedStore.FailureExpectedRevision);

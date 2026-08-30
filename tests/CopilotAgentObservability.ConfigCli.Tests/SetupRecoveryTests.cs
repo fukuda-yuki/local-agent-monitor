@@ -444,8 +444,10 @@ public sealed class SetupRecoveryTests
                    $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}"))
         using (var applyLock = fixture.AcquireLock())
         {
-            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            var applyingActor = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
                 fixture.CreateApplyCoordinator().Apply(applyLock, fixture.ChangeSetId)));
+            await applyingActor.Entered;
+            var applying = applyingActor.Completion;
             restoreCompletion.WaitUntilReached(CancellationToken.None);
             fixture.InjectNextJournalWriteFault();
             restoreCompletion.Release();
@@ -1611,7 +1613,8 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier(
             $"file.read:{fixture.TargetPath}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
         var temporary = fixture.NextTemporaryPath(journalPath, 0);
@@ -1650,7 +1653,8 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var temporary = fixture.NextTemporaryPath(fixture.TargetPath, 0);
         var replace = $"file.replace:{temporary}->{fixture.TargetPath}";
@@ -1692,7 +1696,8 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var temporary = fixture.NextTemporaryPath(fixture.TargetPath, 0);
         fixture.Platform.InjectAfterEffectFault(
@@ -1724,7 +1729,8 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
         var temporary = fixture.NextTemporaryPath(journalPath, 0);
@@ -1760,7 +1766,8 @@ public sealed class SetupRecoveryTests
         using var completionBarrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         completionBarrier.WaitUntilReached(cancellation.Token);
         using var verificationBarrier = fixture.Platform.AddBarrier(
             $"file.read:{fixture.TargetPath}", cancellation.Token);
@@ -1791,7 +1798,8 @@ public sealed class SetupRecoveryTests
         using var completionBarrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         completionBarrier.WaitUntilReached(cancellation.Token);
         using var verificationBarrier = fixture.Platform.AddBarrier(
             $"file.read:{fixture.TargetPath}", cancellation.Token);
@@ -1882,7 +1890,8 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier($"file.read:{backup}", cancellation.Token);
         var operationsBefore = fixture.Platform.Operations.Count;
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedPathMetadata(
             backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
@@ -2392,7 +2401,7 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterCompletionBeforeCommit}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(
+        var recovery = RunBlockingRecoveryParticipant(
             () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedFile(fixture.TargetPath, Encoding.UTF8.GetBytes("third"));
@@ -2459,7 +2468,7 @@ public sealed class SetupRecoveryTests
             $"checkpoint:{SetupFaultPoint.AfterCompletionBeforeCommit}", cancellation.Token);
         using (var setupLock = fixture.AcquireLock())
         {
-            var recovery = Task.Run(
+            var recovery = RunBlockingRecoveryParticipant(
                 () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
             barrier.WaitUntilReached(cancellation.Token);
             fixture.Platform.InjectFault(
@@ -3472,7 +3481,7 @@ public sealed class SetupRecoveryTests
         string markerOperation;
         using (var setupLock = fixture.AcquireLock())
         {
-            var recovery = Task.Run(
+            var recovery = RunBlockingRecoveryParticipant(
                 () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
             notificationBarrier.WaitUntilReached(cancellation.Token);
 
@@ -3973,7 +3982,8 @@ public sealed class SetupRecoveryTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var barrier = fixture.Platform.AddBarrier("environment.get:ENV_B", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedUserEnvironment("ENV_B", "third-b");
         barrier.Release();
@@ -4009,7 +4019,8 @@ public sealed class SetupRecoveryTests
             $"file.read-bounded:{backup}:2097152", cancellation.Token);
         var operationsBefore = fixture.Platform.Operations.Count;
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedPathMetadata(
             backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
@@ -4102,7 +4113,8 @@ public sealed class SetupRecoveryTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var barrier = fixture.Platform.AddBarrier("environment.notify", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var destination = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
         var temporary = fixture.NextTemporaryPath(destination, 0);
@@ -4140,7 +4152,8 @@ public sealed class SetupRecoveryTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var barrier = fixture.Platform.AddBarrier("environment.get:ENV_A", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var destination = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
         var temporary = fixture.NextTemporaryPath(destination, 0);
@@ -4179,7 +4192,8 @@ public sealed class SetupRecoveryTests
         using var barrier = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var destination = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
         var temporary = fixture.NextTemporaryPath(destination, 0);
@@ -4217,7 +4231,8 @@ public sealed class SetupRecoveryTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var barrier = fixture.Platform.AddBarrier("environment.get:ENV_B", cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         var replace = $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}";
         if (afterEffect)
@@ -4336,7 +4351,8 @@ public sealed class SetupRecoveryTests
             $"file.read:{backup}",
             cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedPathMetadata(
             backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
@@ -4468,7 +4484,8 @@ public sealed class SetupRecoveryTests
             $"file.read-bounded:{backup}:2097152",
             cancellation.Token);
         using var setupLock = fixture.AcquireLock();
-        var recovery = Task.Run(() => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
+        var recovery = RunBlockingRecoveryParticipant(
+            () => fixture.ReopenCoordinator().RecoverNext(setupLock), cancellation.Token);
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedPathMetadata(
             backup, new SetupPathMetadata(true, SetupPathKind.File, FileAttributes.ReparsePoint));
@@ -4660,6 +4677,34 @@ public sealed class SetupRecoveryTests
         Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
         Assert.Equal("stable-b", fixture.Platform.ReadUserEnvironment("ENV_B"));
         Assert.Equal("outside-model-a", fixture.Platform.ReadUserEnvironment("UNRELATED"));
+    }
+
+    private static Task<SetupRecoveryResult> RunBlockingRecoveryParticipant(
+        Func<SetupRecoveryResult> recoverNext,
+        CancellationToken cancellationToken)
+    {
+        var delegateEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recovery = Task.Factory.StartNew(
+            () =>
+            {
+                delegateEntered.SetResult();
+                return recoverNext();
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        try
+        {
+            delegateEntered.Task.Wait(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new Xunit.Sdk.XunitException(
+                "Setup recovery participant did not enter before the test waited for the SetupTestPlatform barrier.");
+        }
+
+        return recovery;
     }
 
     private static void AssertRecoveryOperations(

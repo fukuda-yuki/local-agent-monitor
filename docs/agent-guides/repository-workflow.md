@@ -146,8 +146,16 @@ whole Nightly lane Affected.
 ### 2. Pull Request / main integration — Completion CI
 
 GitHub Actions owns Completion validation for Pull Requests and pushes to
-`main`. The single runner executes all unclassified portable deterministic Fast
-tests and the fixed Critical smoke set without running the smoke tests twice.
+`main`. Hosted validation runs `completion-discovery`, ten runner-defined
+matrix shards, and the stable aggregate `completion` check. Each shard receives
+only an opaque identifier; `run-validation.ps1` remains the single authority
+for project discovery, filters, selectors, expected identities, TRX evidence,
+and counts. The aggregate fails closed unless every required shard and its
+evidence match the discovery manifest.
+
+The unphased command below remains the monolithic local/operator compatibility
+entry. It uses the same runner-owned Fast and Critical Smoke authority as the
+hosted phases and does not run the smoke tests twice.
 
 ```powershell
 pwsh scripts\test\run-validation.ps1 -Lane Completion

@@ -27,7 +27,8 @@ public sealed class OwnedSessionPostCompletionImporterV1Tests
         tokens.Enqueue(new byte[32], Enumerable.Repeat((byte)1, 32).ToArray());
         var bridge = new SkillRuntimeCapabilityBridgeV1(admission, transport, () => 0, tokens.Next);
         var queue = new SessionEventQueue(2);
-        var importer = new OwnedSessionPostCompletionImporterV1(bridge, queue, TimeSpan.FromSeconds(1));
+        var importer = new OwnedSessionPostCompletionImporterV1(
+            bridge, queue, TimeSpan.FromSeconds(1), TimeProvider.System);
         var start = Envelope("session.start");
         var terminal = Envelope("session.task_complete");
         var prepared = new OwnedSessionPreparedImportV1("session-1", "1.0.65", Serialize(start),
@@ -54,7 +55,8 @@ public sealed class OwnedSessionPostCompletionImporterV1Tests
         var transport = new FakeBridgeTransport();
         var bridge = new SkillRuntimeCapabilityBridgeV1(admission, transport, () => 0, () => new byte[32]);
         var queue = new SessionEventQueue(2);
-        var importer = new OwnedSessionPostCompletionImporterV1(bridge, queue, TimeSpan.FromSeconds(1));
+        var importer = new OwnedSessionPostCompletionImporterV1(
+            bridge, queue, TimeSpan.FromSeconds(1), TimeProvider.System);
 
         Assert.Equal(OwnedSessionPostFreezeOutcomeV1.Success, await importer.ImportAsync(generation,
             new("session-1", "1.0.65", new byte[] { 1 }, [], new byte[] { 2 }), CancellationToken.None));
@@ -229,7 +231,16 @@ public sealed class OwnedSessionPostCompletionImporterV1Tests
     public async Task ImportAsync_TimeoutThenCancellationDuringClaimedDrainRemainsTimeout(
         bool terminal, int expectedValue)
     {
-        var fixture = new ImportFixture(timeout: TimeSpan.FromMilliseconds(10));
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero));
+        var targetTimerArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var expectedTimerArmCount = terminal ? 2 : 1;
+        var timerArmCount = 0;
+        clock.TimerCreated = () =>
+        {
+            if (Interlocked.Increment(ref timerArmCount) == expectedTimerArmCount)
+                targetTimerArmed.TrySetResult();
+        };
+        var fixture = new ImportFixture(timeout: TimeSpan.FromMilliseconds(10), timeProvider: clock);
         using var cancellation = new CancellationTokenSource();
         var import = fixture.Importer.ImportAsync(fixture.Generation, Prepared([Body(0, 7)]), cancellation.Token);
         var request = await fixture.Queue.Reader.ReadAsync();
@@ -243,7 +254,9 @@ public sealed class OwnedSessionPostCompletionImporterV1Tests
         }
         Assert.True(request.TryClaim());
 
-        await Task.Delay(50);
+        await targetTimerArmed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(import.IsCompleted);
+        clock.Advance(TimeSpan.FromMilliseconds(10));
         Assert.False(import.IsCompleted);
         cancellation.Cancel();
         request.Complete(SessionEventCommitStatus.Committed);
@@ -393,7 +406,7 @@ public sealed class OwnedSessionPostCompletionImporterV1Tests
     private sealed class ImportFixture
     {
         public ImportFixture(int? refuseAt = null, int? throwAt = null, TimeSpan? timeout = null, int queueCapacity = 2,
-            int? invalidateAt = null)
+            int? invalidateAt = null, TimeProvider? timeProvider = null)
         {
             var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
             Generation = Assert.IsType<CopilotRuntimeGenerationV1>(admission.PublishReadyTestCandidate(
@@ -404,7 +417,8 @@ public sealed class OwnedSessionPostCompletionImporterV1Tests
                 () => RandomNumberGenerator.GetBytes(32));
             Transport.Bridge = bridge;
             Queue = new SessionEventQueue(queueCapacity);
-            Importer = new OwnedSessionPostCompletionImporterV1(bridge, Queue, timeout ?? TimeSpan.FromSeconds(1));
+            Importer = new OwnedSessionPostCompletionImporterV1(
+                bridge, Queue, timeout ?? TimeSpan.FromSeconds(1), timeProvider ?? TimeProvider.System);
         }
 
         public CopilotRuntimeGenerationV1 Generation { get; }

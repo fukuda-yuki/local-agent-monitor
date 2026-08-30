@@ -281,18 +281,20 @@ public sealed class SetupCompensationTests
         var exclusive = new TrackingExclusiveLock();
         var setupLock = SetupLock.CreateForTesting(exclusive, fixture.Platform, fixture.Paths, disposeRequested.Set);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(
             () => fixture.Coordinator.Apply(setupLock, fixture.ChangeSetId)));
+        await applying.Entered;
         using var restore = await restoreBarrierReady.Task;
         restore.WaitUntilReached(CancellationToken.None);
 
-        var disposing = Task.Run(setupLock.Dispose);
+        var disposing = BlockingTestActor.Start(setupLock.Dispose);
+        await disposing.Entered;
         Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(exclusive.IsDisposed);
         restore.Release();
 
-        var exception = await applying;
-        await disposing;
+        var exception = await applying.Completion;
+        await disposing.Completion;
 
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.True(exclusive.IsDisposed);
@@ -626,8 +628,9 @@ public sealed class SetupCompensationTests
             });
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
             fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         using var fileClassification = await fileClassificationReady.Task;
         fileClassification.WaitUntilReached(CancellationToken.None);
         using var fileRestore = fixture.Platform.AddBarrier(
@@ -640,7 +643,7 @@ public sealed class SetupCompensationTests
             new IOException("RESTORE_PRIVATE"));
         fileRestore.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
 
         Assert.Equal(SetupCodes.PartialApply, exception.Code);
         Assert.Equal("old-a", fixture.Platform.ReadUserEnvironment("ENV_A"));
@@ -886,8 +889,9 @@ public sealed class SetupCompensationTests
         using var restoreBarrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterRestoreIntentBeforeRestore}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
             fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         forwardBarrier.WaitUntilReached(CancellationToken.None);
         var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
         fixture.Platform.InjectFault(
@@ -908,7 +912,7 @@ public sealed class SetupCompensationTests
         }
         restoreBarrier.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
         if (afterEffect)
         {
             Assert.Equal(SetupCodes.InternalError, exception.Code);
@@ -951,13 +955,14 @@ public sealed class SetupCompensationTests
         string journalFaultOperation;
         using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
         {
-            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
                 fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            await applying.Entered;
             using var classification = await classificationReady.Task;
             classification.WaitUntilReached(CancellationToken.None);
             journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
             classification.Release();
-            exception = await applying;
+            exception = await applying.Completion;
         }
 
         if (afterEffect)
@@ -995,8 +1000,9 @@ public sealed class SetupCompensationTests
         string journalFaultOperation;
         using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
         {
-            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
                 fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            await applying.Entered;
             forwardReady.WaitUntilReached(CancellationToken.None);
             var forwardTemporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
             fixture.Platform.InjectAfterEffectFault(
@@ -1010,7 +1016,7 @@ public sealed class SetupCompensationTests
             classification.WaitUntilReached(CancellationToken.None);
             journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
             classification.Release();
-            exception = await applying;
+            exception = await applying.Completion;
         }
 
         if (afterEffect)
@@ -1048,12 +1054,13 @@ public sealed class SetupCompensationTests
         using (var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}"))
         using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
         {
-            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
                 fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            await applying.Entered;
             barrier.WaitUntilReached(CancellationToken.None);
             journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
             barrier.Release();
-            exception = await applying;
+            exception = await applying.Completion;
         }
 
         if (afterEffect)
@@ -1094,8 +1101,9 @@ public sealed class SetupCompensationTests
                    $"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}"))
         using (var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths))
         {
-            var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+            var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
                 fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+            await applying.Entered;
             forwardReady.WaitUntilReached(CancellationToken.None);
             var forwardTemporary = NextTemporaryPath(fixture.Platform.Operations, fixture.TargetPath);
             fixture.Platform.InjectAfterEffectFault(
@@ -1106,7 +1114,7 @@ public sealed class SetupCompensationTests
             completionReady.WaitUntilReached(CancellationToken.None);
             journalFaultOperation = InjectNextJournalWriteFault(fixture, afterEffect);
             completionReady.Release();
-            exception = await applying;
+            exception = await applying.Completion;
         }
 
         if (afterEffect)
@@ -1137,15 +1145,16 @@ public sealed class SetupCompensationTests
         using var barrier = fixture.Platform.AddBarrier($"checkpoint:{SetupFaultPoint.AfterRestoreBeforeCompletion}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
             fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         barrier.WaitUntilReached(CancellationToken.None);
         fixture.Platform.InjectFault(
             $"file.replace:{fixture.Paths.OwnershipLedger}.tmp->{fixture.Paths.OwnershipLedger}",
             new IOException("PRIVATE_LEDGER"));
         barrier.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         AssertFullyPriorValues(fixture);
         Assert.Equal(SetupJournalPhase.Restored, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
@@ -1168,8 +1177,9 @@ public sealed class SetupCompensationTests
             });
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var applying = Task.Run(() => Assert.Throws<SetupApplyException>(() =>
+        var applying = BlockingTestActor.Start(() => Assert.Throws<SetupApplyException>(() =>
             fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId)));
+        await applying.Entered;
         using var barrier = await barrierReady.Task;
         barrier.WaitUntilReached(CancellationToken.None);
         var journalPath = fixture.Paths.GetTransactionJournal(fixture.ChangeSetId);
@@ -1178,7 +1188,7 @@ public sealed class SetupCompensationTests
             new IOException("PRIVATE_JOURNAL"));
         barrier.Release();
 
-        var exception = await applying;
+        var exception = await applying.Completion;
         Assert.Equal(SetupCodes.RecoveryRequired, exception.Code);
         Assert.Equal(SetupJournalPhase.Compensating, fixture.JournalStore.Load(fixture.ChangeSetId)!.Phase);
         Assert.Equal(SetupChangeSetState.Compensating, fixture.LoadChangeSet().State);

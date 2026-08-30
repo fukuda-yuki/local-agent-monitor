@@ -1,4 +1,5 @@
 using CopilotAgentObservability.LocalMonitor.Retention;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -135,15 +136,16 @@ public sealed class AnalysisSdkDirectoryCatalogTests
             timeProvider: time);
         var reservation = fixture.Catalog.ReserveAnalysisSdkDirectory(7, fixture.Parent);
         fixture.CreateOwnedChild(reservation);
-        var activationTask = Task.Run(() => fixture.Catalog.ActivateAnalysisSdkDirectoryAndAcquireOperationLease(
+        var activationActor = BlockingTestActor.Start(() => fixture.Catalog.ActivateAnalysisSdkDirectoryAndAcquireOperationLease(
             reservation,
             reservation.OwnershipMarker,
             exclusivelyCreatedEmptyChild: true));
+        await activationActor.Entered;
 
         try
         {
             await transactionBegan.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.False(activationTask.IsCompleted);
+            Assert.False(activationActor.Completion.IsCompleted);
             time.Advance(TimeSpan.FromTicks(1));
         }
         finally
@@ -151,7 +153,7 @@ public sealed class AnalysisSdkDirectoryCatalogTests
             resumeActivation.TrySetResult();
         }
 
-        var activation = await activationTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var activation = await activationActor.Completion.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.False(activation.IsActive);
         Assert.Equal(0L, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_items WHERE store_kind='analysis_sdk_directory'"));
@@ -175,15 +177,16 @@ public sealed class AnalysisSdkDirectoryCatalogTests
             timeProvider: time);
         var reservation = fixture.Catalog.ReserveAnalysisSdkDirectory(7, fixture.Parent);
         fixture.CreateOwnedChild(reservation);
-        var activationTask = Task.Run(() => fixture.Catalog.ActivateAnalysisSdkDirectoryAndAcquireOperationLease(
+        var activationActor = BlockingTestActor.Start(() => fixture.Catalog.ActivateAnalysisSdkDirectoryAndAcquireOperationLease(
             reservation,
             reservation.OwnershipMarker,
             exclusivelyCreatedEmptyChild: true));
+        await activationActor.Entered;
 
         try
         {
             await transactionBegan.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.False(activationTask.IsCompleted);
+            Assert.False(activationActor.Completion.IsCompleted);
             time.Advance(TimeSpan.FromMinutes(1));
         }
         finally
@@ -191,7 +194,7 @@ public sealed class AnalysisSdkDirectoryCatalogTests
             resumeActivation.TrySetResult();
         }
 
-        var activation = await activationTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var activation = await activationActor.Completion.WaitAsync(TimeSpan.FromSeconds(5));
         var lease = Assert.IsType<RetentionAnalysisSdkDirectoryOperationLease>(activation.Lease);
 
         Assert.True(activation.IsActive);
@@ -393,7 +396,7 @@ public sealed class AnalysisSdkDirectoryCatalogTests
 
         var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releasePublication = new ManualResetEventSlim();
-        var publicationHolder = Task.Run(() =>
+        var publicationHolder = BlockingTestActor.Start(() =>
         {
             using var publication = exact.Grant.EnterLeasePublication();
             publicationHeld.TrySetResult();
@@ -405,8 +408,12 @@ public sealed class AnalysisSdkDirectoryCatalogTests
         var completedAtBoundary = true;
         try
         {
+            await publicationHolder.Entered;
             await publicationHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            renewal = Task.Run(() => fixture.Catalog.RenewAndObserveAnalysisSdkDirectoryOperationLease(exact));
+            var renewalActor = BlockingTestActor.Start(
+                () => fixture.Catalog.RenewAndObserveAnalysisSdkDirectoryOperationLease(exact));
+            await renewalActor.Entered;
+            renewal = renewalActor.Completion;
             await renewalTransactionBegan.Task.WaitAsync(TimeSpan.FromSeconds(5));
             completedAfterBegin = renewal.IsCompleted;
             fixture.Time.Advance(publishedExpiryBefore - fixture.Time.GetUtcNow());
@@ -418,7 +425,7 @@ public sealed class AnalysisSdkDirectoryCatalogTests
             Exception? backgroundFailure = null;
             try
             {
-                await publicationHolder.WaitAsync(TimeSpan.FromSeconds(5));
+                await publicationHolder.Completion.WaitAsync(TimeSpan.FromSeconds(5));
             }
             catch (Exception exception)
             {
@@ -604,8 +611,9 @@ public sealed class AnalysisSdkDirectoryCatalogTests
     public async Task ReserveAnalysisSdkDirectory_SameRunConcurrentCallsReturnOneCapability()
     {
         using var fixture = Fixture.Create(); using var barrier = new Barrier(2); using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var calls = Enumerable.Range(0, 2).Select(_ => Task.Run(() => { barrier.SignalAndWait(cancellation.Token); return fixture.Catalog.ReserveAnalysisSdkDirectory(7, fixture.Parent); }, cancellation.Token)).ToArray();
-        var reservations = await Task.WhenAll(calls).WaitAsync(cancellation.Token);
+        var calls = Enumerable.Range(0, 2).Select(_ => BlockingTestActor.Start(() => { barrier.SignalAndWait(cancellation.Token); return fixture.Catalog.ReserveAnalysisSdkDirectory(7, fixture.Parent); })).ToArray();
+        await Task.WhenAll(calls.Select(call => call.Entered));
+        var reservations = await Task.WhenAll(calls.Select(call => call.Completion)).WaitAsync(cancellation.Token);
         Assert.Single(reservations.Select(x => x.CaptureId).Distinct());
         Assert.Equal(1L, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_analysis_sdk_directory_reservations WHERE analysis_run_id=7"));
     }

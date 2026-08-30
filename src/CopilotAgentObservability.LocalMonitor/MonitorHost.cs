@@ -397,16 +397,18 @@ internal static class MonitorHost
             var aiOptions = CopilotAnalysisOptions.From(builder.Configuration);
             localAiOptions = aiOptions;
             var configured = !bool.TryParse(builder.Configuration["CopilotAnalysis:Enabled"], out var enabled) || enabled;
-            localAiClientFactory = () => OwnedCopilotSdkClientV1.TryCreate(
-                Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
-                static sdkOptions => new CopilotClient(sdkOptions),
-                static name => Environment.GetEnvironmentVariable(name) is not null,
-                out var client) ? client : null;
+            localAiClientFactory = testOptions?.SettingsAiReadinessClientFactory ?? (() =>
+                OwnedCopilotSdkClientV1.TryCreate(
+                    Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
+                    static sdkOptions => new CopilotClient(sdkOptions),
+                    static name => Environment.GetEnvironmentVariable(name) is not null,
+                    out var client) ? client : null);
             settingsAiReadiness = testOptions?.SettingsAiReadiness ?? new SettingsAiReadinessService(
                 "github_copilot", aiOptions.DefaultModel, aiOptions.DefaultProfile,
                 configured,
                 localAiClientFactory,
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10),
+                timeProvider);
             builder.Services.AddSingleton(settingsAiReadiness);
             builder.Services.AddHostedService(_ => settingsAiReadiness);
         }
@@ -436,6 +438,7 @@ internal static class MonitorHost
                     skillRuntimeBridgeHolder.CurrentBridge,
                     sessionEventQueue,
                     testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
+                    timeProvider,
                     ownedDirectory => OwnedCopilotSdkClientV1.TryCreate(
                         ownedDirectory,
                         static clientOptions => new CopilotClient(clientOptions),
@@ -3018,6 +3021,8 @@ internal sealed class MonitorHostTestOptions
     public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
 
     public SettingsAiReadinessService? SettingsAiReadiness { get; init; }
+
+    public Func<IOwnedCopilotClientV1?>? SettingsAiReadinessClientFactory { get; init; }
 
     public ILocalAiAnalysisApplicationV1? LocalAiAnalysisApplication { get; init; }
 

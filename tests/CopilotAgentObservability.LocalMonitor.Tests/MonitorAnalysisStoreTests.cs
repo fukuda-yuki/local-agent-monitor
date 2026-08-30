@@ -278,21 +278,22 @@ public class MonitorAnalysisStoreTests
         var run = setup.StartRun("trace-analysis", 42, "span-1", MonitorAnalysisFocus.ToolUsage, requestedAt);
 
         using var start = new Barrier(3);
-        var first = Task.Run(() =>
+        var first = BlockingTestActor.Start(() =>
         {
             start.SignalAndWait();
             return new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider).AppendEvent(run.RunId, run.OperationToken, null, "progress", "first raw event", requestedAt.AddMinutes(1));
         });
-        var second = Task.Run(() =>
+        var second = BlockingTestActor.Start(() =>
         {
             start.SignalAndWait();
             return new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider).AppendEvent(run.RunId, run.OperationToken, null, "progress", "second raw event", requestedAt.AddMinutes(2));
         });
 
+        await Task.WhenAll(first.Entered, second.Entered);
         start.SignalAndWait();
         var outcomes = await Task.WhenAll(
-            first.ContinueWith(task => task.Exception?.GetBaseException()),
-            second.ContinueWith(task => task.Exception?.GetBaseException()));
+            first.Completion.ContinueWith(task => task.Exception?.GetBaseException()),
+            second.Completion.ContinueWith(task => task.Exception?.GetBaseException()));
 
         Assert.Single(outcomes, exception => exception is null);
         Assert.Single(outcomes, exception => exception is RetentionRevisionFenceRejectedException);
@@ -707,19 +708,20 @@ public class MonitorAnalysisStoreTests
         var snapshotTask = store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None).AsTask();
         await selectorEntered.Task;
         var appendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var writer = Task.Run(() =>
+        var writer = BlockingTestActor.Start(() =>
         {
             appendStarted.SetResult();
             new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider)
                 .AppendEvent(run.RunId, run.OperationToken, fence, "progress", "post-event", requestedAt.AddMinutes(3));
         });
+        await writer.Entered;
         await appendStarted.Task;
-        Assert.False(writer.IsCompleted);
+        Assert.False(writer.Completion.IsCompleted);
         releaseSelector.SetResult();
         var read = await snapshotTask;
         new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider)
             .AppendEvent(run.RunId, run.OperationToken, fence, "progress", "post-event", requestedAt.AddMinutes(3));
-        await writer;
+        await writer.Completion;
 
         Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);

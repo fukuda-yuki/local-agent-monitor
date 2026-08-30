@@ -174,10 +174,13 @@ public sealed class GenericRouteContentDenialTests
             mutationAttempted.Task.Wait(TimeSpan.FromSeconds(30));
         });
 
-        var readTask = Task.Run(() => store
+        var readActor = BlockingTestActor.Start(() => store
             .ReadGenericRouteContentAsync(identity.SessionId, identity.EventId, CancellationToken.None)
-            .AsTask());
+            .AsTask()
+            .GetAwaiter()
+            .GetResult());
 
+        await readActor.Entered;
         await policyObserved.Task;
 
         SqliteException? mutationFailure = null;
@@ -199,7 +202,7 @@ public sealed class GenericRouteContentDenialTests
         }
 
         mutationAttempted.TrySetResult();
-        var result = await readTask;
+        var result = await readActor.Completion;
 
         // SQLITE_BUSY: the route already holds BEGIN IMMEDIATE, so no type change can commit
         // between its policy decision and its content selection.

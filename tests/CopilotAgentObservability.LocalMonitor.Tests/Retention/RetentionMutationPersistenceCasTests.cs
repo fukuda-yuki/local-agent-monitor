@@ -1,4 +1,5 @@
 using System.Globalization;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -130,11 +131,12 @@ public sealed class RetentionMutationPersistenceCasTests
             return await writer.TryCompareAndSwapMutationAsync(expected, Apply, PersistResult, CancellationToken.None);
         }
 
-        var taskA = Task.Run(() => Run(writerA));
-        var taskB = Task.Run(() => Run(writerB));
+        var actorA = BlockingTestActor.Start(() => Run(writerA).GetAwaiter().GetResult());
+        var actorB = BlockingTestActor.Start(() => Run(writerB).GetAwaiter().GetResult());
+        await Task.WhenAll(actorA.Entered, actorB.Entered);
         await callbackEntered.Task;
         releaseWinner.SetResult();
-        var results = await Task.WhenAll(taskA, taskB);
+        var results = await Task.WhenAll(actorA.Completion, actorB.Completion);
 
         Assert.Equal(1, results.Count(result => result.Disposition == RetentionMutationCasDisposition.Committed));
         Assert.Equal(1, results.Count(result => result.Disposition == RetentionMutationCasDisposition.Stale));

@@ -733,9 +733,13 @@ public sealed class HistoricalAnalysisCoordinatorTests
             HistoricalEvidenceExtractionV1 extraction,
             CancellationToken cancellationToken)
         {
-            Entered.TrySetResult();
-            Release.Wait();
-            return Task.FromResult(HistoricalEfficiencyAnalyzerV1.Analyze(extraction));
+            var actor = BlockingTestActor.Start(() =>
+            {
+                Entered.TrySetResult();
+                Release.Wait();
+                return HistoricalEfficiencyAnalyzerV1.Analyze(extraction);
+            });
+            return actor.Completion;
         }
     }
 }

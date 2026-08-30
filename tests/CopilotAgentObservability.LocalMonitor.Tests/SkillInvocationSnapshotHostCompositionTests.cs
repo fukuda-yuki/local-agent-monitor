@@ -249,9 +249,22 @@ public sealed class SkillInvocationSnapshotHostCompositionTests
         Assert.Same(observer, injectedObserved.ExecutionCheckpointObserver);
     }
 
+    [Fact]
+    public async Task RawAnalysisRootsExecution_PassesHostOwnedTimeProvider()
+    {
+        var timeProvider = new MutableTimeProvider(
+            new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero));
+
+        var observed = await CaptureRootsExecutionContextAsync(
+            driver: null, timeProvider: timeProvider);
+
+        Assert.Same(timeProvider, observed.TimeProvider);
+    }
+
     private static async Task<CopilotAnalysisRootsExecutionContext> CaptureRootsExecutionContextAsync(
         IOwnedSessionExecutionDriverV1? driver,
-        Action<OwnedSessionExecutionCheckpointV1>? checkpointObserver = null)
+        Action<OwnedSessionExecutionCheckpointV1>? checkpointObserver = null,
+        TimeProvider? timeProvider = null)
     {
         const string traceId = "trace-driver-composition";
         using var temp = new MonitorTempDirectory();
@@ -284,7 +297,7 @@ public sealed class SkillInvocationSnapshotHostCompositionTests
             BuildOptions(temp, [root.Path], sanitizedOnly: false),
             new MonitorHostTestOptions
             {
-                TimeProvider = temp.TimeProvider,
+                TimeProvider = timeProvider ?? temp.TimeProvider,
                 AnalysisSdkExecutor = new RejectingCompositionExecutor(),
                 OwnedSessionExecutionDriver = driver,
                 OwnedSessionExecutionCheckpointObserver = checkpointObserver,

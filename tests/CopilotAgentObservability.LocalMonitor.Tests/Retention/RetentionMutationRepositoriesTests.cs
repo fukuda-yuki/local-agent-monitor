@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -83,14 +84,16 @@ public sealed class RetentionMutationRepositoriesTests
         {
             var request = fixture.Idempotency("confirmation_issue", "{\"preview_id\":\"rpv1_preview\"}", "{\"confirmation_id\":\"redacted\"}");
             var barrier = new Barrier(2);
-            async Task<RetentionIdempotencyOutcome> Write()
+            RetentionIdempotencyOutcome Write()
             {
                 barrier.SignalAndWait();
-                await Task.Yield();
                 return fixture.Store.GetOrCreateIdempotency(request);
             }
 
-            var results = await Task.WhenAll(Task.Run(Write), Task.Run(Write));
+            var firstActor = BlockingTestActor.Start(Write);
+            var secondActor = BlockingTestActor.Start(Write);
+            await Task.WhenAll(firstActor.Entered, secondActor.Entered);
+            var results = await Task.WhenAll(firstActor.Completion, secondActor.Completion);
 
             Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Created));
             Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Replayed));
@@ -102,14 +105,16 @@ public sealed class RetentionMutationRepositoriesTests
             var first = fixture.Idempotency("confirmation_issue", "{\"preview_id\":\"rpv1_preview\"}", "{\"confirmation_id\":\"redacted\"}");
             var second = first with { CanonicalRequest = "{\"preview_id\":\"rpv1_other\"}" };
             var barrier = new Barrier(2);
-            async Task<RetentionIdempotencyOutcome> Write(RetentionIdempotencyRequest request)
+            RetentionIdempotencyOutcome Write(RetentionIdempotencyRequest request)
             {
                 barrier.SignalAndWait();
-                await Task.Yield();
                 return fixture.Store.GetOrCreateIdempotency(request);
             }
 
-            var results = await Task.WhenAll(Task.Run(() => Write(first)), Task.Run(() => Write(second)));
+            var firstActor = BlockingTestActor.Start(() => Write(first));
+            var secondActor = BlockingTestActor.Start(() => Write(second));
+            await Task.WhenAll(firstActor.Entered, secondActor.Entered);
+            var results = await Task.WhenAll(firstActor.Completion, secondActor.Completion);
 
             Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Created));
             Assert.Equal(1, results.Count(result => result.Disposition == RetentionIdempotencyDisposition.Conflict));

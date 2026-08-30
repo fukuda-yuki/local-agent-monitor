@@ -203,7 +203,9 @@ public sealed class SetupStorageTests
         using var barrier = context.Platform.AddBarrier(
             $"file.read-bounded:{source}:{SetupLedgerStore.MaximumLedgerBytes}");
 
-        var load = Task.Run(() => Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery()));
+        var loadActor = BlockingTestActor.Start(() => Assert.Throws<SetupStorageException>(() => context.Store.LoadForRecovery()));
+        await loadActor.Entered;
+        var load = loadActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
         context.Platform.SeedPathMetadata(
             source,
@@ -1751,9 +1753,13 @@ public sealed class SetupStorageTests
         var destination = context.Paths.GetPlan(ChangeSetId);
         using var barrier = context.Platform.AddBarrier($"file.move:{destination}.tmp->{destination}");
 
-        var write = Task.Run(() => context.PlanStore.Create(context.Lock, CreatePlan()));
+        var writeActor = BlockingTestActor.Start(() => context.PlanStore.Create(context.Lock, CreatePlan()));
+        await writeActor.Entered;
+        var write = writeActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
-        var dispose = Task.Run(context.Lock.Dispose);
+        var disposeActor = BlockingTestActor.Start(context.Lock.Dispose);
+        await disposeActor.Entered;
+        var dispose = disposeActor.Completion;
         try
         {
             Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
@@ -1781,11 +1787,15 @@ public sealed class SetupStorageTests
         var destination = context.Paths.OwnershipLedger;
         using var barrier = context.Platform.AddBarrier($"file.replace:{destination}.tmp->{destination}");
 
-        var write = Task.Run(() => context.Store.Save(
+        var writeActor = BlockingTestActor.Start(() => context.Store.Save(
             context.Lock,
             new SetupOwnershipLedger(1, [CreateAppliedChangeSet()])));
+        await writeActor.Entered;
+        var write = writeActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
-        var dispose = Task.Run(context.Lock.Dispose);
+        var disposeActor = BlockingTestActor.Start(context.Lock.Dispose);
+        await disposeActor.Entered;
+        var dispose = disposeActor.Completion;
         try
         {
             Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
@@ -1811,10 +1821,14 @@ public sealed class SetupStorageTests
         var context = CreateContext(disposeRequested.Set);
         using var barrier = context.Platform.AddBarrier("checkpoint:after-plan-persisted-before-ledger");
 
-        var write = Task.Run(() => context.Store.PersistPlannedChangeSet(
+        var writeActor = BlockingTestActor.Start(() => context.Store.PersistPlannedChangeSet(
             context.Lock, CreatePlan(), CreatePlannedChangeSet()));
+        await writeActor.Entered;
+        var write = writeActor.Completion;
         barrier.WaitUntilReached(CancellationToken.None);
-        var dispose = Task.Run(context.Lock.Dispose);
+        var disposeActor = BlockingTestActor.Start(context.Lock.Dispose);
+        await disposeActor.Entered;
+        var dispose = disposeActor.Completion;
         try
         {
             Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));

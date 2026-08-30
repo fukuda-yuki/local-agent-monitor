@@ -2412,9 +2412,14 @@ native failure, never zero/default evidence. macOS/BSD/other and uncertified fil
 
 Re-prove root mapping before/after discovery; walk and retain every segment;
 require one regular file; capture chain/final identity, mode, size, mtime and
-ctime/change time; read at most 1,048,577 bytes from the same handle; repeat all
-identity/metadata/root/revision proofs. Any change discards bytes. Only a stable
-read is classified and hashed without BOM/line-ending/Unicode transformation.
+ctime/change time. Windows reads at most 1,048,577 bytes twice from offset zero
+on the same retained final handle, for an aggregate native-read bound of
+2,097,154 bytes, and requires both byte counts and exact bytes to match. Linux
+preserves its existing single same-fd bounded read of at most 1,048,577 bytes.
+Each platform then repeats all identity/metadata/root/revision proofs. Any
+Windows content mismatch or either platform's proof change discards bytes. Only
+a stable read is classified and hashed without BOM/line-ending/Unicode
+transformation.
 
 Native outcomes are total and use no exception-message mapping:
 
@@ -2422,7 +2427,7 @@ Native outcomes are total and use no exception-message mapping:
 |---|---|
 | successful discovery has no exact eligible target | `409 skill_current_file_not_discovered` |
 | path/root relation, node type, reparse/symlink/magic-link, mount/volume, ADS/device/network, or other closed policy violation | `409 skill_current_file_unsafe` |
-| retained-root/revision/native identity or any chain/final metadata differs between required proofs, including disappearance after an identity was observed | `409 skill_current_file_raced` |
+| retained-root/revision/native identity or any chain/final metadata differs between required proofs, an observed identity disappears, or, on Windows only, the two same-handle content-read byte counts or exact bytes differ | `409 skill_current_file_raced` |
 | sole confirmed candidate-segment/final-node not-found arm below, while every retained-root/revision proof is unchanged and no prior identity proved that object | `404 skill_current_file_missing` |
 | stable regular file is greater than 1,048,576 bytes | `422 skill_current_file_oversized` |
 | stable in-bound bytes are not strict UTF-8 | `422 skill_current_file_binary` |

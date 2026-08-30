@@ -90,6 +90,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         var context = new CopilotAnalysisRootsExecutionContext(
             scope, null!, null!, new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1()),
             null, new SessionEventQueue(), TimeSpan.FromSeconds(1),
+            TimeProvider.System,
             _ => throw new InvalidOperationException("must not create client"), _ => false, CancellationToken.None);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
@@ -389,6 +390,44 @@ public sealed class CopilotAnalysisSdkExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RootsEnabledUsesContextTimeProviderForClaimedStartCommitTimeout()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture(OwnedFailure.OneInvocation);
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero));
+        var timerArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.TimerCreated = () => timerArmed.TrySetResult();
+        var observed = new List<OwnedSessionPostFreezeOutcomeV1>();
+
+        var execution = new CopilotAnalysisSdkExecutor().ExecuteAsync(
+            fixture.Scope.ChildDirectory,
+            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with
+            {
+                CommitTimeout = TimeSpan.FromMilliseconds(10),
+                TimeProvider = clock,
+                PostFreezeFailureObserver = observed.Add,
+            }, CancellationToken.None);
+        var request = await fixture.Queue.Reader.ReadAsync();
+        fixture.Queue.MarkDequeued();
+        Assert.True(request.TryClaim());
+        await timerArmed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(execution.IsCompleted);
+
+        clock.Advance(TimeSpan.FromMilliseconds(10));
+        Assert.False(execution.IsCompleted);
+        request.Complete(SessionEventCommitStatus.Committed);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => execution);
+        Assert.Equal("The completed session could not be imported.", error.Message);
+        Assert.Equal([OwnedSessionPostFreezeOutcomeV1.StartCommitTimeout], observed);
+        Assert.Equal(0, fixture.Queue.Count);
+        Assert.Equal(1, fixture.Client.DisposeCalls);
+        Assert.Equal(1, fixture.Scope.DisposeCalls);
+    }
+
+    [Fact]
     public void PostFreezeObserverIsOptionalAndThrowingObserverCannotChangeControlFlow()
     {
         OwnedSessionPostFreezeOutcomeObservationV1.Notify(null, OwnedSessionPostFreezeOutcomeV1.PreparedBodyRejected);
@@ -618,16 +657,19 @@ public sealed class CopilotAnalysisSdkExecutorTests
         using var fixture = new OwnedFixture(control: new OwnedExecutionControl(
             OwnedExecutionPhase.None, nativeReadPhase: phase));
 
-        var execution = Task.Run(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
-            fixture.Scope.ChildDirectory,
-            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-            new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None));
+        var executionActor = BlockingTestActor.Start(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+                fixture.Scope.ChildDirectory,
+                new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+                new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult());
 
+        await executionActor.Entered;
         await fixture.Control!.NativeReadBarrier.Entered;
         if (authority == CancellationAuthority.HostStopping) fixture.StopHost();
         else fixture.Scope.LoseLease();
         fixture.Control.NativeReadBarrier.Release();
-        await Assert.ThrowsAnyAsync<Exception>(() => execution);
+        await Assert.ThrowsAnyAsync<Exception>(() => executionActor.Completion);
 
         Assert.True(fixture.Control.NativeReadTokenCanBeCanceled);
         Assert.True(fixture.Control.NativeReadTokenWasCanceled);
@@ -791,7 +833,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
                 ? new WindowsCurrentSkillFileReaderV1()
                 : new BlockingNativeReader(new WindowsCurrentSkillFileReaderV1(), control);
             Context = new(Scope, RootGeneration, nativeReader, Admission, bridge, Queue,
-                TimeSpan.FromSeconds(1), _ => Client, _ => false, hostStopping.Token);
+                TimeSpan.FromSeconds(1), TimeProvider.System, _ => Client, _ => false, hostStopping.Token);
         }
 
         internal CountingAnalysisScope Scope { get; }

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -285,7 +286,7 @@ public sealed class RetentionConfirmationBindingPersistenceTests
         using var barrier = new Barrier(2);
         var firstReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        async Task<RetentionConfirmationConsumptionResult> Consume(RetentionCatalogStore store)
+        RetentionConfirmationConsumptionResult Consume(RetentionCatalogStore store)
         {
             barrier.SignalAndWait();
             using var connection = store.OpenMutationConnection();
@@ -293,14 +294,14 @@ public sealed class RetentionConfirmationBindingPersistenceTests
             firstReady.TrySetResult();
             var result = store.TryConsumeConfirmationWithinTransaction(connection, transaction, request.ConfirmationToken);
             transaction.Commit();
-            await Task.Yield();
             return result;
         }
 
-        var taskA = Task.Run(() => Consume(new RetentionCatalogStore(fixture.Path, fixture.Time)));
-        var taskB = Task.Run(() => Consume(new RetentionCatalogStore(fixture.Path, fixture.Time)));
+        var actorA = BlockingTestActor.Start(() => Consume(new RetentionCatalogStore(fixture.Path, fixture.Time)));
+        var actorB = BlockingTestActor.Start(() => Consume(new RetentionCatalogStore(fixture.Path, fixture.Time)));
+        await Task.WhenAll(actorA.Entered, actorB.Entered);
         await firstReady.Task;
-        var results = await Task.WhenAll(taskA, taskB);
+        var results = await Task.WhenAll(actorA.Completion, actorB.Completion);
 
         Assert.Equal(1, results.Count(result => result.Disposition == RetentionConfirmationConsumptionDisposition.Consumed));
         Assert.Equal(1, results.Count(result => result.Disposition == RetentionConfirmationConsumptionDisposition.AlreadyConsumed));
@@ -316,20 +317,21 @@ public sealed class RetentionConfirmationBindingPersistenceTests
         var replacement = original with { ConfirmationId = fixture.ConfirmationId(2), ConfirmationToken = fixture.Token(3, 4) };
         using var barrier = new Barrier(2);
 
-        var reissueTask = Task.Run(() =>
+        var reissueActor = BlockingTestActor.Start(() =>
         {
             barrier.SignalAndWait();
             return fixture.Store.StoreConfirmationBinding(replacement);
         });
-        var consumeTask = Task.Run(() =>
+        var consumeActor = BlockingTestActor.Start(() =>
         {
             barrier.SignalAndWait();
             return fixture.Store.ConsumeConfirmation(original.ConfirmationToken);
         });
 
-        await Task.WhenAll(reissueTask, consumeTask);
-        var reissue = await reissueTask;
-        var consume = await consumeTask;
+        await Task.WhenAll(reissueActor.Entered, consumeActor.Entered);
+        await Task.WhenAll(reissueActor.Completion, consumeActor.Completion);
+        var reissue = await reissueActor.Completion;
+        var consume = await consumeActor.Completion;
 
         Assert.True(reissue.Disposition is RetentionConfirmationBindingPersistenceDisposition.Stored
             or RetentionConfirmationBindingPersistenceDisposition.Consumed);

@@ -11,16 +11,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'schedule' && format('validation-schedule-{0}', github.run_id) || format('validation-completion-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
 # Retention inventory diffs pinned historical SHAs. The checkout default
 # (fetch-depth: 1) omits those objects and fails git diff with "bad object".
 jobs:
-  completion:
+  completion-discovery:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: windows-latest
     timeout-minutes: 45
-    concurrency:
-      group: validation-completion-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+    outputs:
+      matrix: ${{ steps.discovery.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,28 +35,124 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Run Completion validation
-        shell: pwsh
-        run: pwsh scripts/test/run-validation.ps1 -Lane Completion
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('global.json', '**/*.csproj') }}
 
-      - name: Upload TRX
+      - name: Discover Completion membership
+        id: discovery
+        shell: pwsh
+        run: pwsh scripts/test/run-validation.ps1 -Lane Completion -Phase Discovery -OutputDirectory artifacts/validation/discovery -ManifestPath artifacts/validation/discovery/completion-manifest.json
+
+      - name: Upload Completion manifest
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-trx-${{ github.job }}-${{ github.run_attempt }}
-          path: artifacts/validation/**/*.trx
-          if-no-files-found: warn
+          name: completion-discovery-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/validation/discovery/**
+          if-no-files-found: error
+          retention-days: 7
+
+  completion-shard:
+    if: needs.completion-discovery.result == 'success'
+    needs: completion-discovery
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.completion-discovery.outputs.matrix) }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('global.json', '**/*.csproj') }}
+
+      - name: Download Completion manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: completion-discovery-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/validation/discovery
+
+      - name: Run Completion shard
+        shell: pwsh
+        run: pwsh scripts/test/run-validation.ps1 -Lane Completion -Phase Shard -ShardId '${{ matrix.id }}' -ManifestPath artifacts/validation/discovery/completion-manifest.json -OutputDirectory artifacts/validation/shard
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: completion-shard-${{ github.sha }}-${{ github.run_attempt }}-${{ matrix.id }}
+          path: artifacts/validation/shard/**
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload Playwright failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-playwright-${{ github.job }}-${{ github.run_attempt }}
+          name: validation-playwright-${{ github.job }}-${{ github.run_attempt }}-${{ matrix.id }}
           path: |
             artifacts/session-workspace/**
             tests/**/TestResults/**
           if-no-files-found: ignore
+          retention-days: 7
+
+  completion:
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'push')
+    needs: [completion-discovery, completion-shard]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Download Completion manifest
+        id: download-discovery
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: completion-discovery-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/validation/discovery
+
+      - name: Download all shard evidence
+        id: download-shards
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: completion-shard-${{ github.sha }}-${{ github.run_attempt }}-*
+          path: artifacts/validation/shards
+
+      - name: Aggregate Completion evidence
+        shell: pwsh
+        run: pwsh scripts/test/run-validation.ps1 -Lane Completion -Phase Aggregate -ManifestPath artifacts/validation/discovery/completion-manifest.json -ArtifactsDirectory artifacts/validation/shards -RunAttempt '${{ github.run_attempt }}' -DiscoveryResult '${{ needs.completion-discovery.result }}' -ShardDependencyResult '${{ needs.completion-shard.result }}' -OutputDirectory artifacts/validation/aggregate
+
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: completion-aggregate-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/validation/aggregate/**
+          if-no-files-found: error
           retention-days: 7
 
   nightly-windows:
