@@ -1142,12 +1142,13 @@ public sealed class SqliteRuntimeBackupService
             checkpoint?.Invoke(RuntimeBackupCheckpoints.BeforeOnlineSnapshot);
             OnlineSnapshot(databasePath, snapshot);
             RemoveLocalComparisonsFromStaging(snapshot);
-            PrepareLocalAiStaging(snapshot,publicationTime??timeProvider.GetUtcNow());
+            var effectivePublicationTime = publicationTime ?? timeProvider.GetUtcNow();
+            PrepareLocalAiStaging(snapshot, effectivePublicationTime);
             checkpoint?.Invoke(RuntimeBackupCheckpoints.AfterOnlineSnapshot);
             var snapshotPreflight = PreflightForMigration(
                 snapshot,
                 immutableReadOnly: true,
-                publicationTime ?? timeProvider.GetUtcNow(),
+                publicationTime,
                 publicationAuthority: migrateSnapshotToCurrent ? null : capturedAuthority,
                 retentionCoverageValidation: migrateSnapshotToCurrent
                     ? RetentionCoverageValidation.Restorable
