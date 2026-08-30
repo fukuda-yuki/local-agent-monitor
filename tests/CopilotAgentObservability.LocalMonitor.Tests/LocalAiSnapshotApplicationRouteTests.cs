@@ -82,6 +82,70 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
 
     [Fact]
+    public void ProjectionEvidenceIndexContainsOnlyNavigableNodesAndProjectsRawAndSpanCitationOwners()
+    {
+        var input = ProjectionInput(1, 1, 0) with
+        {
+            Nodes = [new("node-anchor", "execution-0", null, [],
+                SanitizedSpanObservation: "{\"operation\":\"chat\",\"tool_name\":\"Read\"}")],
+            SanitizedSpanObservations = ["{\"operation\":\"unowned\"}"],
+            RawEvidence = [new("raw:node-anchor:event_content", "node-anchor",
+                new("node-anchor", "event_content", "available", SelectedUtf8Bytes: 12))],
+        };
+
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(input);
+
+        Assert.Equal(["node-anchor"], snapshot.EvidenceIdentifiers);
+        using var index = JsonDocument.Parse(snapshot.EvidenceIndexCanonicalJson);
+        Assert.Equal(["node-anchor"], index.RootElement.GetProperty("evidence_refs").EnumerateArray().Select(item => item.GetString()));
+        using var payload = JsonDocument.Parse(snapshot.PayloadCanonicalJson);
+        var raw = Assert.Single(payload.RootElement.GetProperty("raw_content").EnumerateArray());
+        Assert.Equal("raw:node-anchor:event_content", raw.GetProperty("evidence_id").GetString());
+        Assert.Equal("node-anchor", raw.GetProperty("citation_ref").GetString());
+        var span = Assert.Single(payload.RootElement.GetProperty("sanitized_span_observations").EnumerateArray());
+        Assert.Equal("node-anchor", span.GetProperty("citation_ref").GetString());
+        Assert.Equal("chat", span.GetProperty("observation").GetProperty("operation").GetString());
+        Assert.DoesNotContain("unowned", Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("node-anchor", "Valid")]
+    [InlineData("raw:node-anchor:event_content", "InvalidEvidence")]
+    [InlineData("{\"operation\":\"chat\"}", "InvalidEvidence")]
+    public void ResultEvidenceAcceptsNavigableNodeAndRejectsRawHandleOrSerializedSpan(
+        string evidenceRef, string expected)
+    {
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0) with
+        {
+            Nodes = [new("node-anchor", "execution-0", null, [], SanitizedSpanObservation: "{\"operation\":\"chat\"}")],
+            RawEvidence = [new("raw:node-anchor:event_content", "node-anchor", new("node-anchor", "event_content", "available"))],
+        });
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null,
+            RequestedAt: "2026-01-01T00:00:00.0000000+00:00", StartedAt: "2026-01-01T00:00:01.0000000+00:00",
+            Model: "model-a", ConfigurationSha256: new string('a', 64), PromptTemplateVersion: "template-a");
+        var provider = Encoding.UTF8.GetBytes($$"""{"summary":"ok","findings":[{"finding_id":"f","title":"t","explanation":"e","evidence_state":"supported","evidence_refs":[{{JsonSerializer.Serialize(evidenceRef)}}],"limitation":"none"}],"improvement_suggestions":[],"limitations":[]}""");
+        var result = LocalAiResultEnvelopeV1.Compose(provider, snapshot, run, DateTimeOffset.Parse("2026-01-01T00:00:02Z"));
+
+        Assert.Equal(expected, LocalAiResultValidatorV1.Validate(result, snapshot.EvidenceIdentifiers).Code.ToString());
+    }
+
+    [Fact]
+    public void ProviderPromptSeparatesRawToolHandlesFromNavigableCitationReferences()
+    {
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0) with
+        { RawEvidence = [new("raw:node-0:event_content", "node-0", new("node-0", "event_content", "available"))] });
+        var request = new LocalAiProviderRequestV1(snapshot,
+            new("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null),
+            new LocalAiRawReadCapabilityV1(snapshot.RawEvidence!.Keys, (_, _) => ValueTask.FromResult(Array.Empty<byte>())), null, []);
+
+        var prompt = GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(request);
+
+        Assert.Contains("raw_content.evidence_id is only a tool handle", prompt, StringComparison.Ordinal);
+        Assert.Contains("cite its raw_content.citation_ref node", prompt, StringComparison.Ordinal);
+        Assert.Contains("Sanitized span facts likewise cite their citation_ref node", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ResultEnvelopeReplacesProviderOwnedProvenanceWithApplicationFacts()
     {
         var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
@@ -297,6 +361,20 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Assert.Single(provider.Request.PriorTurns);
         Assert.DoesNotContain("question", runs.PersistedText, StringComparison.Ordinal);
         Assert.DoesNotContain("answer", runs.PersistedText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ApplicationAuthorizesRawHandleWithoutAdmittingItAsResultEvidence()
+    {
+        var snapshots = new RawEvidenceSnapshots(); var provider = new RawReadingProvider();
+        var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), snapshots,
+            new LifecycleRuns(), provider, (_, evidence, _) => ValueTask.FromResult(Encoding.UTF8.GetBytes(evidence.EvidenceId)));
+
+        _ = await application.StartSessionAsync(new(SessionId), CancellationToken.None);
+        await provider.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("raw:node-0:event_content", provider.RawText);
+        Assert.DoesNotContain("raw:node-0:event_content", snapshots.Snapshot.EvidenceIdentifiers);
     }
 
     [Fact]
@@ -560,6 +638,26 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         internal LocalAiProviderRequestV1? Request { get; private set; }
         public ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
         { Request=request; return ValueTask.FromResult(LocalAiProviderOutcomeV1.Partial()); }
+    }
+    private sealed class RawReadingProvider : ILocalAiProviderAdapterV1
+    {
+        internal TaskCompletionSource Completed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal string? RawText { get; private set; }
+        public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
+        {
+            RawText = Encoding.UTF8.GetString(await request.RawReads.ReadAsync("raw:node-0:event_content", token));
+            Completed.TrySetResult();
+            return LocalAiProviderOutcomeV1.Partial();
+        }
+    }
+    private sealed class RawEvidenceSnapshots : ILocalAiSnapshotProjectionServiceV1
+    {
+        internal LocalAiSnapshotProjectionV1 Snapshot { get; } = LocalAiSnapshotProjectionBuilderV1.BuildSession(
+            ProjectionInput(1, 1, 0) with { RawEvidence = [new("raw:node-0:event_content", "node-0",
+                new("node-0", "event_content", "available"))] });
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) => ValueTask.FromResult(Snapshot);
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token) => ValueTask.FromResult(true);
     }
     private sealed class BlockingProvider : ILocalAiProviderAdapterV1
     {

@@ -49,10 +49,7 @@ internal static class LocalAiSnapshotProjectionBuilderV1
     internal static LocalAiSnapshotProjectionV1 BuildSession(LocalAiProjectionInputV1 input)
     {
         Validate(input);
-        return Build(input, "session", null, input.SessionId,
-            input.Nodes.Select(static node => node.NodeId).Concat(input.SanitizedSpanObservations)
-                .Concat(input.Nodes.Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
-                .Concat((input.RawEvidence ?? []).Select(static item => item.EvidenceId)), input.RawEvidence ?? [], input.Nodes);
+        return Build(input, "session", null, input.SessionId, input.RawEvidence ?? [], input.Nodes);
     }
 
     internal static LocalAiSnapshotProjectionV1 BuildNode(LocalAiProjectionInputV1 input)
@@ -76,10 +73,7 @@ internal static class LocalAiSnapshotProjectionBuilderV1
             if (byId.TryGetValue(reference, out var related) && related.ExecutionId == anchor.ExecutionId) admitted.Add(reference);
         var raw = (input.RawEvidence ?? []).Where(item => admitted.Contains(item.NodeId)).ToArray();
         var admittedNodes = input.Nodes.Where(node => admitted.Contains(node.NodeId)).ToArray();
-        return Build(input, "node", anchor.NodeId, anchor.NodeId,
-            admitted.Concat(admittedNodes.Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
-                .Concat(admittedNodes.SelectMany(static node => node.SanitizedSpanObservations ?? []))
-                .Concat(raw.Select(static item => item.EvidenceId)), raw, admittedNodes);
+        return Build(input, "node", anchor.NodeId, anchor.NodeId, raw, admittedNodes);
     }
 
     private static void Validate(LocalAiProjectionInputV1 input)
@@ -93,10 +87,10 @@ internal static class LocalAiSnapshotProjectionBuilderV1
     }
 
     private static LocalAiSnapshotProjectionV1 Build(LocalAiProjectionInputV1 input, string kind, string? nodeId,
-        string anchorId, IEnumerable<string> identifiers, IReadOnlyList<LocalAiRawEvidenceV1> rawEvidence,
-        IReadOnlyList<LocalAiProjectionNodeV1> projectedNodes)
+        string anchorId, IReadOnlyList<LocalAiRawEvidenceV1> rawEvidence, IReadOnlyList<LocalAiProjectionNodeV1> projectedNodes)
     {
-        var evidence = identifiers.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var evidence = projectedNodes.Select(static node => node.NodeId).Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal).ToArray();
         var payload = LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new
         {
             schema_version = "local_ai_snapshot_projection:1",
@@ -112,12 +106,14 @@ internal static class LocalAiSnapshotProjectionBuilderV1
                 .OrderBy(static node => node.NodeId, StringComparer.Ordinal)
                 .Select(static node => new { node_id = node.NodeId, execution_id = node.ExecutionId,
                     parent_node_id = node.ParentNodeId, facts = node.Metadata }).ToArray(),
-            sanitized_span_observations = (kind == "session" ? input.SanitizedSpanObservations : []).Concat(projectedNodes
-                .Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
-                .Concat(projectedNodes.SelectMany(static node => node.SanitizedSpanObservations ?? []))
-                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Select(SanitizedSpanFact).ToArray(),
+            sanitized_span_observations = projectedNodes.SelectMany(static node => OwnedSanitizedSpanFacts(node))
+                .GroupBy(static item => item.CanonicalObservation, StringComparer.Ordinal)
+                .Select(static group => group.OrderBy(static item => item.CitationRef, StringComparer.Ordinal).First())
+                .OrderBy(static item => item.CitationRef, StringComparer.Ordinal)
+                .ThenBy(static item => item.CanonicalObservation, StringComparer.Ordinal)
+                .Select(static item => new { citation_ref=item.CitationRef, observation=item.Observation }).ToArray(),
             raw_content = rawEvidence.OrderBy(static item => item.EvidenceId, StringComparer.Ordinal)
-                .Select(static item => new { evidence_id=item.EvidenceId, state=item.Locator.State,
+                .Select(static item => new { evidence_id=item.EvidenceId, citation_ref=item.NodeId, state=item.Locator.State,
                     selected_utf8_bytes=item.Locator.SelectedUtf8Bytes }).ToArray(),
         }));
         if (payload.Length > LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes)
@@ -130,10 +126,21 @@ internal static class LocalAiSnapshotProjectionBuilderV1
             rawEvidence.ToDictionary(static item => item.EvidenceId, StringComparer.Ordinal));
     }
 
-    private static JsonElement SanitizedSpanFact(string value)
+    private static IEnumerable<OwnedSanitizedSpanFact> OwnedSanitizedSpanFacts(LocalAiProjectionNodeV1 node)
     {
-        try { return JsonSerializer.Deserialize<JsonElement>(value); }
-        catch (JsonException) { return JsonSerializer.SerializeToElement(new { evidence_id = value }); }
+        if (node.SanitizedSpanObservation is { } single) yield return OwnedSanitizedSpanFact.Create(node.NodeId, single);
+        foreach (var value in node.SanitizedSpanObservations ?? []) yield return OwnedSanitizedSpanFact.Create(node.NodeId, value);
+    }
+
+    private sealed record OwnedSanitizedSpanFact(string CitationRef, JsonElement Observation, string CanonicalObservation)
+    {
+        internal static OwnedSanitizedSpanFact Create(string citationRef, string value)
+        {
+            JsonElement observation;
+            try { observation = JsonSerializer.Deserialize<JsonElement>(value); }
+            catch (JsonException) { observation = JsonSerializer.SerializeToElement(new { observation = value }); }
+            return new(citationRef, observation, Convert.ToBase64String(LocalAiCanonicalJsonV1.Serialize(observation)));
+        }
     }
 }
 

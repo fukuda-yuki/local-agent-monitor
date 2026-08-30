@@ -19,10 +19,10 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
         {
             await client.StartAsync(token).ConfigureAwait(false);
             var rawTool = CopilotTool.DefineTool(
-                async ([Description("Exact evidence identifier from evidence_refs.")] string evidence_id) =>
+                async ([Description("Exact process-internal raw handle from raw_content.evidence_id; never use this handle in result evidence_refs.")] string evidence_id) =>
                     Convert.ToBase64String(await request.RawReads.ReadAsync(evidence_id, token).ConfigureAwait(false)),
                 new CopilotToolOptions { SkipPermission = true },
-                new AIFunctionFactoryOptions { Name = "read_exact_evidence", Description = "Read one exact retained raw evidence body as base64." });
+                new AIFunctionFactoryOptions { Name = "read_exact_evidence", Description = "Read one exact retained raw body by its raw_content handle. Cite raw_content.citation_ref in the result." });
             var availableTools = new ToolSet(); availableTools.AddCustom("read_exact_evidence");
             var config = new SessionConfig
             {
@@ -48,10 +48,11 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
         }
     }
 
-    private static string BuildPrompt(LocalAiProviderRequestV1 request)
+    internal static string BuildPrompt(LocalAiProviderRequestV1 request)
     {
         var builder = new StringBuilder();
         builder.AppendLine("Analyze only this immutable bounded snapshot projection and its exact evidence identifiers.");
+        builder.AppendLine("Result evidence_refs may contain only canonical node IDs listed in the evidence index. raw_content.evidence_id is only a tool handle; after reading raw bytes cite its raw_content.citation_ref node. Sanitized span facts likewise cite their citation_ref node.");
         builder.AppendLine(Encoding.UTF8.GetString(request.Snapshot.PayloadCanonicalJson));
         builder.AppendLine(Encoding.UTF8.GetString(request.Snapshot.EvidenceIndexCanonicalJson));
         if (request.Question is not null)

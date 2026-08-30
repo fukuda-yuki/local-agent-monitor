@@ -135,7 +135,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         try
         {
-            var raw = new LocalAiRawReadCapabilityV1(snapshot.EvidenceIdentifiers,
+            var raw = new LocalAiRawReadCapabilityV1(snapshot.RawEvidence?.Keys ?? [],
                 (identifier, cancellationToken) => snapshot.RawEvidence?.TryGetValue(identifier, out var evidence) == true && rawReader is not null
                     ? rawReader(snapshot.SessionId, evidence, cancellationToken)
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));

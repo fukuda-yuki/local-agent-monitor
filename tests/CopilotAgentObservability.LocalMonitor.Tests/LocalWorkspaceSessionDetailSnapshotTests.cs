@@ -1597,9 +1597,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Contains(result.Input.SanitizedSpanObservations,span=>span.Contains("\"tool_name\":\"Read\"",StringComparison.Ordinal));
         Assert.DoesNotContain(result.Input.SanitizedSpanObservations,span=>span.Contains("outside",StringComparison.Ordinal));
         Assert.Contains(result.Input.Nodes,node=>node.Metadata is { } metadata&&metadata.TryGetProperty("subagent_activity",out _));
-        var snapshot=LocalAiSnapshotProjectionBuilderV1.BuildSession(result.Input);
-        using var payload=JsonDocument.Parse(snapshot.PayloadCanonicalJson);
-        Assert.Equal("Read",Assert.Single(payload.RootElement.GetProperty("sanitized_span_observations").EnumerateArray()).GetProperty("tool_name").GetString());
+        Assert.Throws<LocalAiScopeTooLargeException>(()=>LocalAiSnapshotProjectionBuilderV1.BuildSession(result.Input));
     }
 
     [Theory]
@@ -1647,6 +1645,26 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
             Assert.Equal(4096,result.Input.SanitizedSpanObservations.Count);
             Assert.Contains(result.Input.SanitizedSpanObservations,span=>span.Contains("\"operation\":\"chat\"",StringComparison.Ordinal));
         }
+    }
+
+    [Fact]
+    public async Task AiSourceContributionProjectsBoundedSanitizedSpanWithExactNodeOwner()
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction=connection.BeginTransaction();
+        var authority=FixedSkillRegistryGenerationAuthority.Load();using var pinned=LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor=new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority);
+
+        var result=await contributor.ReadAiProjectionPinnedAsync(new DirectReadTransaction(connection,transaction),SessionId,null,
+            DateTimeOffset.UnixEpoch,pinned,CancellationToken.None);
+        var snapshot=LocalAiSnapshotProjectionBuilderV1.BuildSession(result.Input);
+
+        using var payload=JsonDocument.Parse(snapshot.PayloadCanonicalJson);
+        var fact=Assert.Single(payload.RootElement.GetProperty("sanitized_span_observations").EnumerateArray());
+        var citation=fact.GetProperty("citation_ref").GetString();
+        Assert.Contains(result.Input.Nodes,node=>node.NodeId==citation);
+        Assert.Equal("Read",fact.GetProperty("observation").GetProperty("tool_name").GetString());
     }
 
     [Fact]
