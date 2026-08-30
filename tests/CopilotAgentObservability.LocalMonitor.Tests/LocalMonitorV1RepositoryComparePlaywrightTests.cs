@@ -51,7 +51,8 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         if (mutation == "extra") result["extra"] = true;
         if (mutation == "scope") result["scope"]!["comparison_id"] = "018f0000-0000-7000-8000-000000000011";
         if (mutation == "external") result["findings"]![0]!["evidence_refs"]![0] = "https://example.com/sessions/018f0000-0000-7000-8000-000000000001";
-        if (mutation == "duplicate") result["improvement_suggestions"]![0]!["evidence_refs"]![0] = $"/sessions/{SessionId}?execution={ExecutionId}&node={NodeId}";
+        if (mutation == "duplicate") result["improvement_suggestions"]![0]!["evidence_refs"] = new JsonArray(
+            $"/sessions/{SessionId}?execution={ExecutionId}&node={NodeId}", $"/sessions/{SessionId}?execution={ExecutionId}&node={NodeId}");
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
         PlaywrightBrowserPath.ConfigureDefault();
@@ -71,10 +72,11 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
+    [InlineData("accepted")]
+    [InlineData("rejected")]
+    [InlineData("duplicate")]
     [Trait("ValidationLane", "CriticalSmoke")]
-    public async Task CompareAiCancellationRequiresExactSuccessfulReceipt(bool accepted)
+    public async Task CompareAiCancellationRequiresExactSuccessfulReceipt(string outcome)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
         using var temp = new MonitorTempDirectory();
@@ -85,9 +87,17 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
         await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
-        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}/cancel", route => accepted
-            ? route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\",\"state\":\"canceled\"}}"))
-            : route.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"run_not_cancelable\"}" }));
+        var cancelRequests = 0;
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}/cancel", route =>
+        {
+            cancelRequests++;
+            return outcome switch
+            {
+                "accepted" => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\",\"state\":\"canceled\"}}")),
+                "duplicate" => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\",\"run_id\":\"{RunId}\",\"state\":\"canceled\"}}")),
+                _ => route.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"run_not_cancelable\"}" }),
+            };
+        });
         await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(Run("running", "null"))));
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
 
@@ -95,10 +105,98 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
         var cancel = page.GetByRole(AriaRole.Button, new() { Name = "キャンセル", Exact = true });
         await Expect(cancel).ToBeVisibleAsync();
-        await cancel.ClickAsync();
+        await cancel.EvaluateAsync("element => { element.click(); element.click(); }");
+        var accepted = outcome == "accepted";
         await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync(accepted ? "キャンセルしました" : "キャンセルできませんでした");
+        Assert.Equal(1, cancelRequests);
         if (accepted) await Expect(cancel).ToBeHiddenAsync();
         else await Expect(cancel).ToBeVisibleAsync();
+    }
+
+    [Theory]
+    [InlineData("nested_duplicate")]
+    [InlineData("oversized")]
+    [InlineData("depth")]
+    [Trait("ValidationLane", "CriticalSmoke")]
+    public async Task CompareAiRejectsInvalidRunWireBeforeRendering(string mutation)
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        var wire = Run("succeeded", ValidResult());
+        if (mutation == "nested_duplicate") wire = wire.Replace("\"kind\":\"comparison\"", "\"kind\":\"comparison\",\"kind\":\"comparison\"", StringComparison.Ordinal);
+        if (mutation == "oversized") wire += new string(' ', 1_048_577);
+        if (mutation == "depth")
+        {
+            wire = wire.Replace("\"result\":", "\"result\":" + new string('[', 17), StringComparison.Ordinal);
+            wire = wire[..^1] + new string(']', 17) + "}";
+        }
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(wire)));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
+        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync("再試行しています");
+        Assert.Equal(0, await page.Locator("[data-compare-ai-result] > *").CountAsync());
+    }
+
+    [Theory]
+    [InlineData("zero_findings", true, true)]
+    [InlineData("zero_findings", false, false)]
+    [InlineData("succeeded", true, false)]
+    [Trait("ValidationLane", "CriticalSmoke")]
+    public async Task CompareAiRequiresStateFindingCardinality(string runState, bool emptyFindings, bool accepted)
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        var result = JsonNode.Parse(ValidResult())!.AsObject();
+        if (emptyFindings) result["findings"] = new JsonArray();
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(Run(runState, result.ToJsonString()))));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
+        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync(accepted ? "指摘はありません" : "安全に表示できません");
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "CriticalSmoke")]
+    public async Task CompareAiRouteClearInvalidatesStartedSurfaceAndForwardRestoresOnce()
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var runReads = 0;
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => { runReads++; return route.FulfillAsync(Json(Run("succeeded", ValidResult()))); });
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
+        await Expect(page.Locator("[data-compare-ai-result]")).ToContainTextAsync("AIによる解釈");
+        await page.EvaluateAsync("document.dispatchEvent(new CustomEvent('cao-route-state', { detail: {} }))");
+        Assert.Equal(0, await page.Locator("[data-compare-ai-result] > *").CountAsync());
+        await page.EvaluateAsync($"document.dispatchEvent(new CustomEvent('cao-route-state', {{ detail: {{ analysis: '{RunId}' }} }})); document.dispatchEvent(new CustomEvent('cao-route-state', {{ detail: {{ analysis: '{RunId}' }} }}));");
+        await Expect(page.Locator("[data-compare-ai-result]")).ToContainTextAsync("AIによる解釈");
+        Assert.Equal(2, runReads);
     }
 
     [Fact]
@@ -135,7 +233,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(result).ToContainTextAsync("<img src=x onerror=alert(1)>");
         Assert.Equal(0, await result.Locator("img").CountAsync());
         var evidence = result.Locator("section").Filter(new() { Has = page.GetByRole(AriaRole.Heading, new() { Name = "正確な根拠", Exact = true }) });
-        await Expect(evidence.Locator("a")).ToHaveCountAsync(2);
+        await Expect(evidence.Locator("a")).ToHaveCountAsync(1);
         await Expect(evidence.Locator("a").First).ToHaveAttributeAsync("href", $"/sessions/{SessionId}?execution={ExecutionId}&node={NodeId}");
         Assert.DoesNotContain("<img", page.Url, StringComparison.Ordinal);
     }
@@ -451,7 +549,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     private static string Run(string state, string result, string? error = null) => $$"""{"run_id":"{{RunId}}","state":"{{state}}","scope_kind":"comparison","session_id":null,"node_id":null,"repository_id":"{{RepositoryId}}","comparison_id":"{{ComparisonId}}","error":{{(error is null ? "null" : $"\"{error}\"")}},"result":{{result}}}""";
 
     private static string ValidResult() => """
-        {"scope":{"kind":"comparison","repository_id":"$REPOSITORY$","comparison_id":"$COMPARISON$","anchor_id":"$COMPARISON$"},"snapshot":{"snapshot_id":"$SNAPSHOT$","payload_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"summary":"<img src=x onerror=alert(1)>","findings":[{"finding_id":"finding-1","title":"要確認","explanation":"解釈です","evidence_state":"supported","evidence_refs":["/sessions/$SESSION$?execution=$EXECUTION$&node=$NODE$"],"limitation":"制約"}],"improvement_suggestions":[{"suggestion_id":"suggestion-1","target_kind":"skill","target_label":"案","concrete_change":"変更","rationale":"理由","expected_effect":"予想","risks_or_limitations":"制約","evidence_refs":["/sessions/018f0000-0000-7000-8000-000000000002?node=node-22222222222222222222222222222222"]}],"limitations":["制約"],"provenance":{"provider":"github_copilot_sdk","model":"model-a","configuration_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prompt_template_version":"compare.v1","requested_at":"2026-08-30T01:00:00.0000000+00:00","started_at":"2026-08-30T01:00:01.0000000+00:00","completed_at":"2026-08-30T01:00:02.0000000+00:00","snapshot_id":"$SNAPSHOT$","snapshot_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","coverage":{"included":2,"excluded":0,"content_available":true}}}
+        {"scope":{"kind":"comparison","repository_id":"$REPOSITORY$","comparison_id":"$COMPARISON$","anchor_id":"$COMPARISON$"},"snapshot":{"snapshot_id":"$SNAPSHOT$","payload_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"summary":"<img src=x onerror=alert(1)>","findings":[{"finding_id":"finding-1","title":"要確認","explanation":"解釈です","evidence_state":"supported","evidence_refs":["/sessions/$SESSION$?execution=$EXECUTION$&node=$NODE$"],"limitation":"制約"}],"improvement_suggestions":[{"suggestion_id":"suggestion-1","target_kind":"skill","target_label":"案","concrete_change":"変更","rationale":"理由","expected_effect":"予想","risks_or_limitations":"制約","evidence_refs":["/sessions/$SESSION$?execution=$EXECUTION$&node=$NODE$"]}],"limitations":["制約"],"provenance":{"provider":"github_copilot_sdk","model":"model-a","configuration_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prompt_template_version":"compare.v1","requested_at":"2026-08-30T01:00:00.0000000+00:00","started_at":"2026-08-30T01:00:01.0000000+00:00","completed_at":"2026-08-30T01:00:02.0000000+00:00","snapshot_id":"$SNAPSHOT$","snapshot_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","coverage":{"included":2,"excluded":0,"content_available":true}}}
         """.Replace("$REPOSITORY$", RepositoryId, StringComparison.Ordinal).Replace("$COMPARISON$", ComparisonId, StringComparison.Ordinal)
             .Replace("$SNAPSHOT$", SnapshotId, StringComparison.Ordinal).Replace("$SESSION$", SessionId, StringComparison.Ordinal)
             .Replace("$EXECUTION$", ExecutionId, StringComparison.Ordinal).Replace("$NODE$", NodeId, StringComparison.Ordinal);

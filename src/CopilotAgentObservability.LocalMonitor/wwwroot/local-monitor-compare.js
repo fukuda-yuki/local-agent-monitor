@@ -48,8 +48,8 @@
     && Object.keys(value).length === keys.length && Object.keys(value).every((key, index) => key === keys[index]);
   const exactSet = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-  function topLevelKeys(text) {
-    const keys = []; let depth = 0; let quoted = false; let escaped = false; let start = -1;
+  function validateJsonWire(text) {
+    const stack = []; let quoted = false; let escaped = false; let start = -1;
     for (let index = 0; index < text.length; index++) {
       const character = text[index];
       if (quoted) {
@@ -57,14 +57,21 @@
         if (character === "\\") { escaped = true; continue; }
         if (character !== "\"") continue;
         quoted = false;
-        if (depth === 1 && start >= 0) { let next = index + 1; while (/\s/.test(text[next] ?? "")) next++; if (text[next] === ":") keys.push(JSON.parse(text.slice(start, index + 1))); }
+        if (start >= 0) {
+          let next = index + 1; while (/\s/.test(text[next] ?? "")) next++;
+          if (text[next] === ":") { const owner = stack.at(-1); if (!owner || owner.type !== "object") throw new TypeError("invalid json"); const key = JSON.parse(text.slice(start, index + 1)); if (owner.keys.has(key)) throw new TypeError("duplicate json key"); owner.keys.add(key); }
+        }
         continue;
       }
       if (character === "\"") { quoted = true; start = index; }
-      else if (character === "{" || character === "[") depth++;
-      else if (character === "}" || character === "]") depth--;
+      else if (character === "{" || character === "[") { stack.push({ type: character === "{" ? "object" : "array", keys: new Set() }); if (stack.length > 16) throw new TypeError("json too deep"); }
+      else if (character === "}" || character === "]") { const owner = stack.pop(); if (!owner || owner.type !== (character === "}" ? "object" : "array")) throw new TypeError("invalid json"); }
     }
-    return keys;
+    if (quoted || stack.length) throw new TypeError("invalid json");
+  }
+  async function readStrictJson(response, maximumBytes = 1048576) {
+    const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > maximumBytes) throw new TypeError("json too large");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateJsonWire(text); return JSON.parse(text);
   }
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -359,9 +366,11 @@
 
   function validateAiRefs(value, accepted) {
     if (!Array.isArray(value) || value.length < 1 || value.length > 16) return false;
+    const local = new Set();
     for (const reference of value) {
       const href = aiEvidenceLink(reference);
-      if (!href || accepted.has(href)) return false;
+      if (!href || local.has(href)) return false;
+      local.add(href);
       accepted.add(href);
     }
     return true;
@@ -464,10 +473,13 @@
       try {
         const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { method: "GET", credentials: "same-origin", cache: "no-store" });
         if (!response.ok) throw new Error("poll_failed");
-        const text = await response.text(); const runKeys = ["run_id", "state", "scope_kind", "session_id", "node_id", "repository_id", "comparison_id", "error", "result"];
-        const keys = topLevelKeys(text); if (keys.length !== runKeys.length || new Set(keys).size !== keys.length || !runKeys.every(key => keys.includes(key))) throw new TypeError("invalid run");
-        const run = JSON.parse(text);
+        const run = await readStrictJson(response);
+        if (generation !== aiGeneration || activeAiRun !== runId) return;
         if (!ownsComparisonRun(run, runId)) { activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
+        if (["succeeded", "zero_findings"].includes(run.state)
+            && (!validateAiResult(run.result) || (run.state === "zero_findings") !== (run.result.findings.length === 0))) {
+          activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+        }
         if (!aiCancelFailed || !["queued", "running"].includes(run.state)) aiStatus.textContent = AI_STATES[run.state] ?? "AI解釈を表示できません。";
         if (!["queued", "running"].includes(run.state)) {
           activeAiRun = null; aiCancelFailed = false; aiCancel.hidden = true;
@@ -480,16 +492,16 @@
   }
 
   async function startAi() {
-    aiResult.replaceChildren(); aiCancelFailed = false; aiStatus.textContent = "AI解釈を開始しています。"; aiStart.disabled = true;
+    aiResult.replaceChildren(); aiCancelFailed = false; aiCancel.disabled = false; aiStatus.textContent = "AI解釈を開始しています。"; aiStart.disabled = true;
     try {
       const response = await fetch("/api/local-monitor/v1/ai/comparison-runs", {
         method: "POST", credentials: "same-origin", cache: "no-store",
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
       });
-      if (!response.ok) { const failure = await response.json().catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
-      const started = await response.json(); if (!UUID_V7.test(started?.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
-      activeAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
+      if (!response.ok) { const failure = await readStrictJson(response).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
+      const started = await readStrictJson(response); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
+      activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
       try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
       await pollAiRun(activeAiRun, generation);
     } catch { aiStatus.textContent = "AI解釈を開始できませんでした。"; }
@@ -517,10 +529,7 @@
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { method: "GET", credentials: "same-origin", cache: "no-store" });
       if (!response.ok) return;
-      const text = await response.text();
-      const readinessKeys = ["provider", "selected_model", "selected_configuration", "readiness_state", "last_check_result", "provider_egress_notice"];
-      if (readinessKeys.some(key => (text.match(new RegExp(`"${key}"\\s*:`, "g")) ?? []).length !== 1)) return;
-      const readiness = JSON.parse(text);
+      const readiness = await readStrictJson(response);
       if (!validReadiness(readiness) || readiness.readiness_state !== "ready") return;
       aiSurface.hidden = false;
       const route = window.LocalMonitorV1History?.current(); if (route?.analysis) await restoreAi(route.analysis);
@@ -529,20 +538,21 @@
 
   aiStart.addEventListener("click", startAi);
   aiCancel.addEventListener("click", async () => {
-    if (!activeAiRun) return;
+    if (!activeAiRun || aiCancel.disabled) return;
+    aiCancel.disabled = true;
     const runId = activeAiRun;
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}/cancel`, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: "{}" });
-      const value = response.ok ? await response.json() : null;
-      if (!response.ok || !exactSet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") { aiCancelFailed = true; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; return; }
+      const value = response.ok ? await readStrictJson(response) : null;
+      if (!response.ok || !exactSet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; return; }
       aiGeneration++; activeAiRun = null; aiCancel.hidden = true; aiStatus.textContent = AI_STATES.canceled;
-    } catch { aiCancelFailed = true; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
+    } catch { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
   });
   document.addEventListener("cao-route-state", event => {
     if (aiSurface.hidden) return;
     const runId = event.detail?.analysis;
     if (UUID_V7.test(runId ?? "")) { restoreAi(runId); return; }
-    if (restoredAiRun) { aiGeneration++; activeAiRun = null; restoredAiRun = null; aiCancel.hidden = true; aiStatus.textContent = ""; aiResult.replaceChildren(); }
+    if (restoredAiRun) { aiGeneration++; activeAiRun = null; restoredAiRun = null; aiCancel.hidden = true; aiCancel.disabled = false; aiStatus.textContent = ""; aiResult.replaceChildren(); }
   });
   window.addEventListener("pagehide", () => { state.controller?.abort(); aiGeneration++; closeEvidence(); });
 
