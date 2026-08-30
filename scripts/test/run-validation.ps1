@@ -22,9 +22,16 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $solution = Join-Path $repoRoot 'CopilotAgentObservability.slnx'
 $playwrightInstaller = Join-Path $repoRoot 'scripts\test\install-playwright-chromium.ps1'
 $repositoryPolicyGuard = Join-Path $repoRoot 'scripts\test\assert-repository-policy.ps1'
+$validationContract = Join-Path $repoRoot 'scripts\test\assert-validation-contract.ps1'
 $partitionToken = if ([string]::IsNullOrWhiteSpace($Partition)) { 'none' } else { $Partition.ToLowerInvariant() }
 $runName = '{0}-{1}-{2}-{3}' -f $Lane.ToLowerInvariant(), $partitionToken, (Get-Date -Format 'yyyyMMddTHHmmssfff'), $PID
 $resultsRoot = Join-Path $repoRoot (Join-Path 'artifacts\validation' $runName)
+$completionStopwatch = if ($Lane -eq 'Completion') {
+    [System.Diagnostics.Stopwatch]::StartNew()
+}
+else {
+    $null
+}
 
 $operatorOnlyExclusion = 'Issue158Lane!=WindowsOwnedSession&Issue158Lane!=LinuxExt4CurrentFile'
 $completionFastFilter = "ValidationLane!=Nightly&ValidationLane!=CriticalSmoke&$operatorOnlyExclusion"
@@ -80,34 +87,6 @@ function Install-PlaywrightChromium {
     Invoke-NativeCommand -FilePath 'pwsh' -Arguments $arguments
 }
 
-function Assert-CriticalSmokeResults {
-    param(
-        [Parameter(Mandatory)]
-        [string]$ResultsDirectory
-    )
-
-    $trxFiles = @(Get-ChildItem -LiteralPath $ResultsDirectory -Filter '*.trx' -File -Recurse)
-    if ($trxFiles.Count -eq 0) {
-        throw 'Critical smoke validation produced no TRX files.'
-    }
-
-    $results = @(
-        foreach ($trxFile in $trxFiles) {
-            [xml]$document = Get-Content -LiteralPath $trxFile.FullName -Raw
-            $document.SelectNodes("//*[local-name()='UnitTestResult']")
-        }
-    )
-
-    $passed = @($results | Where-Object { $_.GetAttribute('outcome') -eq 'Passed' }).Count
-    $failed = @($results | Where-Object { $_.GetAttribute('outcome') -eq 'Failed' }).Count
-    $skipped = @($results | Where-Object { $_.GetAttribute('outcome') -eq 'NotExecuted' }).Count
-    $executed = $results.Count - $skipped
-
-    if ($executed -ne 2 -or $passed -ne 2 -or $failed -ne 0 -or $skipped -ne 0 -or $results.Count -ne 2) {
-        throw "Critical smoke validation requires exactly 2 executed, 2 passed, 0 failed, and 0 skipped tests; observed executed=$executed passed=$passed failed=$failed skipped=$skipped total=$($results.Count)."
-    }
-}
-
 New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
 Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
     '-NoProfile',
@@ -123,7 +102,26 @@ if ($Lane -eq 'Completion') {
     Install-PlaywrightChromium
     $criticalResults = Join-Path $resultsRoot 'critical-smoke'
     Invoke-TestPass -Filter $criticalSmokeFilter -ResultsDirectory $criticalResults
-    Assert-CriticalSmokeResults -ResultsDirectory $criticalResults
+    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+        '-NoProfile',
+        '-File',
+        $validationContract,
+        '-Mode',
+        'CriticalSmoke',
+        '-ResultsDirectory',
+        $criticalResults
+    )
+    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+        '-NoProfile',
+        '-File',
+        $validationContract,
+        '-Mode',
+        'CompletionBudget',
+        '-ElapsedSeconds',
+        $completionStopwatch.Elapsed.TotalSeconds.ToString(
+            'R',
+            [System.Globalization.CultureInfo]::InvariantCulture)
+    )
 }
 else {
     Install-PlaywrightChromium -WithDeps:($Partition -eq 'Linux')
