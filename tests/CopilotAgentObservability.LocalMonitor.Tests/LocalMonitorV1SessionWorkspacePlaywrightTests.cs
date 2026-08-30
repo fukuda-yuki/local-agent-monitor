@@ -188,6 +188,25 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Fact]
+    public async Task MissingNodeAnalysisOnHistoryRevisitReloadsExactHumanRouteWithoutWorkspaceFallback()
+    {
+        var owner = new MutableHumanRouteLocalAiApplication(new(AiRunId, "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null, System.Text.Encoding.UTF8.GetBytes(AiResult("retained until removed"))));
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(owner));
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("event");
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await ReadyAi(page); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}""")));
+        var exact = host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6&analysis={AiRunId}";
+        await page.GotoAsync(exact); await Expect(page.Locator("[data-node-ai-result]")).ToContainTextAsync("retained until removed");
+        await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ analysis: null })"); await Expect(page.Locator("[data-node-ai-surface]")).ToHaveCountAsync(0);
+
+        owner.Run = null;
+        await page.GoBackAsync();
+
+        await Expect(page).ToHaveURLAsync(exact); await Expect(page.Locator("[data-page-state='analysis_run_not_found']")).ToHaveCountAsync(1);
+        await Expect(page.Locator("[data-session-workspace], [data-timeline-node], [data-session-overview]")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
     public async Task AiResultRendersCompleteAcceptedFieldsSuggestionEvidenceAndTerminalFocus()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -1129,9 +1148,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         if (reverse) executions.Insert(0, second); else executions.Add(second);
     }
 
-    private static MonitorHostTestOptions Options(LocalAiRunStatusV1? run = null) => new()
+    private static MonitorHostTestOptions Options(LocalAiRunStatusV1? run = null) =>
+        Options(new HumanRouteLocalAiApplication(run));
+
+    private static MonitorHostTestOptions Options(ILocalAiAnalysisApplicationV1 application) => new()
     {
-        LocalAiAnalysisApplication = new HumanRouteLocalAiApplication(run),
+        LocalAiAnalysisApplication = application,
         AdditionalServices = services =>
         {
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
@@ -1144,6 +1166,16 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult<LocalAiRunStatusV1?>(run ?? new(runId, "succeeded", "session", SessionId, null, null));
+        public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
+
+    private sealed class MutableHumanRouteLocalAiApplication(LocalAiRunStatusV1? run) : ILocalAiAnalysisApplicationV1
+    {
+        public LocalAiRunStatusV1? Run { get; set; } = run;
+        public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(Run?.RunId == runId ? Run : null);
         public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
     }

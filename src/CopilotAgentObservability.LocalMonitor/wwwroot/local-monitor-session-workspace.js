@@ -742,11 +742,17 @@
   }
 
   async function restoreExactAnalysis(runId, route) {
-    const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
-    const run = await response.json();
-    if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) return;
-    if (run.scope_kind === "node" && NODE.test(run.node_id)) await restoreExactNodeAnalysis(run, route);
-    else if (run.scope_kind === "session") await restoreExactSessionAnalysis(runId);
+    try {
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (response.status === 404) { location.reload(); return "closed"; }
+      if (!response.ok) { renderRouteRecovery({ status: response.status }); return "closed"; }
+      const run = await response.json();
+      if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) { renderRouteRecovery({ status: 503 }); return "closed"; }
+      if (run.scope_kind === "node" && NODE.test(run.node_id)) await restoreExactNodeAnalysis(run, route);
+      else if (run.scope_kind === "session") await restoreExactSessionAnalysis(runId);
+      else { renderRouteRecovery({ status: 503 }); return "closed"; }
+      return "restored";
+    } catch { renderRouteRecovery({ status: 503 }); return "closed"; }
   }
 
   async function openSessionAi(invoker) {
@@ -885,7 +891,7 @@
     if (!state.summary) return;
     const closedAnalysis = !route.analysis && document.querySelector("[data-session-ai-dialog]")?.open;
     if (closedAnalysis) closeSessionAi(!route.execution && !route.node);
-    if (route.analysis) { await restoreExactAnalysis(route.analysis, route); if (route.analysis && document.querySelector("[data-node-ai-surface]")) return; }
+    if (route.analysis) { const outcome = await restoreExactAnalysis(route.analysis, route); if (outcome === "closed" || document.querySelector("[data-node-ai-surface]")) return; }
     if (route.node) {
       if (document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi(false);
       try { await selectNode(route.execution ?? null, route.node, false); if (closedAnalysis) root.querySelector("[data-timeline-node][aria-selected=true]")?.focus(); }
