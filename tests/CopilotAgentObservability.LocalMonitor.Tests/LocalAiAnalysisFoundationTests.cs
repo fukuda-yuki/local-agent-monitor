@@ -101,23 +101,52 @@ public sealed class LocalAiAnalysisFoundationTests
     }
 
     [Fact]
-    public void NodeCleanup_DeletesOnlyTerminalRowsAtExactTwentyFourHourBoundary()
+    public void NodeCleanup_DeletesAllStaleNodeStateAtBoundaryAndPreservesYoungerAndSessionRows()
     {
+        var createdAt = DateTimeOffset.Parse("2026-08-30T01:00:00Z");
+        var time = new MutableTimeProvider(createdAt);
         using var database = new Database();
-        var store = database.NodeStore();
+        var store = database.NodeStore(time);
         store.InsertSnapshot(Snapshot(NodeSnapshotId, "node", "node-1"));
-        store.InsertSnapshot(Snapshot(FreshOrphanSnapshotId, "node", "node-fresh"));
+        store.InsertSnapshot(Snapshot(FreshOrphanSnapshotId, "node", "node-orphan"));
         var run = Complete(store, Request(NodeSnapshotId, "node", "node-1"), Result(scope: Scope("node", "node-1"), snapshotId: NodeSnapshotId));
-        var requestedAt = DateTimeOffset.Parse("2026-08-30T01:00:00Z");
+        var queued = store.CreateRun(Request(FreshOrphanSnapshotId, "node", "node-orphan"));
+        var runningSnapshotId = Guid.CreateVersion7().ToString();
+        store.InsertSnapshot(Snapshot(runningSnapshotId, "node", "node-running"));
+        var running = store.CreateRun(Request(runningSnapshotId, "node", "node-running"));
+        store.TransitionRun(running.RunId, LocalAiRunStateV1.Running, null, createdAt.AddSeconds(1));
+        time.Advance(TimeSpan.FromTicks(1));
+        var youngSnapshotId = Guid.CreateVersion7().ToString();
+        store.InsertSnapshot(Snapshot(youngSnapshotId, "node", "node-young"));
+        var young = store.CreateRun(Request(youngSnapshotId, "node", "node-young") with { RequestedAt = time.GetUtcNow() });
 
-        Assert.Equal(0, store.DeleteExpiredNodeRuns(requestedAt.AddHours(24).AddTicks(-1)));
-        Assert.Equal(1, store.DeleteExpiredNodeRuns(requestedAt.AddHours(24)));
-        Assert.Equal(0, store.DeleteExpiredNodeRuns(requestedAt.AddHours(48)));
+        var sessionStore = database.Store(time: time);
+        var sessionSnapshotId = Guid.CreateVersion7().ToString();
+        sessionStore.InsertSnapshot(Snapshot(sessionSnapshotId));
+        var sessionRun = sessionStore.CreateRun(Request(sessionSnapshotId) with { RequestedAt = createdAt });
+
+        Assert.Equal(0, store.DeleteExpiredNodeRuns(createdAt.AddHours(24).AddTicks(-1)));
+        Assert.Equal(3, store.DeleteExpiredNodeRuns(createdAt.AddHours(24)));
         using var connection = database.Open();
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + run.RunId + "';"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id IN ('" + queued.RunId + "','" + running.RunId + "');"));
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + NodeSnapshotId + "';"));
-        Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + FreshOrphanSnapshotId + "';"));
-        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM sqlite_schema WHERE name='retention_items';"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id IN ('" + FreshOrphanSnapshotId + "','" + runningSnapshotId + "');"));
+        Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + young.RunId + "';"));
+        Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + sessionRun.RunId + "';"));
+    }
+
+    [Fact]
+    public void Snapshot_EnforcesOneMiBPayloadAndEvidenceAdmissionBoundary()
+    {
+        using var database = new Database(); var store = database.NodeStore();
+        var exactPayload = Encoding.UTF8.GetBytes("{\"value\":\"" + new string('x', 1_048_564) + "\"}");
+        var exactEvidence = Encoding.UTF8.GetBytes("{\"evidence_refs\":[\"" + new string('x', 1_048_554) + "\"]}");
+        Assert.Equal(1_048_576, exactPayload.Length); Assert.Equal(1_048_576, exactEvidence.Length);
+        store.InsertSnapshot(Snapshot() with { ScopeKind = "node", NodeId = "node-payload", AnchorId = "node-payload", PayloadCanonicalJson = exactPayload });
+        store.InsertSnapshot(Snapshot(Guid.CreateVersion7().ToString(), "node", "node-evidence") with { EvidenceIndexCanonicalJson = exactEvidence });
+        Assert.Throws<InvalidOperationException>(() => store.InsertSnapshot(Snapshot(Guid.CreateVersion7().ToString(), "node", "node-overflow") with { PayloadCanonicalJson = exactPayload.Concat([(byte)' ']).ToArray() }));
+        Assert.Throws<InvalidOperationException>(() => store.InsertSnapshot(Snapshot(Guid.CreateVersion7().ToString(), "node", "node-overflow") with { EvidenceIndexCanonicalJson = exactEvidence.Concat([(byte)' ']).ToArray() }));
     }
     [Fact]
     public void Schema_MigratesExistingVersionTableAndRejectsMalformedCompleteInventory()
@@ -299,5 +328,5 @@ public sealed class LocalAiAnalysisFoundationTests
     private static readonly string PayloadHash=Convert.ToHexStringLower(SHA256.HashData("{\"value\":1}"u8));
     private static readonly DateTimeOffset StartedAt=DateTimeOffset.Parse("2026-08-30T01:00:01Z"),CompletedAt=DateTimeOffset.Parse("2026-08-30T01:00:02Z");
     private static long Scalar(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return Convert.ToInt64(q.ExecuteScalar());} private static string Text(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return(string)q.ExecuteScalar()!;} private static void Execute(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}
-    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(RetentionCatalogStore? catalog=null,TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);catalog??=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(Path,time),time);return new(Path,catalog,time);}internal LocalAiAnalysisStoreV1 NodeStore(){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
+    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(RetentionCatalogStore? catalog=null,TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);catalog??=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(Path,time),time);return new(Path,catalog,time);}internal LocalAiAnalysisStoreV1 NodeStore(TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path,timeProvider:time);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
 }

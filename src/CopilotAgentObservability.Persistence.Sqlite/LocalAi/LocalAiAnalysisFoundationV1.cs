@@ -229,6 +229,7 @@ internal static class LocalAiCanonicalJsonV1
 
 internal sealed class LocalAiAnalysisStoreV1
 {
+    internal const int MaximumSnapshotDocumentBytes = 1_048_576;
     private readonly string databasePath;
     private readonly RetentionCatalogStore? retentionCatalog;
     private readonly TimeProvider clock;
@@ -239,6 +240,7 @@ internal sealed class LocalAiAnalysisStoreV1
     {
         ValidateUuid7(snapshot.SnapshotId); ValidateScope(snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId);
         if (snapshot.ScopeKind == "session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
+        if(snapshot.PayloadCanonicalJson.Length>MaximumSnapshotDocumentBytes||snapshot.EvidenceIndexCanonicalJson.Length>MaximumSnapshotDocumentBytes)throw new InvalidOperationException("local_ai_snapshot_scope_too_large");
         var payload = Canonical(snapshot.PayloadCanonicalJson); var evidence = Canonical(snapshot.EvidenceIndexCanonicalJson);
         if(!ValidateStoredSnapshot(new(snapshot.SnapshotId,snapshot.ScopeKind,snapshot.SessionId,snapshot.NodeId,snapshot.AnchorId,snapshot.PayloadCanonicalJson,Hash(snapshot.PayloadCanonicalJson),snapshot.EvidenceIndexCanonicalJson,Hash(snapshot.EvidenceIndexCanonicalJson))))throw new InvalidOperationException("local_ai_snapshot_not_canonical");
         using var connection = Open(); using var transaction = connection.BeginTransaction(); using var command = connection.CreateCommand(); command.Transaction=transaction;
@@ -303,7 +305,7 @@ internal sealed class LocalAiAnalysisStoreV1
     internal int DeleteExpiredNodeRuns(DateTimeOffset now)
     {
         var cutoff=now.AddHours(-24).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture); using var connection=Open(); using var transaction=connection.BeginTransaction();
-        using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="CREATE TEMP TABLE local_ai_cleanup_candidates(run_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL); INSERT INTO local_ai_cleanup_candidates SELECT run_id,snapshot_id FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff; DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_cleanup_candidates); DELETE FROM local_ai_runs WHERE run_id IN (SELECT run_id FROM local_ai_cleanup_candidates); DELETE FROM local_ai_snapshots WHERE snapshot_id IN (SELECT snapshot_id FROM local_ai_cleanup_candidates) AND NOT EXISTS(SELECT 1 FROM local_ai_runs WHERE local_ai_runs.snapshot_id=local_ai_snapshots.snapshot_id);"; command.Parameters.AddWithValue("$cutoff",cutoff); command.ExecuteNonQuery();
+        using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="CREATE TEMP TABLE local_ai_cleanup_candidates(run_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL); CREATE TEMP TABLE local_ai_cleanup_snapshots(snapshot_id TEXT PRIMARY KEY); INSERT INTO local_ai_cleanup_candidates SELECT run_id,snapshot_id FROM local_ai_runs WHERE scope_kind='node' AND requested_at<=$cutoff; INSERT INTO local_ai_cleanup_snapshots SELECT snapshot_id FROM local_ai_cleanup_candidates; INSERT OR IGNORE INTO local_ai_cleanup_snapshots SELECT snapshot_id FROM local_ai_snapshots WHERE scope_kind='node' AND created_at<=$cutoff AND NOT EXISTS(SELECT 1 FROM local_ai_runs WHERE local_ai_runs.snapshot_id=local_ai_snapshots.snapshot_id); DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_cleanup_candidates); DELETE FROM local_ai_runs WHERE run_id IN (SELECT run_id FROM local_ai_cleanup_candidates); DELETE FROM local_ai_snapshots WHERE snapshot_id IN (SELECT snapshot_id FROM local_ai_cleanup_snapshots) AND NOT EXISTS(SELECT 1 FROM local_ai_runs WHERE local_ai_runs.snapshot_id=local_ai_snapshots.snapshot_id);"; command.Parameters.AddWithValue("$cutoff",cutoff); command.ExecuteNonQuery();
         using var count=connection.CreateCommand(); count.Transaction=transaction; count.CommandText="SELECT COUNT(*) FROM local_ai_cleanup_candidates;"; var deleted=Convert.ToInt32(count.ExecuteScalar(),CultureInfo.InvariantCulture); transaction.Commit(); return deleted;
     }
 
@@ -398,5 +400,8 @@ internal sealed class LocalAiAnalysisStoreV1
     private static bool ValidateStoredResultCore(byte[] bytes,LocalAiStoredResultInvariantV1 expected,IReadOnlyCollection<string>? evidence)
     {var validation=LocalAiResultValidatorV1.Validate(bytes,evidence);if(validation.Code!=LocalAiResultValidationCodeV1.Valid||!validation.CanonicalBytes!.SequenceEqual(bytes)||!MatchesExpected(bytes,expected))return false;using var document=JsonDocument.Parse(bytes);var findings=document.RootElement.GetProperty("findings").GetArrayLength();return expected.RunState=="zero_findings"?findings==0:expected.RunState=="succeeded"&&findings>0;}
     internal static bool ValidateStoredSnapshot(LocalAiStoredSnapshotInvariantV1 value)
-    {try{ValidateUuid7(value.SnapshotId);ValidateScope(value.ScopeKind,value.SessionId,value.NodeId);if(value.AnchorId!=(value.NodeId??value.SessionId)||Hash(value.Payload)!=value.PayloadSha256||Hash(value.EvidenceIndex)!=value.EvidenceIndexSha256||!Canonical(value.Payload).SequenceEqual(value.Payload)||!Canonical(value.EvidenceIndex).SequenceEqual(value.EvidenceIndex))return false;ValidateEvidenceIndex(value.EvidenceIndex);return true;}catch(Exception exception)when(exception is ArgumentException or InvalidOperationException or JsonException){return false;}}
+    {try{if(value.Payload.Length>MaximumSnapshotDocumentBytes||value.EvidenceIndex.Length>MaximumSnapshotDocumentBytes||!ValidateStoredSnapshotMetadata(value.SnapshotId,value.ScopeKind,value.SessionId,value.NodeId,value.AnchorId,value.PayloadSha256,value.EvidenceIndexSha256)||Hash(value.Payload)!=value.PayloadSha256||Hash(value.EvidenceIndex)!=value.EvidenceIndexSha256||!Canonical(value.Payload).SequenceEqual(value.Payload)||!Canonical(value.EvidenceIndex).SequenceEqual(value.EvidenceIndex))return false;ValidateEvidenceIndex(value.EvidenceIndex);return true;}catch(Exception exception)when(exception is ArgumentException or InvalidOperationException or JsonException){return false;}}
+    internal static bool ValidateStoredSnapshotMetadata(string snapshotId,string scopeKind,string sessionId,string? nodeId,string anchorId,string payloadSha256,string evidenceIndexSha256)
+    {try{ValidateUuid7(snapshotId);ValidateUuid7(sessionId);ValidateScope(scopeKind,sessionId,nodeId);return anchorId==(nodeId??sessionId)&&HashValue(payloadSha256)&&HashValue(evidenceIndexSha256);}catch(ArgumentException){return false;}}
+    private static bool HashValue(string value)=>value.Length==64&&value.All(character=>character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }

@@ -2259,13 +2259,14 @@ public sealed class SqliteRuntimeBackupService
         var at=(validationTime??DateTimeOffset.UtcNow).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture);
         using(var invalid=connection.CreateCommand())
         {
-            invalid.Transaction=transaction; invalid.CommandText="""
+            invalid.Transaction=transaction; invalid.CommandText=$"""
                 SELECT EXISTS(
-                  SELECT 1 FROM local_ai_snapshots s WHERE typeof(snapshot_id)<>'text' OR typeof(session_id)<>'text' OR typeof(anchor_id)<>'text'
+                  SELECT 1 FROM local_ai_snapshots s WHERE typeof(snapshot_id)<>'text' OR typeof(scope_kind)<>'text' OR typeof(session_id)<>'text' OR typeof(anchor_id)<>'text'
+                    OR typeof(node_id) NOT IN('null','text') OR typeof(payload_json) NOT IN('null','blob') OR typeof(evidence_index_json) NOT IN('null','blob')
                     OR typeof(created_at)<>'text' OR typeof(payload_sha256)<>'text' OR typeof(evidence_index_sha256)<>'text'
-                    OR length(retention_owner_token)<>32 OR (scope_kind='session')<>(node_id IS NULL)
+                    OR typeof(retention_owner_token)<>'blob' OR length(retention_owner_token)<>32 OR (scope_kind='session')<>(node_id IS NULL)
                     OR payload_sha256 GLOB '*[^0-9a-f]*' OR evidence_index_sha256 GLOB '*[^0-9a-f]*' OR (scope_kind='node' AND payload_json IS NULL)
-                    OR (payload_json IS NOT NULL AND (length(payload_json)>1048576 OR length(evidence_index_json)>1048576))
+                    OR (payload_json IS NOT NULL AND (length(payload_json)>{LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes} OR length(evidence_index_json)>{LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes}))
                     OR (scope_kind='session' AND (SELECT COUNT(*) FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:snapshot:'||s.snapshot_id)<>1)
                     OR (scope_kind='session' AND payload_json IS NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:snapshot:'||s.snapshot_id AND i.read_denied_at IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now))))
                     OR ($allowDeniedContent=0 AND scope_kind='session' AND payload_json IS NOT NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:snapshot:'||s.snapshot_id AND (i.read_denied_at IS NOT NULL OR i.state NOT IN('retained_by_policy','expiring') OR (i.state='expiring' AND i.expires_at<=$now))))
@@ -2279,7 +2280,7 @@ public sealed class SqliteRuntimeBackupService
                       OR (r.state IN('succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code IS NOT NULL OR r.result_id IS NULL OR (SELECT COUNT(*) FROM local_ai_results x WHERE x.result_id=r.result_id AND x.run_id=r.run_id)<>1))
                       OR (r.state NOT IN('queued','running','succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code<>r.state OR r.result_id IS NOT NULL))
                   UNION ALL SELECT 1 FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id
-                    WHERE length(x.retention_owner_token)<>32 OR x.result_sha256 GLOB '*[^0-9a-f]*' OR length(x.result_json)>1048576 OR r.result_id<>x.result_id OR r.state NOT IN('succeeded','zero_findings') OR x.created_at<>r.completed_at OR (r.scope_kind='node' AND x.result_json IS NULL)
+                    WHERE typeof(x.retention_owner_token)<>'blob' OR length(x.retention_owner_token)<>32 OR x.result_sha256 GLOB '*[^0-9a-f]*' OR length(x.result_json)>1048576 OR r.result_id<>x.result_id OR r.state NOT IN('succeeded','zero_findings') OR x.created_at<>r.completed_at OR (r.scope_kind='node' AND x.result_json IS NULL)
                       OR (r.scope_kind='session' AND (SELECT COUNT(*) FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:result:'||x.result_id)<>1)
                       OR (r.scope_kind='session' AND x.result_json IS NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:result:'||x.result_id AND i.read_denied_at IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now))))
                       OR ($allowDeniedContent=0 AND r.scope_kind='session' AND x.result_json IS NOT NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:result:'||x.result_id AND (i.read_denied_at IS NOT NULL OR i.state NOT IN('retained_by_policy','expiring') OR (i.state='expiring' AND i.expires_at<=$now))))
@@ -2293,8 +2294,8 @@ public sealed class SqliteRuntimeBackupService
         using(var times=connection.CreateCommand()){times.Transaction=transaction;times.CommandText="SELECT requested_at,started_at,completed_at,created_at,updated_at FROM local_ai_runs;";using var reader=times.ExecuteReader();while(reader.Read()){for(var i=0;i<5;i++)if(!reader.IsDBNull(i)&&!CanonicalTimestamp(reader.GetString(i)))return false;}}
         using(var snapshots=connection.CreateCommand())
         {
-            snapshots.Transaction=transaction;snapshots.CommandText="SELECT snapshot_id,scope_kind,session_id,node_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256 FROM local_ai_snapshots WHERE payload_json IS NOT NULL;";using var reader=snapshots.ExecuteReader();
-            while(reader.Read()){if(!LocalAiAnalysisStoreV1.ValidateStoredSnapshot(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.IsDBNull(3)?null:reader.GetString(3),reader.GetString(4),(byte[])reader[5],reader.GetString(6),(byte[])reader[7],reader.GetString(8))))return false;}
+            snapshots.Transaction=transaction;snapshots.CommandText="SELECT snapshot_id,scope_kind,session_id,node_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256 FROM local_ai_snapshots;";using var reader=snapshots.ExecuteReader();
+            while(reader.Read()){var node=reader.IsDBNull(3)?null:reader.GetString(3);if(!LocalAiAnalysisStoreV1.ValidateStoredSnapshotMetadata(reader.GetString(0),reader.GetString(1),reader.GetString(2),node,reader.GetString(4),reader.GetString(6),reader.GetString(8)))return false;if(!reader.IsDBNull(5)&&!LocalAiAnalysisStoreV1.ValidateStoredSnapshot(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),node,reader.GetString(4),(byte[])reader[5],reader.GetString(6),(byte[])reader[7],reader.GetString(8))))return false;}
         }
         using(var results=connection.CreateCommand())
         {
