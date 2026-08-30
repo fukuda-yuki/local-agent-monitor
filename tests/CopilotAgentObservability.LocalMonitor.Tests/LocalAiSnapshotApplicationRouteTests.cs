@@ -173,6 +173,36 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Assert.Equal(0, runs.Creates);
     }
 
+    [Fact]
+    public async Task StoreByteAdmissionReturnsScopeTooLargeWithoutPersistingSnapshotOrRun()
+    {
+        var runs=new StoreAdmissionRuns("local_ai_snapshot_scope_too_large");
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),
+            new OversizedByteSnapshots(),runs,new Provider(LocalAiProviderOutcomeV1.Failed()));
+
+        var response=await application.StartSessionAsync(new(SessionId),CancellationToken.None);
+
+        Assert.Equal("scope_too_large",response.ErrorCode);
+        Assert.Null(response.RunId);
+        Assert.Equal(1,runs.AdmissionAttempts);
+        Assert.Equal(1_048_577,runs.ObservedPayloadBytes);
+        Assert.Equal(0,runs.SnapshotRows);
+        Assert.Equal(0,runs.RunRows);
+    }
+
+    [Fact]
+    public async Task StoreInternalInvalidOperationIsNotReclassifiedAsScopeTooLarge()
+    {
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),
+            new OversizedByteSnapshots(),new StoreAdmissionRuns("local_ai_snapshot_not_canonical"),
+            new Provider(LocalAiProviderOutcomeV1.Failed()));
+
+        var error=await Assert.ThrowsAsync<InvalidOperationException>(()=>
+            application.StartSessionAsync(new(SessionId),CancellationToken.None).AsTask());
+
+        Assert.Equal("local_ai_snapshot_not_canonical",error.Message);
+    }
+
     [Theory]
     [InlineData("partial", true, "provider_partial")]
     [InlineData("failed", true, "provider_failed")]
@@ -560,6 +590,14 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId,string nodeId,CancellationToken token) => throw new NotSupportedException();
         public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token) => throw new LocalAiScopeTooLargeException();
     }
+    private sealed class OversizedByteSnapshots : ILocalAiSnapshotProjectionServiceV1
+    {
+        private readonly LocalAiSnapshotProjectionV1 snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1,1,0)) with
+        { PayloadCanonicalJson=new byte[1_048_577] };
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId,CancellationToken token)=>ValueTask.FromResult(snapshot);
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId,string nodeId,CancellationToken token)=>throw new NotSupportedException();
+        public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>throw new NotSupportedException();
+    }
     private sealed class FailingNodeSnapshots(string failure) : ILocalAiSnapshotProjectionServiceV1
     {
         public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId,CancellationToken token) => throw new NotSupportedException();
@@ -583,6 +621,26 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public bool Cancel(string runId){State="canceled";return true;}
         public LocalAiReportPageResponseV1 Reports(string sessionId,int? limit,string? cursor,string revision)=>new([],null);
         private LocalAiRunStatusV1 Status()=>new("018f0000-0000-7000-8000-000000000010",State,"session",SessionId,null,State=="running"?null:State);
+    }
+    private sealed class StoreAdmissionRuns(string message) : ILocalAiRunRepositoryV1
+    {
+        internal int AdmissionAttempts { get; private set; }
+        internal int ObservedPayloadBytes { get; private set; }
+        internal int SnapshotRows { get; private set; }
+        internal int RunRows { get; private set; }
+        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout)
+        {
+            AdmissionAttempts++;ObservedPayloadBytes=snapshot.PayloadCanonicalJson.Length;
+            if(snapshot.EvidenceIdentifiers.Count>4096||ObservedPayloadBytes<=1_048_576)
+                throw new Xunit.Sdk.XunitException("fixture must reach the byte-only store defense");
+            throw new InvalidOperationException(message);
+        }
+        public void Start(string runId)=>throw new NotSupportedException();
+        public LocalAiRunStatusV1 Complete(string runId,LocalAiProviderOutcomeV1 outcome,DateTimeOffset completedAt)=>throw new NotSupportedException();
+        public LocalAiRunStatusV1 Fail(string runId,string errorCode)=>throw new NotSupportedException();
+        public LocalAiRunStatusV1 Read(string runId)=>throw new NotSupportedException();
+        public bool Cancel(string runId)=>throw new NotSupportedException();
+        public LocalAiReportPageResponseV1 Reports(string sessionId,int? limit,string? cursor,string currentPayloadSha256)=>throw new NotSupportedException();
     }
     private sealed class StubApplication : ILocalAiAnalysisApplicationV1
     {

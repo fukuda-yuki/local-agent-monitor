@@ -122,6 +122,8 @@ internal sealed class LocalAiAnalysisApplicationV1(
                 admission.RunId = run.RunId;
             }
         }
+        catch (InvalidOperationException exception) when (exception.Message == "local_ai_snapshot_scope_too_large")
+        { CompleteAdmission(admissionId, admission); return new(null, "scope_too_large"); }
         catch { CompleteAdmission(admissionId, admission); throw; }
         admission.Cancellation.CancelAfter(TimeSpan.FromSeconds(timeout));
         _ = ExecuteAsync(admissionId, admission, run.RunId, snapshot, question, priorTurns);
