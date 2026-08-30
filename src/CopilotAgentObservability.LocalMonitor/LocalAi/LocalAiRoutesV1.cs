@@ -45,7 +45,8 @@ internal static class LocalAiRoutesV1
         if (!TryNodeRequest(body, out var request)) { await Error(context, 400, "invalid_request"); return; }
         LocalAiStartResponseV1 result;
         try { result = await application.StartNodeAsync(request!, context.RequestAborted).ConfigureAwait(false); }
-        catch (ArgumentException) { await Error(context, 400, "invalid_request"); return; }
+        catch (ArgumentException exception) when (exception.Message == "invalid_request")
+        { await Error(context, 400, "invalid_request"); return; }
         await StartResponse(context, result).ConfigureAwait(false);
     }
 

@@ -6,6 +6,7 @@ using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -97,7 +98,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
 
     [Theory]
-    [InlineData("expired", "denied", false)]
+    [InlineData("expired", "read_denied", false)]
     [InlineData("expired", "available", true)]
     public void ResultEnvelopeContentCoverageRequiresAtLeastOneAvailableRawLocator(
         string firstState, string secondState, bool expected)
@@ -205,6 +206,36 @@ public sealed class LocalAiSnapshotApplicationRouteTests
 
         Assert.NotNull(response.RunId);
         Assert.Equal("scope_too_large", runs.State);
+    }
+
+    [Fact]
+    public async Task SqliteCurrentnessTranslatesRealSpanCapGrowthToScopeTooLarge()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string runA="018f0000-0000-7000-8000-000000000010";
+        const string runB="018f0000-0000-7000-8000-000000000020";
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);
+        var authority=FixedSkillRegistryGenerationAuthority.Load();
+        var service=new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider,registryAuthority:authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority,timeProvider:temp.TimeProvider),
+            skillRegistryAuthority:authority,timeProvider:temp.TimeProvider);
+        var snapshot=await service.ReadSessionAsync(SessionId,CancellationToken.None);
+        using(var connection=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=temp.DatabasePath,Pooling=false}.ToString()))
+        {
+            connection.Open();using var transaction=connection.BeginTransaction();using var delete=connection.CreateCommand();
+            delete.Transaction=transaction;delete.CommandText="DELETE FROM monitor_spans;";delete.ExecuteNonQuery();
+            using var insert=connection.CreateCommand();insert.Transaction=transaction;insert.CommandText="""
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,status,projected_at)
+                VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',$span,$ordinal,'chat','llm_call','ok','2026-08-26T00:00:00.0000000+00:00');
+                """;
+            var span=insert.Parameters.Add("$span",SqliteType.Text);var ordinal=insert.Parameters.Add("$ordinal",SqliteType.Integer);
+            for(var index=0;index<4097;index++){span.Value=$"{index:x16}";ordinal.Value=index;insert.ExecuteNonQuery();}
+            transaction.Commit();
+        }
+
+        await Assert.ThrowsAsync<LocalAiScopeTooLargeException>(()=>service.IsCurrentAsync(snapshot,CancellationToken.None).AsTask());
     }
 
     [Theory]
@@ -358,6 +389,21 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Assert.Equal(expected, response.StatusCode);
         Assert.Equal($$"""{"error":"{{code}}"}""", await response.Content.ReadAsStringAsync());
         Assert.Equal(1, application.NodeStarts);
+    }
+
+    [Theory]
+    [InlineData("invalid_request", HttpStatusCode.BadRequest)]
+    [InlineData("local_ai_node_relation_invalid", HttpStatusCode.InternalServerError)]
+    public async Task NodeMutationOnlyMapsExactInputValidationArgument(string message, HttpStatusCode expected)
+    {
+        await using var host = await Host(new ThrowingNodeApplication(message));
+
+        using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/node-runs",
+            $$"""{"session_id":"{{SessionId}}","node_id":"node-0123456789abcdef0123456789abcdef"}"""));
+
+        Assert.Equal(expected, response.StatusCode);
+        if(expected==HttpStatusCode.BadRequest)
+            Assert.Equal("{\"error\":\"invalid_request\"}",await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -552,6 +598,14 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token)
         { NodeStarts++; return ValueTask.FromResult(response); }
+        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
+    private sealed class ThrowingNodeApplication(string message) : ILocalAiAnalysisApplicationV1
+    {
+        public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new ArgumentException(message);
         public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();

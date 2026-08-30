@@ -118,6 +118,10 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             return string.Equals(current.Revision, snapshot.Revision, StringComparison.Ordinal)
                 && string.Equals(current.PayloadSha256, snapshot.PayloadSha256, StringComparison.Ordinal);
         }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_too_large")
+        {
+            throw new LocalAiScopeTooLargeException();
+        }
         catch (LocalWorkspaceSessionDetailException)
         {
             return false;
