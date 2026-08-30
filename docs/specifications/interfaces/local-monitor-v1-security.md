@@ -287,6 +287,24 @@ AI execution crosses the local-only boundary.
 - credentials and secrets are removed by the accepted filters and closed tool responses;
 - provider request/response/raw bodies/paths are not logged or emitted in diagnostics/artifacts.
 
+## Settings receiver runtime summary
+
+Raw-default alone registers exact `GET /api/local-monitor/v1/settings/runtime`.
+It is loopback/Host guarded, same-origin, no-store, accepts no query or body,
+and returns fixed non-reflecting errors. Every other method is `405` with
+`Allow: GET`. The route is absent under `--sanitized-only`.
+
+The response contains only the application-start instant captured once after
+the current host starts, readiness composed from `MonitorHealthState`, a closed
+`{transport:"http",scope:"loopback",port}` endpoint, the latest committed
+`raw_records.received_at`, the count in the inclusive 300-second window,
+projection backlog, partitioned existing capture/projection reason tokens, and
+`restart_requirement:"unavailable"`. The activity read selects only
+`MAX(received_at)` and a count; it never reads IDs or content. Activity failure
+sets only its closed unavailable/null facts. Unknown projection state makes
+backlog null. The response never contains Host, configured URI, user-info,
+address, path, header, payload, ID, exception, or arbitrary text.
+
 ## Repository-safe outputs
 
 Sanitized evidence export, static dashboards, GitHub Issues, repository docs, logs and test artifacts may contain only their existing allowlisted contracts.

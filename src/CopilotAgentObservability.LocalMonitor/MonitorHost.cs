@@ -206,6 +206,17 @@ internal static class MonitorHost
         builder.Services.AddSingleton<RuntimeBackupMonitorLease>(_ => monitorLease);
         var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(options.DatabasePath, timeProvider);
         builder.Services.AddSingleton(retentionContext);
+        var settingsRuntimeStore = new RawTelemetryStore(
+            options.DatabasePath,
+            retentionContext,
+            timeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var settingsRuntime = options.SanitizedOnly ? null : new SettingsRuntimeSummary(
+            settingsRuntimeStore,
+            health,
+            timeProvider,
+            options.IngestionStallThresholdSeconds,
+            options.ProjectionLagThresholdSeconds);
         var doctorApplication = testOptions?.DoctorApplication
             ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
@@ -632,6 +643,41 @@ internal static class MonitorHost
         testOptions?.AdditionalServices?.Invoke(builder.Services);
 
         var app = builder.Build();
+        if (settingsRuntime is not null)
+        {
+            app.Lifetime.ApplicationStarted.Register(() =>
+                settingsRuntime.MarkApplicationStarted(new Uri(app.Urls.Single()).Port));
+            const string path = "/api/local-monitor/v1/settings/runtime";
+            app.MapMethods(path, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"], async context =>
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                if (!IsValidHostHeader(context.Request.Host.Host))
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                    return;
+                }
+                if (IsCrossSiteRequest(context))
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden");
+                    return;
+                }
+                if (!HttpMethods.IsGet(context.Request.Method))
+                {
+                    context.Response.Headers.Allow = "GET";
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed");
+                    return;
+                }
+                if (context.Request.QueryString.HasValue
+                    || context.Request.ContentLength is > 0
+                    || context.Request.Headers.TransferEncoding.Count > 0)
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_request");
+                    return;
+                }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                await JsonSerializer.SerializeAsync(context.Response.Body, settingsRuntime.Read(), cancellationToken: context.RequestAborted);
+            });
+        }
         if (settingsAiReadiness is not null)
         {
             const string path = "/api/local-monitor/v1/settings/ai-readiness";
@@ -853,10 +899,12 @@ internal static class MonitorHost
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
             var settingsAiReadinessPath = !options.SanitizedOnly
                 && context.Request.Path == "/api/local-monitor/v1/settings/ai-readiness";
+            var settingsRuntimePath = !options.SanitizedOnly
+                && context.Request.Path == "/api/local-monitor/v1/settings/runtime";
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
                 || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
-                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath)
+                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath || settingsRuntimePath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -890,7 +938,7 @@ internal static class MonitorHost
                 {
                     await RuntimeBackupRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
-                else if (settingsAiReadinessPath)
+                else if (settingsAiReadinessPath || settingsRuntimePath)
                 {
                     await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }

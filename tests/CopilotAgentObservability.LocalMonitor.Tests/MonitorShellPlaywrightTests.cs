@@ -605,6 +605,11 @@ public class MonitorShellPlaywrightTests
             Status = 200, ContentType = "application/json",
             Body = "{\"schema_version\":1,\"pending_count\":2,\"queued_count\":0,\"deleting_count\":0,\"failed_count\":1,\"retry_exhausted_count\":1,\"orphan_or_unexpected_missing_count\":0,\"expired_but_readable_violation_count\":0,\"oldest_pending_age_seconds\":3,\"worker_state\":\"idle\",\"last_successful_run_at\":null,\"inventory_version\":1,\"adapter_coverage_version\":1,\"items\":[]}",
         }));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/runtime", route => route.FulfillAsync(new()
+        {
+            Status = 200, ContentType = "application/json",
+            Body = "{\"application_started_at\":\"2026-08-30T01:02:03.0000000+00:00\",\"receiver_readiness\":\"degraded\",\"endpoint\":{\"transport\":\"http\",\"scope\":\"loopback\",\"port\":4320},\"activity_state\":\"available\",\"latest_received_at\":\"2026-08-30T01:06:00.0000000+00:00\",\"recent_received_count\":4,\"projection_backlog\":7,\"capture_reasons\":[\"ingestion_backpressure\"],\"projection_reasons\":[\"projection_lag\"],\"restart_requirement\":\"unavailable\"}",
+        }));
         var releaseHistory = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await page.RouteAsync("**/api/historical-import/v1/history?limit=1", async route =>
         {
@@ -635,8 +640,11 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-receiver-health]")).ToContainTextAsync("投影に遅れがあります");
         await Expect(page.Locator("[data-settings-section='receiver']")).ToContainTextAsync("投影待ち 7件");
         await Expect(page.Locator("[data-settings-receiver-source]")).ToContainTextAsync("互換性を確認済み");
-        await Expect(page.Locator("[data-settings-section='receiver']")).ToContainTextAsync("開始時刻・受信先・直近の受信件数: 現在の情報では確認できません。");
-        await Expect(page.Locator("[data-settings-section='receiver']")).ToContainTextAsync("記録内容の設定変更・再起動要否: この画面では対応していません。");
+        await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("開始 2026-08-30 01:02:03 UTC");
+        await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("受信先 HTTP · ループバック · ポート 4320");
+        await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("直近5分 4件");
+        await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("最新受信 2026-08-30 01:06:00 UTC");
+        await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("再起動要否は確認できません");
         await Expect(page.Locator("#settings-modal")).Not.ToContainTextAsync("SECRET_");
         Assert.Contains(requestedUrls, url => url.EndsWith("/api/monitor/source-diagnostics?limit=1", StringComparison.Ordinal));
         await page.Locator("[data-settings-navigation='state']").ClickAsync();

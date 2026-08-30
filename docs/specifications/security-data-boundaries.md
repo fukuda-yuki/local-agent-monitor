@@ -323,6 +323,15 @@ an empty no-store 404. There is no route-by-route metadata-only fallback UI.
 Frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE
 shape/order/bytes/availability remain under their existing contracts.
 
+The Settings receiver summary is the raw-default exact
+`GET /api/local-monitor/v1/settings/runtime` closed read. It exposes only the
+application-start instant, `MonitorHealthState` readiness and existing reason
+tokens, transport/scope/port, a payload/ID-free 300-second committed receive
+aggregate, projection backlog, and closed restart state. It never exposes a
+Host, URI, user-info, address, path, header, payload, identifier, or raw error.
+Activity failure and unknown projection state remain unavailable/null without
+failing unrelated facts.
+
 AI provider execution is an explicit egress from the local-only boundary.
 GitHub Copilot SDK is the sole v1 provider; actions appear only when ready and
 each run requires a user action. Settings permanently explains the egress and

@@ -98,9 +98,10 @@
       projection.dataset.settingsReceiverProjection = "";
       const source = card("記録範囲", "取得元の状態を確認しています。");
       source.dataset.settingsReceiverSource = "";
+      const runtime = card("稼働情報", "稼働情報を確認しています。");
+      runtime.dataset.settingsReceiverRuntime = "";
       section.append(health, projection, source,
-        element("p", "local-monitor-settings-note", "開始時刻・受信先・直近の受信件数: 現在の情報では確認できません。"),
-        element("p", "local-monitor-settings-note", "記録内容の設定変更・再起動要否: この画面では対応していません。"),
+        runtime,
         link("/diagnostics", "詳しい受信診断を開く"));
     } else if (token === "ai") {
       const ai = card("GitHub Copilot", "AI設定を確認しています。");
@@ -436,6 +437,7 @@
     if (section === "state" || section === "receiver" || section === "diagnostics") {
       loadWorkspace(section, generation);
       if (section === "receiver" || section === "diagnostics") loadSourceSummary(generation);
+      if (section === "receiver") loadReceiverRuntime(generation);
       try {
         const response = await fetch("/health/ready", { cache: "no-store", credentials: "same-origin" });
         if (!response.ok && response.status !== 503) throw new Error();
@@ -504,6 +506,34 @@
           else fixedFailure(owned.get("storage").querySelector(".local-monitor-settings-card"));
         }
       }
+    }
+  }
+
+  async function loadReceiverRuntime(generation) {
+    const target = owned.get("receiver")?.querySelector("[data-settings-receiver-runtime] p");
+    try {
+      const response = await fetch("/api/local-monitor/v1/settings/runtime", { cache: "no-store", credentials: "same-origin" });
+      if (!response.ok) throw new Error();
+      const value = await response.json();
+      if (!exact(value, ["application_started_at", "receiver_readiness", "endpoint", "activity_state", "latest_received_at",
+        "recent_received_count", "projection_backlog", "capture_reasons", "projection_reasons", "restart_requirement"])
+        || !timestamp(value.application_started_at) || !["ready", "degraded", "not_ready"].includes(value.receiver_readiness)
+        || !exact(value.endpoint, ["transport", "scope", "port"]) || value.endpoint.transport !== "http"
+        || value.endpoint.scope !== "loopback" || !Number.isSafeInteger(value.endpoint.port) || value.endpoint.port < 1 || value.endpoint.port > 65535
+        || !["available", "unavailable"].includes(value.activity_state)
+        || value.latest_received_at !== null && !timestamp(value.latest_received_at)
+        || value.recent_received_count !== null && !count(value.recent_received_count)
+        || value.projection_backlog !== null && !count(value.projection_backlog)
+        || !Array.isArray(value.capture_reasons) || !Array.isArray(value.projection_reasons)
+        || [...value.capture_reasons, ...value.projection_reasons].some(reason => typeof reason !== "string" || !(reason in READINESS_REASONS))
+        || value.restart_requirement !== "unavailable") throw new Error();
+      if (generation !== requestGeneration || !target) return;
+      const format = raw => raw.replace("T", " ").slice(0, 19) + " UTC";
+      const activity = value.activity_state === "unavailable" ? "受信履歴は確認できません"
+        : `直近5分 ${value.recent_received_count}件 · 最新受信 ${value.latest_received_at === null ? "記録なし" : format(value.latest_received_at)}`;
+      target.textContent = `開始 ${format(value.application_started_at)} · 受信先 HTTP · ループバック · ポート ${value.endpoint.port} · ${activity} · 再起動要否は確認できません`;
+    } catch {
+      if (generation === requestGeneration && target) target.textContent = "稼働情報を読み込めませんでした。";
     }
   }
 
