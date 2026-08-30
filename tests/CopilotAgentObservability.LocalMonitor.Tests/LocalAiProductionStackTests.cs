@@ -84,6 +84,16 @@ public sealed class LocalAiProductionStackTests
             "/api/local-monitor/v1/ai/session-runs/{runId}","/api/local-monitor/v1/ai/node-runs/{runId}",
             "/api/local-monitor/v1/ai/runs/{runId}","/api/local-monitor/v1/ai/runs/{runId}/cancel",
             "/api/local-monitor/v1/ai/sessions/{sessionId}/reports"},pattern=>Assert.Contains(pattern,host.RoutePatterns));
+        Assert.Equal(HttpStatusCode.NotFound,(await host.Client.GetAsync($"/api/local-monitor/v1/ai/session-runs/{nodeRun}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,(await host.Client.GetAsync($"/api/local-monitor/v1/ai/node-runs/{first}")).StatusCode);
+        using(var wrongMethod=new HttpRequestMessage(HttpMethod.Put,"/api/local-monitor/v1/ai/runs/not-a-uuid"))
+        using(var wrongMethodResponse=await host.Client.SendAsync(wrongMethod))Assert.Equal(HttpStatusCode.MethodNotAllowed,wrongMethodResponse.StatusCode);
+        const string missing="018f0000-0000-7000-8000-000000000099";
+        using(var missingRequest=Post("/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{missing}}"}"""))
+        {missingRequest.Content!.Headers.ContentType=System.Net.Http.Headers.MediaTypeHeaderValue.Parse("Application/Json");using var missingResponse=await host.Client.SendAsync(missingRequest);Assert.Equal(HttpStatusCode.NotFound,missingResponse.StatusCode);}
+        using(var missingReports=await host.Client.GetAsync($"/api/local-monitor/v1/ai/sessions/{missing}/reports"))Assert.Equal(HttpStatusCode.NotFound,missingReports.StatusCode);
+        using(var oversized=Post("/api/local-monitor/v1/ai/session-runs",new string('x',16_385)))
+        {oversized.Content=new StringContent(new string('x',16_385),Encoding.UTF8,"text/plain");using var oversizedResponse=await host.Client.SendAsync(oversized);Assert.Equal(HttpStatusCode.RequestEntityTooLarge,oversizedResponse.StatusCode);}
 
         using var reopened=Open(temp.DatabasePath);using var count=reopened.CreateCommand();
         count.CommandText="SELECT COUNT(*) FROM local_ai_runs WHERE state='succeeded';";Assert.Equal(3L,(long)count.ExecuteScalar()!);

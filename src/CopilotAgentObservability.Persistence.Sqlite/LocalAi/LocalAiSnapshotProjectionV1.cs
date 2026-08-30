@@ -106,7 +106,8 @@ internal static class LocalAiSnapshotProjectionBuilderV1
             anchor_id = anchorId,
             revision = input.Revision,
             session_facts = input.SessionFacts,
-            executions = input.Executions.Order(StringComparer.Ordinal).ToArray(),
+            executions = (kind == "node" ? projectedNodes.Select(static node => node.ExecutionId) : input.Executions)
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
             nodes = input.Nodes.Where(node => evidence.Contains(node.NodeId, StringComparer.Ordinal))
                 .OrderBy(static node => node.NodeId, StringComparer.Ordinal)
                 .Select(static node => new { node_id = node.NodeId, execution_id = node.ExecutionId,

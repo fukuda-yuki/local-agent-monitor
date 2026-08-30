@@ -26,6 +26,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     {
         var input = ProjectionInput(1, 4, 0) with
         {
+            Executions = ["execution-1", "execution-2"],
             AnchorNodeId = "node-anchor",
             Nodes =
             [
@@ -40,6 +41,10 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
         Assert.Equal(["node-anchor", "node-child", "node-reference", "node-root"], snapshot.EvidenceIdentifiers.Order());
         Assert.DoesNotContain("node-other", snapshot.EvidenceIdentifiers);
+        using var payload=JsonDocument.Parse(snapshot.PayloadCanonicalJson);
+        Assert.Equal(["execution-1"],payload.RootElement.GetProperty("executions").EnumerateArray().Select(item=>item.GetString()));
+        Assert.DoesNotContain("execution-2",Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson),StringComparison.Ordinal);
+        Assert.DoesNotContain("execution-2",snapshot.EvidenceIdentifiers);
     }
 
     [Fact]

@@ -101,6 +101,10 @@ internal sealed class LocalAiAnalysisApplicationV1(
         catch (LocalAiScopeTooLargeException) { CompleteAdmission(admissionId, admission); return new(null, "scope_too_large"); }
         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_too_large")
         { CompleteAdmission(admissionId, admission); return new(null, "scope_too_large"); }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "session_not_found")
+        { CompleteAdmission(admissionId, admission); return new(null, "session_not_found"); }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "local_monitor_ui_unavailable")
+        { CompleteAdmission(admissionId, admission); return new(null, "projection_unavailable"); }
         catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
         { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
         catch { CompleteAdmission(admissionId, admission); throw; }
