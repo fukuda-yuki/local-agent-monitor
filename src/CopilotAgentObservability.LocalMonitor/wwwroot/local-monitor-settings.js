@@ -23,6 +23,7 @@
   let storageController = null;
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const DIGEST = /^[0-9a-f]{64}$/;
+  const WRONG_ARCHIVE_TARGET = Symbol("wrong-archive-target");
   const READINESS_REASONS = Object.freeze({
     loopback_unbound: "ローカル受信の準備ができていません。",
     db_unavailable: "保存先を利用できません。",
@@ -220,7 +221,7 @@
         || value.target_id !== expectedId || !["active", "archived"].includes(value.state)
         || !count(value.revision) || value.state === "archived" !== (value.revision > 0 && value.revision % 2 === 1)
         || value.state === "archived" && (!timestamp(value.archived_at) || !timestamp(value.updated_at))
-        || value.state === "active" && (value.archived_at !== null || value.updated_at !== null && !timestamp(value.updated_at))) throw new TypeError();
+        || value.state === "active" && (value.archived_at !== null || value.updated_at !== null && !timestamp(value.updated_at))) throw WRONG_ARCHIVE_TARGET;
     return value;
   }
 
@@ -329,7 +330,7 @@
       exactSearchResult = result;
     } catch (error) {
       if (controller.signal.aborted || generation !== exactSearchGeneration) return;
-      exactSearchResult = error instanceof TypeError ? { kind: "wrong" } : { kind: "error" };
+      exactSearchResult = error === WRONG_ARCHIVE_TARGET ? { kind: "wrong" } : { kind: "error" };
     } finally {
       if (generation === exactSearchGeneration) {
         exactSearchController = null;

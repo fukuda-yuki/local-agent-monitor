@@ -463,13 +463,15 @@ The raw-default `アーカイブ` section keeps its paged archived Session list 
 offers an independent exact Session ID search. Only a canonical UUIDv7 starts
 the direct no-store owner read at
 `GET /api/local-monitor/v1/archive?target_kind=session&target_id=<uuidv7>`;
-invalid input is rejected locally. Search replacement, clear, section leave,
-and modal close abort and invalidate only the exact search. They do not change
-the loaded archived list, its cursor, pagination availability, list request, or
-list generation. The result exposes only fixed states, the entered canonical
-Session ID as a direct Session link when archived, and the existing restore
-action using the exact read revision. It does not render server labels, paths,
-repository/workspace metadata, or opaque error text.
+invalid input is rejected locally. Search replacement and clear abort and
+invalidate only the exact search without changing the loaded archived list,
+its cursor, pagination availability, list request, or list generation. Section
+leave and modal close also abort and invalidate the exact search while retaining
+the pre-existing archived-list lifecycle, including list invalidation and reload
+on a later section entry. The result exposes only fixed states, the entered
+canonical Session ID as a direct Session link when archived, and the existing
+restore action using the exact read revision. It does not render server labels,
+paths, repository/workspace metadata, or opaque error text.
 
 The raw-default `AI設定` section reads and explicitly checks one closed
 Settings-owned readiness resource at
