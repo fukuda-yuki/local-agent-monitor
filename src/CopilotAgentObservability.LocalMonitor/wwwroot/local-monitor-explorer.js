@@ -8,6 +8,7 @@
   const REVISION = /^[0-9a-f]{64}$/;
   const NODE_ID = /^node-[0-9a-f]{32}$/;
   const AI_STATES = new Set(["queued", "running", "succeeded", "zero_findings", "provider_failed", "provider_partial", "invalid_result", "invalid_evidence", "stale_snapshot", "scope_too_large", "timed_out", "canceled"]);
+  const AI_STATE_LABELS = Object.freeze({ queued: "分析を待っています。", running: "分析しています。", succeeded: "分析が完了しました。", zero_findings: "指摘はありませんでした。", provider_failed: "AI provider で分析できませんでした。", provider_partial: "不完全な結果のため表示できません。", stale_snapshot: "対象が更新されたため分析できませんでした。", scope_too_large: "分析対象が上限を超えています。", timed_out: "分析がタイムアウトしました。", canceled: "分析をキャンセルしました。", invalid_result: "AI 結果を安全に表示できません。", invalid_evidence: "証拠を確認できないため表示できません。" });
   const SESSION_CURSOR = /^[A-Za-z0-9_-]{147}$/;
   const REPOSITORY_CURSOR = /^[A-Za-z0-9_-]{135}$/;
   const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})\+00:00$/;
@@ -141,7 +142,7 @@
   const aiPreviewButton = root.querySelector("#session-ai-preview");
   const aiStart = root.querySelector("#session-ai-start");
   const aiCancel = root.querySelector("#session-ai-cancel");
-  const aiState = { preview: null, runId: null, frozenIds: [] };
+  const aiState = { preview: null, runId: null, frozenIds: [], generation: 0, controller: null, restoredRunId: null };
 
   class ApiFailure extends Error {
     constructor(statusCode, code = null) {
@@ -172,7 +173,7 @@
 
   function validEvidenceLocation(value) {
     if (typeof value !== "string" || value.includes("#") || value.includes("%")) return false;
-    const match = /^\/sessions\/([0-9a-f-]{36})(?:\?execution=([0-9a-f-]{36})(?:&node=(node-[0-9a-f]{32}))?|\?node=(node-[0-9a-f]{32}))?$/.exec(value);
+    const match = /^\/sessions\/([0-9a-f-]{36})(?:\?execution=([0-9a-f-]{36})&node=(node-[0-9a-f]{32})|\?node=(node-[0-9a-f]{32}))$/.exec(value);
     return !!match && UUID_V7.test(match[1]) && (!match[2] || UUID_V7.test(match[2])) && (!match[3] || NODE_ID.test(match[3])) && (!match[4] || NODE_ID.test(match[4]));
   }
 
@@ -180,7 +181,7 @@
     const rootKeys = ["scope", "snapshot", "summary", "findings", "improvement_suggestions", "limitations", "provenance"];
     if (!exactKeySet(result, rootKeys) || !exactKeySet(result.scope, ["kind", "repository_id", "anchor_id"])
         || result.scope.kind !== "repository_selection" || result.scope.repository_id !== root.dataset.repositoryId
-        || !boundedText(result.scope.anchor_id) || !exactKeySet(result.snapshot, ["snapshot_id", "payload_sha256"])
+        || result.scope.anchor_id !== root.dataset.repositoryId || !exactKeySet(result.snapshot, ["snapshot_id", "payload_sha256"])
         || !UUID_V7.test(result.snapshot.snapshot_id) || !REVISION.test(result.snapshot.payload_sha256)
         || !boundedText(result.summary, 65_536) || !Array.isArray(result.findings) || result.findings.length > 200
         || !Array.isArray(result.improvement_suggestions) || result.improvement_suggestions.length > 200
@@ -199,10 +200,12 @@
           || !refs(suggestion.evidence_refs)) return false;
     }
     if (!result.limitations.every(value => boundedText(value))) return false;
+    if (aiState.preview && (result.snapshot.snapshot_id !== aiState.preview.snapshot_id || result.snapshot.payload_sha256 !== aiState.preview.payload_sha256)) return false;
     const provenanceKeys = ["provider", "model", "configuration_sha256", "prompt_template_version", "requested_at", "started_at", "completed_at", "snapshot_id", "snapshot_sha256", "coverage"];
     return exactKeySet(result.provenance, provenanceKeys) && ["provider", "model", "prompt_template_version", "requested_at", "started_at", "completed_at"].every(key => boundedText(result.provenance[key]))
       && REVISION.test(result.provenance.configuration_sha256) && UUID_V7.test(result.provenance.snapshot_id) && REVISION.test(result.provenance.snapshot_sha256)
       && result.provenance.snapshot_id === result.snapshot.snapshot_id && result.provenance.snapshot_sha256 === result.snapshot.payload_sha256
+      && [result.provenance.requested_at, result.provenance.started_at, result.provenance.completed_at].every(value => TIMESTAMP.test(value))
       && exactKeySet(result.provenance.coverage, ["included", "excluded", "content_available"])
       && nonnegativeInteger(result.provenance.coverage.included)
       && nonnegativeInteger(result.provenance.coverage.excluded)
@@ -214,7 +217,35 @@
         || !UUID_V7.test(value.run_id) || value.run_id !== expectedRunId || !AI_STATES.has(value.state)
         || value.scope_kind !== "repository_selection" || value.session_id !== null || value.node_id !== null
         || value.repository_id !== root.dataset.repositoryId || !(value.error === null || boundedText(value.error))) return false;
-    return value.result === null || value.state === "succeeded" && validateAiResult(value.result);
+    const successful = value.state === "succeeded" || value.state === "zero_findings";
+    return successful ? value.result !== null && validateAiResult(value.result) : value.result === null;
+  }
+
+  function validatePreviewRow(value, excluded) {
+    const keys = ["session_id", "session_archive_state", "session_archive_revision", "repository_archive_state", "repository_archive_revision", "archive_exclusion_reason", "source", "model", "completeness", "content_state", "workspace_revision", "truncated"];
+    if (!exactKeySet(value, keys) || !UUID_V7.test(value.session_id)) return false;
+    const archive = state => state === null || state === "active" || state === "archived";
+    const revision = revision => revision === null || nonnegativeInteger(revision);
+    const strings = values => values === null || Array.isArray(values) && values.length <= 64 && values.every(item => boundedText(item, 256));
+    const reasons = new Set([null, "session_not_found", "repository_mismatch", "session_archived", "repository_archived", "projection_unavailable"]);
+    return archive(value.session_archive_state) && revision(value.session_archive_revision)
+      && archive(value.repository_archive_state) && revision(value.repository_archive_revision)
+      && reasons.has(value.archive_exclusion_reason) && strings(value.source) && strings(value.model)
+      && (value.completeness === null || boundedText(value.completeness, 128))
+      && (value.content_state === null || ["available", "sanitized_only"].includes(value.content_state))
+      && (value.workspace_revision === null || REVISION.test(value.workspace_revision))
+      && (value.truncated === null || value.truncated === false)
+      && (excluded || value.session_archive_state !== null);
+  }
+
+  function validateRepositoryPreview(value) {
+    if (!exactKeySet(value, ["schema_version", "snapshot_id", "payload_sha256", "expires_at", "included", "excluded", "truncated"])
+        || value.schema_version !== "local-ai-repository-preview.response.v1" || !UUID_V7.test(value.snapshot_id)
+        || !REVISION.test(value.payload_sha256) || !TIMESTAMP.test(value.expires_at) || value.truncated !== false
+        || !Array.isArray(value.included) || !Array.isArray(value.excluded) || value.included.length + value.excluded.length > 200
+        || !value.included.every(row => validatePreviewRow(row, false)) || !value.excluded.every(row => validatePreviewRow(row, true))) return false;
+    const ids = [...value.included, ...value.excluded].map(row => row.session_id);
+    return new Set(ids).size === ids.length;
   }
 
   function count(value) {
@@ -653,7 +684,7 @@
       const list = element("ul");
       for (const value of values) {
         const item = element("li");
-        item.textContent = [value.session_archive_state, value.session_archive_revision, value.archive_exclusion_reason ?? value.reason, value.source, value.model, value.completeness, value.content_state, value.workspace_revision, value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
+        item.textContent = [value.session_id, `Session ${value.session_archive_state} rev ${value.session_archive_revision}`, `Repository ${value.repository_archive_state} rev ${value.repository_archive_revision}`, value.archive_exclusion_reason, value.source, value.model, value.completeness, `content ${value.content_state}`, value.workspace_revision, `truncated ${value.truncated}`].filter(x => x !== null && x !== undefined).flat().join(" / ");
         list.append(item);
       }
       section.append(list); aiPreviewContent.append(section);
@@ -661,30 +692,29 @@
   }
 
   async function previewAiSelection() {
-    aiStart.disabled = true; aiStatus.textContent = "分析対象を確認しています。";
+    const generation = ++aiState.generation; aiState.controller?.abort(); aiState.controller = new AbortController();
+    aiState.preview = null; aiStart.disabled = true; aiStatus.textContent = "分析対象を確認しています。";
     const mode = root.querySelector("input[name='session-ai-mode']:checked")?.value ?? "filter";
     const selection = mode === "explicit"
       ? { kind: "explicit", archive_scope: state.route?.archive_scope ?? "active_only", session_ids: [...aiState.frozenIds] }
       : { kind: "filter", request: { ...requestBody(null), cursor: null, limit: null } };
+    if (mode === "explicit" && aiState.frozenIds.length > 200) { aiStatus.textContent = "分析対象は200件までです。"; return; }
     try {
       const value = await aiJson("/api/local-monitor/v1/ai/repository-preview", { schema_version: "local-ai-repository-preview.request.v1", repository_id: root.dataset.repositoryId, selection });
-      if (!exactKeys(value, ["schema_version", "snapshot_id", "payload_sha256", "expires_at", "included", "excluded", "truncated"])
-          || value.schema_version !== "local-ai-repository-preview.response.v1" || !UUID_V7.test(value.snapshot_id)
-          || !REVISION.test(value.payload_sha256) || typeof value.expires_at !== "string"
-          || !Array.isArray(value.included) || !Array.isArray(value.excluded) || value.truncated !== false) throw new TypeError("invalid preview");
+      if (generation !== aiState.generation || !validateRepositoryPreview(value)) throw new TypeError("invalid preview");
       aiState.preview = value; renderAiMetadata(value);
       aiStatus.textContent = value.included.length === 0 ? "分析できる対象がありません。" : "この対象で分析を開始できます。";
       aiStart.disabled = value.included.length === 0;
     } catch (error) { aiStatus.textContent = error instanceof ApiFailure && error.code === "scope_too_large" ? "対象が200件を超えています。" : "分析対象を確認できませんでした。"; }
   }
 
-  async function pollAiRun() {
+  async function pollAiRun(runId = aiState.runId, generation = aiState.generation) {
     try {
-      const response = await fetch(`/api/local-monitor/v1/ai/runs/${aiState.runId}`, { cache: "no-store", credentials: "same-origin" });
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", signal: aiState.controller?.signal });
       if (!response.ok) throw await apiFailure(response); const value = await response.json();
-      if (!validateRepositoryRun(value, aiState.runId)) throw new TypeError("invalid repository run");
-      if (["queued", "running"].includes(value.state)) { setTimeout(pollAiRun, 250); return; }
-      aiCancel.hidden = true; aiStatus.textContent = value.state === "succeeded" ? "分析が完了しました。" : `分析は ${value.state} で終了しました。`;
+      if (generation !== aiState.generation || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
+      if (["queued", "running"].includes(value.state)) { setTimeout(() => pollAiRun(runId, generation), 250); return; }
+      aiCancel.hidden = true; aiStatus.textContent = AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
       aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result);
     } catch { aiCancel.hidden = true; aiStatus.textContent = "分析結果を取得できませんでした。一覧は引き続き利用できます。"; }
   }
@@ -718,10 +748,11 @@
 
   async function startAiRun() {
     if (!aiState.preview) return; aiStart.disabled = true;
+    const generation = ++aiState.generation; aiState.controller?.abort(); aiState.controller = new AbortController();
     try { const value = await aiJson("/api/local-monitor/v1/ai/repository-runs", { schema_version: "local-ai-repository-run.request.v1", snapshot_id: aiState.preview.snapshot_id, payload_sha256: aiState.preview.payload_sha256, timeout_seconds: 120 });
       if (!UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。";
       try { window.LocalMonitorV1History.push({ analysis: value.run_id }); } catch { }
-      pollAiRun();
+      pollAiRun(value.run_id, generation);
     } catch { aiStatus.textContent = "分析を開始できませんでした。一覧は引き続き利用できます。"; }
   }
 
@@ -732,15 +763,16 @@
 
   async function restoreRepositoryAnalysis(route) {
     const runId = route?.analysis;
-    if (!UUID_V7.test(runId ?? "") || runId === aiState.runId) return;
+    if (!UUID_V7.test(runId ?? "") || runId === aiState.restoredRunId) return;
+    aiState.restoredRunId = runId; const generation = ++aiState.generation; aiState.controller?.abort(); aiState.controller = new AbortController();
     aiState.runId = runId;
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw await apiFailure(response); const value = await response.json();
-      if (!validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
-      aiDialog.showModal(); aiStatus.textContent = value.state === "succeeded" ? "保存された分析を表示しています。" : `分析は ${value.state} です。`;
-      aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(); }
-    } catch { aiState.runId = null; aiStatus.textContent = "保存された分析を復元できませんでした。"; }
+      if (generation !== aiState.generation || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
+      aiDialog.showModal(); aiStatus.textContent = value.result ? "保存された分析を表示しています。" : AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
+      aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(runId, generation); }
+    } catch { aiState.runId = null; aiState.restoredRunId = null; aiStatus.textContent = "保存された分析を復元できませんでした。"; }
   }
 
   async function readCollection(cursor, signal) {
@@ -1909,19 +1941,27 @@
   });
 
   aiOpen.addEventListener("click", () => {
+    aiState.controller?.abort(); ++aiState.generation;
     aiState.preview = null;
-    aiState.frozenIds = [...new Set([...state.cohorts.a, ...state.cohorts.b])].slice(0, 200);
+    aiState.frozenIds = [...new Set([...state.cohorts.a, ...state.cohorts.b])];
     aiExplicitLabel.hidden = aiState.frozenIds.length === 0;
+    root.querySelector("input[name='session-ai-mode'][value='filter']").checked = true;
+    root.querySelector("input[name='session-ai-mode'][value='explicit']").checked = false;
     aiPreviewContent.replaceChildren(); aiResult.replaceChildren(); aiStart.disabled = true;
     aiStatus.textContent = "分析対象を選んで確認してください。"; aiDialog.showModal();
   });
   root.querySelector("#session-ai-close").addEventListener("click", () => aiDialog.close());
   aiPreviewButton.addEventListener("click", previewAiSelection);
   aiStart.addEventListener("click", startAiRun);
+  root.querySelectorAll("input[name='session-ai-mode']").forEach(control => control.addEventListener("change", () => { aiState.preview = null; aiStart.disabled = true; aiPreviewContent.replaceChildren(); }));
+  filters.addEventListener("input", () => { if (aiDialog.open) { aiState.preview = null; aiStart.disabled = true; } });
   aiCancel.addEventListener("click", async () => {
     if (!aiState.runId) return;
-    try { await aiJson(`/api/local-monitor/v1/ai/runs/${aiState.runId}/cancel`, {}); aiStatus.textContent = "キャンセルしました。"; } catch { aiStatus.textContent = "キャンセルできませんでした。"; }
-    aiCancel.hidden = true;
+    const runId = aiState.runId;
+    try { const value = await aiJson(`/api/local-monitor/v1/ai/runs/${runId}/cancel`, {});
+      if (!exactKeySet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") throw new TypeError("invalid cancel");
+      aiState.controller?.abort(); ++aiState.generation; aiStatus.textContent = "分析をキャンセルしました。"; aiCancel.hidden = true;
+    } catch { aiStatus.textContent = "キャンセルを確認できませんでした。分析状態の確認を続けます。"; }
   });
 
   document.addEventListener("cao-route-popstate", () => {
