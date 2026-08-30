@@ -15,7 +15,8 @@ public sealed class HistoricalAnalysisSpecificationTests
 
         Assert.All(
         [
-            "GET /historical-analysis",
+            "standalone `/historical-analysis` presentation",
+            "retired with empty 404 responses",
             "POST /api/historical-analysis/v1/preview",
             "POST /api/historical-analysis/v1/instruction-runs",
             "GET /api/historical-analysis/v1/instruction-runs/{analysisRunId}",
@@ -30,13 +31,12 @@ public sealed class HistoricalAnalysisSpecificationTests
             "Cache-Control: no-store",
             "strict unknown-field rejection",
             "no CORS",
-            "inert text",
-            "no browser storage",
+            "no browser state, storage, history, navigation",
             "no combined analyze-all action",
             "no heuristic lookup",
             "`selection.sanitized_only=false`",
             "before #72 owner access",
-            "After transient rendering, the only long-lived preview binding is exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`",
+            "Machine responses remain bounded repository-safe DTOs",
         ], required => Assert.Contains(required, normalizedSpecification, StringComparison.Ordinal));
     }
 

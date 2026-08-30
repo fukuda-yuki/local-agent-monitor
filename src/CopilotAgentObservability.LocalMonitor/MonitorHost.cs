@@ -62,7 +62,6 @@ internal static class MonitorHost
         "/backup-restore",
         "/costs",
         "/diagnostics",
-        "/historical-analysis",
         "/historical-import",
         "/ingestions",
         "/sanitized-import",
@@ -76,7 +75,6 @@ internal static class MonitorHost
         "/monitor-drawer.js",
         "/monitor-error-mode.js",
         "/monitor-flow.js",
-        "/monitor-historical-analysis.js",
         "/monitor-historical-import.js",
         "/monitor-inspector.js",
         "/monitor-overview.js",
@@ -966,6 +964,11 @@ internal static class MonitorHost
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
+            if (LocalMonitorV1HumanRoutes.IsRetiredHistoricalAnalysis(context))
+            {
+                await LocalMonitorV1HumanRoutes.RetireHistoricalAnalysisAsync(context);
+                return;
+            }
             var requestPath = context.Request.Path.Value ?? string.Empty;
             var settingsAiReadinessPath = !options.SanitizedOnly
                 && string.Equals(requestPath, "/api/local-monitor/v1/settings/ai-readiness", StringComparison.Ordinal);

@@ -615,6 +615,50 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.DoesNotContain("data-session-workspace", html, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("repository_selection", null, null, 200)]
+    [InlineData("comparison", null, null, 404)]
+    [InlineData("repository_selection", "018f0000-0000-7000-8000-000000000099", null, 404)]
+    public async Task RepositoryAnalysis_RequiresExactRetainedScopeAndOwner(
+        string scopeKind, string? repositoryId, string? comparisonId, int expectedStatus)
+    {
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", scopeKind,
+            null, null, null, RepositoryId: repositoryId ?? RepositoryId, ComparisonId: comparisonId);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(run)));
+
+        using var response = await host.Client.GetAsync(
+            $"/repositories/{RepositoryId}/sessions?analysis=018f0000-0000-7000-8000-000000000071");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(expectedStatus, (int)response.StatusCode);
+        Assert.Contains(expectedStatus == 200 ? "data-session-explorer" : "data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("comparison", null, null, 200)]
+    [InlineData("repository_selection", null, null, 404)]
+    [InlineData("comparison", "018f0000-0000-7000-8000-000000000099", null, 404)]
+    [InlineData("comparison", null, "018f0000-0000-7000-8000-000000000099", 404)]
+    public async Task ComparisonAnalysis_RequiresExactRetainedScopeAndOwners(
+        string scopeKind, string? repositoryId, string? comparisonId, int expectedStatus)
+    {
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", scopeKind,
+            null, null, null, RepositoryId: repositoryId ?? RepositoryId, ComparisonId: comparisonId ?? ComparisonId);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            comparisonApplication: new StubComparisonApplication(200, null),
+            localAiApplication: new StubLocalAiApplication(run)));
+
+        using var response = await host.Client.GetAsync(
+            $"/repositories/{RepositoryId}/comparisons/{ComparisonId}?analysis=018f0000-0000-7000-8000-000000000071");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(expectedStatus, (int)response.StatusCode);
+        Assert.Contains(expectedStatus == 200 ? "data-repository-compare" : "data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task SanitizedOnly_DoesNotExposeSessionWorkspaceAssetOrSurface()
     {
@@ -787,7 +831,8 @@ public sealed class LocalMonitorV1HumanRouteTests
         using var trace = await host.Client.GetAsync("/traces/trace-preserved");
         using var historical = await host.Client.GetAsync("/historical-analysis");
         Assert.Equal(HttpStatusCode.NotFound, trace.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, historical.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, historical.StatusCode);
+        Assert.Equal(0, historical.Content.Headers.ContentLength);
         Assert.DoesNotContain("data-local-monitor-v1-host", await trace.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.DoesNotContain("data-local-monitor-v1-host", await historical.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }

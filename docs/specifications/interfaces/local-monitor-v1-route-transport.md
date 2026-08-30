@@ -181,11 +181,16 @@ state | receiver | ai | repositories | archive | storage | diagnostics
 
 ### Repository selection and Compare
 
-`/` and `/repositories/{repositoryId}/comparisons/{comparisonId}` accept only:
+`/` accepts only `settings`. `/repositories/{repositoryId}/comparisons/{comparisonId}` accepts, in generated-link order:
 
 ```text
-settings
+analysis, settings
 ```
+
+`analysis` is an opaque canonical UUIDv7. The retained run must have
+`scope_kind=comparison` and exact route Repository/comparison ownership.
+Absent, expired, wrong-scope or wrong-owner runs are indistinguishable
+`404 analysis_run_not_found`; no ownership detail is disclosed.
 
 Comparison metric/row drill-down state is not added to the human URL in v1.
 Exact evidence links navigate to owner-issued Session/node routes. The five
@@ -238,7 +243,7 @@ generated-link order:
 
 ```text
 from, to, source*, status*, has_skill, has_subagent,
-has_error, has_retry, archive_scope, cursor, mode, settings
+has_error, has_retry, archive_scope, cursor, mode, analysis, settings
 ```
 
 `*` is a repeated set-valued key. Input order is nonsemantic; generated links
@@ -253,9 +258,10 @@ sort repeated values in ordinal byte order.
 | `archive_scope` | Omitted, `active_only` or `include_archived`; omission means `active_only`. |
 | `cursor` | Singleton exact 147-character token from section 9. |
 | `mode` | Omitted or exact `compare`. Draft Session IDs never enter the URL. |
+| `analysis` | Omitted or one opaque canonical UUIDv7, and only on Repository Explorer. The retained run must have `scope_kind=repository_selection` and the exact route Repository ID; wrong scope/owner/absence is closed `404 analysis_run_not_found`. |
 | `settings` | The closed Settings token above. |
 
-`q`, `model`, `scope`, `repository_id`, `limit`, `after`, draft cohort IDs and
+All/unassigned Explorer forbid `analysis`. `q`, `model`, `scope`, `repository_id`, `limit`, `after`, draft cohort IDs and
 any legacy `activity` key are not valid human-URL keys.
 
 Human `from`/`to` values have the exact raw spelling:
@@ -801,10 +807,10 @@ query, method, status, header or byte behavior.
 
 ### `/historical-analysis`
 
-This human page remains unchanged until #164 integrates its backend. At that
-same integration point its existing one-segment, ordinal-ignore-case,
-optional-one-trailing-slash classifier becomes the empty no-store 404 for
-every method. Versioned historical-analysis machine APIs remain unchanged.
+The standalone human page is retired. Its one-segment, ordinal-ignore-case,
+optional-one-trailing-slash classifier returns empty no-store 404 for every
+method, and `/monitor-historical-analysis.js` is unavailable. Versioned
+`/api/historical-analysis/v1/*` machine APIs remain unchanged.
 
 ## 14. Sanitized-only and logging
 

@@ -9,6 +9,8 @@
   const NODE_ID = /^node-[0-9a-f]{32}$/;
   const AI_STATES = new Set(["queued", "running", "succeeded", "zero_findings", "provider_failed", "provider_partial", "invalid_result", "invalid_evidence", "stale_snapshot", "scope_too_large", "timed_out", "canceled"]);
   const AI_STATE_LABELS = Object.freeze({ queued: "分析を待っています。", running: "分析しています。", succeeded: "分析が完了しました。", zero_findings: "指摘はありませんでした。", provider_failed: "AI provider で分析できませんでした。", provider_partial: "不完全な結果のため表示できません。", stale_snapshot: "対象が更新されたため分析できませんでした。", scope_too_large: "分析対象が上限を超えています。", timed_out: "分析がタイムアウトしました。", canceled: "分析をキャンセルしました。", invalid_result: "AI 結果を安全に表示できません。", invalid_evidence: "証拠を確認できないため表示できません。" });
+  const AI_RESULT_MAXIMUM_BYTES = 1_048_576;
+  const AI_RUN_MAXIMUM_BYTES = AI_RESULT_MAXIMUM_BYTES + 4_096;
   const SESSION_CURSOR = /^[A-Za-z0-9_-]{147}$/;
   const REPOSITORY_CURSOR = /^[A-Za-z0-9_-]{135}$/;
   const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})\+00:00$/;
@@ -188,9 +190,39 @@
     if (quoted || stack.length) throw new TypeError("invalid json");
   }
 
+  function topLevelValueSpan(text, propertyName) {
+    let index = 0; while (/\s/.test(text[index] ?? "")) index++;
+    if (text[index++] !== "{") return null;
+    while (index < text.length) {
+      while (/\s/.test(text[index] ?? "")) index++;
+      if (text[index] === "}") return null;
+      if (text[index] !== '"') return null;
+      const keyStart = index++; let escaped = false;
+      while (index < text.length) { const character = text[index++]; if (escaped) { escaped = false; continue; } if (character === "\\") { escaped = true; continue; } if (character === '"') break; }
+      const key = JSON.parse(text.slice(keyStart, index));
+      while (/\s/.test(text[index] ?? "")) index++;
+      if (text[index++] !== ":") return null;
+      while (/\s/.test(text[index] ?? "")) index++;
+      const valueStart = index; let quoted = false; escaped = false; let depth = 0;
+      for (; index < text.length; index++) { const character = text[index]; if (quoted) { if (escaped) { escaped = false; continue; } if (character === "\\") { escaped = true; continue; } if (character === '"') quoted = false; continue; } if (character === '"') quoted = true; else if (character === "{" || character === "[") depth++; else if (character === "}" || character === "]") { if (depth > 0) depth--; else if (character === "}") break; } else if (character === "," && depth === 0) break; }
+      let valueEnd = index; while (valueEnd > valueStart && /\s/.test(text[valueEnd - 1])) valueEnd--;
+      if (key === propertyName) return { start: valueStart, end: valueEnd };
+      if (text[index] === ",") index++;
+    }
+    return null;
+  }
+
   async function readAiJson(response, maximumBytes = 1_048_576) {
     const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > maximumBytes) throw new TypeError("json too large");
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateAiJsonWire(text); return JSON.parse(text);
+  }
+
+  async function readAiRunJson(response) {
+    const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > AI_RUN_MAXIMUM_BYTES) throw new TypeError("json too large");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateAiJsonWire(text);
+    const value = JSON.parse(text); const span = topLevelValueSpan(text, "result");
+    if (value?.result !== null && (!span || new TextEncoder().encode(text.slice(span.start, span.end)).length > AI_RESULT_MAXIMUM_BYTES)) throw new TypeError("result too large");
+    return value;
   }
 
   function boundedText(value, maximum = 16_384) {
@@ -248,7 +280,9 @@
         || value.scope_kind !== "repository_selection" || value.session_id !== null || value.node_id !== null
         || value.repository_id !== root.dataset.repositoryId || !(value.error === null || boundedText(value.error))) return false;
     const successful = value.state === "succeeded" || value.state === "zero_findings";
-    if (!successful) return value.result === null;
+    if (["queued", "running"].includes(value.state)) return value.error === null && value.result === null;
+    if (!successful) return value.error === value.state && value.result === null;
+    if (value.error !== null) return false;
     return value.result !== null && validateAiResult(value.result)
       && (value.state === "zero_findings" ? value.result.findings.length === 0 : value.result.findings.length >= 1);
   }
@@ -747,8 +781,8 @@
   async function pollAiRun(runId = aiState.runId, generation = aiState.generation) {
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", signal: aiState.controller?.signal });
-      if (!response.ok) throw await apiFailure(response); const value = await readAiJson(response);
-      if (generation !== aiState.generation || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
+      if (!response.ok) throw await apiFailure(response); const value = await readAiRunJson(response);
+      if (generation !== aiState.generation || aiState.runId !== runId || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
       if (["queued", "running"].includes(value.state)) { setTimeout(() => pollAiRun(runId, generation), 250); return; }
       aiCancel.hidden = true; aiStatus.textContent = AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
       aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result);
@@ -807,12 +841,13 @@
     aiState.restoredRunId = runId; const generation = ++aiState.generation; aiState.controller?.abort(); aiState.controller = new AbortController();
     aiState.runId = runId;
     try {
-      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin" });
-      if (!response.ok) throw await apiFailure(response); const value = await readAiJson(response);
-      if (generation !== aiState.generation || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
+      const signal = aiState.controller.signal;
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", signal });
+      if (!response.ok) throw await apiFailure(response); const value = await readAiRunJson(response);
+      if (signal.aborted || generation !== aiState.generation || aiState.runId !== runId || aiState.restoredRunId !== runId || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
       aiDialog.showModal(); aiStatus.textContent = value.result ? "保存された分析を表示しています。" : AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
       aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(runId, generation); }
-    } catch { aiState.runId = null; aiState.restoredRunId = null; aiStatus.textContent = "保存された分析を復元できませんでした。"; }
+    } catch (error) { if (generation !== aiState.generation || aiState.runId !== runId || error?.name === "AbortError") return; aiState.runId = null; aiState.restoredRunId = null; aiStatus.textContent = "保存された分析を復元できませんでした。"; }
   }
 
   async function readCollection(cursor, signal) {
@@ -1601,7 +1636,8 @@
   function applyRoute(route) {
     const browserTraversal = state.browserTraversal;
     state.browserTraversal = false;
-    if (!browserTraversal && onlySettingsMayDiffer(route)) {
+    const analysisChanged = (state.route?.analysis ?? null) !== (route.analysis ?? null);
+    if (onlySettingsMayDiffer(route) && (!browserTraversal || analysisChanged)) {
       state.route = route;
       return;
     }
@@ -1998,10 +2034,12 @@
   aiCancel.addEventListener("click", async () => {
     if (!aiState.runId) return;
     const runId = aiState.runId;
-    try { const value = await aiJson(`/api/local-monitor/v1/ai/runs/${runId}/cancel`, {});
+    const generation = aiState.generation;
+    try { const value = await aiJson(`/api/local-monitor/v1/ai/runs/${runId}/cancel`, {}, aiState.controller?.signal);
+      if (generation !== aiState.generation || aiState.runId !== runId) return;
       if (!exactKeySet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") throw new TypeError("invalid cancel");
       aiState.controller?.abort(); ++aiState.generation; aiStatus.textContent = "分析をキャンセルしました。"; aiCancel.hidden = true;
-    } catch { aiStatus.textContent = "キャンセルを確認できませんでした。分析状態の確認を続けます。"; }
+    } catch (error) { if (generation !== aiState.generation || aiState.runId !== runId || error?.name === "AbortError") return; aiStatus.textContent = "キャンセルを確認できませんでした。分析状態の確認を続けます。"; }
   });
 
   document.addEventListener("cao-route-popstate", () => {

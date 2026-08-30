@@ -65,14 +65,17 @@ internal static class LocalMonitorV1PageQueryParser
         out LocalMonitorV1PageQuery? query)
     {
         query = null;
-        if (!OnlyKeys(components, "settings")
+        var allowsAnalysis = routeKind == LocalMonitorV1PrimaryRouteKind.ComparisonDetail;
+        if (!OnlyKeys(components, allowsAnalysis ? ["analysis", "settings"] : ["settings"])
+            || !TrySingleton(components, "analysis", out var analysis)
             || !TrySingleton(components, "settings", out var settings)
+            || analysis is not null && (!allowsAnalysis || !LocalMonitorV1Identity.TryParseUuidV7(analysis, out _))
             || settings is not null && !Settings.Contains(settings))
         {
             return false;
         }
 
-        query = new() { RouteKind = routeKind, Settings = settings };
+        query = new() { RouteKind = routeKind, AnalysisId = analysis, Settings = settings };
         return true;
     }
 
@@ -114,7 +117,7 @@ internal static class LocalMonitorV1PageQueryParser
         if (!OnlyKeys(
                 components,
                 "from", "to", "source", "status", "has_skill", "has_subagent",
-                "has_error", "has_retry", "archive_scope", "cursor", "mode", "settings")
+                "has_error", "has_retry", "archive_scope", "cursor", "mode", "analysis", "settings")
             || !TrySingleton(components, "from", out var fromText)
             || !TrySingleton(components, "to", out var toText)
             || !TrySingleton(components, "has_skill", out var hasSkillText)
@@ -124,6 +127,7 @@ internal static class LocalMonitorV1PageQueryParser
             || !TrySingleton(components, "archive_scope", out var archiveScopeText)
             || !TrySingleton(components, "cursor", out var cursor)
             || !TrySingleton(components, "mode", out var mode)
+            || !TrySingleton(components, "analysis", out var analysis)
             || !TrySingleton(components, "settings", out var settings)
             || !TryRepeated(components, "source", Sources, out var sources)
             || !TryRepeated(components, "status", Statuses, out var statuses)
@@ -137,6 +141,8 @@ internal static class LocalMonitorV1PageQueryParser
             || archiveScopeText is not null and not ("active_only" or "include_archived")
             || cursor is not null && !LocalMonitorV1SessionCursorCodec.IsStructurallyCanonical(cursor)
             || mode is not null and not "compare"
+            || analysis is not null && (routeKind != LocalMonitorV1PrimaryRouteKind.RepositorySessions
+                || !LocalMonitorV1Identity.TryParseUuidV7(analysis, out _))
             || settings is not null && !Settings.Contains(settings))
         {
             return false;
@@ -156,6 +162,7 @@ internal static class LocalMonitorV1PageQueryParser
             ArchiveScope = archiveScopeText ?? "active_only",
             Cursor = cursor,
             CompareMode = mode is not null,
+            AnalysisId = analysis,
             Settings = settings,
         };
         return true;
@@ -373,6 +380,13 @@ internal static class LocalMonitorV1CanonicalUrlBuilder
             if (query.ExecutionId is not null) components.Add($"execution={query.ExecutionId}");
             if (query.NodeId is not null) components.Add($"node={query.NodeId}");
             if (query.AnalysisId is not null) components.Add($"analysis={query.AnalysisId}");
+        }
+
+        if (query.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+            or LocalMonitorV1PrimaryRouteKind.ComparisonDetail
+            && query.AnalysisId is not null)
+        {
+            components.Add($"analysis={query.AnalysisId}");
         }
 
         if (query.Settings is not null) components.Add($"settings={query.Settings}");

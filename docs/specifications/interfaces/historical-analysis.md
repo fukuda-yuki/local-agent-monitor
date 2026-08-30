@@ -1,23 +1,23 @@
 # Historical Analysis Interface
 
-Local Monitor v1 disposition: the `/api/historical-analysis/v1/*` machine API
-and its stores remain frozen. The standalone `GET /historical-analysis` page is
-an installed compatibility surface that retires when #164 integrates the
-backend into Repository-local optional AI. This interface does not own a
-parallel v1 reader, AI history model or permanent navigation destination.
+Local Monitor v1 disposition: this is a frozen machine-API-only interface.
+The `/api/historical-analysis/v1/*` API and its stores remain unchanged. The
+standalone `/historical-analysis` presentation and
+`/monitor-historical-analysis.js` are retired with empty 404 responses and no
+redirect, alias, fallback or compatibility path.
 
 ## Authority and scope
 
-Issue #75 defines the installed Local Monitor historical-analysis presentation
-surface. It consumes the persisted Issue #72 dataset, Issue #73
+Issue #75 defined the retired Local Monitor historical-analysis presentation
+surface. The surviving machine API consumes the persisted Issue #72 dataset, Issue #73
 `historical-instruction-analysis.read.v1` read DTO and nested canonical Issue
 #59 bytes, Issue #74 exact DTO/canonical receipt bytes, and Issue #53 exact
 evidence navigation. It does not re-query history, reconstruct evidence,
 recompute an efficiency formula/threshold/quality/verdict/coverage/mitigation,
 or add an analysis/finding/candidate schema.
 
-The page is `GET /historical-analysis`. The versioned API family is
-`/api/historical-analysis/v1/*`. It is user-triggered: there is no automatic or
+The only active route family is `/api/historical-analysis/v1/*`. It is
+user-triggered: there is no automatic or
 background analysis and no combined analyze-all action. Instruction and
 efficiency executions are independent. This interface does not absorb
 historical import, proposal apply, effect verdict, provider pricing, Alert
@@ -320,15 +320,15 @@ whose exact `selection.sanitized_only=false` posture conflicts with a current
 `--sanitized-only` host. This rejection occurs after the common HTTP guards and
 strict body parse, but before #72 owner access.
 
-## Preview and presentation
+## Frozen machine projection
 
-An explicit preview is required before either start control is enabled. It
-renders every #72 decision in owner order and exact reason, including
+An explicit preview is required before either start operation. It returns
+every #72 decision in owner order and exact reason, including
 `missing_session_reference`, `filter_mismatch`, `window_truncated`, no exact
 evidence, current content state, and `truncated_before`. Mixed source and
 completeness are warnings, not a merged cohort or inferred quality judgement.
 
-Instruction presentation consumes only `historical-instruction-analysis.read.v1`.
+Instruction status consumes only `historical-instruction-analysis.read.v1`.
 It preserves `queued`, `running`, `succeeded`, `zero_findings`,
 `no_eligible_sessions`, `content_unavailable`, `stale_extraction`,
 `extraction_invalid`, `invalid_citation`, `provider_partial`,
@@ -337,14 +337,14 @@ is the fixed public condition when no explicitly configured provider is
 available. Normal production composition has no provider, so it returns
 `provider_unavailable` without pretending a run executed. `zero_findings` is a
 provider-complete empty #59 handoff, distinct from unavailable, failure, stale,
-partial, timeout, and canceled states. Cards preserve #59 category, final
+partial, timeout, and canceled states. The DTO preserves #59 category, final
 verdict, candidate eligibility, support projection, exact references, gap, and
 fixed next-time instruction text. `supported`, `weak`, and `incomplete` have
-distinct presentation and weak/incomplete findings are never promoted.
+distinct states and weak/incomplete findings are never promoted.
 
-Efficiency presentation consumes exact #74 DTO/canonical bytes and preserves
+Efficiency status consumes exact #74 DTO/canonical bytes and preserves
 `succeeded`, `zero_drivers`, and failed invalid-input outcomes without making a
-receipt. It shows each supplied category, observed value, rule/threshold, exact
+receipt. It supplies each category, observed value, rule/threshold, exact
 evidence, quality availability, coverage/reasons, verdict, and mitigation.
 `supported`, `weak`, and `incomplete` remain distinct. It says that efficiency
 drivers are not monetary cost, provider pricing, improvement, or effect verdict.
@@ -371,34 +371,21 @@ distinct. Navigation does not authorize raw reads; responses contain no raw
 prompt/response/tool body, identifier carrier, path, credential, PII, or source
 exception.
 
-## Browser, security, and accessibility
+## Security and retired browser surface
 
 All routes retain loopback bind, Host-header validation, no CORS, same-origin
 reads, `Cache-Control: no-store`, JSON-only bounded bodies, and strict
 unknown-field rejection. Raw-default is a validation profile, not authorization
 to return raw content: responses are repository-safe in raw-default and
 sanitized-only postures. Accepted preview/status/resolution machine APIs retain
-their frozen contract under `--sanitized-only`, but the receiver-only host does
-not register the standalone human page. The posture cannot enable the #73
+their frozen contract under `--sanitized-only`. No host posture registers the
+standalone human page. The posture cannot enable the #73
 provider runner. It also rejects a raw-capable
 `selection.sanitized_only=false` preview before #72 owner access rather than
 silently changing the caller's closed selection.
 
-After transient rendering, the only long-lived preview binding is exactly
-`extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`. The browser
-retains no selection, included/excluded Session data, or other preview response
-fields in that binding. It uses no browser storage and no full history, raw
-descriptor, raw body, provider input, or reusable raw response. Finding,
-mitigation, error, and reference text are escaped inert text, never HTML. Logs,
-URLs, evidence, screenshots, and tests contain only safe IDs, fixed states,
-counts, and bounded safe text.
-
-The page provides semantic headings, labelled scope controls and tables, named
-Instruction/Efficiency start controls, and descriptive evidence links. Tab and
-Shift+Tab follow visual order; Enter/Space invoke enabled controls. Completion
-focuses the result heading; failure/cancel returns focus to its initiator. A
-concise `aria-live="polite"` region announces state changes; validation moves
-focus to its summary. Color is never the only indication of verdict or state.
+The retired presentation has no browser state, storage, history, navigation or
+accessibility contract. Machine responses remain bounded repository-safe DTOs.
 
 ## Validation
 
@@ -406,7 +393,7 @@ focus to its summary. Color is never the only indication of verdict or state.
 Coverage includes zero eligible Sessions, mixed source/completeness,
 truncation, supported/weak/zero findings, supported/incomplete/zero drivers,
 provider unavailable/failed/partial, timeout, cancel, stale/invalid citation,
-sanitized-only, expiry, exact drill-down, and keyboard/live-region behavior.
+sanitized-only, expiry, and exact evidence resolution.
 Provider-free normal composition is `provider_unavailable`; live provider
 execution remains `blocked_external` until safe evidence exists. Run-specific
 results belong in the Pull Request, active Issue, or GitHub Actions artifact.

@@ -136,6 +136,31 @@ public sealed class LocalMonitorV1RouteTransportQueryTests
     }
 
     [Theory]
+    [InlineData("/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/sessions", "?settings=ai&analysis=018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075", "/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/sessions?analysis=018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075&settings=ai")]
+    [InlineData("/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073", "?settings=ai&analysis=018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075", "/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073?analysis=018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075&settings=ai")]
+    public void RepositoryAndComparisonAnalysis_UseCanonicalOpaqueRunBeforeSettings(string path, string rawQuery, string expected)
+    {
+        var parsedPath = LocalMonitorV1PrimaryPathParser.Classify(path);
+        Assert.True(LocalMonitorV1PageQueryParser.TryParse(parsedPath.RouteKind!.Value, rawQuery, out var query));
+        Assert.Equal(AnalysisId, query!.AnalysisId);
+        Assert.Equal(expected, LocalMonitorV1CanonicalUrlBuilder.Build(parsedPath, query));
+    }
+
+    [Theory]
+    [InlineData("RepositorySelection")]
+    [InlineData("AllSessions")]
+    [InlineData("UnassignedSessions")]
+    public void Analysis_RemainsForbiddenOutsideOwnedRoutes(string routeKind) =>
+        Assert.False(LocalMonitorV1PageQueryParser.TryParse(
+            Enum.Parse<LocalMonitorV1PrimaryRouteKind>(routeKind), $"?analysis={AnalysisId}", out _));
+
+    [Theory]
+    [InlineData("?analysis=latest")]
+    [InlineData("?analysis=018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075&analysis=018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6075")]
+    public void RepositoryAnalysis_RejectsMalformedOrDuplicateIdentity(string rawQuery) =>
+        Assert.False(LocalMonitorV1PageQueryParser.TryParse(LocalMonitorV1PrimaryRouteKind.RepositorySessions, rawQuery, out _));
+
+    [Theory]
     [InlineData("/", "?settings=repositories", "/?settings=repositories")]
     [InlineData("/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073", "?settings=diagnostics", "/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073?settings=diagnostics")]
     public void SelectionAndComparison_AcceptOnlySettings(string path, string rawQuery, string expected)
