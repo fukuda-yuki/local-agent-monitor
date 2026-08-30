@@ -77,13 +77,14 @@ public sealed class LocalMonitorV1CompareSpecificationTests
     }
 
     [Fact]
-    public void HistoricalAnalysisExceptionRemainsExplicitlyOwnedByIssue164()
+    public void HistoricalAnalysisHumanRouteIsRetiredWhileMachineApisRemainFrozen()
     {
         var routeTransport = Read("docs", "specifications", "interfaces", "local-monitor-v1-route-transport.md");
         var section = Slice(routeTransport, "### `/historical-analysis`", "## 14. Sanitized-only and logging");
+        var normalized = section.ReplaceLineEndings(" ");
 
-        Assert.Contains("remains unchanged until #164", section, StringComparison.Ordinal);
-        Assert.Contains("Versioned historical-analysis machine APIs remain unchanged.", section, StringComparison.Ordinal);
+        Assert.Contains("The standalone human page is retired.", section, StringComparison.Ordinal);
+        Assert.Contains("Versioned `/api/historical-analysis/v1/*` machine APIs remain unchanged.", normalized, StringComparison.Ordinal);
     }
 
     private static string Read(params string[] path) => File.ReadAllText(Path.Combine([RepositoryRoot, .. path]));

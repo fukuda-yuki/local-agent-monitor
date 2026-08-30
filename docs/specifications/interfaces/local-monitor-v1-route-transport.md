@@ -307,8 +307,11 @@ A returned cursor may be placed in the human URL only when `q` is null,
 dynamic filter is active or `limit` is any non-null value, the cursor and
 non-default limit remain in page memory and the POST body only; the client first
 removes any URL cursor. Reload/back clears that cursor and resets the limit to
-null/default 50. Changing any filter or limit clears the cursor. Neither client
-nor server repairs a mismatch or restarts at page one.
+null/default 50, except that the analysis-only back/forward transition above
+preserves the current Explorer state's memory-only cursor and non-default
+limit. Reload and every other back/forward transition still clear that cursor
+and reset the limit. Changing any filter or limit clears the cursor. Neither
+client nor server repairs a mismatch or restarts at page one.
 
 ## 7. Session Explorer request wire
 
