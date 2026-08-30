@@ -100,8 +100,8 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)return new(null,"provider_unavailable");
         var snapshot=accepted.ReadAccepted(request.SnapshotId);if(snapshot is null)return new(null,"snapshot_not_found");if(snapshot.ExpiresAt<=clock.GetUtcNow())return new(null,"snapshot_expired");if(snapshot.PayloadSha256!=request.PayloadSha256)return new(null,"stale_snapshot");
-        if(!await repositories.IsCurrentAsync(snapshot,token).ConfigureAwait(false))return new(null,"stale_snapshot");
-        return await StartProjectedAsync(request.TimeoutSeconds,_=>ValueTask.FromResult(snapshot),token).ConfigureAwait(false);
+        var current=await repositories.RehydrateCurrentAsync(snapshot,token).ConfigureAwait(false);if(current is null)return new(null,"stale_snapshot");
+        return await StartProjectedAsync(request.TimeoutSeconds,_=>ValueTask.FromResult(current),token).ConfigureAwait(false);
     }
 
     private async ValueTask<LocalAiStartResponseV1> StartProjectedAsync(int timeout,
@@ -186,7 +186,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         {
             var raw = new LocalAiRawReadCapabilityV1(snapshot.RawEvidence?.Keys ?? [],
                 (identifier, cancellationToken) => snapshot.RawEvidence?.TryGetValue(identifier, out var evidence) == true && rawReader is not null
-                    ? rawReader(snapshot.SessionId!, evidence, cancellationToken)
+                    ? rawReader(evidence.SessionId ?? snapshot.SessionId!, evidence, cancellationToken)
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));
             var startedRun = runs.Read(runId);
             var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), admission.Cancellation.Token).ConfigureAwait(false);

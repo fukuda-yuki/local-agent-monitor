@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed record LocalAiProjectionNodeV1(
     string NodeId, string ExecutionId, string? ParentNodeId, IReadOnlyList<string> ExactReferences, JsonElement? Metadata = null,
     string? SanitizedSpanObservation = null, IReadOnlyList<string>? SanitizedSpanObservations = null);
-internal sealed record LocalAiRawEvidenceV1(string EvidenceId, string NodeId, LocalWorkspaceContentAvailability Locator);
+internal sealed record LocalAiRawEvidenceV1(string EvidenceId, string NodeId, LocalWorkspaceContentAvailability Locator, string? SessionId = null);
 
 internal sealed record LocalAiProjectionInputV1(
     string SessionId,

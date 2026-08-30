@@ -30,6 +30,24 @@ public sealed class LocalAiProductionStackTests
     }
 
     [Fact]
+    public void AcceptedRepositorySnapshot_RestartsWithExactExpiryAndRejectsWrongScope()
+    {
+        using var temp=new MonitorTempDirectory{TimeProvider=new MutableTimeProvider(DateTimeOffset.Parse("2026-08-31T00:00:00Z"))};
+        var repository=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model",new string('a',64),temp.TimeProvider);
+        var snapshotId=Guid.CreateVersion7().ToString();var repositoryId=Guid.CreateVersion7().ToString();var expires=DateTimeOffset.Parse("2026-08-31T01:00:00Z");
+        var payload="{\"members\":[]}"u8.ToArray();var index="{\"evidence_refs\":[]}"u8.ToArray();
+        var accepted=new LocalAiSnapshotProjectionV1(snapshotId,"repository_selection",null,null,repositoryId,"revision",payload,index,
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload)),new HashSet<string>(),RepositoryId:repositoryId,ExpiresAt:expires);
+        repository.StoreAccepted(accepted);
+
+        var restarted=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model",new string('a',64),temp.TimeProvider).ReadAccepted(snapshotId);
+        Assert.NotNull(restarted);Assert.Equal(expires,restarted!.ExpiresAt);Assert.Equal(accepted.PayloadSha256,restarted.PayloadSha256);
+        var comparisonId=Guid.CreateVersion7().ToString();var comparisonSnapshotId=Guid.CreateVersion7().ToString();
+        new LocalAiAnalysisStoreV1(temp.DatabasePath,timeProvider:temp.TimeProvider).InsertSnapshot(new(comparisonSnapshotId,"comparison",null,null,comparisonId,payload,index,repositoryId,comparisonId,expires));
+        Assert.Null(repository.ReadAccepted(comparisonSnapshotId));
+    }
+
+    [Fact]
     public async Task ProductionHostRealScopeAndStoreServeSessionNodeAndReportLifecycle()
     {
         using var temp=new MonitorTempDirectory();

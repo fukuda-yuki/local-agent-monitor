@@ -16,12 +16,15 @@ internal interface ILocalAiComparisonSnapshotAdapterV1
     LocalAiSnapshotProjectionV1 Read(string repositoryId, string comparisonId, CancellationToken token);
 }
 
-internal sealed class LocalAiComparisonSnapshotAdapterV1(SqliteLocalComparisonStore store) : ILocalAiComparisonSnapshotAdapterV1
+internal sealed class LocalAiComparisonSnapshotAdapterV1 : ILocalAiComparisonSnapshotAdapterV1
 {
+    private readonly Func<string,string,CancellationToken,LocalComparisonReadResult> read;
+    internal LocalAiComparisonSnapshotAdapterV1(SqliteLocalComparisonStore store):this(store.Read){}
+    internal LocalAiComparisonSnapshotAdapterV1(Func<string,string,CancellationToken,LocalComparisonReadResult> read)=>this.read=read;
     public LocalAiSnapshotProjectionV1 Read(string repositoryId, string comparisonId, CancellationToken token)
     {
         LocalComparisonReadResult read;
-        try { read = store.Read(repositoryId, comparisonId, token); }
+        try { read = this.read(repositoryId, comparisonId, token); }
         catch (InvalidOperationException) { throw new LocalAiScopeSnapshotException("comparison_not_found"); }
         if (read.Status == LocalComparisonReadStatus.NotFound) throw new LocalAiScopeSnapshotException("comparison_not_found");
         if (read.Status == LocalComparisonReadStatus.Expired) throw new LocalAiScopeSnapshotException("comparison_expired");
@@ -41,14 +44,16 @@ internal sealed class LocalAiComparisonSnapshotAdapterV1(SqliteLocalComparisonSt
             receipt_sha256 = receipt.PayloadSha256,
             selection_sha256 = snapshot.SelectionSha256,
             scope_condition_sha256 = Convert.ToHexStringLower(snapshot.ScopeConditionSha256),
+            selection_frame = Convert.ToBase64String(snapshot.SelectionFrame),
+            receipt_payload = Convert.ToBase64String(receipt.Payload),
             created_at = snapshot.CreatedAt.ToUniversalTime().ToString("O"),
             expires_at = snapshot.ExpiresAt.ToUniversalTime().ToString("O"),
             memberships = snapshot.Memberships.OrderBy(static item => item.Cohort, StringComparer.Ordinal).ThenBy(static item => item.Ordinal)
                 .Select(static item => new { cohort=item.Cohort, ordinal=item.Ordinal, session_id=item.SessionId,
-                    workspace_revision=item.WorkspaceRevision, fact_sha256=item.FactSha256 }).ToArray(),
+                    workspace_revision=item.WorkspaceRevision, fact_frame=Convert.ToBase64String(item.FactFrame),fact_sha256=item.FactSha256 }).ToArray(),
             results = snapshot.Results.Where(static item => item.ResultOrdinal != 0).OrderBy(static item => item.ResultOrdinal)
                 .Select(static item => new { result_ordinal=item.ResultOrdinal, section_ordinal=item.SectionOrdinal,
-                    row_kind=item.RowKind, row_key=item.RowKey, values=item.Values }).ToArray(),
+                    row_kind=item.RowKind, row_key=item.RowKey,payload=Convert.ToBase64String(item.Payload),payload_sha256=item.PayloadSha256, values=item.Values }).ToArray(),
             evidence = snapshot.Evidence.OrderBy(static item => item.ResultOrdinal).ThenBy(static item => item.EvidenceOrdinal)
                 .Select(item => new { result_ordinal=item.ResultOrdinal, evidence_ordinal=item.EvidenceOrdinal,
                     field_key=item.FieldKey, cohort=item.Cohort, session_id=item.SessionId, state=item.AvailabilityState,
@@ -63,4 +68,7 @@ internal sealed class LocalAiComparisonSnapshotAdapterV1(SqliteLocalComparisonSt
             payload, index, Convert.ToHexStringLower(SHA256.HashData(payload)), evidenceRefs.ToHashSet(StringComparer.Ordinal),
             RepositoryId:repositoryId, ComparisonId:comparisonId, ExpiresAt:snapshot.ExpiresAt);
     }
+
+    internal static byte[] ComposePayloadForTest(byte[] selection,byte[] fact,byte[] receipt,byte[] result)=>
+        LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new{selection_frame=Convert.ToBase64String(selection),fact_frames=new[]{Convert.ToBase64String(fact)},receipt_payload=Convert.ToBase64String(receipt),results=new[]{Convert.ToBase64String(result)}}));
 }
