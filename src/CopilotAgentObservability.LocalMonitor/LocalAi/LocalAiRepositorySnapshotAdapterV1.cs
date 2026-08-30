@@ -39,7 +39,7 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
             foreach(var item in projection.RawEvidence??new Dictionary<string,LocalAiRawEvidenceV1>()){var handle=id+":"+item.Key;raw.Add(handle,item.Value with{EvidenceId=handle,SessionId=id});}
             var p=(LocalWorkspaceProjectionRow)row.Session;var value=new{session_id=id,session_archive_state=Archive(row.ArchiveState),session_archive_revision=row.ArchiveRevision,
                 repository_archive_state=RepositoryState(scope,request.RepositoryId),repository_archive_revision=RepositoryRevision(scope,request.RepositoryId),archive_exclusion_reason=(string?)null,
-                source=p.Sources,model=p.Models,completeness=p.Completeness,content_state=projection.RawEvidence?.Count>0?"available":"sanitized_only",workspace_revision=projection.Revision,truncated=false};
+                source=new{state=p.Sources.State,values=p.Sources.Values},model=new{state=p.Models.State,values=p.Models.Values},completeness=p.Completeness,content_state=PreviewContentState(projection.RawEvidence),workspace_revision=projection.Revision,truncated=false};
             included.Add(value);frozen.Add(new{session_id=id,assignment_revision=row.AssignmentRevision,session_archive_revision=row.ArchiveRevision,repository_archive_revision=RepositoryRevision(scope,request.RepositoryId),workspace_revision=projection.Revision,payload_sha256=projection.PayloadSha256,evidence_refs=projection.EvidenceIdentifiers.Select(node=>LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(id,null,node)).Order(StringComparer.Ordinal).ToArray()});
         }
         var expires=clock.GetUtcNow().AddHours(24);var snapshotId=Guid.CreateVersion7().ToString();
@@ -56,7 +56,7 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
         return new(response,snapshot);
         object Excluded(string id,string reason,LocalRepositoryScopeSessionSnapshot? row)=>new{session_id=id,reason,session_archive_state=row is null?null:Archive(row.ArchiveState),session_archive_revision=row?.ArchiveRevision,
             repository_archive_state=row is null?null:RepositoryState(scope,request.RepositoryId),repository_archive_revision=row is null?(long?)null:RepositoryRevision(scope,request.RepositoryId),archive_exclusion_reason=row?.ArchiveExclusionReason,
-            source=row?.Session is LocalWorkspaceProjectionRow p?p.Sources:null,model=row?.Session is LocalWorkspaceProjectionRow q?q.Models:null,completeness=(row?.Session as LocalWorkspaceProjectionRow)?.Completeness,content_state=(string?)null,workspace_revision=(string?)null,truncated=(bool?)null};
+            source=row?.Session is LocalWorkspaceProjectionRow p?new{state=p.Sources.State,values=p.Sources.Values}:null,model=row?.Session is LocalWorkspaceProjectionRow q?new{state=q.Models.State,values=q.Models.Values}:null,completeness=(row?.Session as LocalWorkspaceProjectionRow)?.Completeness,content_state=(string?)null,workspace_revision=(string?)null,truncated=(bool?)null};
     }
 
     public async ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot,CancellationToken token)=>await RehydrateCurrentAsync(snapshot,token).ConfigureAwait(false) is not null;
@@ -97,4 +97,11 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
     }
     internal static bool MatchesFrozenMembership(LocalRepositoryScopeSessionSnapshot row,long repositoryArchiveRevision,JsonElement member)=>row.IsRequestedScopeMember&&row.AssignmentRevision==member.GetProperty("assignment_revision").GetInt64()&&row.ArchiveRevision==member.GetProperty("session_archive_revision").GetInt64()&&repositoryArchiveRevision==member.GetProperty("repository_archive_revision").GetInt64();
     internal static string? PreviewExclusion(LocalRepositoryScopeSessionSnapshot row,string archiveScope)=>!row.IsRequestedScopeMember?"repository_mismatch":archiveScope=="active_only"&&!row.IsEffectivelyEligible?(row.ArchiveExclusionReason=="repository_archived"?"repository_archived":"session_archived"):null;
+    internal static string PreviewContentState(IReadOnlyDictionary<string,LocalAiRawEvidenceV1>? evidence)
+    {
+        var states=(evidence?.Values??[]).Select(static item=>item.Locator.State).ToArray();
+        if(states.Contains("available",StringComparer.Ordinal))return "available";
+        if(states.Any(static state=>state is "expired" or "deleted"))return "expired_pending_deletion";
+        return "not_captured";
+    }
 }

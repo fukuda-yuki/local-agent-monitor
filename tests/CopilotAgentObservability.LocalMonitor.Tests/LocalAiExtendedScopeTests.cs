@@ -162,6 +162,24 @@ public sealed class LocalAiExtendedScopeTests
         Assert.Equal("repository_archived",LocalAiRepositorySnapshotAdapterV1.PreviewExclusion(row with{ArchiveState=CopilotAgentObservability.Persistence.Sqlite.LocalArchiveState.Active,ArchiveExclusionReason="repository_archived"},"active_only"));
     }
 
+    [Theory]
+    [InlineData("available", "available")]
+    [InlineData("not_captured", "not_captured")]
+    [InlineData("expired", "expired_pending_deletion")]
+    [InlineData(null, "not_captured")]
+    public void RepositoryPreview_ContentStateUsesProjectedLocatorAuthority(string? locatorState, string expected)
+    {
+        IReadOnlyDictionary<string, LocalAiRawEvidenceV1> evidence = locatorState is null
+            ? new Dictionary<string, LocalAiRawEvidenceV1>()
+            : new Dictionary<string, LocalAiRawEvidenceV1>
+            {
+                ["raw-1"] = new("raw-1", "node-11111111111111111111111111111111",
+                    new("node-11111111111111111111111111111111", "instruction", locatorState)),
+            };
+
+        Assert.Equal(expected, LocalAiRepositorySnapshotAdapterV1.PreviewContentState(evidence));
+    }
+
     private sealed class CurrentRepository(LocalAiSnapshotProjectionV1 snapshot):ILocalAiRepositorySnapshotAdapterV1
     {public ValueTask<LocalAiRepositoryPreviewResultV1> PreviewAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)=>throw new NotSupportedException();public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromResult(true);public ValueTask<LocalAiSnapshotProjectionV1?> RehydrateCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromResult<LocalAiSnapshotProjectionV1?>(snapshot);}
     private sealed class BusyRepository:ILocalAiRepositorySnapshotAdapterV1

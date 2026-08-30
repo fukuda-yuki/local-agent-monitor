@@ -294,18 +294,23 @@
     if (!exactKeySet(value, keys) || !UUID_V7.test(value.session_id)) return false;
     const archive = state => state === null || state === "active" || state === "archived";
     const revision = revision => revision === null || nonnegativeInteger(revision);
-    const sources = values => values === null || Array.isArray(values) && values.length <= SOURCES.size && new Set(values).size === values.length && values.every(item => SOURCES.has(item));
-    const models = values => values === null || Array.isArray(values) && values.length <= 64 && new Set(values).size === values.length && values.every(item => boundedText(item, 256));
+    const fact = (value, maximum, valid) => value === null || exactKeySet(value, ["state", "values"])
+      && FACT_STATES.has(value.state) && Array.isArray(value.values) && value.values.length <= maximum
+      && new Set(value.values).size === value.values.length && value.values.every(valid)
+      && value.values.every((item, index) => index === 0 || value.values[index - 1] < item)
+      && (value.state !== "recorded" || value.values.length > 0);
     const reasons = new Set([null, "session_not_found", "repository_mismatch", "session_archived", "repository_archived", "projection_unavailable"]);
     return archive(value.session_archive_state) && revision(value.session_archive_revision)
       && archive(value.repository_archive_state) && revision(value.repository_archive_revision)
-      && reasons.has(value.archive_exclusion_reason) && sources(value.source) && models(value.model)
+      && reasons.has(value.archive_exclusion_reason)
+      && fact(value.source, SOURCES.size, item => SOURCES.has(item))
+      && fact(value.model, 64, item => boundedText(item, 256))
       && (value.completeness === null || boundedText(value.completeness, 128))
-      && (value.content_state === null || ["available", "sanitized_only"].includes(value.content_state))
+      && (value.content_state === null || ["available", "not_captured", "expired_pending_deletion"].includes(value.content_state))
       && (value.workspace_revision === null || REVISION.test(value.workspace_revision))
       && (value.truncated === null || value.truncated === false)
       && (!excluded || reasons.has(value.reason) && value.reason !== null)
-      && (excluded || value.session_archive_state !== null);
+      && (excluded || value.session_archive_state !== null && value.source !== null && value.model !== null);
   }
 
   function validateRepositoryPreview(value) {
@@ -748,13 +753,14 @@
 
   function renderAiMetadata(preview) {
     aiPreviewContent.replaceChildren();
+    const factValues = value => value === null ? null : value.values.length > 0 ? value.values : value.state;
     for (const [heading, values] of [["対象", preview.included], ["除外", preview.excluded]]) {
       const section = element("section");
       section.append(element("h3", null, `${heading} ${values.length}件`));
       const list = element("ul");
       for (const value of values) {
         const item = element("li");
-        item.textContent = [value.session_id, value.reason, `Session ${value.session_archive_state} rev ${value.session_archive_revision}`, `Repository ${value.repository_archive_state} rev ${value.repository_archive_revision}`, value.archive_exclusion_reason, value.source, value.model, value.completeness, `content ${value.content_state}`, value.workspace_revision, `truncated ${value.truncated}`].filter(x => x !== null && x !== undefined).flat().join(" / ");
+        item.textContent = [value.session_id, value.reason, `Session ${value.session_archive_state} rev ${value.session_archive_revision}`, `Repository ${value.repository_archive_state} rev ${value.repository_archive_revision}`, value.archive_exclusion_reason, factValues(value.source), factValues(value.model), value.completeness, `content ${value.content_state}`, value.workspace_revision, `truncated ${value.truncated}`].filter(x => x !== null && x !== undefined).flat().join(" / ");
         list.append(item);
       }
       section.append(list); aiPreviewContent.append(section);
