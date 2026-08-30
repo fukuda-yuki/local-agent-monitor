@@ -8,6 +8,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// Settings actions, and the extension-only Unified Settings modal host.
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public class MonitorShellPlaywrightTests
 {
     private const string RepositoryId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071";

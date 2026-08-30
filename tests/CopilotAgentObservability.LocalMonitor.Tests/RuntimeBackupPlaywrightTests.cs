@@ -5,6 +5,7 @@ using static Microsoft.Playwright.Assertions;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class RuntimeBackupPlaywrightTests
 {
     [Fact(Timeout = 60_000)]

@@ -16,6 +16,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     private const string NodeId = "node-11111111111111111111111111111111";
 
     [Fact]
+    [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ImmutableCompareRendersNineSectionsRowsEvidenceAndResponsiveTableWithoutRecompute()
     {
         var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
@@ -121,6 +122,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task EvidenceActionsUseAcceptedResultFieldsAndPagingKeepsRowsInsideTheirTables()
     {
         var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();

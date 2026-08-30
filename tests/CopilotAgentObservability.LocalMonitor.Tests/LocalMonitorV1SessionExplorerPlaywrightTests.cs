@@ -25,6 +25,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     };
 
     [Fact]
+    [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ComparePreviewCreatesFromTransientOrderedCohortsAndNavigatesOnlyByServerLocation()
     {
         using var temp = new MonitorTempDirectory();
@@ -99,6 +100,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ComparePreviewLocalizesExclusionsAndEscapeRetainsOnlyTransientSelection()
     {
         using var temp = new MonitorTempDirectory();
@@ -149,6 +151,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareCreateRejectsExtraAndMalformedSuccessResponsesWithoutNavigating()
     {
         using var temp = new MonitorTempDirectory();
@@ -184,6 +187,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task AllSessionsPostsTheClosedRequestAndRendersADenseDirectOpenRow()
     {
         using var temp = new MonitorTempDirectory();
@@ -328,6 +332,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task LongRepositoryNameKeepsTheCompareActionVisibleAndKeyboardReachableAt1366()
     {
         var displayName = new string('長', 200);
@@ -362,6 +367,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task UnassignedScopeUsesTheSameControllerAndPostsOnlyItsExactScope()
     {
         using var temp = new MonitorTempDirectory();
@@ -390,6 +396,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task MissingExplorerAssetCannotNativeSubmitTransientValuesIntoNavigationOrNetworkUrls()
     {
         using var temp = new MonitorTempDirectory();
@@ -421,6 +428,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task KeyboardOrderReachesFiltersRowsOverflowPaginationAndCompareActions()
     {
         using var temp = new MonitorTempDirectory();
@@ -484,6 +492,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task SafeFiltersCursorBackAndReloadRoundTripWhileSearchAndModelRemainTransient()
     {
         using var temp = new MonitorTempDirectory();
@@ -652,6 +661,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task InvalidServerCursorOffersAnExplicitFirstPageRecovery()
     {
         using var temp = new MonitorTempDirectory();
@@ -690,6 +700,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task InvalidRequestDoesNotMasqueradeAsAStaleCursorRecovery()
     {
         using var temp = new MonitorTempDirectory();
@@ -716,6 +727,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task FailedPaginationRetriesTheExactAttemptedCursorForUrlAndDocumentOnlyPaging()
     {
         using var temp = new MonitorTempDirectory();
@@ -797,6 +809,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ADelayedFilterReadCannotReuseThePreviousPageCursorOrRestoreItsRows()
     {
         using var temp = new MonitorTempDirectory();
@@ -847,6 +860,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareModeUsesExplicitABDraftsAndRequiresRepositoryScope()
     {
         using var temp = new MonitorTempDirectory();
@@ -911,6 +925,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task InvalidOwnerSuccessResponseDoesNotOptimisticallyMutateOrRefreshTheRow()
     {
         using var temp = new MonitorTempDirectory();
@@ -954,6 +969,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ResumeAutomaticRejectsAContradictoryManualOwnerSuccess()
     {
         using var temp = new MonitorTempDirectory();
@@ -994,6 +1010,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ContradictoryArchiveRelationsFailClosedBeforeRenderingRows()
     {
         using var temp = new MonitorTempDirectory();
@@ -1038,6 +1055,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ArchivedAndInconsistentFactsRemainDistinctAndAreExcludedFromCompare()
     {
         using var temp = new MonitorTempDirectory();
@@ -1092,6 +1110,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ConfirmedArchiveAndAssignmentOwnerActionsUseExactIdentityRevisionThenRefresh()
     {
         using var temp = new MonitorTempDirectory();
@@ -1157,6 +1176,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task RestoreKeepsThePriorCollectionAuthorityWithoutBlockingExplicitArchivedInclusion()
     {
         using var temp = new MonitorTempDirectory();
@@ -1193,6 +1213,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task AssignmentPickerUsesExactOwnerCollectionsCandidatesAndSameNameRepositoryIdentity()
     {
         using var temp = new MonitorTempDirectory();
@@ -1279,6 +1300,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task AssignmentPickerCannotSubmitTheAlreadyCurrentExactRepository()
     {
         using var temp = new MonitorTempDirectory();
@@ -1331,6 +1353,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task AssignmentPickerKeepsTheExactSelectedRepositoryAcrossCandidatePagination()
     {
         using var temp = new MonitorTempDirectory();
@@ -1407,6 +1430,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ConfirmedOwnerMutationKeepsAnExplicitRefreshRecoveryWhenTheCollectionRefreshFails()
     {
         using var temp = new MonitorTempDirectory();
@@ -1454,6 +1478,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task FilterNavigationDuringOwnerMutationStillRefreshesTheConfirmedCurrentScope()
     {
         using var temp = new MonitorTempDirectory();
@@ -1510,6 +1535,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task TransientPageTwoMutationRefreshUsesTheNewFilterFirstPageNotThePriorCursor()
     {
         using var temp = new MonitorTempDirectory();
@@ -1598,6 +1624,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ConfirmedOwnerMutationAcknowledgesSuccessWhenItsPagedRefreshCursorExpires()
     {
         using var temp = new MonitorTempDirectory();
@@ -1649,6 +1676,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CertificationPendingSummaryAndTokensKeepTheirDedicatedSharedVocabulary()
     {
         using var temp = new MonitorTempDirectory();
@@ -1675,6 +1703,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task MaximumPositiveSummaryAndTokenStateRemainWithinTheDense1366RowTarget()
     {
         using var temp = new MonitorTempDirectory();
@@ -1725,6 +1754,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task EveryUnavailableFactFamilyKeepsItsDistinctSharedPresentation()
     {
         using var temp = new MonitorTempDirectory();
@@ -1797,6 +1827,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task SettingsOnlyNavigationPreservesTransientFiltersAndExactCohortIds()
     {
         using var temp = new MonitorTempDirectory();
@@ -1857,6 +1888,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task InvalidTransientInputsFailLocallyWithoutRepairOrValueDisclosure()
     {
         using var temp = new MonitorTempDirectory();
@@ -1926,6 +1958,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ArchivingASelectedSessionMarksTheExactIdExcludedWhenTheRowDisappears()
     {
         using var temp = new MonitorTempDirectory();
@@ -1963,6 +1996,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task FilterChangesExplicitlyClearTheDraftWithoutGuessingOffPageEligibility()
     {
         using var temp = new MonitorTempDirectory();
@@ -1995,6 +2029,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task RecordedTokenCoverageDoesNotTurnAnUnobservedProducerTotalIntoZero()
     {
         using var temp = new MonitorTempDirectory();
@@ -2018,6 +2053,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task ResponseIntegersAboveTheJavascriptSafeRangeRemainExactThroughOwnerActions()
     {
         using var temp = new MonitorTempDirectory();
@@ -2062,6 +2098,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task NoncanonicalSuccessBytesAndLexicallyInvalidServerCursorsFailClosed()
     {
         using var temp = new MonitorTempDirectory();
@@ -2131,6 +2168,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task OpaqueServerCursorIsPassedBackExactlyWithoutExplorerDecoding()
     {
         using var temp = new MonitorTempDirectory();
@@ -2166,6 +2204,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareDraftSpansServerPagesAndRejectsACombinedSelectionAboveTwoHundred()
     {
         using var temp = new MonitorTempDirectory();

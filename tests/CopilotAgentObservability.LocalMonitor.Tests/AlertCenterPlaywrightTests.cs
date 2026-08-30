@@ -9,6 +9,7 @@ using static Microsoft.Playwright.Assertions;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class AlertCenterPlaywrightTests
 {
     private static readonly JsonSerializerOptions AlertCenterJson = new(JsonSerializerDefaults.Web)

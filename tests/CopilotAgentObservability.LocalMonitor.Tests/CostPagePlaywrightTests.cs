@@ -11,6 +11,7 @@ using static Microsoft.Playwright.Assertions;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class CostPagePlaywrightTests
 {
     private const string SessionId = "0198f5b8-0c00-7000-8000-000000000001";

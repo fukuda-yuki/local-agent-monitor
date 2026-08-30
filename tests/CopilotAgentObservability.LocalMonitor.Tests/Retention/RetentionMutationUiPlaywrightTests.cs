@@ -10,6 +10,7 @@ using static Microsoft.Playwright.Assertions;
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class RetentionMutationUiPlaywrightTests
 {
     [Fact(Timeout = 60_000)]

@@ -4172,3 +4172,30 @@ schema, HTTP, CLI, storage, D087 content-authority, or D088 shutdown behavior.
 D090 takes precedence over only the conflicting chronology and current-release
 acceptance-sequencing clauses in D083, D086, and D089; all other clauses remain
 authoritative.
+
+## D091: Separate Affected, Completion CI, and Nightly validation lanes
+
+Status: Accepted (2026-08-30)
+
+Repository development validation has three owners. Coding agents run Affected
+validation during implementation and before an ordinary completion report:
+the nearest existing test or component-owned check that directly exercises the
+changed behavior or contract. GitHub Actions runs Completion on Pull Requests
+and pushes to `main`: all unclassified portable deterministic Fast tests plus
+exactly two fixed Critical smoke tests. Scheduled GitHub Actions runs Nightly on
+Windows and Linux every day at 03:00 JST: every schedulable automated test
+except the separately authorized operator-only live lanes.
+
+`scripts/test/run-validation.ps1` is the single authority for Completion and
+Nightly filters, Critical smoke count enforcement, and TRX output. Workflows do
+not duplicate its filters or test list. Completion and Nightly do not retry
+automatically, and coding agents do not start or restart either full lane
+locally unless the user or active work item explicitly requires it. A CI
+failure is diagnosed by narrowing to the failed project, class, or test.
+
+D091 supersedes only D015's requirement that ordinary code, project, CLI, or
+workflow changes run the local full solution build, Playwright bootstrap, and
+full test suite before completion. D015 remains decision history. Release tags,
+manual releases, cross-surface release candidates, feature-specific live
+evidence, and operator-only validation retain their owning specifications,
+runbooks, authorization, and existing release workflow.

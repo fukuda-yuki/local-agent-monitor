@@ -10,6 +10,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// (parallel trio, cache turns, recovered retry pair).
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public class MonitorDesignViewPlaywrightTests
 {
     [Fact]
