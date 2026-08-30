@@ -108,6 +108,31 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Assert.DoesNotContain("unowned", Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SanitizedSpanDedupPrefersExactOwnerAndUsesExecutionRootOnlyAsFallback()
+    {
+        const string observation = "{\"operation\":\"chat\",\"span_id\":\"span-a\"}";
+        var exact = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 2, 0) with
+        {
+            Nodes =
+            [
+                new("node-root", "execution-0", null, [], SanitizedSpanObservations: [observation]),
+                new("node-exact", "execution-0", "node-root", [], SanitizedSpanObservation: observation),
+            ],
+        });
+        using var exactPayload = JsonDocument.Parse(exact.PayloadCanonicalJson);
+        Assert.Equal("node-exact", Assert.Single(exactPayload.RootElement.GetProperty("sanitized_span_observations")
+            .EnumerateArray()).GetProperty("citation_ref").GetString());
+
+        var fallback = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0) with
+        {
+            Nodes = [new("node-root", "execution-0", null, [], SanitizedSpanObservations: [observation])],
+        });
+        using var fallbackPayload = JsonDocument.Parse(fallback.PayloadCanonicalJson);
+        Assert.Equal("node-root", Assert.Single(fallbackPayload.RootElement.GetProperty("sanitized_span_observations")
+            .EnumerateArray()).GetProperty("citation_ref").GetString());
+    }
+
     [Theory]
     [InlineData("node-anchor", "Valid")]
     [InlineData("raw:node-anchor:event_content", "InvalidEvidence")]

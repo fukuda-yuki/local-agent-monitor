@@ -1663,8 +1663,10 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         using var payload=JsonDocument.Parse(snapshot.PayloadCanonicalJson);
         var fact=Assert.Single(payload.RootElement.GetProperty("sanitized_span_observations").EnumerateArray());
         var citation=fact.GetProperty("citation_ref").GetString();
-        Assert.Contains(result.Input.Nodes,node=>node.NodeId==citation);
         Assert.Equal("Read",fact.GetProperty("observation").GetProperty("tool_name").GetString());
+        var exactOwner=Assert.Single(result.Input.Nodes,node=>node.SanitizedSpanObservation is { } observation
+            && observation.Contains("\"tool_name\":\"Read\"",StringComparison.Ordinal));
+        Assert.Equal(exactOwner.NodeId,citation);
     }
 
     [Fact]

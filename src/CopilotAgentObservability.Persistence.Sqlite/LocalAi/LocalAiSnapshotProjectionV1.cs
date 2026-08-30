@@ -108,7 +108,8 @@ internal static class LocalAiSnapshotProjectionBuilderV1
                     parent_node_id = node.ParentNodeId, facts = node.Metadata }).ToArray(),
             sanitized_span_observations = projectedNodes.SelectMany(static node => OwnedSanitizedSpanFacts(node))
                 .GroupBy(static item => item.CanonicalObservation, StringComparer.Ordinal)
-                .Select(static group => group.OrderBy(static item => item.CitationRef, StringComparer.Ordinal).First())
+                .Select(static group => group.OrderBy(static item => item.Authority)
+                    .ThenBy(static item => item.CitationRef, StringComparer.Ordinal).First())
                 .OrderBy(static item => item.CitationRef, StringComparer.Ordinal)
                 .ThenBy(static item => item.CanonicalObservation, StringComparer.Ordinal)
                 .Select(static item => new { citation_ref=item.CitationRef, observation=item.Observation }).ToArray(),
@@ -128,18 +129,23 @@ internal static class LocalAiSnapshotProjectionBuilderV1
 
     private static IEnumerable<OwnedSanitizedSpanFact> OwnedSanitizedSpanFacts(LocalAiProjectionNodeV1 node)
     {
-        if (node.SanitizedSpanObservation is { } single) yield return OwnedSanitizedSpanFact.Create(node.NodeId, single);
-        foreach (var value in node.SanitizedSpanObservations ?? []) yield return OwnedSanitizedSpanFact.Create(node.NodeId, value);
+        if (node.SanitizedSpanObservation is { } single)
+            yield return OwnedSanitizedSpanFact.Create(node.NodeId, single, SpanOwnerAuthority.ExactNode);
+        foreach (var value in node.SanitizedSpanObservations ?? [])
+            yield return OwnedSanitizedSpanFact.Create(node.NodeId, value, SpanOwnerAuthority.ExecutionFallback);
     }
 
-    private sealed record OwnedSanitizedSpanFact(string CitationRef, JsonElement Observation, string CanonicalObservation)
+    private enum SpanOwnerAuthority { ExactNode, ExecutionFallback }
+
+    private sealed record OwnedSanitizedSpanFact(
+        string CitationRef, JsonElement Observation, string CanonicalObservation, SpanOwnerAuthority Authority)
     {
-        internal static OwnedSanitizedSpanFact Create(string citationRef, string value)
+        internal static OwnedSanitizedSpanFact Create(string citationRef, string value, SpanOwnerAuthority authority)
         {
             JsonElement observation;
             try { observation = JsonSerializer.Deserialize<JsonElement>(value); }
             catch (JsonException) { observation = JsonSerializer.SerializeToElement(new { observation = value }); }
-            return new(citationRef, observation, Convert.ToBase64String(LocalAiCanonicalJsonV1.Serialize(observation)));
+            return new(citationRef, observation, Convert.ToBase64String(LocalAiCanonicalJsonV1.Serialize(observation)), authority);
         }
     }
 }
