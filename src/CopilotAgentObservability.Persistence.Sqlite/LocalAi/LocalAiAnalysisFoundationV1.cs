@@ -21,7 +21,8 @@ internal sealed record LocalAiRunRequestV1(string SnapshotId, string ScopeKind, 
 internal sealed record LocalAiRunV1(string RunId, int TimeoutSeconds);
 internal sealed record LocalAiReportV1(string RunId, string? ResultId, LocalAiRunStateV1 State, DateTimeOffset CreatedAt, byte[]? CanonicalResult, string? Sha256, string ContentState);
 internal sealed record LocalAiReportPageV1(IReadOnlyList<LocalAiReportV1> Items, string? NextCursor);
-internal sealed record LocalAiStoredResultInvariantV1(byte[] EvidenceIndex,string PayloadSha256,string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,string Provider,string Model,string ConfigurationSha256,string Template,string RequestedAt,string StartedAt,string CompletedAt);
+internal sealed record LocalAiStoredResultInvariantV1(byte[] EvidenceIndex,string PayloadSha256,string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,string Provider,string Model,string ConfigurationSha256,string Template,string RequestedAt,string StartedAt,string CompletedAt,string RunState);
+internal sealed record LocalAiStoredSnapshotInvariantV1(string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,byte[] Payload,string PayloadSha256,byte[] EvidenceIndex,string EvidenceIndexSha256);
 
 internal static class LocalAiAnalysisSchemaV1
 {
@@ -239,8 +240,7 @@ internal sealed class LocalAiAnalysisStoreV1
         ValidateUuid7(snapshot.SnapshotId); ValidateScope(snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId);
         if (snapshot.ScopeKind == "session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
         var payload = Canonical(snapshot.PayloadCanonicalJson); var evidence = Canonical(snapshot.EvidenceIndexCanonicalJson);
-        if (!payload.SequenceEqual(snapshot.PayloadCanonicalJson) || !evidence.SequenceEqual(snapshot.EvidenceIndexCanonicalJson)) throw new InvalidOperationException("local_ai_snapshot_not_canonical");
-        ValidateEvidenceIndex(evidence);
+        if(!ValidateStoredSnapshot(new(snapshot.SnapshotId,snapshot.ScopeKind,snapshot.SessionId,snapshot.NodeId,snapshot.AnchorId,snapshot.PayloadCanonicalJson,Hash(snapshot.PayloadCanonicalJson),snapshot.EvidenceIndexCanonicalJson,Hash(snapshot.EvidenceIndexCanonicalJson))))throw new InvalidOperationException("local_ai_snapshot_not_canonical");
         using var connection = Open(); using var transaction = connection.BeginTransaction(); using var command = connection.CreateCommand(); command.Transaction=transaction;
         var ownerToken=RandomNumberGenerator.GetBytes(32); var created=clock.GetUtcNow();
         command.CommandText = """
@@ -260,7 +260,7 @@ internal sealed class LocalAiAnalysisStoreV1
     {
         ArgumentNullException.ThrowIfNull(request); var snapshotId=request.SnapshotId; var scopeKind=request.ScopeKind; var sessionId=request.SessionId; var nodeId=request.NodeId;
         ValidateUuid7(snapshotId); ValidateScope(scopeKind, sessionId, nodeId); ValidateMetadata(request); if(scopeKind=="session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required"); var timeout=request.TimeoutSeconds ?? 60; if (timeout is < 1 or > 600) throw new ArgumentOutOfRangeException(nameof(request.TimeoutSeconds));
-        var runId=Guid.CreateVersion7().ToString(); var now=Now(); using var connection=Open();
+        var runId=Guid.CreateVersion7().ToString(); var now=clock.GetUtcNow().ToUniversalTime().ToString("O",CultureInfo.InvariantCulture); using var connection=Open();
         using (var snapshot = connection.CreateCommand())
         {
             snapshot.CommandText = "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id=$id AND scope_kind=$scope AND session_id=$session AND node_id IS $node;";
@@ -288,12 +288,12 @@ internal sealed class LocalAiAnalysisStoreV1
         using var evidenceCommand=connection.CreateCommand(); evidenceCommand.CommandText="SELECT s.evidence_index_json,s.payload_sha256,s.snapshot_id,s.scope_kind,s.session_id,s.node_id,s.anchor_id,r.provider,r.model,r.configuration_sha256,r.prompt_template_version,r.requested_at,r.started_at FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE r.run_id=$id;"; evidenceCommand.Parameters.AddWithValue("$id",runId);
         using var expectedReader=evidenceCommand.ExecuteReader(); if(!expectedReader.Read()) throw new InvalidOperationException("local_ai_run_missing");
         var completion=(completedAt??DateTimeOffset.UtcNow).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture);
-        var expected=new LocalAiStoredResultInvariantV1((byte[])expectedReader[0],expectedReader.GetString(1),expectedReader.GetString(2),expectedReader.GetString(3),expectedReader.GetString(4),expectedReader.IsDBNull(5)?null:expectedReader.GetString(5),expectedReader.GetString(6),expectedReader.GetString(7),expectedReader.GetString(8),expectedReader.GetString(9),expectedReader.GetString(10),expectedReader.GetString(11),expectedReader.GetString(12),completion);
+        var expected=new LocalAiStoredResultInvariantV1((byte[])expectedReader[0],expectedReader.GetString(1),expectedReader.GetString(2),expectedReader.GetString(3),expectedReader.GetString(4),expectedReader.IsDBNull(5)?null:expectedReader.GetString(5),expectedReader.GetString(6),expectedReader.GetString(7),expectedReader.GetString(8),expectedReader.GetString(9),expectedReader.GetString(10),expectedReader.GetString(11),expectedReader.GetString(12),completion,"");
         if(expected.ScopeKind=="session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
         expectedReader.Close(); var refs=ReadEvidence(expected.EvidenceIndex); var validation=LocalAiResultValidatorV1.Validate(result,refs);
         if(validation.Code==LocalAiResultValidationCodeV1.Valid && !MatchesExpected(validation.CanonicalBytes!,expected)) validation=new(LocalAiResultValidationCodeV1.InvalidResult);
         if(validation.Code!=LocalAiResultValidationCodeV1.Valid) { var failed=validation.Code==LocalAiResultValidationCodeV1.InvalidEvidence?LocalAiRunStateV1.InvalidEvidence:LocalAiRunStateV1.InvalidResult; TransitionRun(runId,failed,failed==LocalAiRunStateV1.InvalidEvidence?"invalid_evidence":"invalid_result"); return failed; }
-        var canonical=validation.CanonicalBytes!; var root=JsonDocument.Parse(canonical).RootElement; var state=root.GetProperty("findings").GetArrayLength()==0?LocalAiRunStateV1.ZeroFindings:LocalAiRunStateV1.Succeeded;
+        var canonical=validation.CanonicalBytes!; var root=JsonDocument.Parse(canonical).RootElement; var state=root.GetProperty("findings").GetArrayLength()==0?LocalAiRunStateV1.ZeroFindings:LocalAiRunStateV1.Succeeded;if(!ValidateStoredResult(canonical,expected with{RunState=Wire(state)}))throw new InvalidOperationException("local_ai_result_invariant_invalid");
         using var transaction=connection.BeginTransaction(); using var insert=connection.CreateCommand(); insert.Transaction=transaction; var resultId=Guid.CreateVersion7().ToString(); var now=completion; var ownerToken=RandomNumberGenerator.GetBytes(32);
         insert.CommandText="INSERT INTO local_ai_results(result_id,run_id,result_json,result_sha256,retention_owner_token,created_at) VALUES($result,$run,$json,$hash,$owner,$now);"; insert.Parameters.AddWithValue("$result",resultId); insert.Parameters.AddWithValue("$run",runId); insert.Parameters.Add("$json",SqliteType.Blob).Value=canonical; insert.Parameters.AddWithValue("$hash",Hash(canonical)); insert.Parameters.Add("$owner",SqliteType.Blob).Value=ownerToken; insert.Parameters.AddWithValue("$now",now); insert.ExecuteNonQuery();
         using var update=connection.CreateCommand(); update.Transaction=transaction; update.CommandText="UPDATE local_ai_runs SET state=$state,completed_at=$now,result_id=$result,error_code=NULL,updated_at=$now WHERE run_id=$run AND state='running' AND completed_at IS NULL AND result_id IS NULL;"; update.Parameters.AddWithValue("$state",Wire(state)); update.Parameters.AddWithValue("$now",now); update.Parameters.AddWithValue("$result",resultId); update.Parameters.AddWithValue("$run",runId); if(update.ExecuteNonQuery()!=1) throw new InvalidOperationException("local_ai_run_transition_conflict"); if(expected.ScopeKind=="session") retentionCatalog?.RegisterLocalAiRaw(connection,transaction,"result",resultId,DateTimeOffset.Parse(completion,CultureInfo.InvariantCulture),ownerToken); transaction.Commit(); return state;
@@ -373,7 +373,7 @@ internal sealed class LocalAiAnalysisStoreV1
     private static LocalAiRunStateV1 ReadState(SqliteConnection c,string id){using var q=c.CreateCommand();q.CommandText="SELECT state FROM local_ai_runs WHERE run_id=$id;";q.Parameters.AddWithValue("$id",id);return Parse(q.ExecuteScalar() as string??throw new InvalidOperationException("local_ai_run_missing"));}
     private static string Wire(LocalAiRunStateV1 value)=>value switch{LocalAiRunStateV1.Queued=>"queued",LocalAiRunStateV1.Running=>"running",LocalAiRunStateV1.Succeeded=>"succeeded",LocalAiRunStateV1.ZeroFindings=>"zero_findings",LocalAiRunStateV1.ProviderFailed=>"provider_failed",LocalAiRunStateV1.ProviderPartial=>"provider_partial",LocalAiRunStateV1.InvalidResult=>"invalid_result",LocalAiRunStateV1.InvalidEvidence=>"invalid_evidence",LocalAiRunStateV1.StaleSnapshot=>"stale_snapshot",LocalAiRunStateV1.ScopeTooLarge=>"scope_too_large",LocalAiRunStateV1.TimedOut=>"timed_out",LocalAiRunStateV1.Canceled=>"canceled",_=>throw new ArgumentOutOfRangeException(nameof(value))};
     private static LocalAiRunStateV1 Parse(string value)=>value switch{"queued"=>LocalAiRunStateV1.Queued,"running"=>LocalAiRunStateV1.Running,"succeeded"=>LocalAiRunStateV1.Succeeded,"zero_findings"=>LocalAiRunStateV1.ZeroFindings,"provider_failed"=>LocalAiRunStateV1.ProviderFailed,"provider_partial"=>LocalAiRunStateV1.ProviderPartial,"invalid_result"=>LocalAiRunStateV1.InvalidResult,"invalid_evidence"=>LocalAiRunStateV1.InvalidEvidence,"stale_snapshot"=>LocalAiRunStateV1.StaleSnapshot,"scope_too_large"=>LocalAiRunStateV1.ScopeTooLarge,"timed_out"=>LocalAiRunStateV1.TimedOut,"canceled"=>LocalAiRunStateV1.Canceled,_=>throw new InvalidOperationException("local_ai_state_invalid")};
-    private static string Hash(byte[] bytes)=>Convert.ToHexStringLower(SHA256.HashData(bytes)); private static string Now()=>DateTimeOffset.UtcNow.ToString("O",CultureInfo.InvariantCulture);
+    private static string Hash(byte[] bytes)=>Convert.ToHexStringLower(SHA256.HashData(bytes));
     private static string EncodeCursor(string value)=>Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
     private static string? DecodeCursor(string? value)
     { try{return value is null?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));}catch(FormatException){throw new ArgumentException("local_ai_cursor_invalid");} }
@@ -391,6 +391,8 @@ internal sealed class LocalAiAnalysisStoreV1
     }
     internal static bool ValidateStoredResult(byte[] bytes,LocalAiStoredResultInvariantV1 expected)
     {
-        var validation=LocalAiResultValidatorV1.Validate(bytes,ReadEvidence(expected.EvidenceIndex));return validation.Code==LocalAiResultValidationCodeV1.Valid&&validation.CanonicalBytes!.SequenceEqual(bytes)&&MatchesExpected(bytes,expected);
+        var validation=LocalAiResultValidatorV1.Validate(bytes,ReadEvidence(expected.EvidenceIndex));if(validation.Code!=LocalAiResultValidationCodeV1.Valid||!validation.CanonicalBytes!.SequenceEqual(bytes)||!MatchesExpected(bytes,expected))return false;using var document=JsonDocument.Parse(bytes);var findings=document.RootElement.GetProperty("findings").GetArrayLength();return expected.RunState=="zero_findings"?findings==0:expected.RunState=="succeeded"&&findings>0;
     }
+    internal static bool ValidateStoredSnapshot(LocalAiStoredSnapshotInvariantV1 value)
+    {try{ValidateUuid7(value.SnapshotId);ValidateScope(value.ScopeKind,value.SessionId,value.NodeId);if(value.AnchorId!=(value.NodeId??value.SessionId)||Hash(value.Payload)!=value.PayloadSha256||Hash(value.EvidenceIndex)!=value.EvidenceIndexSha256||!Canonical(value.Payload).SequenceEqual(value.Payload)||!Canonical(value.EvidenceIndex).SequenceEqual(value.EvidenceIndex))return false;ValidateEvidenceIndex(value.EvidenceIndex);return true;}catch(Exception exception)when(exception is ArgumentException or InvalidOperationException or JsonException){return false;}}
 }
