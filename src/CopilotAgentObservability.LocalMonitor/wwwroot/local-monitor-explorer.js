@@ -130,6 +130,16 @@
   const assignmentLoadMore = root.querySelector("#session-assignment-load-more");
   const assignmentCancel = root.querySelector("#session-assignment-cancel");
   const assignmentSubmit = root.querySelector("#session-assignment-submit");
+  const aiOpen = root.querySelector("#session-ai-open");
+  const aiDialog = root.querySelector("#session-ai-dialog");
+  const aiStatus = root.querySelector("#session-ai-status");
+  const aiPreviewContent = root.querySelector("#session-ai-preview-content");
+  const aiResult = root.querySelector("#session-ai-result");
+  const aiExplicitLabel = root.querySelector("#session-ai-explicit-label");
+  const aiPreviewButton = root.querySelector("#session-ai-preview");
+  const aiStart = root.querySelector("#session-ai-start");
+  const aiCancel = root.querySelector("#session-ai-cancel");
+  const aiState = { preview: null, runId: null, frozenIds: [] };
 
   class ApiFailure extends Error {
     constructor(statusCode, code = null) {
@@ -565,6 +575,72 @@
       cursor,
       limit: state.dynamic.limit,
     };
+  }
+
+  async function aiJson(path, body) {
+    const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: stringifyExactJson(body), cache: "no-store", credentials: "same-origin" });
+    if (!response.ok) throw await apiFailure(response);
+    return readJsonResponse(response, 8_388_608);
+  }
+
+  function renderAiMetadata(preview) {
+    aiPreviewContent.replaceChildren();
+    for (const [heading, values] of [["対象", preview.included], ["除外", preview.excluded]]) {
+      const section = element("section");
+      section.append(element("h3", null, `${heading} ${values.length}件`));
+      const list = element("ul");
+      for (const value of values) {
+        const item = element("li");
+        item.textContent = [value.session_archive_state, value.session_archive_revision, value.archive_exclusion_reason ?? value.reason, value.source, value.model, value.completeness, value.content_state, value.workspace_revision, value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
+        list.append(item);
+      }
+      section.append(list); aiPreviewContent.append(section);
+    }
+  }
+
+  async function previewAiSelection() {
+    aiStart.disabled = true; aiStatus.textContent = "分析対象を確認しています。";
+    const mode = root.querySelector("input[name='session-ai-mode']:checked")?.value ?? "filter";
+    const selection = mode === "explicit"
+      ? { kind: "explicit", archive_scope: state.route?.archive_scope ?? "active_only", session_ids: [...aiState.frozenIds] }
+      : { kind: "filter", request: { ...requestBody(null), cursor: null, limit: null } };
+    try {
+      const value = await aiJson("/api/local-monitor/v1/ai/repository-preview", { schema_version: "local-ai-repository-preview.request.v1", repository_id: root.dataset.repositoryId, selection });
+      if (!exactKeys(value, ["schema_version", "snapshot_id", "payload_sha256", "expires_at", "included", "excluded", "truncated"])
+          || value.schema_version !== "local-ai-repository-preview.response.v1" || !UUID_V7.test(value.snapshot_id)
+          || !REVISION.test(value.payload_sha256) || typeof value.expires_at !== "string"
+          || !Array.isArray(value.included) || !Array.isArray(value.excluded) || value.truncated !== false) throw new TypeError("invalid preview");
+      aiState.preview = value; renderAiMetadata(value);
+      aiStatus.textContent = value.included.length === 0 ? "分析できる対象がありません。" : "この対象で分析を開始できます。";
+      aiStart.disabled = value.included.length === 0;
+    } catch (error) { aiStatus.textContent = error instanceof ApiFailure && error.code === "scope_too_large" ? "対象が200件を超えています。" : "分析対象を確認できませんでした。"; }
+  }
+
+  async function pollAiRun() {
+    try {
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${aiState.runId}`, { cache: "no-store", credentials: "same-origin" });
+      if (!response.ok) throw await apiFailure(response); const value = await readJsonResponse(response, 8_388_608);
+      if (["queued", "running"].includes(value.state)) { setTimeout(pollAiRun, 250); return; }
+      aiCancel.hidden = true; aiStatus.textContent = value.state === "succeeded" ? "分析が完了しました。" : `分析は ${value.state} で終了しました。`;
+      aiResult.replaceChildren(); if (value.result) {
+        for (const key of ["scope", "snapshot", "summary", "findings", "improvement_suggestions", "exact_evidence", "limitations", "provider", "model", "prompt_template_version"]) {
+          if (value.result[key] === undefined) continue; const section = element("section"); section.append(element("h3", null, key));
+          section.append(element("pre", null, typeof value.result[key] === "string" ? value.result[key] : stringifyExactJson(value.result[key]))); aiResult.append(section);
+        }
+      }
+    } catch { aiCancel.hidden = true; aiStatus.textContent = "分析結果を取得できませんでした。一覧は引き続き利用できます。"; }
+  }
+
+  async function startAiRun() {
+    if (!aiState.preview) return; aiStart.disabled = true;
+    try { const value = await aiJson("/api/local-monitor/v1/ai/repository-runs", { schema_version: "local-ai-repository-run.request.v1", snapshot_id: aiState.preview.snapshot_id, payload_sha256: aiState.preview.payload_sha256, timeout_seconds: 120 });
+      if (!UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。"; pollAiRun();
+    } catch { aiStatus.textContent = "分析を開始できませんでした。一覧は引き続き利用できます。"; }
+  }
+
+  async function enableRepositoryAi() {
+    if (root.dataset.explorerScope !== "repository" || !UUID_V7.test(root.dataset.repositoryId ?? "")) return;
+    try { const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin" }); const value = response.ok ? await response.json() : null; if (value?.readiness_state === "ready") aiOpen.hidden = false; } catch { }
   }
 
   async function readCollection(cursor, signal) {
@@ -1732,11 +1808,28 @@
     }, "assignmentPicker");
   });
 
+  aiOpen.addEventListener("click", () => {
+    aiState.preview = null;
+    aiState.frozenIds = [...new Set([...state.cohorts.a, ...state.cohorts.b])].slice(0, 200);
+    aiExplicitLabel.hidden = aiState.frozenIds.length === 0;
+    aiPreviewContent.replaceChildren(); aiResult.replaceChildren(); aiStart.disabled = true;
+    aiStatus.textContent = "分析対象を選んで確認してください。"; aiDialog.showModal();
+  });
+  root.querySelector("#session-ai-close").addEventListener("click", () => aiDialog.close());
+  aiPreviewButton.addEventListener("click", previewAiSelection);
+  aiStart.addEventListener("click", startAiRun);
+  aiCancel.addEventListener("click", async () => {
+    if (!aiState.runId) return;
+    try { await aiJson(`/api/local-monitor/v1/ai/runs/${aiState.runId}/cancel`, {}); aiStatus.textContent = "キャンセルしました。"; } catch { aiStatus.textContent = "キャンセルできませんでした。"; }
+    aiCancel.hidden = true;
+  });
+
   document.addEventListener("cao-route-popstate", () => {
     if (comparisonDialog.open) clearComparisonDialog(false);
     state.browserTraversal = true;
     if (assignmentDialog.open) closeAssignmentPicker(false);
   });
   document.addEventListener("cao-route-state", event => applyRoute(event.detail));
+  enableRepositoryAi();
   applyRoute(window.LocalMonitorV1History.current());
 })();

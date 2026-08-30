@@ -17,6 +17,7 @@
             <p><span id="session-result-count">読み込み中</span></p>
         </div>
         <button type="button" id="session-compare-mode">比較を作成</button>
+        <button type="button" id="session-ai-open" hidden>AI で選択を分析</button>
     </header>
 
     <form id="session-explorer-filters" class="local-monitor-session-explorer-filters" role="search">
@@ -140,5 +141,20 @@
                 <button type="submit" id="session-assignment-submit" disabled>割り当てる</button>
             </div>
         </form>
+    </dialog>
+    <dialog id="session-ai-dialog" aria-labelledby="session-ai-title">
+        <h2 id="session-ai-title">リポジトリ選択の AI 分析</h2>
+        <p id="session-ai-status" role="status" aria-live="polite"></p>
+        <fieldset>
+            <legend>分析対象</legend>
+            <label><input type="radio" name="session-ai-mode" value="filter" checked /> 現在の絞り込み結果</label>
+            <label id="session-ai-explicit-label" hidden><input type="radio" name="session-ai-mode" value="explicit" /> 選択中のセッション</label>
+        </fieldset>
+        <div id="session-ai-preview-content"></div>
+        <div id="session-ai-result"></div>
+        <button type="button" id="session-ai-close">閉じる</button>
+        <button type="button" id="session-ai-preview">対象を確認</button>
+        <button type="button" id="session-ai-start" disabled>分析を開始</button>
+        <button type="button" id="session-ai-cancel" hidden>キャンセル</button>
     </dialog>
 </section>

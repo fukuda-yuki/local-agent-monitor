@@ -25,6 +25,38 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     };
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task RepositoryAiAppearsOnlyWhenReadyAndPreviewsTheUnpagedSemanticFilter()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"provider":"github_copilot","selected_model":"synthetic","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""")));
+        string? previewBody = null;
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route =>
+        {
+            previewBody = route.Request.PostData;
+            return route.FulfillAsync(Json($$"""{"schema_version":"local-ai-repository-preview.response.v1","snapshot_id":"018f0000-0000-7000-8000-000000000020","payload_sha256":"{{new string('a', 64)}}","expires_at":"2026-08-31T12:00:00.0000000+00:00","included":[],"excluded":[],"truncated":false}"""));
+        });
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions?source=vscode", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#session-ai-open")).ToBeVisibleAsync();
+        await page.Locator("#session-ai-open").ClickAsync();
+        await page.Locator("#session-ai-preview").ClickAsync();
+
+        using var request = JsonDocument.Parse(previewBody!);
+        var filter = request.RootElement.GetProperty("selection").GetProperty("request");
+        Assert.Equal("filter", request.RootElement.GetProperty("selection").GetProperty("kind").GetString());
+        Assert.Equal("vscode", filter.GetProperty("source")[0].GetString());
+        Assert.Equal(JsonValueKind.Null, filter.GetProperty("cursor").ValueKind);
+        Assert.Equal(JsonValueKind.Null, filter.GetProperty("limit").ValueKind);
+    }
+
+    [Fact]
     [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ComparePreviewCreatesFromTransientOrderedCohortsAndNavigatesOnlyByServerLocation()
     {
