@@ -52,6 +52,10 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     {
         var builder = new StringBuilder();
         builder.AppendLine("Analyze only this immutable bounded snapshot projection and its exact evidence identifiers.");
+        if (request.Snapshot.ScopeKind == "repository_selection")
+            builder.AppendLine("Analyze only the frozen included repository membership. Do not explore, infer, or request any session outside this snapshot.");
+        else if (request.Snapshot.ScopeKind == "comparison")
+            builder.AppendLine("Interpret only the stored observed differences and offer concrete improvement suggestions. Do not state an effect verdict, quality evidence, priority score, improvement or regression classification, deterministic fact, or any recalculation.");
         builder.AppendLine("Result evidence_refs may contain only canonical node IDs listed in the evidence index. raw_content.evidence_id is only a tool handle; after reading raw bytes cite its raw_content.citation_ref node. Sanitized span facts likewise cite their citation_ref node.");
         builder.AppendLine(Encoding.UTF8.GetString(request.Snapshot.PayloadCanonicalJson));
         builder.AppendLine(Encoding.UTF8.GetString(request.Snapshot.EvidenceIndexCanonicalJson));

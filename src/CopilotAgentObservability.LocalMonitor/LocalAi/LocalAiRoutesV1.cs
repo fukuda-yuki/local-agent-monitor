@@ -14,6 +14,9 @@ internal static class LocalAiRoutesV1
     {
         endpoints.Map("/api/local-monitor/v1/ai/session-runs", context => StartSession(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/node-runs", context => StartNode(context, application));
+        endpoints.Map("/api/local-monitor/v1/ai/comparison-runs", context => StartComparison(context, application));
+        endpoints.Map("/api/local-monitor/v1/ai/repository-preview", context => PreviewRepository(context, application));
+        endpoints.Map("/api/local-monitor/v1/ai/repository-runs", context => StartRepository(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/session-runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/session-runs/", "session"));
         endpoints.Map("/api/local-monitor/v1/ai/node-runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/node-runs/", "node"));
         endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/runs/", null));
@@ -50,6 +53,29 @@ internal static class LocalAiRoutesV1
         await StartResponse(context, result).ConfigureAwait(false);
     }
 
+    private static async Task StartComparison(HttpContext context, ILocalAiAnalysisApplicationV1 application)
+    {
+        if (!ExactPath(context, "/api/local-monitor/v1/ai/comparison-runs")) { await NotFound(context); return; }
+        if (!await PreparePost(context, MaximumSessionBody).ConfigureAwait(false)) return;
+        var body=await Body(context,MaximumSessionBody).ConfigureAwait(false);
+        if(body is null){await Error(context,413,"request_too_large");return;}
+        if(!SupportedMedia(context)){await Error(context,415,"unsupported_media_type");return;}
+        if(context.Request.QueryString.HasValue||!LocalAiExtendedScopeRequestParser.TryComparisonRun(body,out var request))
+        {await Error(context,400,"invalid_request");return;}
+        var result=await application.StartComparisonAsync(request!,context.RequestAborted).ConfigureAwait(false);
+        await StartResponse(context,result).ConfigureAwait(false);
+    }
+    private static async Task PreviewRepository(HttpContext context,ILocalAiAnalysisApplicationV1 application)
+    {
+        if(!ExactPath(context,"/api/local-monitor/v1/ai/repository-preview")){await NotFound(context);return;}if(!await PreparePost(context,MaximumNodeBody))return;var body=await Body(context,MaximumNodeBody);if(body is null){await Error(context,413,"request_too_large");return;}if(!SupportedMedia(context)){await Error(context,415,"unsupported_media_type");return;}if(context.Request.QueryString.HasValue){await Error(context,400,"invalid_request");return;}
+        var parsed=LocalAiExtendedScopeRequestParser.TryRepositoryPreview(body,out var request);if(parsed==LocalAiPreviewParseStatus.ScopeTooLarge){await Error(context,409,"scope_too_large");return;}if(parsed!=LocalAiPreviewParseStatus.Success){await Error(context,400,"invalid_request");return;}
+        try{var result=await application.PreviewRepositoryAsync(request!,context.RequestAborted);await JsonBytes(context,200,result.ResponseJson);}catch(LocalAiScopeTooLargeException){await Error(context,409,"scope_too_large");}catch(LocalRepositoryScopeSnapshotException exception){await Error(context,503,exception.ErrorCode);}
+    }
+    private static async Task StartRepository(HttpContext context,ILocalAiAnalysisApplicationV1 application)
+    {
+        if(!ExactPath(context,"/api/local-monitor/v1/ai/repository-runs")){await NotFound(context);return;}if(!await PreparePost(context,MaximumSessionBody))return;var body=await Body(context,MaximumSessionBody);if(body is null){await Error(context,413,"request_too_large");return;}if(!SupportedMedia(context)){await Error(context,415,"unsupported_media_type");return;}if(context.Request.QueryString.HasValue||!LocalAiExtendedScopeRequestParser.TryRepositoryRun(body,out var request)){await Error(context,400,"invalid_request");return;}await StartResponse(context,await application.StartRepositoryAsync(request!,context.RequestAborted));
+    }
+
     private static async Task ReadRun(HttpContext context, ILocalAiAnalysisApplicationV1 application, string literalPrefix, string? requiredScope)
     {
         var rawRunId=context.Request.RouteValues["runId"]?.ToString();
@@ -61,9 +87,7 @@ internal static class LocalAiRoutesV1
         if (context.Request.QueryString.HasValue) { await Error(context, 400, "invalid_request"); return; }
         var status = await application.ReadRunAsync(runId!, context.RequestAborted).ConfigureAwait(false);
         if (status is null || requiredScope is not null && status.ScopeKind != requiredScope) { await Error(context, 404, "run_not_found"); return; }
-        await Json(context, 200, new { run_id=status.RunId, state=status.State, scope_kind=status.ScopeKind,
-            session_id=status.SessionId, node_id=status.NodeId, error=status.ErrorCode,
-            result=status.ResultJson is null ? (JsonElement?)null : JsonDocument.Parse(status.ResultJson).RootElement.Clone() }).ConfigureAwait(false);
+        await JsonBytes(context, 200, SerializeRun(status)).ConfigureAwait(false);
     }
 
     private static async Task Cancel(HttpContext context, ILocalAiAnalysisApplicationV1 application)
@@ -190,8 +214,26 @@ internal static class LocalAiRoutesV1
 
     private static Task StartResponse(HttpContext context,LocalAiStartResponseV1 result)=>result.ErrorCode is null
         ? Json(context,201,new{run_id=result.RunId}) : Error(context,result.ErrorCode switch
-        {"provider_unavailable" or "projection_unavailable"=>503,"session_not_found" or "node_not_found"=>404,_=>409},result.ErrorCode);
+        {"provider_unavailable" or "projection_unavailable"=>503,"session_not_found" or "node_not_found" or "comparison_not_found" or "snapshot_not_found"=>404,
+         "persistence_busy"=>503,"snapshot_expired" or "comparison_expired"=>410,"invalid_request"=>400,_=>409},result.ErrorCode);
     internal static Task Error(HttpContext context,int status,string code)=>Json(context,status,new{error=code});
+    internal static byte[] SerializeRun(LocalAiRunStatusV1 status)
+    {
+        using var stream=new MemoryStream(); using(var writer=new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();writer.WriteString("run_id",status.RunId);writer.WriteString("state",status.State);writer.WriteString("scope_kind",status.ScopeKind);
+            if(status.SessionId is null)writer.WriteNull("session_id");else writer.WriteString("session_id",status.SessionId);
+            if(status.NodeId is null)writer.WriteNull("node_id");else writer.WriteString("node_id",status.NodeId);
+            if(status.RepositoryId is not null)writer.WriteString("repository_id",status.RepositoryId);
+            if(status.ComparisonId is not null)writer.WriteString("comparison_id",status.ComparisonId);
+            if(status.ErrorCode is null)writer.WriteNull("error");else writer.WriteString("error",status.ErrorCode);
+            writer.WritePropertyName("result");if(status.ResultJson is null)writer.WriteNullValue();else using(var result=JsonDocument.Parse(status.ResultJson))result.RootElement.WriteTo(writer);
+            writer.WriteEndObject();
+        }
+        return stream.ToArray();
+    }
     private static async Task Json(HttpContext context,int status,object entity)
-    { var bytes=JsonSerializer.SerializeToUtf8Bytes(entity);context.Response.StatusCode=status;context.Response.ContentType="application/json; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.ContentLength=bytes.Length;if(!HttpMethods.IsHead(context.Request.Method))await context.Response.Body.WriteAsync(bytes,context.RequestAborted); }
+        => await JsonBytes(context,status,JsonSerializer.SerializeToUtf8Bytes(entity)).ConfigureAwait(false);
+    private static async Task JsonBytes(HttpContext context,int status,byte[] bytes)
+    { context.Response.StatusCode=status;context.Response.ContentType="application/json; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.ContentLength=bytes.Length;if(!HttpMethods.IsHead(context.Request.Method))await context.Response.Body.WriteAsync(bytes,context.RequestAborted); }
 }

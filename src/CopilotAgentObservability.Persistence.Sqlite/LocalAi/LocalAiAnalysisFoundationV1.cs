@@ -428,6 +428,17 @@ internal sealed class LocalAiAnalysisStoreV1
         using var reader=read.ExecuteReader(); if(!reader.Read())throw new InvalidOperationException("local_ai_snapshot_conflict");var storedCreated=DateTimeOffset.Parse(reader.GetString(8),CultureInfo.InvariantCulture);var expectedStoredExpiry=identity.Kind switch{LocalAiScopeKindV1.Session=>(DateTimeOffset?)null,LocalAiScopeKindV1.Comparison=>snapshot.ExpiresAt is { } bound?Min(storedCreated.AddHours(24),bound):throw new ArgumentException("local_ai_comparison_expiry_required"),_=>storedCreated.AddHours(24)};if(reader.GetString(0)!=snapshot.ScopeKind || (reader.IsDBNull(1)?null:reader.GetString(1))!=snapshot.SessionId || (reader.IsDBNull(2)?null:reader.GetString(2))!=snapshot.NodeId || (reader.IsDBNull(3)?null:reader.GetString(3))!=snapshot.RepositoryId || (reader.IsDBNull(4)?null:reader.GetString(4))!=snapshot.ComparisonId || reader.GetString(5)!=snapshot.AnchorId || reader.IsDBNull(6) || reader.IsDBNull(7) || !((byte[])reader[6]).SequenceEqual(payload) || !((byte[])reader[7]).SequenceEqual(evidence) || (reader.IsDBNull(9)?null:reader.GetString(9))!=(expectedStoredExpiry is null?null:expectedStoredExpiry.Value.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture))) throw new InvalidOperationException("local_ai_snapshot_conflict"); reader.Close(); transaction.Commit();
     }
 
+    internal LocalAiSnapshotV1? ReadTransientSnapshot(string snapshotId)
+    {
+        ValidateUuid7(snapshotId); using var connection=Open(); using var command=connection.CreateCommand();
+        command.CommandText="SELECT scope_kind,session_id,node_id,anchor_id,payload_json,evidence_index_json,repository_id,comparison_id,expires_at FROM local_ai_snapshots WHERE snapshot_id=$id AND scope_kind<>'session';";
+        command.Parameters.AddWithValue("$id",snapshotId); using var reader=command.ExecuteReader(); if(!reader.Read())return null;
+        if(reader.IsDBNull(4)||reader.IsDBNull(5))return null;
+        return new(snapshotId,reader.GetString(0),reader.IsDBNull(1)?null:reader.GetString(1),reader.IsDBNull(2)?null:reader.GetString(2),reader.GetString(3),
+            ((byte[])reader[4]).ToArray(),((byte[])reader[5]).ToArray(),reader.IsDBNull(6)?null:reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),
+            reader.IsDBNull(8)?null:DateTimeOffset.Parse(reader.GetString(8),CultureInfo.InvariantCulture));
+    }
+
     internal LocalAiRunV1 CreateRun(LocalAiRunRequestV1 request)
     {
         ArgumentNullException.ThrowIfNull(request); var snapshotId=request.SnapshotId; var scopeKind=request.ScopeKind; var sessionId=request.SessionId; var nodeId=request.NodeId;

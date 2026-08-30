@@ -42,11 +42,21 @@ internal interface ILocalAiRunRepositoryV1
     bool Cancel(string runId);
     LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256);
 }
+internal interface ILocalAiAcceptedSnapshotRepositoryV1
+{
+    void StoreAccepted(LocalAiSnapshotProjectionV1 snapshot);
+    LocalAiSnapshotProjectionV1? ReadAccepted(string snapshotId);
+}
 
 internal interface ILocalAiAnalysisApplicationV1
 {
     ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token);
     ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token);
+    ValueTask<LocalAiStartResponseV1> StartComparisonAsync(LocalAiComparisonRunRequestV1 request, CancellationToken token) =>
+        ValueTask.FromResult(new LocalAiStartResponseV1(null, "provider_unavailable"));
+    ValueTask<LocalAiRepositoryPreviewResultV1> PreviewRepositoryAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)=>
+        ValueTask.FromException<LocalAiRepositoryPreviewResultV1>(new InvalidOperationException("provider_unavailable"));
+    ValueTask<LocalAiStartResponseV1> StartRepositoryAsync(LocalAiRepositoryRunRequestV1 request,CancellationToken token)=>ValueTask.FromResult(new LocalAiStartResponseV1(null,"provider_unavailable"));
     ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token);
     ValueTask<bool> CancelAsync(string runId, CancellationToken token);
     ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token);
@@ -58,7 +68,9 @@ internal sealed class LocalAiAnalysisApplicationV1(
     ILocalAiRunRepositoryV1 runs,
     ILocalAiProviderAdapterV1 provider,
     Func<string, LocalAiRawEvidenceV1, CancellationToken, ValueTask<byte[]>>? rawReader = null,
-    TimeProvider? timeProvider = null) : ILocalAiAnalysisApplicationV1, IHostedService
+    TimeProvider? timeProvider = null,
+    ILocalAiComparisonSnapshotAdapterV1? comparisons = null,
+    ILocalAiRepositorySnapshotAdapterV1? repositories = null) : ILocalAiAnalysisApplicationV1, IHostedService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
@@ -71,6 +83,43 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         ValidateTranscript(request);
         return StartAsync(request.SessionId, request.NodeId, request.TimeoutSeconds, request.Question, request.PriorTurns ?? [], token);
+    }
+
+    public async ValueTask<LocalAiStartResponseV1> StartComparisonAsync(LocalAiComparisonRunRequestV1 request, CancellationToken token)
+    {
+        if (comparisons is null) return new(null, "provider_unavailable");
+        return await StartProjectedAsync(request.TimeoutSeconds,
+            cancellationToken => ValueTask.FromResult(comparisons.Read(request.RepositoryId, request.ComparisonId, cancellationToken)), token).ConfigureAwait(false);
+    }
+    public async ValueTask<LocalAiRepositoryPreviewResultV1> PreviewRepositoryAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)
+    {
+        if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)throw new InvalidOperationException("provider_unavailable");
+        var preview=await repositories.PreviewAsync(request,token).ConfigureAwait(false);accepted.StoreAccepted(preview.Snapshot);return preview;
+    }
+    public async ValueTask<LocalAiStartResponseV1> StartRepositoryAsync(LocalAiRepositoryRunRequestV1 request,CancellationToken token)
+    {
+        if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)return new(null,"provider_unavailable");
+        var snapshot=accepted.ReadAccepted(request.SnapshotId);if(snapshot is null)return new(null,"snapshot_not_found");if(snapshot.ExpiresAt<=clock.GetUtcNow())return new(null,"snapshot_expired");if(snapshot.PayloadSha256!=request.PayloadSha256)return new(null,"stale_snapshot");
+        if(!await repositories.IsCurrentAsync(snapshot,token).ConfigureAwait(false))return new(null,"stale_snapshot");
+        return await StartProjectedAsync(request.TimeoutSeconds,_=>ValueTask.FromResult(snapshot),token).ConfigureAwait(false);
+    }
+
+    private async ValueTask<LocalAiStartResponseV1> StartProjectedAsync(int timeout,
+        Func<CancellationToken, ValueTask<LocalAiSnapshotProjectionV1>> capture, CancellationToken token)
+    {
+        if (timeout is < 1 or > 600) return new(null, "invalid_request");
+        if (!await providerReady(token).ConfigureAwait(false)) return new(null, "provider_unavailable");
+        LocalAiSnapshotProjectionV1 snapshot;
+        try { snapshot = await capture(token).ConfigureAwait(false); }
+        catch (LocalAiScopeSnapshotException exception) { return new(null, exception.Error); }
+        catch (LocalAiScopeTooLargeException) { return new(null, "scope_too_large"); }
+        var run = runs.Create(snapshot, timeout); runs.Start(run.RunId);
+        var admissionId = Guid.CreateVersion7().ToString();
+        var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token)) { RunId=run.RunId };
+        lock (lifecycleGate) { if (!accepting) { runs.Cancel(run.RunId); admission.Cancellation.Dispose(); return new(null,"provider_unavailable"); } active.Add(admissionId,admission); }
+        admission.Cancellation.CancelAfter(TimeSpan.FromSeconds(timeout));
+        _ = ExecuteAsync(admissionId,admission,run.RunId,snapshot,null,[]);
+        return new(run.RunId,null);
     }
 
     private async ValueTask<LocalAiStartResponseV1> StartAsync(string sessionId, string? nodeId, int timeout,
@@ -141,7 +190,8 @@ internal sealed class LocalAiAnalysisApplicationV1(
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));
             var startedRun = runs.Read(runId);
             var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), admission.Cancellation.Token).ConfigureAwait(false);
-            if (!await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false))
+            if (snapshot.ScopeKind is "session" or "node" && !await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false)
+                || snapshot.ScopeKind=="repository_selection"&&repositories is not null&&!await repositories.IsCurrentAsync(snapshot,CancellationToken.None).ConfigureAwait(false))
                 runs.Fail(runId, "stale_snapshot");
             else
             {

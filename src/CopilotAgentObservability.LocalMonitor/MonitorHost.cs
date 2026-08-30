@@ -632,7 +632,9 @@ internal static class MonitorHost
                         runRepository,
                         providerAdapter,
                         localAiRawReader.ReadAsync,
-                        timeProvider));
+                        timeProvider,
+                        new LocalAiComparisonSnapshotAdapterV1(services.GetRequiredService<SqliteLocalComparisonStore>()),
+                        new LocalAiRepositorySnapshotAdapterV1(services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(),services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),timeProvider)));
                 if (testOptions?.LocalAiAnalysisApplication is null)
                     builder.Services.AddHostedService(services =>
                         (LocalAiAnalysisApplicationV1)services.GetRequiredService<ILocalAiAnalysisApplicationV1>());

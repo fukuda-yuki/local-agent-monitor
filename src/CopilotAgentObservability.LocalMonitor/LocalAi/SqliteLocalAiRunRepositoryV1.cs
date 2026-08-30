@@ -9,6 +9,7 @@ namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
 internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string model,
     string configurationSha256, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null) : ILocalAiRunRepositoryV1
+    , ILocalAiAcceptedSnapshotRepositoryV1
 {
     private readonly LocalAiAnalysisStoreV1 store = new(databasePath, retentionCatalog, timeProvider);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
@@ -22,12 +23,26 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
 
     internal int CleanupExpiredTransientRuns() => store.DeleteExpiredTransientRuns(clock.GetUtcNow());
 
+    public void StoreAccepted(LocalAiSnapshotProjectionV1 snapshot)=>store.InsertSnapshot(new(snapshot.SnapshotId,snapshot.ScopeKind,snapshot.SessionId,snapshot.NodeId,
+        snapshot.AnchorId,snapshot.PayloadCanonicalJson,snapshot.EvidenceIndexCanonicalJson,snapshot.RepositoryId,snapshot.ComparisonId,snapshot.ExpiresAt));
+
+    public LocalAiSnapshotProjectionV1? ReadAccepted(string snapshotId)
+    {
+        var value=store.ReadTransientSnapshot(snapshotId); if(value is null)return null;
+        var hash=Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(value.PayloadCanonicalJson));
+        using var document=JsonDocument.Parse(value.EvidenceIndexCanonicalJson);var refs=document.RootElement.GetProperty("evidence_refs").EnumerateArray().Select(static item=>item.GetString()!).ToHashSet(StringComparer.Ordinal);
+        return new(value.SnapshotId,value.ScopeKind,value.SessionId,value.NodeId,value.AnchorId,hash,value.PayloadCanonicalJson,value.EvidenceIndexCanonicalJson,hash,refs,
+            RepositoryId:value.RepositoryId,ComparisonId:value.ComparisonId,ExpiresAt:value.ExpiresAt);
+    }
+
     public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout)
     {
         store.InsertSnapshot(new(snapshot.SnapshotId, snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId,
             snapshot.AnchorId, snapshot.PayloadCanonicalJson, snapshot.EvidenceIndexCanonicalJson,snapshot.RepositoryId,snapshot.ComparisonId,snapshot.ExpiresAt));
         var run = store.CreateRun(new(snapshot.SnapshotId, snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId,
-            "github_copilot_sdk", model, configurationSha256, "local-ai-session-node-v1", clock.GetUtcNow(), timeout,snapshot.RepositoryId,snapshot.ComparisonId));
+            "github_copilot_sdk", model, configurationSha256, snapshot.ScopeKind switch
+            { "repository_selection"=>"local-ai-repository-v1", "comparison"=>"local-ai-comparison-v1", _=>"local-ai-session-node-v1" },
+            clock.GetUtcNow(), timeout,snapshot.RepositoryId,snapshot.ComparisonId));
         return Read(run.RunId);
     }
 
