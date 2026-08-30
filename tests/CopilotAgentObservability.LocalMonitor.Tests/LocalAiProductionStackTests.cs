@@ -27,7 +27,7 @@ public sealed class LocalAiProductionStackTests
             skillRegistryAuthority:authority,timeProvider:temp.TimeProvider);
         var retention=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath,temp.TimeProvider),temp.TimeProvider);
         var repository=new SqliteLocalAiRunRepositoryV1(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider,retention);
-        var provider=new SequenceProvider("session-one","session-two",null,"node-one","!invalid","!block","!timeout");
+        var provider=new SequenceProvider("session-one","!zero","session-two",null,"node-one","!invalid","!block","!timeout");
         var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,repository,provider,timeProvider:temp.TimeProvider);
         await using var host=await MonitorTestHost.StartAsync(temp,testOptions:new MonitorHostTestOptions{
             LocalRepositoryScopeSnapshotService=scope,LocalAiAnalysisApplication=application,TimeProvider=temp.TimeProvider});
@@ -41,6 +41,8 @@ public sealed class LocalAiProductionStackTests
         var generic=await Get(host.Client,$"/api/local-monitor/v1/ai/runs/{first}");
         Assert.Equal("session-one",generic.GetProperty("result").GetProperty("summary").GetString());
 
+        var zero=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        Assert.Equal("zero_findings",(await Poll(host.Client,$"/api/local-monitor/v1/ai/session-runs/{zero}")).GetProperty("state").GetString());
         var second=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
         Assert.NotEqual(first,second);await Poll(host.Client,$"/api/local-monitor/v1/ai/session-runs/{second}");
         var failed=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
@@ -52,7 +54,8 @@ public sealed class LocalAiProductionStackTests
         }
         var reports=await Get(host.Client,$"/api/local-monitor/v1/ai/sessions/{SessionId}/reports");
         var items=reports.GetProperty("reports").EnumerateArray().ToArray();
-        Assert.Equal(2,items.Length);Assert.DoesNotContain(items,item=>item.GetProperty("run_id").GetString()==failed);
+        Assert.Equal(3,items.Length);Assert.DoesNotContain(items,item=>item.GetProperty("run_id").GetString()==failed);
+        Assert.Contains(items,item=>item.GetProperty("run_id").GetString()==zero&&item.GetProperty("state").GetString()=="zero_findings");
         Assert.All(items,item=>Assert.Equal("retained",item.GetProperty("content_state").GetString()));
         Assert.Contains(items,item=>item.GetProperty("snapshot_changed").GetBoolean());
 
@@ -117,6 +120,7 @@ public sealed class LocalAiProductionStackTests
             if(summary=="!block"){Entered.TrySetResult();await Release.Task;token.ThrowIfCancellationRequested();}
             if(summary=="!timeout"){await Task.Delay(Timeout.InfiniteTimeSpan,token);throw new InvalidOperationException();}
             if(summary=="!invalid")return LocalAiProviderOutcomeV1.Complete("{}"u8.ToArray());
+            if(summary=="!zero")return LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes("{\"summary\":\"none\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}"));
             var evidence=request.Snapshot.EvidenceIdentifiers.First();var bytes=Encoding.UTF8.GetBytes($$"""{"summary":"{{summary}}","findings":[{"finding_id":"f-1","title":"title","explanation":"explanation","evidence_state":"supported","evidence_refs":["{{evidence}}"],"limitation":"none"}],"improvement_suggestions":[],"limitations":[]}""");
             return LocalAiProviderOutcomeV1.Complete(bytes);}}
 }

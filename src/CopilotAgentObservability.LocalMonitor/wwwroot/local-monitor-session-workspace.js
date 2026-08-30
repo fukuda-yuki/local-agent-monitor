@@ -818,13 +818,14 @@
 
   async function applyRoute(route) {
     if (!state.summary) return;
-    if (!route.analysis && !route.execution && !route.node && document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi();
+    const closedAnalysis = !route.analysis && document.querySelector("[data-session-ai-dialog]")?.open;
+    if (closedAnalysis) closeSessionAi(!route.execution && !route.node);
     if (route.analysis && !route.node) {
       await restoreExactSessionAnalysis(route.analysis);
     }
     if (route.node) {
       if (document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi(false);
-      try { await selectNode(route.execution ?? null, route.node, false); }
+      try { await selectNode(route.execution ?? null, route.node, false); if (closedAnalysis) root.querySelector("[data-timeline-node][aria-selected=true]")?.focus(); }
       catch (error) { if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
     } else if (route.execution) {
       const execution = state.summary.executions.find(item => item.execution_id === route.execution);
@@ -832,7 +833,7 @@
       state.selectedExecutionId = execution.execution_id; state.selectedNodeId = null;
       for (const item of state.summary.executions) executionMemory(item.execution_id).open = item.execution_id === execution.execution_id;
       if (!executionMemory(execution.execution_id).pages.has("root")) await loadTimeline(execution.execution_id);
-      renderOverview(state.summary); renderExecutions();
+      renderOverview(state.summary); renderExecutions(); if (closedAnalysis) root.querySelector(`[data-execution-id='${route.execution}'] [data-execution-toggle]`)?.focus();
     } else fallbackSelection(false);
   }
 
