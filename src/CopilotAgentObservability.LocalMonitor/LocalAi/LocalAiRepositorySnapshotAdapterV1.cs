@@ -86,12 +86,14 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
     }
     private static JsonNode NormalizeProjection(LocalAiSnapshotProjectionV1 projection)
     {
-        var root=JsonNode.Parse(projection.PayloadCanonicalJson)!;Rewrite(root,null);return root;
-        void Rewrite(JsonNode node,string? property)
+        var root=JsonNode.Parse(projection.PayloadCanonicalJson)!.AsObject();
+        if(root["raw_content"] is JsonArray raw)
         {
-            if(node is JsonObject obj){foreach(var item in obj.ToArray()){if(item.Value is null)continue;if(item.Value is JsonValue value&&value.TryGetValue<string>(out var text)){if(item.Key=="evidence_id")obj[item.Key]=projection.SessionId+":"+text;else if(item.Key=="citation_ref")obj[item.Key]=LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(projection.SessionId!,null,text);}else Rewrite(item.Value,item.Key);}}
-            else if(node is JsonArray array)foreach(var item in array)if(item is not null)Rewrite(item,property);
+            foreach(var item in raw.OfType<JsonObject>()){var evidenceId=item["evidence_id"]?.GetValue<string>();var citation=item["citation_ref"]?.GetValue<string>();if(evidenceId is not null)item["evidence_id"]=projection.SessionId+":"+evidenceId;if(citation is not null)item["citation_ref"]=LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(projection.SessionId!,null,citation);}
         }
+        if(root["sanitized_span_observations"] is JsonArray observations)
+            foreach(var item in observations.OfType<JsonObject>()){var citation=item["citation_ref"]?.GetValue<string>();if(citation is not null)item["citation_ref"]=LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(projection.SessionId!,null,citation);}
+        return root;
     }
     internal static bool MatchesFrozenMembership(LocalRepositoryScopeSessionSnapshot row,long repositoryArchiveRevision,JsonElement member)=>row.IsRequestedScopeMember&&row.AssignmentRevision==member.GetProperty("assignment_revision").GetInt64()&&row.ArchiveRevision==member.GetProperty("session_archive_revision").GetInt64()&&repositoryArchiveRevision==member.GetProperty("repository_archive_revision").GetInt64();
     internal static string? PreviewExclusion(LocalRepositoryScopeSessionSnapshot row,string archiveScope)=>!row.IsRequestedScopeMember?"repository_mismatch":archiveScope=="active_only"&&!row.IsEffectivelyEligible?(row.ArchiveExclusionReason=="repository_archived"?"repository_archived":"session_archived"):null;

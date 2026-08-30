@@ -71,12 +71,13 @@ public sealed class LocalAiProductionStackTests
             using var response=await first.Client.SendAsync(Post("/api/local-monitor/v1/ai/repository-preview",previewBody));
             Assert.Equal(HttpStatusCode.OK,response.StatusCode);using var json=JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());var snapshotId=json.RootElement.GetProperty("snapshot_id").GetString()!;var hash=json.RootElement.GetProperty("payload_sha256").GetString()!;
             using(var locked=Open(temp.DatabasePath)){using(var begin=locked.CreateCommand()){begin.CommandText="BEGIN EXCLUSIVE;";begin.ExecuteNonQuery();}var runBody=JsonSerializer.Serialize(new{schema_version="local-ai-repository-run.request.v1",snapshot_id=snapshotId,payload_sha256=hash,timeout_seconds=60});using var busy=await first.Client.SendAsync(Post("/api/local-monitor/v1/ai/repository-runs",runBody));Assert.Equal(HttpStatusCode.ServiceUnavailable,busy.StatusCode);Assert.Equal("{\"error\":\"persistence_busy\"}",await busy.Content.ReadAsStringAsync());using var rollback=locked.CreateCommand();rollback.CommandText="ROLLBACK;";rollback.ExecuteNonQuery();}
-            var provider=new CapturingProvider();var restartedRepository=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider);
-            var restartedApplication=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,restartedRepository,provider,timeProvider:temp.TimeProvider,repositories:new LocalAiRepositorySnapshotAdapterV1(scope,scope,historical,temp.TimeProvider));
+            var provider=new RepositoryRawProvider();var restartedRepository=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider);
+            var restartedApplication=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,restartedRepository,provider,static (_,_,_)=>ValueTask.FromResult("raw-safe"u8.ToArray()),timeProvider:temp.TimeProvider,repositories:new LocalAiRepositorySnapshotAdapterV1(scope,scope,historical,temp.TimeProvider));
             var start=await restartedApplication.StartRepositoryAsync(new(snapshotId,hash,60),CancellationToken.None);Assert.Null(start.ErrorCode);Assert.NotNull(start.RunId);
-            Assert.Equal("zero_findings",(await Poll(first.Client,$"/api/local-monitor/v1/ai/runs/{start.RunId}")).GetProperty("state").GetString());
+            var status=await Poll(first.Client,$"/api/local-monitor/v1/ai/runs/{start.RunId}");Assert.Equal("succeeded",status.GetProperty("state").GetString());
             Assert.NotNull(provider.Request);var request=provider.Request!;var payload=Encoding.UTF8.GetString(request.Snapshot.PayloadCanonicalJson);
             Assert.Contains("repository_safe_evidence",payload,StringComparison.Ordinal);Assert.Contains($"/sessions/{SessionId}?node=",payload,StringComparison.Ordinal);Assert.DoesNotContain("\"citation_ref\":\"node-",payload,StringComparison.Ordinal);
+            Assert.Equal(1,provider.Count);Assert.True(provider.PrefixedReadSucceeded);Assert.True(provider.UnprefixedReadRejected);Assert.Equal(provider.IndexedLocation,status.GetProperty("result").GetProperty("findings")[0].GetProperty("evidence_refs")[0].GetString());
             using(var connection=Open(temp.DatabasePath))
             {
                 using var mutate=connection.CreateCommand();mutate.CommandText="UPDATE session_repository_manual_overrides SET revision=2 WHERE session_id=$session; UPDATE session_repository_assignment_revisions SET revision=2 WHERE session_id=$session;";mutate.Parameters.AddWithValue("$session",SessionId);mutate.ExecuteNonQuery();
@@ -227,6 +228,16 @@ public sealed class LocalAiProductionStackTests
             return LocalAiProviderOutcomeV1.Complete(bytes);}}
     private sealed class CapturingProvider:ILocalAiProviderAdapterV1
     {public int Count{get;private set;}public LocalAiProviderRequestV1? Request{get;private set;}public ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request,CancellationToken token){Count++;Request=request;return ValueTask.FromResult(LocalAiProviderOutcomeV1.Complete("{\"summary\":\"none\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}"u8.ToArray()));}}
+    private sealed class RepositoryRawProvider:ILocalAiProviderAdapterV1
+    {
+        public int Count{get;private set;}public LocalAiProviderRequestV1? Request{get;private set;}public bool PrefixedReadSucceeded{get;private set;}public bool UnprefixedReadRejected{get;private set;}public string? IndexedLocation{get;private set;}
+        public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request,CancellationToken token)
+        {
+            Count++;Request=request;using var payload=JsonDocument.Parse(request.Snapshot.PayloadCanonicalJson);var raw=payload.RootElement.GetProperty("raw_content")[0];var handle=raw.GetProperty("evidence_id").GetString()!;IndexedLocation=raw.GetProperty("citation_ref").GetString()!;PrefixedReadSucceeded=Encoding.UTF8.GetString(await request.RawReads.ReadAsync(handle,token))=="raw-safe";
+            try{await request.RawReads.ReadAsync(handle[(handle.IndexOf(':')+1)..],token);}catch(LocalAiRawReadException exception) when(exception.Message=="raw_scope_rejected"){UnprefixedReadRejected=true;}
+            return LocalAiProviderOutcomeV1.Complete(JsonSerializer.SerializeToUtf8Bytes(new{summary="supported",findings=new[]{new{finding_id="f-1",title="title",explanation="explanation",evidence_state="supported",evidence_refs=new[]{IndexedLocation},limitation="none"}},improvement_suggestions=Array.Empty<object>(),limitations=Array.Empty<object>()}));
+        }
+    }
     private sealed class ThrowProjection:ILocalAiSnapshotProjectionServiceV1
     {public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string id,CancellationToken token)=>throw new InvalidOperationException();public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string id,string node,CancellationToken token)=>throw new InvalidOperationException();public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>throw new InvalidOperationException();}
     private sealed class ThrowHistorical:IHistoricalEvidenceSnapshotSourceV1{public ValueTask<IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(HistoricalEvidenceSelectionV1 selection,CancellationToken token)=>throw new InvalidOperationException();}

@@ -58,11 +58,15 @@ public sealed class LocalAiExtendedScopeTests
         var comparison=ProviderRequest("comparison");
         var comparisonPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(comparison);
         Assert.Contains("stored observed differences",comparisonPrompt,StringComparison.Ordinal);
+        Assert.Contains("Cite only the exact supplied evidence locations",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state an effect verdict",comparisonPrompt,StringComparison.Ordinal);
         var repositoryPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("repository_selection"));
         Assert.Contains("Do not explore",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("never cite a bare node ID",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state or promote AI output as a deterministic fact",repositoryPrompt,StringComparison.Ordinal);
+        Assert.DoesNotContain("only canonical node IDs",repositoryPrompt,StringComparison.Ordinal);
+        Assert.Contains("only canonical node IDs",GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("session")),StringComparison.Ordinal);
+        Assert.Contains("only canonical node IDs",GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("node")),StringComparison.Ordinal);
     }
 
     private static LocalAiProviderRequestV1 ProviderRequest(string scope)
@@ -78,7 +82,7 @@ public sealed class LocalAiExtendedScopeTests
     public void RepositoryProjection_ComposesActualSelectedPayloadAndSessionOwnedLocations()
     {
         var projection=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,"session",RepositoryId,null,RepositoryId,"revision",
-            "{\"session_facts\":{\"status\":\"completed\",\"citation_ref\":\"node-11111111111111111111111111111111\"},\"raw_content\":[{\"evidence_id\":\"raw-1\",\"citation_ref\":\"node-11111111111111111111111111111111\",\"state\":\"available\"}]}"u8.ToArray(),
+            "{\"session_facts\":{\"status\":\"completed\",\"citation_ref\":\"user-citation\",\"evidence_id\":\"user-evidence\"},\"sanitized_span_observations\":[{\"citation_ref\":\"node-11111111111111111111111111111111\",\"observation\":\"safe\"}],\"raw_content\":[{\"evidence_id\":\"raw-1\",\"citation_ref\":\"node-11111111111111111111111111111111\",\"state\":\"available\"}]}"u8.ToArray(),
             "{\"evidence_refs\":[\"node-11111111111111111111111111111111\"]}"u8.ToArray(),new string('a',64),new HashSet<string>{"node-11111111111111111111111111111111"});
         var payload=LocalAiRepositorySnapshotAdapterV1.ComposeSelectedPayload(RepositoryId,[projection],"{\"distribution\":{\"source_kinds\":[]}}"u8.ToArray());
         var text=Encoding.UTF8.GetString(payload);
@@ -86,6 +90,8 @@ public sealed class LocalAiExtendedScopeTests
         Assert.Contains($"/sessions/{RepositoryId}?node=node-11111111111111111111111111111111",text,StringComparison.Ordinal);
         Assert.Contains($"\"evidence_id\":\"{RepositoryId}:raw-1\"",text,StringComparison.Ordinal);
         Assert.DoesNotContain("\"citation_ref\":\"node-11111111111111111111111111111111\"",text,StringComparison.Ordinal);
+        Assert.Contains("\"citation_ref\":\"user-citation\"",text,StringComparison.Ordinal);
+        Assert.Contains("\"evidence_id\":\"user-evidence\"",text,StringComparison.Ordinal);
         Assert.Contains("source_kinds",text,StringComparison.Ordinal);
     }
 
