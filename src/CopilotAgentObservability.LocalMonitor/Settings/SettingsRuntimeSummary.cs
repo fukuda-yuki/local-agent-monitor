@@ -32,7 +32,7 @@ internal sealed class SettingsRuntimeSummary(
         RawReceiveActivity? activity = null;
         try
         {
-            activity = store.GetRawReceiveActivity(timeProvider.GetUtcNow().AddSeconds(-300));
+            activity = store.GetRawReceiveActivity(timeProvider.GetUtcNow());
         }
         catch
         {

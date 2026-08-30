@@ -24,6 +24,7 @@ public sealed class SettingsRuntimeRouteTests
         Insert(store, Start.AddSeconds(-301), "SECRET_OLD_PAYLOAD");
         Insert(store, Start.AddSeconds(-300), "SECRET_BOUNDARY_PAYLOAD");
         Insert(store, Start.AddSeconds(-1), "SECRET_LATEST_PAYLOAD");
+        Insert(store, Start.AddSeconds(1), "SECRET_FUTURE_PAYLOAD");
 
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
         {
@@ -104,6 +105,19 @@ public sealed class SettingsRuntimeRouteTests
         await using (var host = await MonitorTestHost.StartAsync(temp, testOptions: new() { StartWriter = false, StartProjectionWorker = false }))
         {
             await AssertError(await host.Client.SendAsync(new(HttpMethod.Put, Path)), 405, "method_not_allowed");
+            await AssertError(await host.Client.SendAsync(new(new HttpMethod("PROPFIND"), Path)), 405, "method_not_allowed");
+            using (var upper = await host.Client.GetAsync("/API/local-monitor/v1/settings/runtime"))
+            {
+                Assert.Equal(HttpStatusCode.NotFound, upper.StatusCode);
+                Assert.True(upper.Headers.CacheControl?.NoStore);
+                Assert.Equal(string.Empty, await upper.Content.ReadAsStringAsync());
+            }
+            using (var trailing = await host.Client.GetAsync(Path + "/"))
+            {
+                Assert.Equal(HttpStatusCode.NotFound, trailing.StatusCode);
+                Assert.True(trailing.Headers.CacheControl?.NoStore);
+                Assert.Equal(string.Empty, await trailing.Content.ReadAsStringAsync());
+            }
             await AssertError(await host.Client.GetAsync(Path + "?extra=1"), 400, "invalid_request");
             await AssertError(await host.Client.SendAsync(new(HttpMethod.Get, Path) { Content = new StringContent("{}", Encoding.UTF8, "application/json") }), 400, "invalid_request");
             using var origin = new HttpRequestMessage(HttpMethod.Get, Path);
@@ -129,6 +143,10 @@ public sealed class SettingsRuntimeRouteTests
         {
             Assert.Equal((HttpStatusCode)status, response.StatusCode);
             Assert.True(response.Headers.CacheControl?.NoStore);
+            if (status == 405)
+            {
+                Assert.Equal(["GET"], response.Content.Headers.Allow);
+            }
             Assert.Equal($"{{\"error\":\"{code}\"}}", await response.Content.ReadAsStringAsync());
         }
     }

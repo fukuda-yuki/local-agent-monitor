@@ -19,6 +19,7 @@
   let requestGeneration = 0;
   let selectedSettings = null;
   let aiCheckController = null;
+  let receiverRuntimeController = null;
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const DIGEST = /^[0-9a-f]{64}$/;
   const READINESS_REASONS = Object.freeze({
@@ -511,8 +512,12 @@
 
   async function loadReceiverRuntime(generation) {
     const target = owned.get("receiver")?.querySelector("[data-settings-receiver-runtime] p");
+    receiverRuntimeController?.abort();
+    const controller = receiverRuntimeController = new AbortController();
     try {
-      const response = await fetch("/api/local-monitor/v1/settings/runtime", { cache: "no-store", credentials: "same-origin" });
+      const response = await fetch("/api/local-monitor/v1/settings/runtime", {
+        cache: "no-store", credentials: "same-origin", signal: controller.signal,
+      });
       if (!response.ok) throw new Error();
       const value = await response.json();
       if (!exact(value, ["application_started_at", "receiver_readiness", "endpoint", "activity_state", "latest_received_at",
@@ -533,14 +538,22 @@
         : `直近5分 ${value.recent_received_count}件 · 最新受信 ${value.latest_received_at === null ? "記録なし" : format(value.latest_received_at)}`;
       target.textContent = `開始 ${format(value.application_started_at)} · 受信先 HTTP · ループバック · ポート ${value.endpoint.port} · ${activity} · 再起動要否は確認できません`;
     } catch {
-      if (generation === requestGeneration && target) target.textContent = "稼働情報を読み込めませんでした。";
+      if (!controller.signal.aborted && generation === requestGeneration && target) target.textContent = "稼働情報を読み込めませんでした。";
+    } finally {
+      if (receiverRuntimeController === controller) receiverRuntimeController = null;
     }
+  }
+
+  function invalidateReceiverRuntimeLoad() {
+    receiverRuntimeController?.abort();
+    receiverRuntimeController = null;
   }
 
   function select(section) {
     const selected = sections.some(([token]) => token === section) ? section : "state";
     if (selectedSettings === "archive" && selected !== "archive") invalidateArchiveLoad();
     if (selectedSettings === "ai" && selected !== "ai") { aiCheckController?.abort(); aiCheckController = null; }
+    if (selectedSettings === "receiver") invalidateReceiverRuntimeLoad();
     selectedSettings = selected;
     for (const [token] of sections) {
       const nav = navigation.querySelector(`[data-settings-navigation='${token}']`);
@@ -558,6 +571,7 @@
       selectedSettings = null;
       aiCheckController?.abort();
       aiCheckController = null;
+      invalidateReceiverRuntimeLoad();
       invalidateArchiveLoad();
     }
   });
@@ -575,6 +589,7 @@
     selectedSettings = null;
     aiCheckController?.abort();
     aiCheckController = null;
+    invalidateReceiverRuntimeLoad();
     invalidateArchiveLoad();
   });
   const initial = window.LocalMonitorV1History.current();

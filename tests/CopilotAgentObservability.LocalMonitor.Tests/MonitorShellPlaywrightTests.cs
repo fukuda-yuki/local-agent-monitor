@@ -817,6 +817,48 @@ public class MonitorShellPlaywrightTests
     }
 
     [Fact]
+    public async Task Shell_UnifiedSettings_CancelsReceiverRuntimeReadWhenLeavingOrClosing()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.AddInitScriptAsync(
+            """
+            (() => {
+              const original = window.fetch.bind(window);
+              window.runtimeRequests = 0;
+              window.runtimeAborts = 0;
+              window.fetch = (input, init = {}) => {
+                if (String(input).endsWith("/api/local-monitor/v1/settings/runtime")) {
+                  window.runtimeRequests++;
+                  return new Promise((resolve, reject) => {
+                    init.signal?.addEventListener("abort", () => {
+                      window.runtimeAborts++;
+                      reject(new DOMException("Aborted", "AbortError"));
+                    }, { once: true });
+                  });
+                }
+                return original(input, init);
+              };
+            })();
+            """);
+
+        await page.GotoAsync($"{host.Url}/sessions?settings=receiver", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("[data-settings-section='receiver']")).ToBeVisibleAsync();
+        await page.WaitForFunctionAsync("() => window.runtimeRequests === 1");
+        await page.Locator("[data-settings-navigation='state']").ClickAsync();
+        await page.WaitForFunctionAsync("() => window.runtimeAborts === 1");
+
+        await page.Locator("[data-settings-navigation='receiver']").ClickAsync();
+        await page.WaitForFunctionAsync("() => window.runtimeRequests === 2");
+        await page.Locator("#settings-modal-close").ClickAsync();
+        await page.WaitForFunctionAsync("() => window.runtimeAborts === 2");
+    }
+
+    [Fact]
     public async Task Shell_SettingsModal_ContainsBidirectionalFocus()
     {
         using var temp = new MonitorTempDirectory();

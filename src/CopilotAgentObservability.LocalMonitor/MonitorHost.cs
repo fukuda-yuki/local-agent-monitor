@@ -899,12 +899,20 @@ internal static class MonitorHost
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
             var settingsAiReadinessPath = !options.SanitizedOnly
                 && context.Request.Path == "/api/local-monitor/v1/settings/ai-readiness";
+            var requestPath = context.Request.Path.Value ?? string.Empty;
             var settingsRuntimePath = !options.SanitizedOnly
-                && context.Request.Path == "/api/local-monitor/v1/settings/runtime";
+                && string.Equals(requestPath, "/api/local-monitor/v1/settings/runtime", StringComparison.Ordinal);
+            var settingsRuntimeNearPath = !options.SanitizedOnly
+                && !settingsRuntimePath
+                && string.Equals(
+                    requestPath.EndsWith("/", StringComparison.Ordinal) ? requestPath[..^1] : requestPath,
+                    "/api/local-monitor/v1/settings/runtime",
+                    StringComparison.OrdinalIgnoreCase);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
                 || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
-                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath || settingsRuntimePath)
+                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath
+                || settingsRuntimePath || settingsRuntimeNearPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -1006,6 +1014,20 @@ internal static class MonitorHost
                 context.Response.Headers.CacheControl = "no-store";
                 context.Response.StatusCode = StatusCodes.Status404NotFound;
                 context.Response.ContentLength = 0;
+                return;
+            }
+
+            if (settingsRuntimeNearPath)
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                context.Response.ContentLength = 0;
+                return;
+            }
+
+            if (settingsRuntimePath && !HttpMethods.IsGet(context.Request.Method))
+            {
+                context.Response.Headers.Allow = "GET";
+                await WriteSettingsAiErrorAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed");
                 return;
             }
 

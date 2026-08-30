@@ -4,17 +4,18 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed partial class RawTelemetryStore
 {
-    public RawReceiveActivity GetRawReceiveActivity(DateTimeOffset windowStartInclusive)
+    public RawReceiveActivity GetRawReceiveActivity(DateTimeOffset sampledNow)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT MAX(received_at),
-                   SUM(CASE WHEN received_at >= $window_start THEN 1 ELSE 0 END)
+            SELECT MAX(CASE WHEN received_at <= $window_end THEN received_at END),
+                   SUM(CASE WHEN received_at >= $window_start AND received_at <= $window_end THEN 1 ELSE 0 END)
             FROM raw_records;
             """;
-        AddParameter(command, "$window_start", windowStartInclusive.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        AddParameter(command, "$window_start", sampledNow.AddSeconds(-300).ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        AddParameter(command, "$window_end", sampledNow.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
         using var reader = command.ExecuteReader();
         reader.Read();
         var latest = reader.IsDBNull(0)
