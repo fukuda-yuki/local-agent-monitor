@@ -91,6 +91,11 @@ public sealed class RuntimeBackupLocalAiComponentTests
         try
         {
             var time = Time();
+            var wallTime = DateTimeOffset.UtcNow;
+            var mutableTime = time.GetUtcNow();
+            var boundaryBase = wallTime > mutableTime ? wallTime : mutableTime;
+            var expiryTime = boundaryBase.AddDays(1);
+            var validationTime = boundaryBase.AddDays(2);
             var source = Path.Combine(root, "source.db");
             var sourceCatalog = Initialize(source, time);
             new LocalAiAnalysisStoreV1(source, sourceCatalog, time).InsertSnapshot(
@@ -104,10 +109,11 @@ public sealed class RuntimeBackupLocalAiComponentTests
             using (var connection = Open(target))
             {
                 using var command = connection.CreateCommand();
-                command.CommandText = "UPDATE retention_items SET state='expiring',expires_at='2050-01-01T00:00:00.0000000+00:00' WHERE source_item_id LIKE 'local_ai:%';";
+                command.CommandText = "UPDATE retention_items SET state='expiring',expires_at=$expiry WHERE source_item_id LIKE 'local_ai:%';";
+                command.Parameters.AddWithValue("$expiry", expiryTime.ToString("O"));
                 Assert.Equal(1, command.ExecuteNonQuery());
             }
-            time.Advance(new DateTimeOffset(2099, 8, 30, 1, 0, 0, TimeSpan.Zero) - time.GetUtcNow());
+            time.Advance(validationTime - mutableTime);
 
             var safetyBackup = Path.Combine(root, "safety.zip");
             var restored = service.Restore(
