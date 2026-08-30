@@ -431,6 +431,7 @@ internal static class MonitorHost
                     skillRuntimeBridgeHolder.CurrentBridge,
                     sessionEventQueue,
                     testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
+                    timeProvider,
                     ownedDirectory => OwnedCopilotSdkClientV1.TryCreate(
                         ownedDirectory,
                         static clientOptions => new CopilotClient(clientOptions),

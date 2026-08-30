@@ -70,7 +70,8 @@ internal static class OwnedSessionPostFreezeOutcomeObservationV1
 internal sealed class OwnedSessionPostCompletionImporterV1(
     SkillRuntimeCapabilityBridgeV1 bridge,
     SessionEventQueue sessionEventQueue,
-    TimeSpan commitTimeout)
+    TimeSpan commitTimeout,
+    TimeProvider timeProvider)
 {
     public async Task<OwnedSessionPostFreezeOutcomeV1> ImportAsync(
         CopilotRuntimeGenerationV1 candidate,
@@ -117,7 +118,7 @@ internal sealed class OwnedSessionPostCompletionImporterV1(
             return start ? OwnedSessionPostFreezeOutcomeV1.StartQueueRefused : OwnedSessionPostFreezeOutcomeV1.TerminalQueueRefused;
         try
         {
-            return await request.Completion.WaitAsync(commitTimeout, cancellationToken).ConfigureAwait(false) switch
+            return await request.Completion.WaitAsync(commitTimeout, timeProvider, cancellationToken).ConfigureAwait(false) switch
             {
                 SessionEventCommitStatus.Committed => OwnedSessionPostFreezeOutcomeV1.Success,
                 SessionEventCommitStatus.Busy => start ? OwnedSessionPostFreezeOutcomeV1.StartCommitBusy : OwnedSessionPostFreezeOutcomeV1.TerminalCommitBusy,

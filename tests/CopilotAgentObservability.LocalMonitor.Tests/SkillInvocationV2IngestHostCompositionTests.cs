@@ -286,7 +286,8 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
         var importer = new OwnedSessionPostCompletionImporterV1(
             bridge,
             host.Services.GetRequiredService<SessionEventQueue>(),
-            TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(5),
+            temp.TimeProvider);
 
         var outcome = await importer.ImportAsync(candidate, prepared, CancellationToken.None);
 

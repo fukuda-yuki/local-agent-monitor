@@ -373,7 +373,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
         if (prepared.Bodies.Count != 0)
         {
             var importer = new OwnedSessionPostCompletionImporterV1(
-                context.Bridge!, context.SessionEventQueue, context.CommitTimeout);
+                context.Bridge!, context.SessionEventQueue, context.CommitTimeout, context.TimeProvider);
             OwnedSessionPostFreezeOutcomeV1 outcome;
             try
             {

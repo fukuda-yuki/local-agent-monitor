@@ -67,6 +67,7 @@ internal sealed record CopilotAnalysisRootsExecutionContext(
     SkillRuntimeCapabilityBridgeV1? Bridge,
     SessionEventQueue SessionEventQueue,
     TimeSpan CommitTimeout,
+    TimeProvider TimeProvider,
     Func<string, IOwnedCopilotClientV1?> OwnedClientFactory,
     Func<string, bool> EnvironmentEntryPresent,
     CancellationToken HostStoppingToken,
