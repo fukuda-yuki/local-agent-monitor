@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,6 +20,20 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     {
         var input = ProjectionInput(executions, events, spans);
         Assert.Throws<LocalAiScopeTooLargeException>(() => LocalAiSnapshotProjectionBuilderV1.BuildSession(input));
+    }
+
+    [Fact]
+    public void SessionProjectionAcceptsExactDocumentCeilingAndRejectsOneByteOverflow()
+    {
+        var baseline = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
+        var exactText = new string('x', LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes - baseline.PayloadCanonicalJson.Length + 2);
+        var exact = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0) with
+        {
+            SessionFacts = JsonSerializer.SerializeToElement(exactText),
+        });
+        Assert.Equal(LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes, exact.PayloadCanonicalJson.Length);
+        Assert.Throws<LocalAiScopeTooLargeException>(() => LocalAiSnapshotProjectionBuilderV1.BuildSession(
+            ProjectionInput(1, 1, 0) with { SessionFacts = JsonSerializer.SerializeToElement(exactText + "x") }));
     }
 
     [Fact]

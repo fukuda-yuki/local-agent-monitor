@@ -120,7 +120,11 @@ internal static class LocalAiSnapshotProjectionBuilderV1
                 .Select(static item => new { evidence_id=item.EvidenceId, state=item.Locator.State,
                     selected_utf8_bytes=item.Locator.SelectedUtf8Bytes }).ToArray(),
         }));
+        if (payload.Length > LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes)
+            throw new LocalAiScopeTooLargeException();
         var index = LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new { evidence_refs = evidence }));
+        if (index.Length > LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes)
+            throw new LocalAiScopeTooLargeException();
         return new(Guid.CreateVersion7().ToString(), kind, input.SessionId, nodeId, anchorId, input.Revision,
             payload, index, Convert.ToHexStringLower(SHA256.HashData(payload)), evidence.ToHashSet(StringComparer.Ordinal),
             rawEvidence.ToDictionary(static item => item.EvidenceId, StringComparer.Ordinal));

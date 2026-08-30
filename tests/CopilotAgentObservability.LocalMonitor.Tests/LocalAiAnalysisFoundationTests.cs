@@ -109,6 +109,8 @@ public sealed class LocalAiAnalysisFoundationTests
         var store = database.NodeStore(time);
         store.InsertSnapshot(Snapshot(NodeSnapshotId, "node", "node-1"));
         store.InsertSnapshot(Snapshot(FreshOrphanSnapshotId, "node", "node-orphan"));
+        var oldRunlessSnapshotId = Guid.CreateVersion7().ToString();
+        store.InsertSnapshot(Snapshot(oldRunlessSnapshotId, "node", "node-old-runless"));
         var run = Complete(store, Request(NodeSnapshotId, "node", "node-1"), Result(scope: Scope("node", "node-1"), snapshotId: NodeSnapshotId));
         var queued = store.CreateRun(Request(FreshOrphanSnapshotId, "node", "node-orphan"));
         var runningSnapshotId = Guid.CreateVersion7().ToString();
@@ -118,7 +120,6 @@ public sealed class LocalAiAnalysisFoundationTests
         time.Advance(TimeSpan.FromTicks(1));
         var youngSnapshotId = Guid.CreateVersion7().ToString();
         store.InsertSnapshot(Snapshot(youngSnapshotId, "node", "node-young"));
-        var young = store.CreateRun(Request(youngSnapshotId, "node", "node-young") with { RequestedAt = time.GetUtcNow() });
 
         var sessionStore = database.Store(time: time);
         var sessionSnapshotId = Guid.CreateVersion7().ToString();
@@ -132,7 +133,8 @@ public sealed class LocalAiAnalysisFoundationTests
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id IN ('" + queued.RunId + "','" + running.RunId + "');"));
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + NodeSnapshotId + "';"));
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id IN ('" + FreshOrphanSnapshotId + "','" + runningSnapshotId + "');"));
-        Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + young.RunId + "';"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + oldRunlessSnapshotId + "';"));
+        Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + youngSnapshotId + "';"));
         Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + sessionRun.RunId + "';"));
     }
 
