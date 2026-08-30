@@ -5,7 +5,7 @@
       data-session-id="@Model.Path!.SessionId">
     <header class="local-monitor-session-context" data-session-context>
         <nav aria-label="パンくず"><a href="/sessions">Session Explorer</a> / <span data-session-breadcrumb>Session</span></nav>
-        <h1 data-session-title>Session</h1>
+        <div class="local-monitor-session-title-row"><h1 data-session-title>Session</h1><button type="button" data-session-ai-open hidden>AIで分析</button></div>
         <div data-session-context-content role="status" aria-live="polite">Session を読み込んでいます</div>
     </header>
     <section class="local-monitor-session-summary" data-session-summary aria-label="Session 全体の概要"></section>
@@ -20,5 +20,15 @@
         <header><h2 id="local-monitor-raw-dialog-title" data-raw-content-title>Raw content</h2><button type="button" data-raw-content-close aria-label="閉じる">×</button></header>
         <div data-raw-content-status role="status" aria-live="polite"></div>
         <pre data-raw-content-text tabindex="0"></pre>
+    </div>
+</dialog>
+<dialog class="local-monitor-ai-dialog" data-session-ai-dialog aria-labelledby="local-monitor-session-ai-title">
+    <div class="local-monitor-ai-dialog-frame">
+        <header><h2 id="local-monitor-session-ai-title">Session AI分析</h2><button type="button" data-session-ai-close>閉じる</button></header>
+        <p>選択した Session と利用可能な raw content は GitHub Copilot service へ送信される場合があります。</p>
+        <div data-session-ai-status role="status" aria-live="polite"></div>
+        <nav data-session-ai-history aria-label="過去のSession分析"></nav>
+        <div data-session-ai-report></div>
+        <footer><button type="button" data-session-ai-regenerate>再分析</button><button type="button" data-session-ai-cancel hidden>キャンセル</button><button type="button" data-session-ai-more hidden>さらに読み込む</button></footer>
     </div>
 </dialog>

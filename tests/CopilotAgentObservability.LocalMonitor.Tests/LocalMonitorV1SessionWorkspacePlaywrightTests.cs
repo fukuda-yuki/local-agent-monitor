@@ -12,6 +12,47 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 {
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
+    private const string AiRunId = "018f0000-0000-7000-8000-000000000071";
+
+    [Fact]
+    public async Task AiActionsAreReadyOnlyAndSessionReportUsesExactRunHistoryAndInertEvidence()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var readiness = "unconfigured"; var reports = 0; var starts = 0; var raw = "<img src=x onerror=window.__aiExecuted=true>";
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json"))));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json($$"""{"provider":"github_copilot","selected_model":null,"selected_configuration":null,"readiness_state":"{{readiness}}","last_check_result":"not_checked","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => { reports++; return r.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult(raw)}},"snapshot_changed":true}],"next_cursor":"Y3Vyc29y"}""")); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs", r => { starts++; return r.FulfillAsync(new RouteFulfillOptions { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" }); });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult(raw)}}}""")));
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        var action = page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }); await Expect(action).ToHaveCountAsync(0); Assert.Equal(0, reports);
+        readiness = "ready"; await page.ReloadAsync(); await Expect(action).ToBeVisibleAsync(); Assert.Equal(1, reports);
+        await action.ClickAsync(); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "Session AI分析" }); await Expect(dialog).ToContainTextAsync("GitHub Copilot service"); await Expect(dialog).ToContainTextAsync(raw); await Expect(dialog).ToContainTextAsync("前回の分析後に記録が更新されています");
+        Assert.False(await page.EvaluateAsync<bool>("() => Boolean(window.__aiExecuted)")); Assert.Contains($"analysis={AiRunId}", page.Url); Assert.Equal(0, starts);
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync(); Assert.Equal(1, starts);
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "閉じる" }).ClickAsync(); await Expect(action).ToBeFocusedAsync();
+    }
+
+    [Fact]
+    public async Task NodeAiIsTransientResendsOnlyPageMemoryTranscriptAndNavigatesExactEvidence()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("event"); var bodies = new List<string>(); var run = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json("""{"provider":"github_copilot","selected_model":"synthetic","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs", r => { bodies.Add(r.Request.PostData!); run++; return r.FulfillAsync(new RouteFulfillOptions { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"018f0000-0000-7000-8000-00000000007{{run}}"}""" }); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs/*", r => r.FulfillAsync(Json($$"""{"run_id":"018f0000-0000-7000-8000-00000000007{{run}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{AiResult("answer", "node-a8a773d6614d5030f505ff195b452dd6")}}}""")));
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var action = page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }); await Expect(action).ToBeVisibleAsync(); await action.ClickAsync();
+        var surface = page.Locator("[data-node-ai-surface]"); await Expect(surface).ToContainTextAsync("GitHub Copilot service"); await Expect(page.Locator("[data-session-executions]")).ToBeVisibleAsync();
+        await surface.GetByRole(AriaRole.Textbox).FillAsync("why?"); await surface.GetByRole(AriaRole.Button, new() { Name = "質問する" }).ClickAsync();
+        Assert.Equal(2, bodies.Count); Assert.DoesNotContain("prior_turns", bodies[0]); Assert.Contains("\"question\":\"why?\"", bodies[1]); Assert.Contains("\"prior_turns\":[{\"question\":\"\",\"answer\":\"answer\"}]", bodies[1]);
+        Assert.DoesNotContain("answer", page.Url); Assert.Null(await page.EvaluateAsync<string?>("() => localStorage.getItem('local-ai') ?? sessionStorage.getItem('local-ai')")); await Expect(page.GetByText("過去の分析")).ToHaveCountAsync(0);
+        await surface.GetByRole(AriaRole.Button, new() { Name = "証拠を表示" }).ClickAsync(); Assert.Contains("execution=9a5590c8-46e3-7069-af48-3844d2bf17a4", page.Url); Assert.Contains("node=node-a8a773d6614d5030f505ff195b452dd6", page.Url); await Expect(page.Locator("[data-timeline-node][aria-selected=true]")).ToHaveCountAsync(1);
+        await page.ReloadAsync(); await Expect(page.Locator("[data-node-ai-surface]")).ToHaveCountAsync(0); Assert.Equal(2, bodies.Count);
+    }
 
     [Fact]
     public async Task TimelineTreeSupportsKeyboardNavigationSelectionAndFocusPreservation()
@@ -813,6 +854,13 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
     private static string Summary(string name) => File.ReadAllText(Path.GetFullPath(Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "TestData", "LocalMonitorV1SessionDetail", name)));
+
+    private static string AiResult(string summary, string evidence = "node-a8a773d6614d5030f505ff195b452dd6") =>
+        "{\"scope\":{\"kind\":\"session\",\"session_id\":\"" + SessionId + "\",\"node_id\":null,\"anchor_id\":\"" + SessionId
+        + "\"},\"snapshot\":{\"snapshot_id\":\"018f0000-0000-7000-8000-000000000072\",\"payload_sha256\":\"" + new string('a', 64)
+        + "\"},\"summary\":" + System.Text.Json.JsonSerializer.Serialize(summary)
+        + ",\"findings\":[{\"finding_id\":\"f-1\",\"title\":\"Finding\",\"explanation\":\"Explanation\",\"evidence_state\":\"supported\",\"evidence_refs\":[\""
+        + evidence + "\"],\"limitation\":\"none\"}],\"improvement_suggestions\":[],\"limitations\":[],\"provenance\":{\"provider\":\"github_copilot_sdk\",\"model\":\"synthetic\"}}";
 
     private static string ArtifactPath(string name)
     {

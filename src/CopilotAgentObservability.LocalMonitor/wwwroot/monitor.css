@@ -14,6 +14,8 @@
 .local-monitor-session-workspace { display: grid; grid-template-rows: minmax(0, 72px) 104px minmax(0, 1fr); height: calc(100vh - 32px); overflow: hidden; }
 .local-monitor-session-context { padding: 8px 16px; overflow: hidden; }
 .local-monitor-session-context h1 { margin: 2px 0; font-size: 1.1rem; }
+.local-monitor-session-title-row { align-items: center; display: flex; gap: 12px; min-width: 0; }
+.local-monitor-session-title-row h1 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-monitor-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .local-monitor-session-context [data-session-context-content] { display: flex; gap: 8px; align-items: baseline; }
 .local-monitor-session-summary { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 8px; padding: 8px 16px; overflow-x: auto; }
@@ -38,6 +40,15 @@
 @media (max-width: 1179px) { .local-monitor-session-execution-workspace { display: block; position: relative; } .local-monitor-session-inspector { position: absolute; z-index: 10; inset: 0 0 0 auto; width: min(420px, 100%); background: var(--monitor-surface-panel); color: var(--monitor-ink); box-shadow: -8px 0 24px rgb(0 0 0 / 24%); } .local-monitor-session-inspector[aria-hidden="true"] { display: none; } }
 .local-monitor-session-inspector-close { float: right; }
 .local-monitor-session-timeline-node[aria-selected="true"] { outline: 2px solid var(--accent, #526de8); outline-offset: -2px; }
+.local-monitor-ai-dialog { border: 0; border-radius: 10px; max-height: min(700px, calc(100vh - 32px)); max-width: min(760px, calc(100vw - 32px)); padding: 0; width: 100%; }
+.local-monitor-ai-dialog-frame { display: grid; gap: 12px; max-height: inherit; overflow: auto; padding: 16px; }
+.local-monitor-ai-dialog-frame header, .local-monitor-ai-dialog-frame footer { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
+.local-monitor-ai-dialog-frame h2, .local-monitor-node-ai h3 { margin: 0; }
+.local-monitor-node-ai { border-top: 1px solid var(--border, #ddd); display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; }
+.local-monitor-node-ai textarea { box-sizing: border-box; min-height: 72px; max-width: 100%; width: 100%; }
+.local-monitor-ai-finding { border-left: 3px solid var(--accent, #526de8); margin: 8px 0; padding-left: 10px; }
+.local-monitor-ai-evidence-unavailable { display: block; color: var(--muted, #777); }
+@media (max-width: 560px) { .local-monitor-ai-dialog { height: calc(100vh - 16px); max-height: none; max-width: calc(100vw - 16px); } .local-monitor-ai-dialog-frame { box-sizing: border-box; } }
 
 /* Issue #95: contextual estimated-cost surface. */
 .cost-page {
