@@ -40,6 +40,8 @@ internal static class WindowsNativeFileApisV1
     internal const int FileBasicInformationClass = 4;
     internal const int FileStandardInformationClass = 5;
 
+    internal const uint FileBegin = 0;
+
     internal const uint DriveFixed = 3;
 
     internal static readonly uint DirectoryOpenAccess = Synchronize | FileReadAttributes;
@@ -152,6 +154,13 @@ internal static class WindowsNativeFileApisV1
         uint nNumberOfBytesToRead,
         out uint lpNumberOfBytesRead,
         IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool SetFilePointerEx(
+        SafeFileHandle hFile,
+        long liDistanceToMove,
+        out long lpNewFilePointer,
+        uint dwMoveMethod);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern uint GetFileType(SafeFileHandle hFile);

@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.SkillNative;
 
 // Gate 8 retained-root every-segment walker for Windows. One relative NtCreateFile per segment
 // beneath retained ancestor handles, FILE_OPEN_REPARSE_POINT on every open, identity proof on
-// every segment, a bounded same-handle read, and repeated identity/metadata/root proofs before
+// every segment, two bounded same-handle reads, and repeated identity/metadata/root proofs before
 // any classification. Descendant handles are noninheritable and disposed in reverse acquisition
 // order on every arm; the retained root handle belongs to the process generation and is never
 // disposed here.
@@ -160,6 +160,19 @@ internal sealed class WindowsCurrentSkillFileReaderV1 : ICurrentSkillNativeFileR
             hooks?.AfterReadCompleted?.Invoke(finalHandle);
             cancellationToken.ThrowIfCancellationRequested();
 
+            var reproofReadBuffer = new byte[MaximumReadBytes];
+            var (reproofReadTotal, reproofReadFailed) = ReadBounded(finalHandle, reproofReadBuffer, cancellationToken);
+            if (reproofReadFailed)
+            {
+                return CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.OtherNativeFailure);
+            }
+
+            if (reproofReadTotal != readTotal ||
+                !reproofReadBuffer.AsSpan(0, reproofReadTotal).SequenceEqual(pendingReadBuffer.AsSpan(0, readTotal)))
+            {
+                return CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Raced);
+            }
+
             var metadata = finalMetadata!.Value;
             if (!TryGetFileSize(finalHandle, out var reproofSize) ||
                 !WindowsNativeFileApisV1.TryGetIdentity(finalHandle, out var reproofVolume, out var reproofFileId) ||
@@ -263,6 +276,15 @@ internal sealed class WindowsCurrentSkillFileReaderV1 : ICurrentSkillNativeFileR
         byte[] pendingReadBuffer,
         CancellationToken cancellationToken)
     {
+        if (!WindowsNativeFileApisV1.SetFilePointerEx(
+                handle,
+                0,
+                out _,
+                WindowsNativeFileApisV1.FileBegin))
+        {
+            return (0, true);
+        }
+
         var bufferHandle = System.Runtime.InteropServices.GCHandle.Alloc(pendingReadBuffer, System.Runtime.InteropServices.GCHandleType.Pinned);
         try
         {
