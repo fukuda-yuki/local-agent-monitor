@@ -11,6 +11,8 @@ on:
 permissions:
   contents: read
 
+# Retention inventory diffs pinned historical SHAs. The checkout default
+# (fetch-depth: 1) omits those objects and fails git diff with "bad object".
 jobs:
   completion:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -21,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -60,6 +64,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -99,6 +105,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
