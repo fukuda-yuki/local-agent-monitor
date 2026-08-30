@@ -88,6 +88,12 @@ public sealed class ValidationRunnerContractTests
     [InlineData("empty")]
     [InlineData("unknown")]
     [InlineData("hash")]
+    [InlineData("missing-prerequisites")]
+    [InlineData("duplicate-prerequisite")]
+    [InlineData("traversal-prerequisite")]
+    [InlineData("invalid-prerequisite")]
+    [InlineData("null-prerequisites")]
+    [InlineData("scalar-prerequisite")]
     public async Task ManifestAssertionRejectsInvalidShardMembership(string defect)
     {
         using var directory = new TempDirectory();
@@ -109,10 +115,28 @@ public sealed class ValidationRunnerContractTests
         }
 
         var manifest = WriteManifest(directory.Path, required, baseline, shards);
-        if (defect == "hash")
+        if (defect is "hash" or "missing-prerequisites" or "duplicate-prerequisite" or
+            "traversal-prerequisite" or "invalid-prerequisite" or "null-prerequisites" or
+            "scalar-prerequisite")
         {
             var document = JsonNode.Parse(File.ReadAllText(manifest))!.AsObject();
-            document["baselineHash"] = "wrong";
+            var firstShard = document["shards"]![0]!.AsObject();
+            switch (defect)
+            {
+                case "hash": document["baselineHash"] = "wrong"; break;
+                case "missing-prerequisites": firstShard.Remove("prerequisiteProjects"); break;
+                case "duplicate-prerequisite":
+                    firstShard["prerequisiteProjects"] = new JsonArray("src/a/a.csproj", "src/a/a.csproj");
+                    break;
+                case "traversal-prerequisite":
+                    firstShard["prerequisiteProjects"] = new JsonArray("../outside.csproj");
+                    break;
+                case "invalid-prerequisite":
+                    firstShard["prerequisiteProjects"] = new JsonArray("src/a/not-a-project.txt");
+                    break;
+                case "null-prerequisites": firstShard["prerequisiteProjects"] = null; break;
+                case "scalar-prerequisite": firstShard["prerequisiteProjects"] = "src/a/a.csproj"; break;
+            }
             File.WriteAllText(manifest, document.ToJsonString());
         }
         var result = await RunContractAsync(
@@ -600,6 +624,104 @@ public sealed class ValidationRunnerContractTests
         Assert.False(File.Exists(finalReceipt), "Contract failure must not materialize a false success receipt.");
     }
 
+    [Fact]
+    public async Task RunnerOwnsTheExactShardPrerequisitesAndBuildsThemBeforeTheTarget()
+    {
+        var source = File.ReadAllText(RunnerScript);
+        var mapStart = source.IndexOf("$shardPrerequisiteProjects = [ordered]@{", StringComparison.Ordinal);
+        Assert.True(mapStart >= 0, "Runner-owned prerequisite map was not found.");
+        var mapEnd = source.IndexOf("}\n", mapStart, StringComparison.Ordinal);
+        Assert.True(mapEnd > mapStart, "Runner-owned prerequisite map was not terminated.");
+        var map = source[mapStart..mapEnd];
+
+        Assert.Contains(
+            "'s01' = @('src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj')",
+            map,
+            StringComparison.Ordinal);
+        foreach (var id in Enumerable.Range(2, 9).Select(number => $"s{number:00}"))
+            Assert.Contains($"'{id}' = @()", map, StringComparison.Ordinal);
+
+        Assert.Contains("shardPrerequisiteProjects = $shardPrerequisiteProjects", source, StringComparison.Ordinal);
+        Assert.Contains("prerequisiteProjects = @($shardPrerequisiteProjects[$id])", source, StringComparison.Ordinal);
+
+        var shardStart = source.IndexOf("function Invoke-ShardPhase", StringComparison.Ordinal);
+        var aggregateStart = source.IndexOf("function Invoke-AggregatePhase", StringComparison.Ordinal);
+        var shard = source[shardStart..aggregateStart];
+        var prerequisiteValidation = shard.IndexOf("Assert-ShardPrerequisiteProjects", StringComparison.Ordinal);
+        var prerequisiteRestore = shard.IndexOf(
+            "@('restore', $prerequisiteProjectPath)",
+            StringComparison.Ordinal);
+        var prerequisiteBuild = shard.IndexOf(
+            "@('build', $prerequisiteProjectPath, '--no-restore')",
+            StringComparison.Ordinal);
+        var targetRestore = shard.IndexOf("@('restore', $projectPath)", StringComparison.Ordinal);
+
+        Assert.True(prerequisiteValidation >= 0, "Shard prerequisite binding validation was not found.");
+        Assert.True(prerequisiteRestore > prerequisiteValidation, "Prerequisite restore must follow exact binding validation.");
+        Assert.True(prerequisiteBuild > prerequisiteRestore, "Prerequisite build must follow its restore.");
+        Assert.True(targetRestore > prerequisiteBuild, "Target restore must follow every prerequisite build.");
+        Assert.Contains("[IO.Path]::GetFullPath", source, StringComparison.Ordinal);
+        Assert.Contains("[IO.Path]::IsPathRooted", source, StringComparison.Ordinal);
+        Assert.Contains("[IO.File]::Exists", source, StringComparison.Ordinal);
+
+        const string localMonitorProject =
+            "src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj";
+        var validator = await File.ReadAllTextAsync(ContractScript);
+        Assert.DoesNotContain(localMonitorProject, validator, StringComparison.Ordinal);
+        Assert.Contains("ExpectedPrerequisiteProjectsJson", validator, StringComparison.Ordinal);
+        Assert.Equal(2, CountOccurrences(source, "'-ExpectedPrerequisiteProjectsJson'"));
+
+        using var directory = new TempDirectory();
+        var required = Enumerable.Range(1, 10).Select(number => $"s{number:00}").ToArray();
+        var rows = required.ToDictionary(
+            id => id,
+            id => new[] { Row($"Example.Tests.{id}.Fact", projectPath: $"tests/{id}/{id}.csproj") });
+        var expectedPrerequisites = required.ToDictionary(
+            id => id,
+            id => id == "s01" ? new[] { localMonitorProject } : Array.Empty<string>());
+        var expectedJson = JsonSerializer.Serialize(expectedPrerequisites);
+        var baselineRows = rows.Values.SelectMany(value => value).ToArray();
+        var exactShards = required
+            .Select(id => Shard(id, rows[id], expectedPrerequisites[id]))
+            .ToList();
+        var manifest = WriteManifest(directory.Path, required, baselineRows, exactShards);
+        var accepted = await RunContractAsync(
+            "-Mode", "Manifest",
+            "-ManifestPath", manifest,
+            "-ExpectedShardIds", string.Join(';', required),
+            "-ExpectedPrerequisiteProjectsJson", expectedJson);
+        Assert.True(accepted.ExitCode == 0, accepted.Output);
+
+        var nullAuthority = await RunContractAsync(
+            "-Mode", "Manifest",
+            "-ManifestPath", manifest,
+            "-ExpectedShardIds", string.Join(';', required),
+            "-ExpectedPrerequisiteProjectsJson", "null");
+        Assert.NotEqual(0, nullAuthority.ExitCode);
+
+        foreach (var defect in required)
+        {
+            var mismatchedShards = required
+                .Select(id => Shard(id, rows[id], expectedPrerequisites[id]))
+                .ToList();
+            var defectIndex = Array.IndexOf(required, defect);
+            mismatchedShards[defectIndex] = defect == "s01"
+                ? Shard(defect, rows[defect])
+                : Shard(
+                    defect,
+                    rows[defect],
+                    new[] { "src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj" });
+            manifest = WriteManifest(directory.Path, required, baselineRows, mismatchedShards);
+            var rejected = await RunContractAsync(
+                "-Mode", "Manifest",
+                "-ManifestPath", manifest,
+                "-ExpectedShardIds", string.Join(';', required),
+                "-ExpectedPrerequisiteProjectsJson", expectedJson);
+            Assert.NotEqual(0, rejected.ExitCode);
+            Assert.Contains("prerequisite", rejected.Output, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     private static void WriteTrx(string directory, params (string Fqn, string Outcome)[] rows) =>
         WriteTrx(directory, rows.Select(row => (row.Fqn, row.Fqn, row.Outcome)).ToArray());
 
@@ -651,11 +773,12 @@ public sealed class ValidationRunnerContractTests
         authorityIdentity = $"{projectPath}|{fqn}|{occurrence}",
     };
 
-    private static object Shard(string id, object[] rows) => new
+    private static object Shard(string id, object[] rows, string[]? prerequisiteProjects = null) => new
     {
         id,
         projectPath = $"tests/{id}/{id}.csproj",
         filter = "ValidationLane!=Nightly",
+        prerequisiteProjects = prerequisiteProjects ?? Array.Empty<string>(),
         expectedCount = rows.Length,
         expectedHash = RowHash(rows),
         expectedRows = rows,

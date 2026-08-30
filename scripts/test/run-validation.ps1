@@ -87,6 +87,19 @@ $localShardSelectors = [ordered]@{
 }
 $criticalShardId = 's10'
 $requiredShardIds = @($testProjects.Keys[0]) + @($localShardSelectors.Keys) + @($testProjects.Keys | Select-Object -Skip 1) + @($criticalShardId)
+$shardPrerequisiteProjects = [ordered]@{
+    's01' = @('src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj')
+    's02' = @()
+    's03' = @()
+    's04' = @()
+    's05' = @()
+    's06' = @()
+    's07' = @()
+    's08' = @()
+    's09' = @()
+    's10' = @()
+}
+$serializedShardPrerequisiteProjects = ConvertTo-Json -InputObject $shardPrerequisiteProjects -Depth 10 -Compress
 
 function Invoke-NativeCommand {
     param(
@@ -199,6 +212,7 @@ function Get-AuthorityDigest {
         localProject = $localProject
         localShardSelectors = $localShardSelectors
         criticalShardId = $criticalShardId
+        shardPrerequisiteProjects = $shardPrerequisiteProjects
     } | ConvertTo-Json -Depth 20 -Compress
     return Get-TextDigest -Value $authority
 }
@@ -273,6 +287,54 @@ function Get-CandidateSha {
     $result = Invoke-PhaseCommand -FilePath 'git' -Arguments @('rev-parse', 'HEAD')
     Assert-PhaseCommand -Result $result -Description 'Candidate SHA resolution'
     return $result.Output.Trim()
+}
+
+function Resolve-RepositoryProjectPath {
+    param([Parameter(Mandatory)][string]$RelativePath)
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or
+        [IO.Path]::IsPathRooted($RelativePath) -or
+        $RelativePath.Contains('\') -or
+        -not $RelativePath.EndsWith('.csproj', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Shard prerequisite must be a normalized repository-relative project path; path=$RelativePath."
+    }
+    $segments = @($RelativePath.Split('/'))
+    if ($segments.Count -lt 2 -or @($segments | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0) {
+        throw "Shard prerequisite must remain within the repository; path=$RelativePath."
+    }
+    $repositoryPath = [IO.Path]::GetFullPath($repoRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar)
+    $projectPath = [IO.Path]::GetFullPath((Join-Path $repositoryPath $RelativePath))
+    $repositoryPrefix = $repositoryPath + [IO.Path]::DirectorySeparatorChar
+    if (-not $projectPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [IO.File]::Exists($projectPath)) {
+        throw "Shard prerequisite project is missing or outside the repository; path=$RelativePath."
+    }
+    return $projectPath
+}
+
+function Assert-ShardPrerequisiteProjects {
+    param(
+        [Parameter(Mandatory)][object]$Shard,
+        [Parameter(Mandatory)][string]$CurrentShardId)
+    if (-not $shardPrerequisiteProjects.Contains($CurrentShardId) -or
+        $null -eq $Shard.PSObject.Properties['prerequisiteProjects'] -or
+        $Shard.prerequisiteProjects -isnot [System.Array]) {
+        throw "Shard prerequisite authority is missing; shard_id=$CurrentShardId."
+    }
+    $expected = @($shardPrerequisiteProjects[$CurrentShardId] | ForEach-Object { [string]$_ })
+    $actual = @($Shard.prerequisiteProjects | ForEach-Object { [string]$_ })
+    if ((ConvertTo-Json -InputObject $actual -Compress) -ne
+        (ConvertTo-Json -InputObject $expected -Compress)) {
+        throw "Shard prerequisite projects do not match runner authority; shard_id=$CurrentShardId."
+    }
+    $distinct = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativePath in $actual) {
+        if (-not $distinct.Add($relativePath)) {
+            throw "Shard prerequisite projects must be distinct; shard_id=$CurrentShardId path=$relativePath."
+        }
+        [void](Resolve-RepositoryProjectPath -RelativePath $relativePath)
+    }
 }
 
 function ConvertTo-TestRows {
@@ -534,6 +596,7 @@ function Invoke-DiscoveryPhase {
                 kind = if ($id -eq $criticalShardId) { 'critical' } else { 'fast' }
                 projectPath = $projectPath
                 filter = $filter
+                prerequisiteProjects = @($shardPrerequisiteProjects[$id])
                 expectedCount = @($shardRows[$id]).Count
                 expectedHash = Get-RowHash -Rows @($shardRows[$id])
                 expectedRows = @(Get-CanonicalRows -Rows @($shardRows[$id]))
@@ -558,7 +621,8 @@ function Invoke-DiscoveryPhase {
     Write-ImmutableJson -Path $resolvedManifest -Value $manifest
     $contract = Invoke-PhaseCommand -FilePath 'pwsh' -Arguments @(
         '-NoProfile', '-File', $validationContract, '-Mode', 'Manifest',
-        '-ManifestPath', $resolvedManifest, '-ExpectedShardIds', ($requiredShardIds -join ';'))
+        '-ManifestPath', $resolvedManifest, '-ExpectedShardIds', ($requiredShardIds -join ';'),
+        '-ExpectedPrerequisiteProjectsJson', $serializedShardPrerequisiteProjects)
     Assert-PhaseCommand -Result $contract -Description 'Completion manifest validation'
     $discoveryReceipt = [ordered]@{
         schemaVersion = 1
@@ -604,6 +668,16 @@ function Invoke-ShardPhase {
         $shardMatches = @($manifest.shards | Where-Object { [string]$_.id -eq $ShardId })
         if ($shardMatches.Count -ne 1) { throw "Unknown Completion shard ID; shard_id=$ShardId." }
         $shard = $shardMatches[0]
+        Assert-ShardPrerequisiteProjects -Shard $shard -CurrentShardId $ShardId
+        foreach ($prerequisiteProject in @($shard.prerequisiteProjects)) {
+            $prerequisiteProjectPath = Resolve-RepositoryProjectPath -RelativePath ([string]$prerequisiteProject)
+            $prerequisiteRestore = Invoke-PhaseCommand -FilePath 'dotnet' -Arguments @('restore', $prerequisiteProjectPath)
+            $lastExitCode = $prerequisiteRestore.ExitCode; $timedOut = $prerequisiteRestore.TimedOut
+            Assert-PhaseCommand -Result $prerequisiteRestore -Description "Shard prerequisite restore ($ShardId)"
+            $prerequisiteBuild = Invoke-PhaseCommand -FilePath 'dotnet' -Arguments @('build', $prerequisiteProjectPath, '--no-restore')
+            $lastExitCode = $prerequisiteBuild.ExitCode; $timedOut = $prerequisiteBuild.TimedOut
+            Assert-PhaseCommand -Result $prerequisiteBuild -Description "Shard prerequisite build ($ShardId)"
+        }
         $projectPath = Join-Path $repoRoot ([string]$shard.projectPath)
         $restore = Invoke-PhaseCommand -FilePath 'dotnet' -Arguments @('restore', $projectPath)
         $lastExitCode = $restore.ExitCode; $timedOut = $restore.TimedOut
@@ -698,6 +772,7 @@ function Invoke-AggregatePhase {
         '-NoProfile', '-File', $validationContract, '-Mode', 'Aggregate',
         '-ManifestPath', $resolvedManifest, '-ArtifactsDirectory', $resolvedArtifacts,
         '-DependencyResultsPath', $resolvedDependencies, '-ExpectedShardIds', ($requiredShardIds -join ';'),
+        '-ExpectedPrerequisiteProjectsJson', $serializedShardPrerequisiteProjects,
         '-RunAttempt', $RunAttempt,
         '-ExpectedSkippedFqns', ($expectedWindowsSkippedFqns -join ';'))
     Assert-PhaseCommand -Result $contract -Description 'Completion aggregate validation'

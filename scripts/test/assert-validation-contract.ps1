@@ -8,6 +8,7 @@ param(
     [double]$ElapsedSeconds,
     [string]$ManifestPath,
     [string]$ExpectedShardIds,
+    [string]$ExpectedPrerequisiteProjectsJson,
     [string]$ExpectedSkippedFqns,
     [string]$ShardId,
     [string]$ReceiptPath,
@@ -31,6 +32,16 @@ function ConvertTo-StringArray {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
     return @($Value.Split(';', [StringSplitOptions]::RemoveEmptyEntries))
+}
+
+function ConvertTo-ExpectedPrerequisiteProjects {
+    param([string]$Json)
+    if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
+    $value = $Json | ConvertFrom-Json -Depth 100
+    if ($null -eq $value) {
+        throw 'Expected prerequisite authority JSON must contain an object.'
+    }
+    return $value
 }
 
 function Read-JsonFile {
@@ -144,7 +155,8 @@ function Get-IdentityHash {
 function Assert-Manifest {
     param(
         [Parameter(Mandatory)][object]$Manifest,
-        [Parameter(Mandatory)][string[]]$RequiredShardIds)
+        [Parameter(Mandatory)][string[]]$RequiredShardIds,
+        [object]$ExpectedPrerequisiteProjects)
     if ([int]$Manifest.schemaVersion -ne 1 -or
         [string]::IsNullOrWhiteSpace([string]$Manifest.candidateSha) -or
         [string]::IsNullOrWhiteSpace([string]$Manifest.authorityDigest) -or
@@ -158,6 +170,16 @@ function Assert-Manifest {
     Assert-EqualMultiset -Name 'Manifest shard IDs' -Expected $RequiredShardIds -Actual $shardIds
     if (@($shardIds | Select-Object -Unique).Count -ne $shardIds.Count) {
         throw 'Manifest contains duplicate shard IDs.'
+    }
+    if ($null -ne $ExpectedPrerequisiteProjects) {
+        $authorityProperties = @($ExpectedPrerequisiteProjects.PSObject.Properties)
+        Assert-EqualMultiset `
+            -Name 'Expected prerequisite authority shard IDs' `
+            -Expected $RequiredShardIds `
+            -Actual @($authorityProperties | ForEach-Object Name)
+        if (@($authorityProperties | Where-Object { $_.Value -isnot [System.Array] }).Count -ne 0) {
+            throw 'Expected prerequisite authority values must be arrays.'
+        }
     }
     $baselineIdentities = Get-ManifestRowIdentities -Rows @($Manifest.baselineRows)
     if ($baselineIdentities.Count -eq 0 -or
@@ -177,6 +199,37 @@ function Assert-Manifest {
             if ([string]::IsNullOrWhiteSpace([string]$shard.projectPath) -or
                 [string]::IsNullOrWhiteSpace([string]$shard.filter)) {
                 throw "Manifest shard lacks runner-owned project/filter authority; shard_id=$($shard.id)."
+            }
+            if ($null -eq $shard.PSObject.Properties['prerequisiteProjects'] -or
+                $shard.prerequisiteProjects -isnot [System.Array]) {
+                throw "Manifest shard lacks runner-owned prerequisite authority; shard_id=$($shard.id)."
+            }
+            $prerequisites = @($shard.prerequisiteProjects | ForEach-Object { [string]$_ })
+            if ($null -ne $ExpectedPrerequisiteProjects) {
+                $authorityProperty = $ExpectedPrerequisiteProjects.PSObject.Properties[[string]$shard.id]
+                if ($null -eq $authorityProperty) {
+                    throw "Expected prerequisite authority is missing a shard; shard_id=$($shard.id)."
+                }
+                $expectedPrerequisites = @($authorityProperty.Value | ForEach-Object { [string]$_ })
+                if ((ConvertTo-Json -InputObject $prerequisites -Compress) -ne
+                    (ConvertTo-Json -InputObject $expectedPrerequisites -Compress)) {
+                    throw "Manifest prerequisite projects do not match passed authority; shard_id=$($shard.id)."
+                }
+            }
+            $distinctPrerequisites = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($prerequisite in $prerequisites) {
+                $segments = @($prerequisite.Split('/'))
+                if ([string]::IsNullOrWhiteSpace($prerequisite) -or
+                    [IO.Path]::IsPathRooted($prerequisite) -or
+                    $prerequisite.Contains('\') -or
+                    -not $prerequisite.EndsWith('.csproj', [StringComparison]::OrdinalIgnoreCase) -or
+                    $segments.Count -lt 2 -or
+                    @($segments | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0) {
+                    throw "Manifest prerequisite must be a normalized repository-contained project path; shard_id=$($shard.id) path=$prerequisite."
+                }
+                if (-not $distinctPrerequisites.Add($prerequisite)) {
+                    throw "Manifest prerequisite project paths must be distinct; shard_id=$($shard.id) path=$prerequisite."
+                }
             }
             if (@($rows | Where-Object { [string]$_.projectPath -ne [string]$shard.projectPath }).Count -ne 0) {
                 throw "Manifest row project does not match its shard project; shard_id=$($shard.id)."
@@ -264,7 +317,11 @@ if ($Mode -eq 'CriticalSmoke') {
 
 if ($Mode -eq 'Manifest') {
     $manifest = Read-JsonFile -Path $ManifestPath
-    Assert-Manifest -Manifest $manifest -RequiredShardIds (ConvertTo-StringArray $ExpectedShardIds)
+    $expectedPrerequisites = ConvertTo-ExpectedPrerequisiteProjects -Json $ExpectedPrerequisiteProjectsJson
+    Assert-Manifest `
+        -Manifest $manifest `
+        -RequiredShardIds (ConvertTo-StringArray $ExpectedShardIds) `
+        -ExpectedPrerequisiteProjects $expectedPrerequisites
     Write-Output 'manifest_exact_partition=passed'
     exit 0
 }
@@ -327,7 +384,11 @@ if ($Mode -eq 'Aggregate') {
     $manifest = Read-JsonFile -Path $ManifestPath
     $expectedIds = ConvertTo-StringArray $ExpectedShardIds
     $allowedSkips = @(ConvertTo-StringArray $ExpectedSkippedFqns)
-    Assert-Manifest -Manifest $manifest -RequiredShardIds $expectedIds
+    $expectedPrerequisites = ConvertTo-ExpectedPrerequisiteProjects -Json $ExpectedPrerequisiteProjectsJson
+    Assert-Manifest `
+        -Manifest $manifest `
+        -RequiredShardIds $expectedIds `
+        -ExpectedPrerequisiteProjects $expectedPrerequisites
     $dependencies = Read-JsonFile -Path $DependencyResultsPath
     $dependencyProperties = @($dependencies.PSObject.Properties)
     Assert-EqualMultiset `
