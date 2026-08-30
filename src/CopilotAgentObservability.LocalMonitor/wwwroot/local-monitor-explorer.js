@@ -152,6 +152,10 @@
     }
   }
 
+  function aiErrorMessage(error, fallback) {
+    return ({ scope_too_large: "分析対象が上限を超えています。", stale_snapshot: "対象が更新されたため分析できませんでした。", snapshot_expired: "分析対象の確認期限が切れています。", provider_unavailable: "AI provider を利用できません。", persistence_busy: "保存処理が使用中です。しばらくしてから再試行してください。", provider_failed: "AI provider で分析できませんでした。", provider_partial: "不完全な結果のため表示できません。", timed_out: "分析がタイムアウトしました。", canceled: "分析をキャンセルしました。", invalid_result: "AI 結果を安全に表示できません。", invalid_evidence: "証拠を確認できないため表示できません。" })[error?.code] ?? fallback;
+  }
+
   function exactKeys(value, keys) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const actual = Object.keys(value);
@@ -161,6 +165,32 @@
   function exactKeySet(value, keys) {
     return value && typeof value === "object" && !Array.isArray(value)
       && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  }
+
+  function validateAiJsonWire(text) {
+    const stack = []; let quoted = false; let escaped = false; let start = -1;
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (quoted) {
+        if (escaped) { escaped = false; continue; }
+        if (character === "\\") { escaped = true; continue; }
+        if (character !== '"') continue;
+        quoted = false;
+        if (start >= 0) { let next = index + 1; while (/\s/.test(text[next] ?? "")) next++;
+          if (text[next] === ":") { const owner = stack.at(-1); if (!owner || owner.type !== "object") throw new TypeError("invalid json"); const key = JSON.parse(text.slice(start, index + 1)); if (owner.keys.has(key)) throw new TypeError("duplicate json key"); owner.keys.add(key); }
+        }
+        continue;
+      }
+      if (character === '"') { quoted = true; start = index; }
+      else if (character === "{" || character === "[") { stack.push({ type: character === "{" ? "object" : "array", keys: new Set() }); if (stack.length > 16) throw new TypeError("json too deep"); }
+      else if (character === "}" || character === "]") { const owner = stack.pop(); if (!owner || owner.type !== (character === "}" ? "object" : "array")) throw new TypeError("invalid json"); }
+    }
+    if (quoted || stack.length) throw new TypeError("invalid json");
+  }
+
+  async function readAiJson(response, maximumBytes = 1_048_576) {
+    const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > maximumBytes) throw new TypeError("json too large");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateAiJsonWire(text); return JSON.parse(text);
   }
 
   function boundedText(value, maximum = 16_384) {
@@ -679,7 +709,7 @@
   async function aiJson(path, body, signal = undefined) {
     const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: stringifyExactJson(body), cache: "no-store", credentials: "same-origin", signal });
     if (!response.ok) throw await apiFailure(response);
-    return readJsonResponse(response, 8_388_608);
+    return readAiJson(response);
   }
 
   function renderAiMetadata(preview) {
@@ -711,13 +741,13 @@
       aiState.preview = value; renderAiMetadata(value);
       aiStatus.textContent = value.included.length === 0 ? "分析できる対象がありません。" : "この対象で分析を開始できます。";
       aiStart.disabled = value.included.length === 0;
-    } catch (error) { if (generation !== aiState.generation || error?.name === "AbortError") return; aiStatus.textContent = error instanceof ApiFailure && error.code === "scope_too_large" ? "対象が200件を超えています。" : "分析対象を確認できませんでした。"; }
+    } catch (error) { if (generation !== aiState.generation || error?.name === "AbortError") return; aiStatus.textContent = aiErrorMessage(error, "分析対象を確認できませんでした。"); }
   }
 
   async function pollAiRun(runId = aiState.runId, generation = aiState.generation) {
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", signal: aiState.controller?.signal });
-      if (!response.ok) throw await apiFailure(response); const value = await response.json();
+      if (!response.ok) throw await apiFailure(response); const value = await readAiJson(response);
       if (generation !== aiState.generation || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
       if (["queued", "running"].includes(value.state)) { setTimeout(() => pollAiRun(runId, generation), 250); return; }
       aiCancel.hidden = true; aiStatus.textContent = AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
@@ -759,12 +789,12 @@
       if (!exactKeySet(value, ["run_id"]) || !UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiState.restoredRunId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。";
       try { window.LocalMonitorV1History.push({ analysis: value.run_id }); } catch { }
       pollAiRun(value.run_id, generation);
-    } catch (error) { if (generation !== aiState.generation || error?.name === "AbortError") return; aiStatus.textContent = "分析を開始できませんでした。一覧は引き続き利用できます。"; }
+    } catch (error) { if (generation !== aiState.generation || error?.name === "AbortError") return; aiStatus.textContent = aiErrorMessage(error, "分析を開始できませんでした。一覧は引き続き利用できます。"); }
   }
 
   async function enableRepositoryAi() {
     if (root.dataset.explorerScope !== "repository" || !UUID_V7.test(root.dataset.repositoryId ?? "")) return;
-    try { const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin" }); const value = response.ok ? await response.json() : null; if (value?.readiness_state === "ready") aiOpen.hidden = false; } catch { }
+    try { const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin" }); const value = response.ok ? await readAiJson(response, 16_384) : null; if (value?.readiness_state === "ready") aiOpen.hidden = false; } catch { }
   }
 
   async function restoreRepositoryAnalysis(route) {
@@ -778,7 +808,7 @@
     aiState.runId = runId;
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin" });
-      if (!response.ok) throw await apiFailure(response); const value = await response.json();
+      if (!response.ok) throw await apiFailure(response); const value = await readAiJson(response);
       if (generation !== aiState.generation || !validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
       aiDialog.showModal(); aiStatus.textContent = value.result ? "保存された分析を表示しています。" : AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
       aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(runId, generation); }

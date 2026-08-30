@@ -68,7 +68,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var page = await browser.NewPageAsync();
         var searchCalls = 0;
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => { searchCalls++; return route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())); });
-        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.AbortAsync());
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready","nested":{"value":1,"value":2}}""")));
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#session-ai-open")).ToBeHiddenAsync();
         await page.Locator("#session-search").FillAsync("still usable");
