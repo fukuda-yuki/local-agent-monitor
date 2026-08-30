@@ -82,10 +82,10 @@ internal sealed class SettingsAiReadinessService(
             await client.StartAsync(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
             var status = await client.GetStatusAsync(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
             if (status is null) return Set("unavailable", "unavailable");
-            if (!status.IsAuthenticated) return Set("authentication_required", "authentication_required");
-            return CopilotRuntimeIdentityCertifierV1.TryCertify(status, out _)
+            if (!CopilotRuntimeIdentityCertifierV1.TryCertify(status, out _)) return Set("unavailable", "unavailable");
+            return status.IsAuthenticated
                 ? Set("ready", "ready")
-                : Set("unavailable", "unavailable");
+                : Set("authentication_required", "authentication_required");
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {

@@ -45,11 +45,45 @@ public sealed class SettingsAiReadinessRouteTests
         using var temp = new MonitorTempDirectory();
         await using var host = await Host(temp);
         await AssertError(await host.Client.SendAsync(Request(HttpMethod.Put)), 405, "method_not_allowed");
+        await AssertError(await host.Client.SendAsync(Request(new HttpMethod("PROPFIND"))), 405, "method_not_allowed", "GET", "POST");
         await AssertError(await host.Client.SendAsync(Request(HttpMethod.Get, uri: Path + "?extra=1")), 400, "invalid_request");
         await AssertError(await host.Client.SendAsync(Request(HttpMethod.Post, "local-monitor", new StringContent("{}", Encoding.UTF8, "application/json"))), 400, "invalid_request");
         using var invalidHost = Request(HttpMethod.Get);
         invalidHost.Headers.Host = "remote.example";
         await AssertError(await host.Client.SendAsync(invalidHost), 400, "invalid_host");
+    }
+
+    [Theory]
+    [InlineData("/API/local-monitor/v1/settings/ai-readiness")]
+    [InlineData(Path + "/")]
+    public async Task NearPathsAreEmptyNoStoreNotFound(string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await Host(temp);
+        using var response = await host.Client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task PartialInvalidAnalysisProviderDoesNotPreventHostStartup()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            ConfigurationValues = new Dictionary<string, string?>
+            {
+                ["CopilotAnalysis:Provider:Type"] = "openai",
+            },
+        });
+
+        using var response = await host.Client.GetAsync(Path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"readiness_state\":\"configured_not_checked\"", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -61,12 +95,13 @@ public sealed class SettingsAiReadinessRouteTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
-    private static async Task AssertError(HttpResponseMessage response, int status, string error)
+    private static async Task AssertError(HttpResponseMessage response, int status, string error, params string[] allow)
     {
         using (response)
         {
             Assert.Equal((HttpStatusCode)status, response.StatusCode);
             Assert.True(response.Headers.CacheControl?.NoStore);
+            if (allow.Length > 0) Assert.Equal(allow, response.Content.Headers.Allow);
             Assert.Equal($"{{\"error\":\"{error}\"}}", await response.Content.ReadAsStringAsync());
         }
     }

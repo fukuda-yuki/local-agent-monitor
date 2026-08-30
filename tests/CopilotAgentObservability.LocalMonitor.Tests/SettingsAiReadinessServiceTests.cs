@@ -25,6 +25,13 @@ public sealed class SettingsAiReadinessServiceTests
     }
 
     [Fact]
+    public async Task CheckAsync_UncertifiedRuntimeIsUnavailableBeforeAuthenticationClassification()
+    {
+        var service = Service(() => new Client(new CopilotRuntimeStatusObservationV1("unsupported", 3, null, false)));
+        Assert.Equal("unavailable", (await service.CheckAsync(CancellationToken.None)).ReadinessState);
+    }
+
+    [Fact]
     public async Task CheckAsync_MapsUnusableRuntimeToUnavailableAndNeverCreatesAClientWhenDisabled()
     {
         var calls = 0;

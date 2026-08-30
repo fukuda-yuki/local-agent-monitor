@@ -390,10 +390,10 @@ internal static class MonitorHost
         if (!options.SanitizedOnly)
         {
             var aiOptions = CopilotAnalysisOptions.From(builder.Configuration);
-            var analysisSettings = CopilotAnalysisSettings.From(builder.Configuration);
+            var configured = !bool.TryParse(builder.Configuration["CopilotAnalysis:Enabled"], out var enabled) || enabled;
             settingsAiReadiness = testOptions?.SettingsAiReadiness ?? new SettingsAiReadinessService(
                 "github_copilot", aiOptions.DefaultModel, aiOptions.DefaultProfile,
-                analysisSettings.Enabled,
+                configured,
                 () => OwnedCopilotSdkClientV1.TryCreate(
                     Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
                     static sdkOptions => new CopilotClient(sdkOptions),
@@ -655,6 +655,12 @@ internal static class MonitorHost
             app.MapMethods(path, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"], async context =>
             {
                 context.Response.Headers.CacheControl = "no-store";
+                if (!string.Equals(context.Request.Path.Value, path, StringComparison.Ordinal))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    context.Response.ContentLength = 0;
+                    return;
+                }
                 if (!IsValidHostHeader(context.Request.Host.Host))
                 {
                     await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
@@ -922,9 +928,9 @@ internal static class MonitorHost
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
-            var settingsAiReadinessPath = !options.SanitizedOnly
-                && context.Request.Path == "/api/local-monitor/v1/settings/ai-readiness";
             var requestPath = context.Request.Path.Value ?? string.Empty;
+            var settingsAiReadinessPath = !options.SanitizedOnly
+                && string.Equals(requestPath, "/api/local-monitor/v1/settings/ai-readiness", StringComparison.Ordinal);
             var settingsRuntimePath = !options.SanitizedOnly
                 && string.Equals(requestPath, "/api/local-monitor/v1/settings/runtime", StringComparison.Ordinal);
             var settingsStoragePath = !options.SanitizedOnly
@@ -941,11 +947,18 @@ internal static class MonitorHost
                     requestPath.EndsWith("/", StringComparison.Ordinal) ? requestPath[..^1] : requestPath,
                     "/api/local-monitor/v1/settings/storage",
                     StringComparison.OrdinalIgnoreCase);
+            var settingsAiReadinessNearPath = !options.SanitizedOnly
+                && !settingsAiReadinessPath
+                && string.Equals(
+                    requestPath.EndsWith("/", StringComparison.Ordinal) ? requestPath[..^1] : requestPath,
+                    "/api/local-monitor/v1/settings/ai-readiness",
+                    StringComparison.OrdinalIgnoreCase);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
                 || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
                 || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath
-                || settingsRuntimePath || settingsRuntimeNearPath || settingsStoragePath || settingsStorageNearPath)
+                || settingsRuntimePath || settingsRuntimeNearPath || settingsStoragePath || settingsStorageNearPath
+                || settingsAiReadinessNearPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -1050,10 +1063,19 @@ internal static class MonitorHost
                 return;
             }
 
-            if (settingsRuntimeNearPath || settingsStorageNearPath)
+            if (settingsRuntimeNearPath || settingsStorageNearPath || settingsAiReadinessNearPath)
             {
                 context.Response.StatusCode = StatusCodes.Status404NotFound;
                 context.Response.ContentLength = 0;
+                return;
+            }
+
+            if (settingsAiReadinessPath
+                && !HttpMethods.IsGet(context.Request.Method)
+                && !HttpMethods.IsPost(context.Request.Method))
+            {
+                context.Response.Headers.Allow = "GET, POST";
+                await WriteSettingsAiErrorAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed");
                 return;
             }
 
