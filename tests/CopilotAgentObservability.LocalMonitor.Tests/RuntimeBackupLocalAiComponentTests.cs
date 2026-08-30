@@ -106,6 +106,61 @@ public sealed class RuntimeBackupLocalAiComponentTests
         }
     }
 
+    [Theory]
+    [InlineData("snapshot", "retained")]
+    [InlineData("result", "expired")]
+    public async Task Backup_PreservesIndependentSnapshotAndResultRetentionLifecycles(string deniedKind, string expectedContentState)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-local-ai-mixed-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "source.db");
+            var time = Time();
+            var catalog = Initialize(source, time);
+            var store = new LocalAiAnalysisStoreV1(source, catalog, time);
+            Complete(store, false);
+            using (var setup = Open(source))
+            {
+                using var coverage = setup.CreateCommand();
+                coverage.CommandText = "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);";
+                coverage.ExecuteNonQuery();
+                using var expire = setup.CreateCommand();
+                expire.CommandText = "UPDATE retention_items SET expires_at=$expired WHERE source_item_id LIKE $source;";
+                expire.Parameters.AddWithValue("$expired", time.GetUtcNow().AddSeconds(3).ToString("O"));
+                expire.Parameters.AddWithValue("$source", $"local_ai:{deniedKind}:%");
+                Assert.Equal(1, expire.ExecuteNonQuery());
+            }
+            time.Advance(TimeSpan.FromSeconds(4));
+            var prepared = await catalog.PrepareCleanupBatchAsync(time.GetUtcNow(), 10, 0, TimeSpan.FromSeconds(1), CancellationToken.None);
+            Assert.False(prepared.CoverageBlocked);
+            var archive = Path.Combine(root, "backup.zip");
+            var service = new SqliteRuntimeBackupService(time);
+            Assert.True(service.CreateAndPublish(source, archive).Success);
+            using (var unchanged = Open(source))
+                Assert.Equal(2L, Scalar(unchanged, "SELECT (SELECT COUNT(*) FROM local_ai_snapshots WHERE payload_json IS NOT NULL)+(SELECT COUNT(*) FROM local_ai_results WHERE result_json IS NOT NULL);"));
+            var restored = Path.Combine(root, "restored.db");
+            Assert.True(service.Restore(archive, restored, new RuntimeRestoreOptions()).Success);
+            using (var read = Open(restored))
+            {
+                Assert.Equal(deniedKind == "snapshot" ? 0L : 1L, Scalar(read, "SELECT COUNT(*) FROM local_ai_snapshots WHERE payload_json IS NOT NULL;"));
+                Assert.Equal(deniedKind == "result" ? 0L : 1L, Scalar(read, "SELECT COUNT(*) FROM local_ai_results WHERE result_json IS NOT NULL;"));
+                Assert.Equal(64L, Scalar(read, "SELECT length(payload_sha256) FROM local_ai_snapshots;"));
+                Assert.Equal(64L, Scalar(read, "SELECT length(evidence_index_sha256) FROM local_ai_snapshots;"));
+                Assert.Equal(64L, Scalar(read, "SELECT length(result_sha256) FROM local_ai_results;"));
+            }
+            var restoredCatalog = new RetentionCatalogStore(RetentionCatalogContext.AdoptExistingCatalogV1(restored), time);
+            var report = Assert.Single(new LocalAiAnalysisStoreV1(restored, restoredCatalog, time).GetSessionReports(SessionId, null, null).Items);
+            Assert.Equal(expectedContentState, report.ContentState);
+            Assert.Equal(expectedContentState == "retained", report.CanonicalResult is not null);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, true);
+        }
+    }
+
     private static MutableTimeProvider Time()=>new(new DateTimeOffset(2026,8,30,1,0,0,TimeSpan.Zero));
     private static RetentionCatalogStore Initialize(string path,MutableTimeProvider time){using(var connection=Open(path)){using var transaction=connection.BeginTransaction();MonitorSchemaMigrator.ApplyBaseSchema(connection,transaction);transaction.Commit();}var context=RetentionCatalogContext.InitializeNewOwnedDatabase(path,time);using(var connection=Open(path))LocalAiAnalysisSchemaV1.Ensure(connection);return new(context,time);}
     private static LocalAiRunV1 Complete(LocalAiAnalysisStoreV1 store,bool zero){store.InsertSnapshot(new(SessionSnapshot,"session",SessionId,null,SessionId,"{}"u8.ToArray(),"{\"evidence_refs\":[\"ev-1\"]}"u8.ToArray()));var request=new LocalAiRunRequestV1(SessionSnapshot,"session",SessionId,null,"github_copilot_sdk","model",new string('a',64),"template",DateTimeOffset.Parse("2026-08-30T01:00:00Z"),60);var run=store.CreateRun(request);store.TransitionRun(run.RunId,LocalAiRunStateV1.Running,null,DateTimeOffset.Parse("2026-08-30T01:00:01Z"));Assert.Equal(zero?LocalAiRunStateV1.ZeroFindings:LocalAiRunStateV1.Succeeded,store.Complete(run.RunId,Result(zero),DateTimeOffset.Parse("2026-08-30T01:00:02Z")));return run;}

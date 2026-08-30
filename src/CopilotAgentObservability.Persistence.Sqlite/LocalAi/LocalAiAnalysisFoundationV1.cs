@@ -21,7 +21,7 @@ internal sealed record LocalAiRunRequestV1(string SnapshotId, string ScopeKind, 
 internal sealed record LocalAiRunV1(string RunId, int TimeoutSeconds);
 internal sealed record LocalAiReportV1(string RunId, string? ResultId, LocalAiRunStateV1 State, DateTimeOffset CreatedAt, byte[]? CanonicalResult, string? Sha256, string ContentState);
 internal sealed record LocalAiReportPageV1(IReadOnlyList<LocalAiReportV1> Items, string? NextCursor);
-internal sealed record LocalAiStoredResultInvariantV1(byte[] EvidenceIndex,string PayloadSha256,string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,string Provider,string Model,string ConfigurationSha256,string Template,string RequestedAt,string StartedAt,string CompletedAt,string RunState);
+internal sealed record LocalAiStoredResultInvariantV1(byte[]? EvidenceIndex,string PayloadSha256,string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,string Provider,string Model,string ConfigurationSha256,string Template,string RequestedAt,string StartedAt,string CompletedAt,string RunState);
 internal sealed record LocalAiStoredSnapshotInvariantV1(string SnapshotId,string ScopeKind,string SessionId,string? NodeId,string AnchorId,byte[] Payload,string PayloadSha256,byte[] EvidenceIndex,string EvidenceIndexSha256);
 
 internal static class LocalAiAnalysisSchemaV1
@@ -141,7 +141,7 @@ internal static class LocalAiResultValidatorV1
     private static readonly string[] Coverage = ["included", "excluded", "content_available"];
     private static readonly HashSet<string> TargetKinds = ["instructions", "skill", "agent", "subagent_input", "tool_configuration"];
 
-    internal static LocalAiResultValidationV1 Validate(ReadOnlySpan<byte> utf8, IReadOnlyCollection<string> evidenceIndex)
+    internal static LocalAiResultValidationV1 Validate(ReadOnlySpan<byte> utf8, IReadOnlyCollection<string>? evidenceIndex)
     {
         if (utf8.Length > 1_048_576) return new(LocalAiResultValidationCodeV1.TooLarge);
         try
@@ -174,12 +174,12 @@ internal static class LocalAiResultValidatorV1
         catch (InvalidOperationException) { return Invalid(); }
     }
 
-    private static LocalAiResultValidationCodeV1 ValidateRefs(JsonElement value, IReadOnlyCollection<string> evidence)
+    private static LocalAiResultValidationCodeV1 ValidateRefs(JsonElement value, IReadOnlyCollection<string>? evidence)
     {
         if (value.ValueKind != JsonValueKind.Array) return LocalAiResultValidationCodeV1.InvalidResult;
         var refs = value.EnumerateArray().ToArray();
         if (refs.Length is < 1 or > 16 || refs.Any(item => item.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(item.GetString()))) return LocalAiResultValidationCodeV1.InvalidEvidence;
-        return refs.All(item => evidence.Contains(item.GetString()!, StringComparer.Ordinal)) ? LocalAiResultValidationCodeV1.Valid : LocalAiResultValidationCodeV1.InvalidEvidence;
+        return evidence is null || refs.All(item => evidence.Contains(item.GetString()!, StringComparer.Ordinal)) ? LocalAiResultValidationCodeV1.Valid : LocalAiResultValidationCodeV1.InvalidEvidence;
     }
     private static bool Exact(JsonElement element, string[] expected) => element.ValueKind == JsonValueKind.Object && element.EnumerateObject().Select(x => x.Name).Order().SequenceEqual(expected.Order());
     private static bool Strings(JsonElement element, params string[] names) => names.All(name => element.GetProperty(name).ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(element.GetProperty(name).GetString()));
@@ -391,8 +391,11 @@ internal sealed class LocalAiAnalysisStoreV1
     }
     internal static bool ValidateStoredResult(byte[] bytes,LocalAiStoredResultInvariantV1 expected)
     {
-        var validation=LocalAiResultValidatorV1.Validate(bytes,ReadEvidence(expected.EvidenceIndex));if(validation.Code!=LocalAiResultValidationCodeV1.Valid||!validation.CanonicalBytes!.SequenceEqual(bytes)||!MatchesExpected(bytes,expected))return false;using var document=JsonDocument.Parse(bytes);var findings=document.RootElement.GetProperty("findings").GetArrayLength();return expected.RunState=="zero_findings"?findings==0:expected.RunState=="succeeded"&&findings>0;
+        return expected.EvidenceIndex is not null&&ValidateStoredResultCore(bytes,expected,ReadEvidence(expected.EvidenceIndex));
     }
+    internal static bool ValidateStoredResultWithoutEvidenceMembership(byte[] bytes,LocalAiStoredResultInvariantV1 expected)=>ValidateStoredResultCore(bytes,expected,null);
+    private static bool ValidateStoredResultCore(byte[] bytes,LocalAiStoredResultInvariantV1 expected,IReadOnlyCollection<string>? evidence)
+    {var validation=LocalAiResultValidatorV1.Validate(bytes,evidence);if(validation.Code!=LocalAiResultValidationCodeV1.Valid||!validation.CanonicalBytes!.SequenceEqual(bytes)||!MatchesExpected(bytes,expected))return false;using var document=JsonDocument.Parse(bytes);var findings=document.RootElement.GetProperty("findings").GetArrayLength();return expected.RunState=="zero_findings"?findings==0:expected.RunState=="succeeded"&&findings>0;}
     internal static bool ValidateStoredSnapshot(LocalAiStoredSnapshotInvariantV1 value)
     {try{ValidateUuid7(value.SnapshotId);ValidateScope(value.ScopeKind,value.SessionId,value.NodeId);if(value.AnchorId!=(value.NodeId??value.SessionId)||Hash(value.Payload)!=value.PayloadSha256||Hash(value.EvidenceIndex)!=value.EvidenceIndexSha256||!Canonical(value.Payload).SequenceEqual(value.Payload)||!Canonical(value.EvidenceIndex).SequenceEqual(value.EvidenceIndex))return false;ValidateEvidenceIndex(value.EvidenceIndex);return true;}catch(Exception exception)when(exception is ArgumentException or InvalidOperationException or JsonException){return false;}}
 }

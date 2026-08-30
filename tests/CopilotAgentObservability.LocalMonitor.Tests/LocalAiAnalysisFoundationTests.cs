@@ -11,6 +11,31 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalAiAnalysisFoundationTests
 {
     [Fact]
+    public void StoredResultWithoutSnapshotEvidence_SkipsOnlyMembershipResolution()
+    {
+        var unresolved = Result(evidenceRef: "ev-missing");
+        Assert.Equal(LocalAiResultValidationCodeV1.InvalidEvidence, LocalAiResultValidatorV1.Validate(unresolved, ["ev-1"]).Code);
+        Assert.Equal(LocalAiResultValidationCodeV1.Valid, LocalAiResultValidatorV1.Validate(unresolved, null).Code);
+
+        foreach (var malformed in new[]
+        {
+            "[]",
+            "[1]",
+            "[\"\"]",
+            "[" + string.Join(',', Enumerable.Range(1, 17).Select(index => $"\"ev-{index}\"")) + "]",
+        })
+            Assert.Equal(LocalAiResultValidationCodeV1.InvalidEvidence, LocalAiResultValidatorV1.Validate(Result(findingEvidenceRefs: malformed), null).Code);
+
+        var expected = new LocalAiStoredResultInvariantV1(null, PayloadHash, SnapshotId, "session", SessionId, null, SessionId,
+            "github_copilot_sdk", "synthetic-model", Hash64, "local-ai-analysis.prompt.v1",
+            "2026-08-30T01:00:00.0000000+00:00", "2026-08-30T01:00:01.0000000+00:00", "2026-08-30T01:00:02.0000000+00:00", "succeeded");
+        static byte[] Canonical(byte[] value) => LocalAiResultValidatorV1.Validate(value, null).CanonicalBytes!;
+        Assert.True(LocalAiAnalysisStoreV1.ValidateStoredResultWithoutEvidenceMembership(Canonical(Result()), expected));
+        Assert.False(LocalAiAnalysisStoreV1.ValidateStoredResultWithoutEvidenceMembership(Canonical(Result(provider: "other")), expected));
+        Assert.False(LocalAiAnalysisStoreV1.ValidateStoredResultWithoutEvidenceMembership(Canonical(Result(zero: true)), expected));
+    }
+
+    [Fact]
     public void SessionContent_IsCatalogOwnedAndReadableAfterRestart()
     {
         using var database = new Database();
