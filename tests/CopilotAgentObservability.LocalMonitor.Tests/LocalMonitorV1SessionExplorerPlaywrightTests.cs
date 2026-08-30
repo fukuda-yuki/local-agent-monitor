@@ -57,6 +57,60 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task RepositoryAiReadinessFailureIsInvisibleAndDoesNotDisableExplorerCore()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var searchCalls = 0;
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => { searchCalls++; return route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())); });
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.AbortAsync());
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#session-ai-open")).ToBeHiddenAsync();
+        await page.Locator("#session-search").FillAsync("still usable");
+        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await Expect(page.Locator("#session-explorer-rows tr")).ToHaveCountAsync(2);
+        Assert.True(searchCalls >= 2);
+
+        var all = await browser.NewPageAsync();
+        await all.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await all.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
+        await all.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(all.Locator("#session-ai-open")).ToBeHiddenAsync();
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task RepositoryAiRendersClosedResultAndOnlyCanonicalEvidenceAsAnExactLink()
+    {
+        const string runId = "018f0000-0000-7000-8000-000000000021";
+        const string snapshotId = "018f0000-0000-7000-8000-000000000020";
+        var hash = new string('a', 64); var configuration = new string('b', 64);
+        var evidence = $"/sessions/{SessionId}?node=node-a8a773d6614d5030f505ff195b452dd6";
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json($$"""{"schema_version":"local-ai-repository-preview.response.v1","snapshot_id":"{{snapshotId}}","payload_sha256":"{{hash}}","expires_at":"2026-08-31T12:00:00.0000000+00:00","included":[{"session_archive_state":"active","session_archive_revision":1,"archive_exclusion_reason":null,"source":["vscode"],"model":["model-a"],"completeness":"complete","content_state":"available","workspace_revision":"{{hash}}","truncated":false}],"excluded":[],"truncated":false}""")));
+        string? startBody = null; await page.RouteAsync("**/api/local-monitor/v1/ai/repository-runs", route => { startBody = route.Request.PostData; return route.FulfillAsync(Json($$"""{"run_id":"{{runId}}"}""")); });
+        var resultBody = JsonSerializer.Serialize(new { run_id = runId, state = "succeeded", scope_kind = "repository_selection", session_id = (string?)null, node_id = (string?)null, repository_id = RepositoryId, error = (string?)null, result = new { scope = new { kind = "repository_selection", repository_id = RepositoryId, anchor_id = RepositoryId }, snapshot = new { snapshot_id = snapshotId, payload_sha256 = hash }, summary = "<img src=x onerror=alert(1)> summary", findings = new[] { new { finding_id = "f-1", title = "Finding", explanation = "Explanation", evidence_state = "supported", evidence_refs = new[] { evidence }, limitation = "none" } }, improvement_suggestions = Array.Empty<object>(), limitations = Array.Empty<string>(), provenance = new { provider = "github_copilot_sdk", model = "synthetic", configuration_sha256 = configuration, prompt_template_version = "v1", requested_at = "2026-08-31T00:00:00.0000000+00:00", started_at = "2026-08-31T00:00:01.0000000+00:00", completed_at = "2026-08-31T00:00:02.0000000+00:00", snapshot_id = snapshotId, snapshot_sha256 = hash, coverage = new { included = 1, excluded = 0, content_available = true } } } });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{runId}", route => route.FulfillAsync(Json(resultBody)));
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator("#session-ai-open").ClickAsync(); await page.Locator("#session-ai-preview").ClickAsync();
+        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("vscode / model-a / complete / available");
+        await page.Locator("#session-ai-start").ClickAsync(); await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AI による解釈");
+        await Expect(page.Locator("#session-ai-result a")).ToHaveAttributeAsync("href", evidence);
+        Assert.Equal(0, await page.Locator("#session-ai-result img").CountAsync());
+        using var start = JsonDocument.Parse(startBody!); Assert.Equal(new[] { "schema_version", "snapshot_id", "payload_sha256", "timeout_seconds" }, start.RootElement.EnumerateObject().Select(x => x.Name));
+    }
+
+    [Fact]
     [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ComparePreviewCreatesFromTransientOrderedCohortsAndNavigatesOnlyByServerLocation()
     {

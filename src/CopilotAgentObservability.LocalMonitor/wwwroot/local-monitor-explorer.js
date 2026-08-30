@@ -166,6 +166,10 @@
     return typeof value === "string" && value.length > 0 && value.length <= maximum && !hasUnpairedSurrogate(value);
   }
 
+  function nonnegativeInteger(value) {
+    return typeof value === "bigint" ? value >= 0n : Number.isSafeInteger(value) && value >= 0;
+  }
+
   function validEvidenceLocation(value) {
     if (typeof value !== "string" || value.includes("#") || value.includes("%")) return false;
     const match = /^\/sessions\/([0-9a-f-]{36})(?:\?execution=([0-9a-f-]{36})(?:&node=(node-[0-9a-f]{32}))?|\?node=(node-[0-9a-f]{32}))?$/.exec(value);
@@ -200,8 +204,8 @@
       && REVISION.test(result.provenance.configuration_sha256) && UUID_V7.test(result.provenance.snapshot_id) && REVISION.test(result.provenance.snapshot_sha256)
       && result.provenance.snapshot_id === result.snapshot.snapshot_id && result.provenance.snapshot_sha256 === result.snapshot.payload_sha256
       && exactKeySet(result.provenance.coverage, ["included", "excluded", "content_available"])
-      && Number.isSafeInteger(result.provenance.coverage.included) && result.provenance.coverage.included >= 0
-      && Number.isSafeInteger(result.provenance.coverage.excluded) && result.provenance.coverage.excluded >= 0
+      && nonnegativeInteger(result.provenance.coverage.included)
+      && nonnegativeInteger(result.provenance.coverage.excluded)
       && typeof result.provenance.coverage.content_available === "boolean";
   }
 
@@ -677,7 +681,7 @@
   async function pollAiRun() {
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${aiState.runId}`, { cache: "no-store", credentials: "same-origin" });
-      if (!response.ok) throw await apiFailure(response); const value = await readJsonResponse(response, 8_388_608);
+      if (!response.ok) throw await apiFailure(response); const value = await response.json();
       if (!validateRepositoryRun(value, aiState.runId)) throw new TypeError("invalid repository run");
       if (["queued", "running"].includes(value.state)) { setTimeout(pollAiRun, 250); return; }
       aiCancel.hidden = true; aiStatus.textContent = value.state === "succeeded" ? "分析が完了しました。" : `分析は ${value.state} で終了しました。`;
@@ -715,7 +719,9 @@
   async function startAiRun() {
     if (!aiState.preview) return; aiStart.disabled = true;
     try { const value = await aiJson("/api/local-monitor/v1/ai/repository-runs", { schema_version: "local-ai-repository-run.request.v1", snapshot_id: aiState.preview.snapshot_id, payload_sha256: aiState.preview.payload_sha256, timeout_seconds: 120 });
-      if (!UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。"; window.LocalMonitorV1History.push({ analysis: value.run_id }); pollAiRun();
+      if (!UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。";
+      try { window.LocalMonitorV1History.push({ analysis: value.run_id }); } catch { }
+      pollAiRun();
     } catch { aiStatus.textContent = "分析を開始できませんでした。一覧は引き続き利用できます。"; }
   }
 
@@ -730,7 +736,7 @@
     aiState.runId = runId;
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin" });
-      if (!response.ok) throw await apiFailure(response); const value = await readJsonResponse(response, 8_388_608);
+      if (!response.ok) throw await apiFailure(response); const value = await response.json();
       if (!validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
       aiDialog.showModal(); aiStatus.textContent = value.state === "succeeded" ? "保存された分析を表示しています。" : `分析は ${value.state} です。`;
       aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(); }
