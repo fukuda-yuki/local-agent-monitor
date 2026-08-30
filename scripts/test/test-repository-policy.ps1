@@ -8,6 +8,11 @@ if (-not (Test-Path -LiteralPath $guard -PathType Leaf)) {
     throw "Repository policy guard was not found: $guard"
 }
 
+$validationRunner = Join-Path $PSScriptRoot 'run-validation.ps1'
+if (-not (Test-Path -LiteralPath $validationRunner -PathType Leaf)) {
+    throw "Validation runner was not found: $validationRunner"
+}
+
 function Invoke-Git {
     param(
         [Parameter(Mandatory)]
@@ -44,6 +49,76 @@ function Invoke-Guard {
     return [pscustomobject]@{
         ExitCode = $LASTEXITCODE
         Output = $output -join "`n"
+    }
+}
+
+function Assert-ValidationRunnerPreflightOrder {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("repository-policy-runner-{0}" -f [guid]::NewGuid().ToString('N'))
+    $scriptRoot = Join-Path $root 'scripts\test'
+    $shimRoot = Join-Path $root 'shims'
+    $logPath = Join-Path $root 'commands.log'
+
+    New-Item -ItemType Directory -Path $scriptRoot | Out-Null
+    New-Item -ItemType Directory -Path $shimRoot | Out-Null
+    Copy-Item -LiteralPath $validationRunner -Destination (Join-Path $scriptRoot 'run-validation.ps1')
+    Set-Content -LiteralPath (Join-Path $root 'CopilotAgentObservability.slnx') -Value '' -NoNewline
+    Set-Content -LiteralPath (Join-Path $scriptRoot 'test-repository-policy.ps1') -Value @'
+[CmdletBinding()]
+param()
+Add-Content -LiteralPath $env:VALIDATION_PREFLIGHT_LOG -Value 'repository-policy-self-test'
+'@ -NoNewline
+    Set-Content -LiteralPath (Join-Path $scriptRoot 'assert-repository-policy.ps1') -Value @'
+[CmdletBinding()]
+param([string]$RepositoryRoot)
+Add-Content -LiteralPath $env:VALIDATION_PREFLIGHT_LOG -Value 'repository-policy-guard'
+'@ -NoNewline
+    if ($IsWindows) {
+        Set-Content -LiteralPath (Join-Path $shimRoot 'dotnet.cmd') -Value @'
+@echo off
+echo dotnet:%*>>"%VALIDATION_PREFLIGHT_LOG%"
+exit /b 17
+'@ -NoNewline
+    }
+    else {
+        $dotnetShim = Join-Path $shimRoot 'dotnet'
+        Set-Content -LiteralPath $dotnetShim -Value @'
+#!/usr/bin/env sh
+printf 'dotnet:%s\n' "$*" >> "$VALIDATION_PREFLIGHT_LOG"
+exit 17
+'@ -NoNewline
+        & chmod +x $dotnetShim
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to make the dotnet validation shim executable."
+        }
+    }
+
+    $previousPath = $env:PATH
+    $previousLog = $env:VALIDATION_PREFLIGHT_LOG
+    try {
+        $env:PATH = "$shimRoot$([System.IO.Path]::PathSeparator)$previousPath"
+        $env:VALIDATION_PREFLIGHT_LOG = $logPath
+        $pwshExecutable = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        & $pwshExecutable -NoProfile -File (Join-Path $scriptRoot 'run-validation.ps1') -Lane Completion 2>&1 | Out-Null
+
+        $commands = @(Get-Content -LiteralPath $logPath)
+        $selfTestIndex = [Array]::IndexOf($commands, 'repository-policy-self-test')
+        $guardIndex = [Array]::IndexOf($commands, 'repository-policy-guard')
+        $buildIndex = [Array]::FindIndex($commands, [Predicate[string]] { param($line) $line -match '^dotnet:build ' })
+
+        if ($selfTestIndex -lt 0 -or $guardIndex -lt 0 -or $buildIndex -lt 0) {
+            throw "Validation runner did not execute repository policy self-test, guard, and build: $($commands -join ' | ')"
+        }
+
+        if (-not ($selfTestIndex -lt $guardIndex -and $guardIndex -lt $buildIndex)) {
+            throw "Validation runner preflight order must be self-test, guard, then build: $($commands -join ' | ')"
+        }
+    }
+    finally {
+        $env:PATH = $previousPath
+        $env:VALIDATION_PREFLIGHT_LOG = $previousLog
+        if (Test-Path -LiteralPath $root) {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
     }
 }
 
@@ -92,6 +167,8 @@ try {
     if ($segmentedReferenceResult.ExitCode -eq 0 -or $segmentedReferenceResult.Output -notmatch 'README\.md') {
         throw "Segmented removed-path reference was not rejected with its source: $($segmentedReferenceResult.Output)"
     }
+
+    Assert-ValidationRunnerPreflightOrder
 
     Write-Output 'repository_policy_tests=passed'
 }
