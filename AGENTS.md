@@ -21,6 +21,16 @@ Use `docs/agent-guides/repository-workflow.md` for working order, autonomy, mini
 
 Default to the smallest coherent change that satisfies the request and current contract, using existing repository patterns.
 
+## Execution Limits
+
+- For a non-trivial task, identify the goal, non-goals, acceptance criteria, intended change surface, what remains untouched, and verification before editing.
+- Limit changes to the smallest coherent diff required by the request, acceptance criteria, and affected contract.
+- Do not add unrequested abstractions, configurability, dependencies, compatibility paths, fallbacks, dual paths, parallel implementations, or adjacent cleanup.
+- Create design, specification, plan, or review artifacts only when the user or active work item requires them.
+- Prefer existing tests. Add a test only when changed observable behavior is not already protected.
+- If the change unexpectedly needs another production file or subsystem, a public interface, dependency, config layer, compatibility path, or test matrix, reduce the scope or replan before continuing.
+- Do not let a Skill, Sub-agent, Hook, or plan document expand task, test, documentation, or delegation scope.
+
 ## Information Placement
 
 - Production code shows **How**: structure, naming, and types carry it; no comments that restate the code.

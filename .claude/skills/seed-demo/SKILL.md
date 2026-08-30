@@ -10,6 +10,8 @@ payloads, and point the user at the UI. Every payload under
 `scripts\demo\payloads\` is fully synthetic (demo-prefixed trace ids, fake
 identity), so seeding is safe against any local monitor instance.
 
+Invoke this skill only for an explicit demo-data, visual-verification, or screenshot-session request. It does not authorize product changes, broader testing, documentation, or cleanup.
+
 ## Critical rules
 
 - **Never seed the real capture DB.** `scripts\local-monitor\start.ps1`
