@@ -30,10 +30,17 @@
   const evidenceItems = root.querySelector("[data-compare-evidence-items]");
   const evidenceMore = root.querySelector("#repository-compare-evidence-more");
   const evidenceClose = root.querySelector("#repository-compare-evidence-close");
+  const aiSurface = root.querySelector("[data-compare-ai]");
+  const aiStart = root.querySelector("[data-compare-ai-start]");
+  const aiCancel = root.querySelector("[data-compare-ai-cancel]");
+  const aiStatus = root.querySelector("[data-compare-ai-status]");
+  const aiResult = root.querySelector("[data-compare-ai-result]");
   const repositoryId = root.dataset.repositoryId;
   const comparisonId = root.dataset.comparisonId;
   if (!UUID_V7.test(repositoryId ?? "") || !UUID_V7.test(comparisonId ?? "")) return;
   const base = `/api/local-monitor/v1/repositories/${repositoryId}/comparisons/${comparisonId}`;
+  let activeAiRun = null;
+  let aiGeneration = 0;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && Object.keys(value).every((key, index) => key === keys[index]);
@@ -297,11 +304,137 @@
   evidenceClose.addEventListener("click", closeEvidence);
   evidenceMore.addEventListener("click", () => { if (state.evidenceCursor) loadEvidence(true); });
   evidenceDialog.addEventListener("cancel", event => { event.preventDefault(); closeEvidence(); });
-  window.addEventListener("pagehide", () => { state.controller?.abort(); closeEvidence(); });
+
+  const AI_STATES = Object.freeze({
+    queued: "AI解釈を待っています。", running: "AIが比較を解釈しています。",
+    succeeded: "AI解釈が完了しました。", zero_findings: "AIからの指摘はありませんでした。",
+    provider_failed: "AI provider で解釈できませんでした。", provider_partial: "不完全なAI結果のため表示できません。",
+    timed_out: "AI解釈がタイムアウトしました。", canceled: "AI解釈をキャンセルしました。",
+    stale_snapshot: "比較の保存期間またはスナップショットが更新されたため表示できません。",
+    invalid_result: "AI結果を安全に表示できません。", invalid_evidence: "AIの根拠を確認できないため表示できません。",
+    scope_too_large: "比較がAI解釈の上限を超えています。",
+  });
+
+  function appendAiField(target, label, value) {
+    if (value === null || value === undefined || value === "") return;
+    const row = element("p"); row.append(element("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
+  }
+
+  function aiEvidenceLink(reference) {
+    if (typeof reference !== "string") return null;
+    const match = /^\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:\?execution=([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:&node=(node-[0-9a-f]{32}))?|\?node=(node-[0-9a-f]{32}))?$/.exec(reference);
+    return match ? reference : null;
+  }
+
+  function appendAiEvidence(target, references) {
+    for (const reference of Array.isArray(references) ? references : []) {
+      const href = aiEvidenceLink(reference);
+      if (!href) continue;
+      const link = element("a", null, "正確な根拠を開く"); link.href = href; target.append(link);
+    }
+  }
+
+  function renderAiResult(result) {
+    aiResult.replaceChildren();
+    if (!result || typeof result !== "object" || typeof result.summary !== "string" || !Array.isArray(result.findings)
+        || !Array.isArray(result.improvement_suggestions) || !Array.isArray(result.limitations)) {
+      aiStatus.textContent = AI_STATES.invalid_result; return false;
+    }
+    aiResult.append(element("h3", null, "AIによる解釈"));
+    if (result.scope && typeof result.scope === "object") {
+      const scope = element("section"); scope.append(element("h4", null, "対象範囲"));
+      for (const [key, label] of [["kind", "scope"], ["repository_id", "Repository"], ["comparison_id", "comparison"], ["anchor_id", "anchor"]]) appendAiField(scope, label, result.scope[key]);
+      aiResult.append(scope);
+    }
+    if (result.snapshot && typeof result.snapshot === "object") {
+      const snapshot = element("section"); snapshot.append(element("h4", null, "スナップショット"));
+      appendAiField(snapshot, "snapshot", result.snapshot.snapshot_id); appendAiField(snapshot, "payload SHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
+    }
+    aiResult.append(element("h4", null, "要約"), element("p", null, result.summary));
+    if (result.findings.length) aiResult.append(element("h4", null, "指摘（AIによる解釈）"));
+    for (const finding of result.findings) {
+      const article = element("article"); article.append(element("h5", null, String(finding.title ?? "指摘")));
+      for (const [key, label] of [["explanation", "解釈"], ["evidence_state", "根拠の状態"], ["limitation", "制約"]]) appendAiField(article, label, finding[key]);
+      appendAiEvidence(article, finding.evidence_refs); aiResult.append(article);
+    }
+    if (result.improvement_suggestions.length) aiResult.append(element("h4", null, "改善案（AIによる提案）"));
+    for (const suggestion of result.improvement_suggestions) {
+      const article = element("article");
+      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "予想（決定的事実ではありません）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
+      appendAiEvidence(article, suggestion.evidence_refs); aiResult.append(article);
+    }
+    if (result.limitations.length) { aiResult.append(element("h4", null, "制約")); for (const limitation of result.limitations) aiResult.append(element("p", null, String(limitation))); }
+    if (result.provenance && typeof result.provenance === "object") {
+      const provenance = element("section"); provenance.append(element("h4", null, "来歴"));
+      for (const [key, label] of [["provider", "provider"], ["model", "model"], ["configuration_sha256", "configuration"], ["prompt_template_version", "template"], ["snapshot_id", "snapshot"], ["snapshot_sha256", "snapshot SHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      aiResult.append(provenance);
+    }
+    return true;
+  }
+
+  function ownsComparisonRun(run, runId) {
+    return run && run.run_id === runId && run.scope_kind === "comparison"
+      && run.repository_id === repositoryId && run.comparison_id === comparisonId;
+  }
+
+  async function pollAiRun(runId, generation) {
+    while (generation === aiGeneration && activeAiRun === runId) {
+      try {
+        const run = await get(`/api/local-monitor/v1/ai/runs/${runId}`);
+        if (!ownsComparisonRun(run, runId)) { aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
+        aiStatus.textContent = AI_STATES[run.state] ?? "AI解釈を表示できません。";
+        if (!["queued", "running"].includes(run.state)) {
+          activeAiRun = null; aiCancel.hidden = true;
+          if (["succeeded", "zero_findings"].includes(run.state) && !renderAiResult(run.result)) return;
+          return;
+        }
+      } catch { aiStatus.textContent = "AI解釈の状態を確認できません。"; return; }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+
+  async function startAi() {
+    aiResult.replaceChildren(); aiStatus.textContent = "AI解釈を開始しています。"; aiStart.disabled = true;
+    try {
+      const response = await fetch("/api/local-monitor/v1/ai/comparison-runs", {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
+        body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
+      });
+      if (!response.ok) { const failure = await response.json().catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
+      const started = await response.json(); if (!UUID_V7.test(started?.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
+      activeAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
+      try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
+      await pollAiRun(activeAiRun, generation);
+    } catch { aiStatus.textContent = "AI解釈を開始できませんでした。"; }
+    finally { aiStart.disabled = false; }
+  }
+
+  async function restoreAi(runId) {
+    if (!UUID_V7.test(runId ?? "")) return;
+    activeAiRun = runId; const generation = ++aiGeneration; aiCancel.hidden = false; await pollAiRun(runId, generation);
+  }
+
+  async function checkAiReadiness() {
+    try {
+      const readiness = await get("/api/local-monitor/v1/settings/ai-readiness");
+      if (readiness?.readiness_state !== "ready") return;
+      aiSurface.hidden = false;
+      const route = window.LocalMonitorV1History?.current(); if (route?.analysis) await restoreAi(route.analysis);
+    } catch { /* deterministic Compare remains available without AI */ }
+  }
+
+  aiStart.addEventListener("click", startAi);
+  aiCancel.addEventListener("click", async () => {
+    if (!activeAiRun) return;
+    try { await fetch(`/api/local-monitor/v1/ai/runs/${activeAiRun}/cancel`, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: "{}" }); }
+    finally { aiGeneration++; activeAiRun = null; aiCancel.hidden = true; aiStatus.textContent = AI_STATES.canceled; }
+  });
+  window.addEventListener("pagehide", () => { state.controller?.abort(); aiGeneration++; closeEvidence(); });
 
   (async () => {
     const generation = ++state.generation; state.controller?.abort(); state.controller = new AbortController();
-    try { const snapshot = validateRead(await get(base, state.controller.signal)); if (generation === state.generation) renderRead(snapshot); }
+    try { const snapshot = validateRead(await get(base, state.controller.signal)); if (generation === state.generation) { renderRead(snapshot); await checkAiReadiness(); } }
     catch (error) {
       if (state.controller.signal.aborted || generation !== state.generation) return;
       status.textContent = error.code === "comparison_expired" ? "比較結果の保存期間が終了しました。" : "比較結果を読み込めませんでした。";

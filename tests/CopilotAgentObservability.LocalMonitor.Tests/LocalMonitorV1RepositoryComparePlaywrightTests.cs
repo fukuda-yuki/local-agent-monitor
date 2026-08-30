@@ -14,6 +14,83 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
     private const string ExecutionId = "018f0000-0000-7000-8000-000000000020";
     private const string NodeId = "node-11111111111111111111111111111111";
+    private const string RunId = "018f0000-0000-7000-8000-000000000099";
+
+    [Fact]
+    [Trait("ValidationLane", "CriticalSmoke")]
+    public async Task CompareAiIsHiddenUntilReadyThenStartsFromExactReceiptAndRendersSafeResult()
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        string? startBody = null;
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route =>
+            route.FulfillAsync(Json("{\"readiness_state\":\"ready\"}")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route =>
+        {
+            startBody = route.Request.PostData;
+            return route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}"));
+        });
+        var completedRun = """
+            {"run_id":"$RUN$","state":"succeeded","scope_kind":"comparison","session_id":null,"node_id":null,"repository_id":"$REPOSITORY$","comparison_id":"$COMPARISON$","error":null,"result":{"scope":{"kind":"comparison","repository_id":"$REPOSITORY$","comparison_id":"$COMPARISON$"},"snapshot":{"snapshot_id":"$COMPARISON$","payload_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"summary":"<img src=x onerror=alert(1)>","findings":[{"title":"要確認","explanation":"解釈です","evidence_refs":["/sessions/$SESSION$?execution=$EXECUTION$&node=$NODE$","/sessions/$SESSION$?node=unsafe"]}],"improvement_suggestions":[{"target_label":"案","rationale":"理由","evidence_refs":[]}],"limitations":["制約"],"provenance":{"provider":"copilot","model":"model-a","prompt_template_version":"compare.v1"}}}
+            """.Replace("$RUN$", RunId, StringComparison.Ordinal)
+                .Replace("$REPOSITORY$", RepositoryId, StringComparison.Ordinal)
+                .Replace("$COMPARISON$", ComparisonId, StringComparison.Ordinal)
+                .Replace("$SESSION$", SessionId, StringComparison.Ordinal)
+                .Replace("$EXECUTION$", ExecutionId, StringComparison.Ordinal)
+                .Replace("$NODE$", NodeId, StringComparison.Ordinal);
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(completedRun)));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route =>
+            route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        var action = page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true });
+        await Expect(action).ToBeVisibleAsync();
+        await action.ClickAsync();
+        Assert.Equal($$"""{"schema_version":"local-ai-comparison-run.request.v1","repository_id":"{{RepositoryId}}","comparison_id":"{{ComparisonId}}","timeout_seconds":60}""", startBody);
+        var result = page.Locator("[data-compare-ai-result]");
+        await Expect(result).ToContainTextAsync("AIによる解釈");
+        await Expect(result).ToContainTextAsync("<img src=x onerror=alert(1)>");
+        Assert.Equal(0, await result.Locator("img").CountAsync());
+        await Expect(result.Locator("a")).ToHaveCountAsync(1);
+        await Expect(result.Locator("a")).ToHaveAttributeAsync("href", $"/sessions/{SessionId}?execution={ExecutionId}&node={NodeId}");
+        Assert.DoesNotContain("<img", page.Url, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("scope")]
+    [InlineData("repository")]
+    [InlineData("comparison")]
+    [Trait("ValidationLane", "CriticalSmoke")]
+    public async Task CompareAiFailureAndWrongOwnershipLeaveDeterministicComparisonUsable(string mismatch)
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("{\"readiness_state\":\"ready\"}")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        var scope = mismatch == "scope" ? "repository" : "comparison";
+        var repository = mismatch == "repository" ? "018f0000-0000-7000-8000-000000000101" : RepositoryId;
+        var comparison = mismatch == "comparison" ? "018f0000-0000-7000-8000-000000000011" : ComparisonId;
+        var wrongOwner = $"{{\"run_id\":\"{RunId}\",\"state\":\"succeeded\",\"scope_kind\":\"{scope}\",\"session_id\":null,\"node_id\":null,\"repository_id\":\"{repository}\",\"comparison_id\":\"{comparison}\",\"error\":null,\"result\":null}}";
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(wrongOwner)));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
+        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync("表示できません");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator(".local-monitor-compare-section")).ToHaveCountAsync(9);
+    }
 
     [Fact]
     [Trait("ValidationLane", "CriticalSmoke")]
@@ -31,6 +108,8 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync(new BrowserNewPageOptions { ViewportSize = new ViewportSize { Width = 1366, Height = 768 } });
         var rowQueries = new List<string>();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route =>
+            route.FulfillAsync(Json("{\"readiness_state\":\"unconfigured\"}")));
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}**", route =>
         {
             if (route.Request.Url.Contains("/rows?", StringComparison.Ordinal))
@@ -63,6 +142,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(compareBody).Not.ToContainTextAsync("not_observed");
         await Expect(compareBody).Not.ToContainTextAsync("おすすめ");
         await Expect(compareBody).Not.ToContainTextAsync("AI");
+        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true })).ToHaveCountAsync(0);
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "設定", Exact = true })).ToBeVisibleAsync();
 
         var toolSection = page.Locator(".local-monitor-compare-section").Filter(new LocatorFilterOptions { Has = page.Locator("h2", new PageLocatorOptions { HasText = "ツール" }) });
