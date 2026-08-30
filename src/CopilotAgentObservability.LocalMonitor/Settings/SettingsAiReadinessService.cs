@@ -17,7 +17,8 @@ internal sealed class SettingsAiReadinessService(
     string selectedConfiguration,
     bool configured,
     Func<IOwnedCopilotClientV1?> clientFactory,
-    TimeSpan timeout) : IHostedLifecycleService, IAsyncDisposable
+    TimeSpan timeout,
+    TimeProvider timeProvider) : IHostedLifecycleService, IAsyncDisposable
 {
     private const string EgressNotice = "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action";
     private readonly object sync = new();
@@ -77,8 +78,8 @@ internal sealed class SettingsAiReadinessService(
         {
             client = clientFactory();
             if (client is null) return Set("unavailable", "unavailable");
-            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
-            bounded.CancelAfter(timeout);
+            using var expiry = new CancellationTokenSource(timeout, timeProvider);
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token, expiry.Token);
             await client.StartAsync(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
             var status = await client.GetStatusAsync(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
             if (status is null) return Set("unavailable", "unavailable");
@@ -99,7 +100,8 @@ internal sealed class SettingsAiReadinessService(
         {
             if (client is not null)
             {
-                try { await client.DisposeAsync().AsTask().WaitAsync(timeout).ConfigureAwait(false); }
+                using var expiry = new CancellationTokenSource(timeout, timeProvider);
+                try { await client.DisposeAsync().AsTask().WaitAsync(expiry.Token).ConfigureAwait(false); }
                 catch { }
             }
         }

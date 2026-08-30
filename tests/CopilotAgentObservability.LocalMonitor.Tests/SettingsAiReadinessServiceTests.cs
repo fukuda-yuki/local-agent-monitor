@@ -84,8 +84,9 @@ public sealed class SettingsAiReadinessServiceTests
     }
 
     [Fact]
-    public async Task CheckAsync_IsBoundedWhenProviderIgnoresCancellationAndDisposesExactlyOnce()
+    public async Task CheckAsync_ProviderExpiryIsControllableWhenProviderIgnoresCancellationAndDisposesExactlyOnce()
     {
+        var timeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         var never = new TaskCompletionSource<CopilotRuntimeStatusObservationV1?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var providerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var providerExpiryDelivered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -98,21 +99,17 @@ public sealed class SettingsAiReadinessServiceTests
                 return never.Task;
             },
             () => disposeEntered.TrySetResult());
-        var service = Service(() => client, timeout: TimeSpan.FromMilliseconds(30));
+        var service = Service(
+            () => client,
+            timeout: TimeSpan.FromMilliseconds(30),
+            timeProvider: timeProvider);
         var check = service.CheckAsync(CancellationToken.None);
         await providerEntered.Task;
-        SettingsAiReadinessSnapshot result;
-        try
-        {
-            result = await check.WaitAsync(TimeSpan.FromSeconds(1));
-        }
-        catch (TimeoutException exception)
-        {
-            throw new Xunit.Sdk.XunitException(
-                $"AI readiness diagnostic timed out: harness-ready=true provider-entered={providerEntered.Task.IsCompleted} " +
-                $"provider-expiry-delivered={providerExpiryDelivered.Task.IsCompleted} dispose-entered={disposeEntered.Task.IsCompleted} " +
-                $"caller-completed={check.IsCompleted} dispose-count={client.DisposeCalls}. {exception.Message}");
-        }
+        Assert.False(check.IsCompleted);
+
+        timeProvider.Advance(TimeSpan.FromMilliseconds(30));
+        var result = await check.WaitAsync(TimeSpan.FromSeconds(10));
+
         Assert.Equal("check_failed", result.ReadinessState);
         Assert.True(providerExpiryDelivered.Task.IsCompleted);
         Assert.True(disposeEntered.Task.IsCompleted);
@@ -121,30 +118,26 @@ public sealed class SettingsAiReadinessServiceTests
     }
 
     [Fact]
-    public async Task CheckAsync_IsBoundedWhenDisposeIgnoresCompletionAndInvokesDisposeExactlyOnce()
+    public async Task CheckAsync_DisposalExpiryIsControllableWhenDisposeIgnoresCompletionAndInvokesDisposeExactlyOnce()
     {
+        var timeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         var disposeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var neverDisposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var client = new Client(
             _ => Task.FromResult<CopilotRuntimeStatusObservationV1?>(Status(true)),
             () => disposeEntered.TrySetResult(),
             neverDisposed.Task);
-        var service = Service(() => client, timeout: TimeSpan.FromMilliseconds(30));
+        var service = Service(
+            () => client,
+            timeout: TimeSpan.FromMilliseconds(30),
+            timeProvider: timeProvider);
 
         var check = service.CheckAsync(CancellationToken.None);
         await disposeEntered.Task;
-        SettingsAiReadinessSnapshot result;
-        try
-        {
-            result = await check.WaitAsync(TimeSpan.FromSeconds(1));
-        }
-        catch (TimeoutException exception)
-        {
-            throw new Xunit.Sdk.XunitException(
-                $"AI readiness disposal diagnostic timed out: harness-ready=true provider-entered=true " +
-                $"dispose-entered={disposeEntered.Task.IsCompleted} dispose-completed={neverDisposed.Task.IsCompleted} " +
-                $"caller-completed={check.IsCompleted} dispose-count={client.DisposeCalls}. {exception.Message}");
-        }
+        Assert.False(check.IsCompleted);
+
+        timeProvider.Advance(TimeSpan.FromMilliseconds(30));
+        var result = await check.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal("ready", result.ReadinessState);
         Assert.False(neverDisposed.Task.IsCompleted);
@@ -154,8 +147,19 @@ public sealed class SettingsAiReadinessServiceTests
 
     private static CopilotRuntimeStatusObservationV1 Status(bool authenticated) => new("1.0.75", 3, null, authenticated);
 
-    private static SettingsAiReadinessService Service(Func<IOwnedCopilotClientV1?> factory, bool enabled = true, TimeSpan? timeout = null) =>
-        new("github_copilot", "gpt-5", "standard", enabled, factory, timeout ?? TimeSpan.FromSeconds(1));
+    private static SettingsAiReadinessService Service(
+        Func<IOwnedCopilotClientV1?> factory,
+        bool enabled = true,
+        TimeSpan? timeout = null,
+        TimeProvider? timeProvider = null) =>
+        new(
+            "github_copilot",
+            "gpt-5",
+            "standard",
+            enabled,
+            factory,
+            timeout ?? TimeSpan.FromSeconds(1),
+            timeProvider ?? TimeProvider.System);
 
     private sealed class Client : IOwnedCopilotClientV1
     {
