@@ -98,18 +98,18 @@ public sealed class SetupRuntimeTests
         using var secondCallbackEntered = new ManualResetEventSlim();
         using var disposeStarted = new ManualResetEventSlim();
 
-        var first = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        var first = RunBlockingParticipant(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             callbackEntered.Set();
             WaitOrFail(releaseCallback, "the first setup callback release");
-        }));
+        }), "the first setup callback");
         WaitOrFail(callbackEntered, "the first setup callback entry");
 
-        var second = Task.Run(() =>
+        var second = RunBlockingParticipant(() =>
         {
             secondAttempted.Set();
             setupLock.ExecuteWhileHeld(platform, paths, secondCallbackEntered.Set);
-        });
+        }, "the second setup callback");
         WaitOrFail(secondAttempted, "the second setup callback attempt");
         Assert.False(secondCallbackEntered.IsSet);
         using var contended = SetupLock.TryAcquire(platform, paths);
@@ -123,21 +123,19 @@ public sealed class SetupRuntimeTests
 
         callbackEntered.Reset();
         releaseCallback.Reset();
-        var third = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        var third = RunBlockingParticipant(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             callbackEntered.Set();
             WaitOrFail(releaseCallback, "the third setup callback release");
-        }));
+        }), "the third setup callback");
         WaitOrFail(callbackEntered, "the third setup callback entry");
-        var dispose = Task.Factory.StartNew(
+        var dispose = RunBlockingParticipant(
             () =>
             {
                 disposeStarted.Set();
                 setupLock.Dispose();
             },
-            CancellationToken.None,
-            TaskCreationOptions.LongRunning,
-            TaskScheduler.Default);
+            "the external Dispose");
         WaitOrFail(disposeStarted, "the external Dispose start");
         Assert.False(dispose.IsCompleted);
 
@@ -161,20 +159,20 @@ public sealed class SetupRuntimeTests
         using var releaseCallback = new ManualResetEventSlim();
         using var queuedAttempted = new ManualResetEventSlim();
 
-        var active = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        var active = RunBlockingParticipant(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             callbackEntered.Set();
             WaitOrFail(releaseCallback, "the active setup callback release");
-        }));
+        }), "the active setup callback");
         WaitOrFail(callbackEntered, "the active setup callback entry");
-        var queued = Task.Run(() =>
+        var queued = RunBlockingParticipant(() =>
         {
             queuedAttempted.Set();
             setupLock.ExecuteWhileHeld(platform, paths, () => { });
-        });
+        }, "the queued setup callback");
         WaitOrFail(queuedAttempted, "the queued setup callback attempt");
 
-        var dispose = Task.Run(setupLock.Dispose);
+        var dispose = RunBlockingParticipant(setupLock.Dispose, "the external Dispose");
         WaitOrFail(disposeRequested, "the DisposeRequested lifecycle transition");
         Assert.Equal(0, handle.DisposeCount);
 
@@ -214,13 +212,13 @@ public sealed class SetupRuntimeTests
         using var callbackEntered = new ManualResetEventSlim();
         using var releaseCallback = new ManualResetEventSlim();
 
-        var callback = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
+        var callback = RunBlockingParticipant(() => setupLock.ExecuteWhileHeld(platform, paths, () =>
         {
             callbackEntered.Set();
             WaitOrFail(releaseCallback, "the callback release before throwing-handle disposal");
-        }));
+        }), "the throwing-handle setup callback");
         WaitOrFail(callbackEntered, "the callback entry before throwing-handle disposal");
-        var dispose = Task.Run(setupLock.Dispose);
+        var dispose = RunBlockingParticipant(setupLock.Dispose, "the throwing-handle Dispose");
         WaitOrFail(disposeRequested, "the throwing-handle DisposeRequested transition");
 
         releaseCallback.Set();
@@ -406,14 +404,14 @@ public sealed class SetupRuntimeTests
         var setupLock = Assert.IsType<SetupLock>(acquired.Lock);
         using var publicMonitorEntered = new ManualResetEventSlim();
         using var releasePublicMonitor = new ManualResetEventSlim();
-        var monitorHolder = Task.Run(() =>
+        var monitorHolder = RunBlockingParticipant(() =>
         {
             lock (setupLock)
             {
                 publicMonitorEntered.Set();
                 WaitOrFail(releasePublicMonitor, "the public monitor release");
             }
-        });
+        }, "the public monitor holder");
         WaitOrFail(publicMonitorEntered, "the public monitor entry");
 
         var operation = Task.Run(() => setupLock.ExecuteWhileHeld(platform, paths, () => 11));
@@ -554,6 +552,25 @@ public sealed class SetupRuntimeTests
     {
         var exception = Assert.Throws<SetupStorageException>(action);
         Assert.Equal(SetupStorageCodes.LockRequired, exception.Code);
+    }
+
+    private static Task RunBlockingParticipant(Action participant, string description)
+    {
+        var delegateEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var task = Task.Factory.StartNew(
+            () =>
+            {
+                delegateEntered.SetResult();
+                participant();
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        Assert.True(
+            delegateEntered.Task.Wait(TimeSpan.FromSeconds(10)),
+            $"Timed out waiting for {description} delegate entry.");
+        return task;
     }
 
     private static void WaitOrFail(ManualResetEventSlim signal, string description) =>
