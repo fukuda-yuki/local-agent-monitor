@@ -4,6 +4,9 @@
   if (!root || !window.LocalMonitorV1FactState) return;
 
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const RESULT_MAXIMUM_BYTES = 1_048_576;
+  const RUN_MAXIMUM_BYTES = RESULT_MAXIMUM_BYTES + 4_096;
+  const SMALL_RESPONSE_MAXIMUM_BYTES = 4_096;
   const SHA256 = /^[0-9a-f]{64}$/;
   const NODE = /^node-[0-9a-f]{32}$/;
   const SECTIONS = [
@@ -69,9 +72,9 @@
     }
     if (quoted || stack.length) throw new TypeError("invalid json");
   }
-  async function readStrictJson(response, maximumBytes = 1048576) {
+  async function readStrictJson(response, maximumBytes, includeText = false) {
     const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > maximumBytes) throw new TypeError("json too large");
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateJsonWire(text); return JSON.parse(text);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateJsonWire(text); const value = JSON.parse(text); return includeText ? { value, text } : value;
   }
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -377,7 +380,7 @@
   }
 
   function validateAiResult(result) {
-    if (!exactSet(result, RESULT_KEYS) || new TextEncoder().encode(JSON.stringify(result)).length > 1048576
+    if (!exactSet(result, RESULT_KEYS) || new TextEncoder().encode(JSON.stringify(result)).length > RESULT_MAXIMUM_BYTES
         || !exactSet(result.scope, ["kind", "repository_id", "comparison_id", "anchor_id"])
         || result.scope.kind !== "comparison" || result.scope.repository_id !== repositoryId
         || result.scope.comparison_id !== comparisonId || result.scope.anchor_id !== comparisonId
@@ -473,9 +476,15 @@
       try {
         const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { method: "GET", credentials: "same-origin", cache: "no-store" });
         if (!response.ok) throw new Error("poll_failed");
-        const run = await readStrictJson(response);
+        const wire = await readStrictJson(response, RUN_MAXIMUM_BYTES, true); const run = wire.value;
         if (generation !== aiGeneration || activeAiRun !== runId) return;
         if (!ownsComparisonRun(run, runId)) { activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
+        if (["succeeded", "zero_findings"].includes(run.state)) {
+          const marker = wire.text.lastIndexOf('"result":'); const end = wire.text.lastIndexOf("}");
+          if (marker < 0 || end <= marker || new TextEncoder().encode(wire.text.slice(marker + 9, end).trim()).length > RESULT_MAXIMUM_BYTES) {
+            activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+          }
+        }
         if (["succeeded", "zero_findings"].includes(run.state)
             && (!validateAiResult(run.result) || (run.state === "zero_findings") !== (run.result.findings.length === 0))) {
           activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
@@ -486,7 +495,7 @@
           if (["succeeded", "zero_findings"].includes(run.state) && !renderAiResult(run.result)) return;
           return;
         }
-      } catch { aiStatus.textContent = "AI解釈の状態を確認できません。再試行しています。"; }
+      } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiStatus.textContent = "AI解釈の状態を確認できません。再試行しています。"; }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
@@ -499,8 +508,8 @@
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
       });
-      if (!response.ok) { const failure = await readStrictJson(response).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
-      const started = await readStrictJson(response); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
+      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
+      const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
       activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
       try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
       await pollAiRun(activeAiRun, generation);
@@ -529,7 +538,7 @@
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { method: "GET", credentials: "same-origin", cache: "no-store" });
       if (!response.ok) return;
-      const readiness = await readStrictJson(response);
+      const readiness = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES);
       if (!validReadiness(readiness) || readiness.readiness_state !== "ready") return;
       aiSurface.hidden = false;
       const route = window.LocalMonitorV1History?.current(); if (route?.analysis) await restoreAi(route.analysis);
@@ -541,12 +550,15 @@
     if (!activeAiRun || aiCancel.disabled) return;
     aiCancel.disabled = true;
     const runId = activeAiRun;
+    const generation = aiGeneration;
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}/cancel`, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: "{}" });
-      const value = response.ok ? await readStrictJson(response) : null;
+      if (generation !== aiGeneration || activeAiRun !== runId) return;
+      const value = response.ok ? await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES) : null;
+      if (generation !== aiGeneration || activeAiRun !== runId) return;
       if (!response.ok || !exactSet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; return; }
       aiGeneration++; activeAiRun = null; aiCancel.hidden = true; aiStatus.textContent = AI_STATES.canceled;
-    } catch { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
+    } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
   });
   document.addEventListener("cao-route-state", event => {
     if (aiSurface.hidden) return;
