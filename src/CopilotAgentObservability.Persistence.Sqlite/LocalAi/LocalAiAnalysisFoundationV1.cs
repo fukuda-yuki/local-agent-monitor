@@ -178,7 +178,7 @@ internal static class LocalAiResultValidatorV1
     {
         if (value.ValueKind != JsonValueKind.Array) return LocalAiResultValidationCodeV1.InvalidResult;
         var refs = value.EnumerateArray().ToArray();
-        if (refs.Length is < 1 or > 16 || refs.Any(item => item.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(item.GetString()))) return LocalAiResultValidationCodeV1.InvalidEvidence;
+        if (refs.Length is < 1 or > 16 || refs.Any(item => item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()))) return LocalAiResultValidationCodeV1.InvalidEvidence;
         return evidence is null || refs.All(item => evidence.Contains(item.GetString()!, StringComparer.Ordinal)) ? LocalAiResultValidationCodeV1.Valid : LocalAiResultValidationCodeV1.InvalidEvidence;
     }
     private static bool Exact(JsonElement element, string[] expected) => element.ValueKind == JsonValueKind.Object && element.EnumerateObject().Select(x => x.Name).Order().SequenceEqual(expected.Order());
@@ -290,7 +290,8 @@ internal sealed class LocalAiAnalysisStoreV1
         var completion=(completedAt??DateTimeOffset.UtcNow).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture);
         var expected=new LocalAiStoredResultInvariantV1((byte[])expectedReader[0],expectedReader.GetString(1),expectedReader.GetString(2),expectedReader.GetString(3),expectedReader.GetString(4),expectedReader.IsDBNull(5)?null:expectedReader.GetString(5),expectedReader.GetString(6),expectedReader.GetString(7),expectedReader.GetString(8),expectedReader.GetString(9),expectedReader.GetString(10),expectedReader.GetString(11),expectedReader.GetString(12),completion,"");
         if(expected.ScopeKind=="session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
-        expectedReader.Close(); var refs=ReadEvidence(expected.EvidenceIndex); var validation=LocalAiResultValidatorV1.Validate(result,refs);
+        var evidenceIndex=expected.EvidenceIndex??throw new InvalidOperationException("local_ai_evidence_index_missing");
+        expectedReader.Close(); var refs=ReadEvidence(evidenceIndex); var validation=LocalAiResultValidatorV1.Validate(result,refs);
         if(validation.Code==LocalAiResultValidationCodeV1.Valid && !MatchesExpected(validation.CanonicalBytes!,expected)) validation=new(LocalAiResultValidationCodeV1.InvalidResult);
         if(validation.Code!=LocalAiResultValidationCodeV1.Valid) { var failed=validation.Code==LocalAiResultValidationCodeV1.InvalidEvidence?LocalAiRunStateV1.InvalidEvidence:LocalAiRunStateV1.InvalidResult; TransitionRun(runId,failed,failed==LocalAiRunStateV1.InvalidEvidence?"invalid_evidence":"invalid_result"); return failed; }
         var canonical=validation.CanonicalBytes!; var root=JsonDocument.Parse(canonical).RootElement; var state=root.GetProperty("findings").GetArrayLength()==0?LocalAiRunStateV1.ZeroFindings:LocalAiRunStateV1.Succeeded;if(!ValidateStoredResult(canonical,expected with{RunState=Wire(state)}))throw new InvalidOperationException("local_ai_result_invariant_invalid");

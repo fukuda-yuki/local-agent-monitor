@@ -22,9 +22,15 @@ public sealed class LocalAiAnalysisFoundationTests
             "[]",
             "[1]",
             "[\"\"]",
+            "[\" \"]",
+            "[\"\\t\"]",
+            "[\"\\n\"]",
             "[" + string.Join(',', Enumerable.Range(1, 17).Select(index => $"\"ev-{index}\"")) + "]",
         })
+        {
             Assert.Equal(LocalAiResultValidationCodeV1.InvalidEvidence, LocalAiResultValidatorV1.Validate(Result(findingEvidenceRefs: malformed), null).Code);
+            Assert.Equal(LocalAiResultValidationCodeV1.InvalidEvidence, LocalAiResultValidatorV1.Validate(Result(findingEvidenceRefs: malformed), ["ev-1"]).Code);
+        }
 
         var expected = new LocalAiStoredResultInvariantV1(null, PayloadHash, SnapshotId, "session", SessionId, null, SessionId,
             "github_copilot_sdk", "synthetic-model", Hash64, "local-ai-analysis.prompt.v1",
