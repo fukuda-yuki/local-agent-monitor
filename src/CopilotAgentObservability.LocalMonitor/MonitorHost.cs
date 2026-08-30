@@ -927,17 +927,25 @@ internal static class MonitorHost
             var requestPath = context.Request.Path.Value ?? string.Empty;
             var settingsRuntimePath = !options.SanitizedOnly
                 && string.Equals(requestPath, "/api/local-monitor/v1/settings/runtime", StringComparison.Ordinal);
+            var settingsStoragePath = !options.SanitizedOnly
+                && string.Equals(requestPath, "/api/local-monitor/v1/settings/storage", StringComparison.Ordinal);
             var settingsRuntimeNearPath = !options.SanitizedOnly
                 && !settingsRuntimePath
                 && string.Equals(
                     requestPath.EndsWith("/", StringComparison.Ordinal) ? requestPath[..^1] : requestPath,
                     "/api/local-monitor/v1/settings/runtime",
                     StringComparison.OrdinalIgnoreCase);
+            var settingsStorageNearPath = !options.SanitizedOnly
+                && !settingsStoragePath
+                && string.Equals(
+                    requestPath.EndsWith("/", StringComparison.Ordinal) ? requestPath[..^1] : requestPath,
+                    "/api/local-monitor/v1/settings/storage",
+                    StringComparison.OrdinalIgnoreCase);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
                 || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
                 || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath
-                || settingsRuntimePath || settingsRuntimeNearPath)
+                || settingsRuntimePath || settingsRuntimeNearPath || settingsStoragePath || settingsStorageNearPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -971,7 +979,7 @@ internal static class MonitorHost
                 {
                     await RuntimeBackupRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
-                else if (settingsAiReadinessPath || settingsRuntimePath)
+                else if (settingsAiReadinessPath || settingsRuntimePath || settingsStoragePath)
                 {
                     await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
@@ -1042,7 +1050,7 @@ internal static class MonitorHost
                 return;
             }
 
-            if (settingsRuntimeNearPath)
+            if (settingsRuntimeNearPath || settingsStorageNearPath)
             {
                 context.Response.StatusCode = StatusCodes.Status404NotFound;
                 context.Response.ContentLength = 0;
@@ -1050,6 +1058,13 @@ internal static class MonitorHost
             }
 
             if (settingsRuntimePath && !HttpMethods.IsGet(context.Request.Method))
+            {
+                context.Response.Headers.Allow = "GET";
+                await WriteSettingsAiErrorAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed");
+                return;
+            }
+
+            if (settingsStoragePath && !HttpMethods.IsGet(context.Request.Method))
             {
                 context.Response.Headers.Allow = "GET";
                 await WriteSettingsAiErrorAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed");

@@ -617,7 +617,7 @@ public class MonitorShellPlaywrightTests
             await route.FulfillAsync(new()
             {
                 Status = 200, ContentType = "application/json",
-                Body = "{\"schema_version\":\"settings-storage-summary.v1\",\"database_file_size_bytes\":4096,\"retention\":{\"state\":\"idle\",\"pending_count\":2,\"failed_count\":1,\"last_successful_run_at\":null},\"backup\":{\"state\":\"idle\",\"last_successful_at\":null,\"validation_state\":\"unknown\"},\"historical_import\":{\"state\":\"running\"},\"restart_requirement\":\"not_required\"}",
+                Body = "{\"schema_version\":\"settings-storage-summary.v1\",\"database_file_size_bytes\":4096,\"retention\":{\"state\":\"idle\"},\"backup\":{\"state\":\"idle\",\"last_successful_at\":null,\"validation_state\":\"unknown\"},\"historical_import\":{\"state\":\"running\"},\"restart_requirement\":\"not_required\"}",
             });
         });
         IRequest? backupRequest = null;
@@ -672,9 +672,10 @@ public class MonitorShellPlaywrightTests
         Assert.Equal($$"""{"schema_version":"local-archive-action.v1","action":"restore","target_kind":"session","targets":[{"target_id":"{{archivedSession}}","expected_revision":1}]}""", restoreRequest.PostData);
         releaseHistory.TrySetResult();
         await page.Locator("[data-settings-navigation='storage']").ClickAsync();
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("保留 2件");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("保持 待機中");
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("データベース 4096 bytes");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("直近の履歴取り込み running");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("直近の履歴取り込みは実行中です");
+        await Expect(page.Locator("[data-settings-section='storage']")).Not.ToContainTextAsync("running");
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: 対応していません。");
         Assert.Contains(requestedUrls, url => url.EndsWith("/api/local-monitor/v1/settings/storage", StringComparison.Ordinal));
         await Expect(page.Locator("[data-settings-section='storage'] a[href='/diagnostics#retention-diagnostics']")).ToHaveCountAsync(1);
@@ -812,6 +813,64 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-archived-sessions]")).ToContainTextAsync("読み込めませんでした");
         await Expect(page.Locator($"a[href='/sessions/{firstSession}']")).ToHaveCountAsync(0);
     }
+
+    [Fact]
+    public async Task Shell_UnifiedSettings_StorageCancelsAndDropsDelayedResponseAfterLeaveAndReplacement()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.AddInitScriptAsync("""
+            window.__storageAbortCount = 0;
+            const originalFetch = window.fetch;
+            window.fetch = (input, init = {}) => {
+              const url = typeof input === 'string' ? input : input.url;
+              if (url.includes('/api/local-monitor/v1/settings/storage') && init.signal)
+                init.signal.addEventListener('abort', () => window.__storageAbortCount++);
+              return originalFetch(input, init);
+            };
+            """);
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        await page.RouteAsync("**/api/local-monitor/v1/settings/storage", async route =>
+        {
+            var call = Interlocked.Increment(ref calls);
+            if (call == 1)
+            {
+                firstStarted.TrySetResult();
+                await releaseFirst.Task;
+                try { await route.FulfillAsync(StorageSummary("succeeded")); }
+                catch (PlaywrightException) { }
+                finally { firstFinished.TrySetResult(); }
+                return;
+            }
+            await route.FulfillAsync(StorageSummary("not_run"));
+        });
+
+        await page.GotoAsync($"{host.Url}/sessions?settings=storage", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await Expect(page.Locator("[data-settings-storage-summary]")).ToContainTextAsync("確認しています");
+        await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
+        await page.Locator("[data-settings-navigation='storage']").ClickAsync();
+        await Expect(page.Locator("[data-settings-storage-operations]")).ToContainTextAsync("履歴取り込みはまだありません");
+        releaseFirst.TrySetResult();
+        await firstFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(await page.EvaluateAsync<int>("() => window.__storageAbortCount") >= 1);
+        await Expect(page.Locator("[data-settings-storage-operations]")).ToContainTextAsync("履歴取り込みはまだありません");
+        await Expect(page.Locator("[data-settings-storage-operations]")).Not.ToContainTextAsync("完了しています");
+    }
+
+    private static RouteFulfillOptions StorageSummary(string importState) => new()
+    {
+        Status = 200,
+        ContentType = "application/json",
+        Body = $"{{\"schema_version\":\"settings-storage-summary.v1\",\"database_file_size_bytes\":4096,\"retention\":{{\"state\":\"idle\"}},\"backup\":{{\"state\":\"idle\",\"last_successful_at\":null,\"validation_state\":\"unknown\"}},\"historical_import\":{{\"state\":\"{importState}\"}},\"restart_requirement\":\"not_required\"}}",
+    };
 
     [Fact]
     public async Task Shell_UnifiedSettings_CancelsReceiverRuntimeReadWhenLeavingOrClosing()

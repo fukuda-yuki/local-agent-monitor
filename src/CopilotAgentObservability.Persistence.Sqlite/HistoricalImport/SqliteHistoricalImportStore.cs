@@ -768,6 +768,26 @@ public sealed class SqliteHistoricalImportStore
             : null;
     }
 
+    internal string ReadLatestOperationState()
+    {
+        try
+        {
+            return ReadLatestOperationStateOrNull() switch
+            {
+                null => "not_run",
+                "queued" => "queued",
+                "running" => "running",
+                "succeeded" => "succeeded",
+                "failed" => "failed",
+                "rejected" => "rejected",
+                _ => "unknown",
+            };
+        }
+        catch (Exception exception) when (exception is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException
+            or System.Text.Json.JsonException or FormatException or OverflowException)
+        { return "unknown"; }
+    }
+
     internal HistoricalImportResult? ReadResultOrNull(string operationId)
     {
         using var connection = Open();

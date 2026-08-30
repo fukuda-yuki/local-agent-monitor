@@ -19,31 +19,26 @@ internal sealed class SettingsStorageSummary(
         try { databaseBytes = new FileInfo(databasePath).Exists ? new FileInfo(databasePath).Length : null; }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
 
-        object retentionState;
+        string retentionState;
         try
         {
             retentionState = retention.TryReadStatusSnapshot(retentionWorkerEnabled(), out var value)
-                ? new { state = value!.WorkerState, pending_count = value.PendingCount, failed_count = value.FailedCount,
-                    last_successful_run_at = Timestamp(value.LastSuccessfulRunAt) }
-                : new { state = "unknown", pending_count = (long?)null, failed_count = (long?)null, last_successful_run_at = (string?)null };
+                ? value!.WorkerState : "unknown";
         }
-        catch { retentionState = new { state = "unknown", pending_count = (long?)null, failed_count = (long?)null, last_successful_run_at = (string?)null }; }
+        catch { retentionState = "unknown"; }
 
-        string? importState = null;
-        try { importState = imports.ReadLatestOperationStateOrNull(); } catch { }
+        var importState = imports.ReadLatestOperationState();
         return new
         {
             schema_version = "settings-storage-summary.v1",
             database_file_size_bytes = databaseBytes,
-            retention = retentionState,
+            retention = new { state = retentionState },
             backup = backup.Read(),
-            historical_import = new { state = importState ?? "none" },
+            historical_import = new { state = importState },
             restart_requirement = monitorLease.IsActive ? "not_required" : "unknown",
         };
     }
 
-    private static string? Timestamp(DateTimeOffset? value) =>
-        value?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 }
 
 internal sealed class RuntimeBackupStatusSnapshot(TimeProvider timeProvider)

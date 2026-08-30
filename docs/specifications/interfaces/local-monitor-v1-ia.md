@@ -470,9 +470,10 @@ it creates no analysis run, SDK session, snapshot, result or retained item.
 The raw-default `保存・バックアップ` section reads the exact same-origin,
 no-store `GET /api/local-monitor/v1/settings/storage` aggregate. It reports
 only the configured primary database file size, the existing Retention runtime
-state, one process-local backup operation snapshot (including the last
+state token (without policy or aggregate counts), one process-local backup operation snapshot (including the last
 successful instant and closed validation state), the latest historical import
-operation state, and whether the active monitor lease proves restart is not
+operation state (`not_run`, `queued`, `running`, `succeeded`, `failed`,
+`rejected`, or `unknown`), and whether the active monitor lease proves restart is not
 required. Unavailable owners produce closed `unknown` or `null` facts. The
 aggregate never scans directories or backup files and never returns paths,
 file names, operation IDs, policy values, failure reasons, or exception text.

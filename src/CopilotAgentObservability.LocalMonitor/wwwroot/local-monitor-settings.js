@@ -398,27 +398,32 @@
       if (!exact(value, ["schema_version", "database_file_size_bytes", "retention", "backup", "historical_import", "restart_requirement"])
           || value.schema_version !== "settings-storage-summary.v1"
           || value.database_file_size_bytes !== null && !count(value.database_file_size_bytes)
-          || !exact(value.retention, ["state", "pending_count", "failed_count", "last_successful_run_at"])
+          || !exact(value.retention, ["state"])
           || !["idle", "running", "degraded", "disabled", "unknown"].includes(value.retention.state)
-          || value.retention.pending_count !== null && !count(value.retention.pending_count)
-          || value.retention.failed_count !== null && !count(value.retention.failed_count)
-          || value.retention.last_successful_run_at !== null && !timestamp(value.retention.last_successful_run_at)
           || !exact(value.backup, ["state", "last_successful_at", "validation_state"])
           || !["idle", "running", "succeeded", "failed"].includes(value.backup.state)
           || value.backup.last_successful_at !== null && !timestamp(value.backup.last_successful_at)
           || !["passed", "unknown"].includes(value.backup.validation_state)
           || !exact(value.historical_import, ["state"])
-          || !["none", "queued", "running", "succeeded", "failed", "rejected"].includes(value.historical_import.state)
+          || !["not_run", "queued", "running", "succeeded", "failed", "rejected", "unknown"].includes(value.historical_import.state)
           || !["not_required", "unknown"].includes(value.restart_requirement)) throw new Error();
       if (controller.signal.aborted || generation !== requestGeneration || selectedSettings !== "storage") return;
       const bytes = value.database_file_size_bytes === null ? "確認できません" : `${value.database_file_size_bytes} bytes`;
-      const retention = value.retention.state === "unknown" ? "保持状態は確認できません"
-        : `保持 ${RETENTION_WORKER_STATES[value.retention.state]} · 保留 ${value.retention.pending_count}件 · 失敗 ${value.retention.failed_count}件`;
+      const retention = value.retention.state === "unknown" ? "保持状態は確認できません" : `保持 ${RETENTION_WORKER_STATES[value.retention.state]}`;
       summary.textContent = `データベース ${bytes} · ${retention} · 再起動 ${value.restart_requirement === "not_required" ? "不要" : "確認できません"}`;
       const backup = value.backup.state === "idle" ? "バックアップ操作なし"
         : value.backup.state === "running" ? "バックアップ作成中"
           : value.backup.state === "succeeded" ? `バックアップ成功 · 検証済み · 最終成功 ${value.backup.last_successful_at}` : "バックアップ失敗";
-      const imported = value.historical_import.state === "none" ? "履歴取り込みなし" : `直近の履歴取り込み ${value.historical_import.state}`;
+      const importLabels = {
+        not_run: "履歴取り込みはまだありません",
+        queued: "直近の履歴取り込みは待機中です",
+        running: "直近の履歴取り込みは実行中です",
+        succeeded: "直近の履歴取り込みは完了しています",
+        failed: "直近の履歴取り込みは失敗しました",
+        rejected: "直近の履歴取り込みは受け付けられませんでした",
+        unknown: "履歴取り込み状態は確認できません",
+      };
+      const imported = importLabels[value.historical_import.state];
       operations.textContent = `${backup} · ${imported}`;
     } catch {
       if (!controller.signal.aborted && generation === requestGeneration && selectedSettings === "storage") {

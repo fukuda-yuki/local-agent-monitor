@@ -25,6 +25,8 @@ public sealed class SettingsStorageRouteTests
             json.RootElement.EnumerateObject().Select(property => property.Name).ToArray());
         Assert.Equal("settings-storage-summary.v1", json.RootElement.GetProperty("schema_version").GetString());
         Assert.True(json.RootElement.GetProperty("database_file_size_bytes").GetInt64() > 0);
+        Assert.Equal(["state"], json.RootElement.GetProperty("retention").EnumerateObject().Select(property => property.Name).ToArray());
+        Assert.Equal("not_run", json.RootElement.GetProperty("historical_import").GetProperty("state").GetString());
         Assert.Equal("not_required", json.RootElement.GetProperty("restart_requirement").GetString());
         Assert.DoesNotContain(temp.Path, await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
     }
@@ -35,10 +37,14 @@ public sealed class SettingsStorageRouteTests
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers());
         await AssertError(await host.Client.SendAsync(new(HttpMethod.Put, Path)), 405, "method_not_allowed");
+        await AssertError(await host.Client.SendAsync(new(new HttpMethod("PROPFIND"), Path)), 405, "method_not_allowed");
         await AssertError(await host.Client.GetAsync(Path + "?extra=1"), 400, "invalid_request");
         await AssertError(await host.Client.SendAsync(new(HttpMethod.Get, Path) { Content = new StringContent("{}", Encoding.UTF8, "application/json") }), 400, "invalid_request");
         Assert.Equal(HttpStatusCode.NotFound, (await host.Client.GetAsync(Path + "/")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await host.Client.GetAsync("/API/local-monitor/v1/settings/storage")).StatusCode);
+        using var invalidHost = new HttpRequestMessage(HttpMethod.Get, Path);
+        invalidHost.Headers.Host = "remote.example";
+        await AssertError(await host.Client.SendAsync(invalidHost), 400, "invalid_host");
 
         using var sanitizedTemp = new MonitorTempDirectory();
         await using var sanitized = await MonitorTestHost.StartAsync(sanitizedTemp, sanitizedOnly: true, testOptions: DisabledWorkers());

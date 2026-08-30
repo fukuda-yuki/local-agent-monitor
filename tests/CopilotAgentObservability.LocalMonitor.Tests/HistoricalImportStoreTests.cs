@@ -23,6 +23,18 @@ public sealed class HistoricalImportStoreTests
         Assert.Equal("running", store.ReadLatestOperationStateOrNull());
     }
 
+    [Fact]
+    public void Latest_operation_state_maps_absent_and_hostile_values_to_closed_states()
+    {
+        using var database = new HistoricalImportTestDatabase();
+        var store = new SqliteHistoricalImportStore(database.Path);
+        store.CreateSchema();
+        Assert.Equal("not_run", store.ReadLatestOperationState());
+        using (var connection = database.Open())
+            InsertOperation(connection, "operation-hostile", "2026-08-30T00:00:00.0000000+00:00", "PRIVATE_PATH_TOKEN");
+        Assert.Equal("unknown", store.ReadLatestOperationState());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
