@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
@@ -80,7 +81,7 @@ internal static class RetentionOwnershipReceipt
     private static bool Fail(out byte[] bytes) { bytes = []; return false; }
 
     private static bool CanonicalGuid(string? value) => value is not null && Guid.TryParseExact(value, "D", out var guid) && string.Equals(value, guid.ToString("D"), StringComparison.Ordinal);
-    private static bool CanonicalUuid7(string? value) => CanonicalGuid(value) && Guid.ParseExact(value!, "D").Version == 7;
+    private static bool CanonicalUuid7(string? value) => value is not null && LocalAiResultValidatorV1.CanonicalUuid7(value);
     private static bool CanonicalCaptureId(string? value) => value is { Length: 32 } && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     private static bool Timestamp(string? text, long ticks) => text is not null && DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var value) && value.UtcDateTime.Ticks == ticks;
     private static ArgumentException Invalid() => new("Invalid retention ownership receipt input.");

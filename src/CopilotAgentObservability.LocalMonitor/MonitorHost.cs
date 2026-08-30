@@ -540,6 +540,7 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
+        builder.Services.AddHostedService(_ => new LocalAiNodeCleanupHostedService(options.DatabasePath,timeProvider));
         if (!options.SanitizedOnly)
         {
             var repositoryExistenceAuthority = SqliteLocalRepositoryTargetExistenceAuthority.Instance;
@@ -617,7 +618,6 @@ internal static class MonitorHost
                     $"local-ai-v1\0{localAiOptions.DefaultModel}\0{localAiOptions.DefaultProfile}")));
                 var runRepository = SqliteLocalAiRunRepositoryV1.Create(
                     options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider, retentionCatalog);
-                builder.Services.AddHostedService(_ => new LocalAiNodeCleanupHostedService(runRepository, timeProvider));
                 var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
                     localAiClientFactory, localAiOptions.DefaultModel);
                 var localAiRawReader = new LocalAiRetentionRawReaderV1(

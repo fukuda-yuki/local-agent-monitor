@@ -1,6 +1,7 @@
 using System.Globalization;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Retention;
@@ -27,7 +28,8 @@ internal sealed class MonitorAnalysisRetentionAdapter : IRetentionDeletionAdapte
     private static ValueTask<int> DeleteLocalAiAsync(SqliteConnection connection, SqliteTransaction transaction, RetentionSqliteDeletionGrant grant)
     {
         var parts=grant.OwnershipKey.SourceItemId.Split(':');
-        if(parts.Length!=3 || parts[0]!="local_ai" || parts[1] is not ("snapshot" or "result") || !Guid.TryParseExact(parts[2],"D",out var id) || id.Version!=7 || parts[2]!=parts[2].ToLowerInvariant()) throw new ArgumentException("The Local AI content identity is invalid.");
+        if(parts.Length!=3 || parts[0]!="local_ai" || parts[1] is not ("snapshot" or "result") || !LocalAiResultValidatorV1.CanonicalUuid7(parts[2])) throw new ArgumentException("The Local AI content identity is invalid.");
+        connection.CreateFunction<string,string,long>("local_ai_retention_delete_authorized",(kind,id)=>kind==parts[1]&&id==parts[2]?1L:0L,isDeterministic:false);
         using var command=connection.CreateCommand(); command.Transaction=transaction;
         command.CommandText=parts[1]=="snapshot"
             ? "UPDATE local_ai_snapshots SET payload_json=NULL,evidence_index_json=NULL WHERE snapshot_id=$id AND scope_kind='session' AND retention_owner_token=$retention_owner_token AND payload_json IS NOT NULL;"

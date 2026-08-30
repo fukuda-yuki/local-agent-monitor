@@ -156,7 +156,7 @@ public sealed partial class RetentionCatalogStore
 
     private static bool TryCanonicalLocalAiIdentity(string value)
     {
-        var parts=value.Split(':'); return parts.Length==3 && parts[0]=="local_ai" && parts[1] is "snapshot" or "result" && Guid.TryParseExact(parts[2],"D",out var id) && id.Version==7 && parts[2]==parts[2].ToLowerInvariant();
+        var parts=value.Split(':'); return parts.Length==3 && parts[0]=="local_ai" && parts[1] is "snapshot" or "result" && global::CopilotAgentObservability.Persistence.Sqlite.LocalAi.LocalAiResultValidatorV1.CanonicalUuid7(parts[2]);
     }
 
     private static bool AdvanceCursor(SqliteConnection connection, SqliteTransaction transaction, RetentionDeleteContext context)

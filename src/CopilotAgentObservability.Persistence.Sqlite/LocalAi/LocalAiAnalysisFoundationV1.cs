@@ -35,8 +35,8 @@ internal static class LocalAiAnalysisSchemaV1
     private static readonly string[] AdditionalDefinitions =
     [
         "CREATE INDEX IX_local_ai_session_reports ON local_ai_runs(scope_kind,session_id,state,completed_at DESC,run_id DESC)",
-        "CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots WHEN NOT (OLD.scope_kind='session' AND OLD.payload_json IS NOT NULL AND OLD.evidence_index_json IS NOT NULL AND NEW.payload_json IS NULL AND NEW.evidence_index_json IS NULL AND NEW.snapshot_id=OLD.snapshot_id AND NEW.scope_kind=OLD.scope_kind AND NEW.session_id=OLD.session_id AND NEW.node_id IS OLD.node_id AND NEW.anchor_id=OLD.anchor_id AND NEW.payload_sha256=OLD.payload_sha256 AND NEW.evidence_index_sha256=OLD.evidence_index_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END",
-        "CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results WHEN NOT (OLD.result_json IS NOT NULL AND NEW.result_json IS NULL AND NEW.result_id=OLD.result_id AND NEW.run_id=OLD.run_id AND NEW.result_sha256=OLD.result_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END",
+        "CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots WHEN NOT (local_ai_retention_delete_authorized('snapshot',OLD.snapshot_id)=1 AND OLD.scope_kind='session' AND OLD.payload_json IS NOT NULL AND OLD.evidence_index_json IS NOT NULL AND NEW.payload_json IS NULL AND NEW.evidence_index_json IS NULL AND NEW.snapshot_id=OLD.snapshot_id AND NEW.scope_kind=OLD.scope_kind AND NEW.session_id=OLD.session_id AND NEW.node_id IS OLD.node_id AND NEW.anchor_id=OLD.anchor_id AND NEW.payload_sha256=OLD.payload_sha256 AND NEW.evidence_index_sha256=OLD.evidence_index_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END",
+        "CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results WHEN NOT (local_ai_retention_delete_authorized('result',OLD.result_id)=1 AND OLD.result_json IS NOT NULL AND NEW.result_json IS NULL AND NEW.result_id=OLD.result_id AND NEW.run_id=OLD.run_id AND NEW.result_sha256=OLD.result_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END",
         "CREATE TRIGGER local_ai_terminal_run_update_rejected BEFORE UPDATE ON local_ai_runs WHEN OLD.state NOT IN ('queued','running') BEGIN SELECT RAISE(ABORT,'local_ai_terminal_run_immutable'); END",
     ];
 
@@ -62,6 +62,14 @@ internal static class LocalAiAnalysisSchemaV1
 
     internal static bool IsValid(SqliteConnection connection, SqliteTransaction transaction) =>
         ReadVersion(connection, transaction) == Version && OwnedCount(connection, transaction) == Definitions.Length + AdditionalDefinitions.Length && HasExactSchema(connection, transaction);
+
+    internal static bool ValidateExisting(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var version=ReadVersion(connection,transaction); var owned=OwnedCount(connection,transaction);
+        if(version is null && owned==0) return false;
+        if(version!=Version || owned!=Definitions.Length+AdditionalDefinitions.Length || !HasExactSchema(connection,transaction)) Reject();
+        return true;
+    }
 
     private static long? ReadVersion(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -227,6 +235,7 @@ internal sealed class LocalAiAnalysisStoreV1
     internal void InsertSnapshot(LocalAiSnapshotV1 snapshot)
     {
         ValidateUuid7(snapshot.SnapshotId); ValidateScope(snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId);
+        if (snapshot.ScopeKind == "session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
         var payload = Canonical(snapshot.PayloadCanonicalJson); var evidence = Canonical(snapshot.EvidenceIndexCanonicalJson);
         if (!payload.SequenceEqual(snapshot.PayloadCanonicalJson) || !evidence.SequenceEqual(snapshot.EvidenceIndexCanonicalJson)) throw new InvalidOperationException("local_ai_snapshot_not_canonical");
         ValidateEvidenceIndex(evidence);
@@ -248,7 +257,7 @@ internal sealed class LocalAiAnalysisStoreV1
     internal LocalAiRunV1 CreateRun(LocalAiRunRequestV1 request)
     {
         ArgumentNullException.ThrowIfNull(request); var snapshotId=request.SnapshotId; var scopeKind=request.ScopeKind; var sessionId=request.SessionId; var nodeId=request.NodeId;
-        ValidateUuid7(snapshotId); ValidateScope(scopeKind, sessionId, nodeId); ValidateMetadata(request); var timeout=request.TimeoutSeconds ?? 60; if (timeout is < 1 or > 600) throw new ArgumentOutOfRangeException(nameof(request.TimeoutSeconds));
+        ValidateUuid7(snapshotId); ValidateScope(scopeKind, sessionId, nodeId); ValidateMetadata(request); if(scopeKind=="session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required"); var timeout=request.TimeoutSeconds ?? 60; if (timeout is < 1 or > 600) throw new ArgumentOutOfRangeException(nameof(request.TimeoutSeconds));
         var runId=Guid.CreateVersion7().ToString(); var now=Now(); using var connection=Open();
         using (var snapshot = connection.CreateCommand())
         {
@@ -278,6 +287,7 @@ internal sealed class LocalAiAnalysisStoreV1
         using var expectedReader=evidenceCommand.ExecuteReader(); if(!expectedReader.Read()) throw new InvalidOperationException("local_ai_run_missing");
         var completion=(completedAt??DateTimeOffset.UtcNow).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture);
         var expected=new ExpectedResult((byte[])expectedReader[0],expectedReader.GetString(1),expectedReader.GetString(2),expectedReader.GetString(3),expectedReader.GetString(4),expectedReader.IsDBNull(5)?null:expectedReader.GetString(5),expectedReader.GetString(6),expectedReader.GetString(7),expectedReader.GetString(8),expectedReader.GetString(9),expectedReader.GetString(10),expectedReader.GetString(11),expectedReader.GetString(12),completion);
+        if(expected.ScopeKind=="session" && retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
         expectedReader.Close(); var refs=ReadEvidence(expected.EvidenceIndex); var validation=LocalAiResultValidatorV1.Validate(result,refs);
         if(validation.Code==LocalAiResultValidationCodeV1.Valid && !MatchesExpected(validation.CanonicalBytes!,expected)) validation=new(LocalAiResultValidationCodeV1.InvalidResult);
         if(validation.Code!=LocalAiResultValidationCodeV1.Valid) { var failed=validation.Code==LocalAiResultValidationCodeV1.InvalidEvidence?LocalAiRunStateV1.InvalidEvidence:LocalAiRunStateV1.InvalidResult; TransitionRun(runId,failed,failed==LocalAiRunStateV1.InvalidEvidence?"invalid_evidence":"invalid_result"); return failed; }
@@ -290,22 +300,48 @@ internal sealed class LocalAiAnalysisStoreV1
     internal int DeleteExpiredNodeRuns(DateTimeOffset now)
     {
         var cutoff=now.AddHours(-24).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture); using var connection=Open(); using var transaction=connection.BeginTransaction();
-        using var count=connection.CreateCommand(); count.Transaction=transaction; count.CommandText="SELECT COUNT(*) FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff;"; count.Parameters.AddWithValue("$cutoff",cutoff); var deleted=Convert.ToInt32(count.ExecuteScalar(),CultureInfo.InvariantCulture);
-        using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff); DELETE FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff; DELETE FROM local_ai_snapshots WHERE scope_kind='node' AND NOT EXISTS(SELECT 1 FROM local_ai_runs WHERE local_ai_runs.snapshot_id=local_ai_snapshots.snapshot_id);"; command.Parameters.AddWithValue("$cutoff",cutoff); command.ExecuteNonQuery(); transaction.Commit(); return deleted;
+        using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="CREATE TEMP TABLE local_ai_cleanup_candidates(run_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL); INSERT INTO local_ai_cleanup_candidates SELECT run_id,snapshot_id FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff; DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_cleanup_candidates); DELETE FROM local_ai_runs WHERE run_id IN (SELECT run_id FROM local_ai_cleanup_candidates); DELETE FROM local_ai_snapshots WHERE snapshot_id IN (SELECT snapshot_id FROM local_ai_cleanup_candidates) AND NOT EXISTS(SELECT 1 FROM local_ai_runs WHERE local_ai_runs.snapshot_id=local_ai_snapshots.snapshot_id);"; command.Parameters.AddWithValue("$cutoff",cutoff); command.ExecuteNonQuery();
+        using var count=connection.CreateCommand(); count.Transaction=transaction; count.CommandText="SELECT COUNT(*) FROM local_ai_cleanup_candidates;"; var deleted=Convert.ToInt32(count.ExecuteScalar(),CultureInfo.InvariantCulture); transaction.Commit(); return deleted;
+    }
+
+    internal static int DeleteExpiredNodeRunsIfPresent(string path,DateTimeOffset now)
+    {
+        var store=new LocalAiAnalysisStoreV1(path); using var connection=store.Open(); using(var validation=connection.BeginTransaction()){if(!LocalAiAnalysisSchemaV1.ValidateExisting(connection,validation)){validation.Commit();return 0;}validation.Commit();} return store.DeleteExpiredNodeRuns(now);
     }
 
     internal LocalAiReportPageV1 GetSessionReports(string sessionId, int? limit, string? cursor)
     {
         var take=Math.Min(limit??20,100); if(take<1) throw new ArgumentOutOfRangeException(nameof(limit)); var cursorValue=DecodeCursor(cursor);
         using var connection=Open(); using var command=connection.CreateCommand(); command.CommandText="""
-            SELECT r.run_id,x.result_id,r.state,COALESCE(x.created_at,r.completed_at),x.result_json,x.result_sha256
+            SELECT r.run_id,x.result_id,r.state,COALESCE(x.created_at,r.completed_at),x.result_sha256
             FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.run_id=r.run_id
             WHERE r.scope_kind='session' AND r.session_id=$session AND r.state IN ('succeeded','zero_findings')
               AND ($cursor IS NULL OR (COALESCE(x.created_at,r.completed_at) || '|' || r.run_id) < $cursor)
             ORDER BY COALESCE(x.created_at,r.completed_at) DESC,r.run_id DESC LIMIT $limit;
             """; command.Parameters.AddWithValue("$session",sessionId); command.Parameters.AddWithValue("$cursor",(object?)cursorValue??DBNull.Value); command.Parameters.AddWithValue("$limit",take+1);
-        using var reader=command.ExecuteReader(); var rows=new List<LocalAiReportV1>(); while(reader.Read()) rows.Add(new(reader.GetString(0),reader.IsDBNull(1)?null:reader.GetString(1),Parse(reader.GetString(2)),DateTimeOffset.Parse(reader.GetString(3),CultureInfo.InvariantCulture),reader.IsDBNull(4)?null:(byte[])reader[4],reader.IsDBNull(5)?null:reader.GetString(5),reader.IsDBNull(4)?"expired":"retained"));
+        using var reader=command.ExecuteReader(); var metadata=new List<(string RunId,string? ResultId,LocalAiRunStateV1 State,DateTimeOffset CreatedAt,string? Hash)>(); while(reader.Read()) metadata.Add((reader.GetString(0),reader.IsDBNull(1)?null:reader.GetString(1),Parse(reader.GetString(2)),DateTimeOffset.Parse(reader.GetString(3),CultureInfo.InvariantCulture),reader.IsDBNull(4)?null:reader.GetString(4))); reader.Close();
+        var rows=metadata.Select(item=>{var content=item.ResultId is null?null:ReadRetainedResult(item.ResultId);return new LocalAiReportV1(item.RunId,item.ResultId,item.State,item.CreatedAt,content,item.Hash,content is null?"expired":"retained");}).ToList();
         var hasMore=rows.Count>take; if(hasMore) rows.RemoveAt(rows.Count-1); var next=hasMore?EncodeCursor(rows[^1].CreatedAt.ToString("O",CultureInfo.InvariantCulture)+"|"+rows[^1].RunId):null; return new(rows,next);
+    }
+
+    internal byte[]? ReadRetainedResult(string resultId)
+    {
+        ValidateUuid7(resultId); if(retentionCatalog is null) throw new InvalidOperationException("local_ai_retention_required");
+        var request=new RetentionReadRequest(new(retentionCatalog.StoreInstanceId,RetentionStoreKind.AnalysisRunRaw,"local_ai:result:"+resultId),RetentionReadKind.Access,clock.GetUtcNow(),null);
+        var result=retentionCatalog.ReadAsync(request,(connection,transaction,grant,_)=>
+        {
+            using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="""
+                SELECT x.result_json FROM local_ai_results x
+                JOIN retention_items i ON i.item_id=$retention_read_item_id AND i.store_instance_id=$retention_store_instance_id
+                  AND i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:result:'||x.result_id AND i.revision=$retention_read_revision
+                JOIN retention_leases l ON l.item_id=i.item_id AND l.lease_kind=$retention_read_lease_kind AND l.owner=$retention_read_lease_owner
+                  AND l.generation=$retention_read_lease_generation AND l.expires_at=$retention_read_lease_expires_at
+                WHERE x.result_id=$id AND x.retention_owner_token=$retention_read_source_token AND x.result_json IS NOT NULL;
+                """; command.Parameters.AddWithValue("$id",resultId); command.Parameters.AddWithValue("$retention_store_instance_id",retentionCatalog.StoreInstanceId); grant.BindAdmissionSelectorCapability(command); return ValueTask.FromResult(command.ExecuteScalar() as byte[]);
+        },CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        if(result.Lease is null) return null; var lease=result.Lease;
+        try { using var reference=lease.AcquireValueReference(); var bytes=reference.Value.ToArray(); if(lease.TrySealRawResponse()!=RetentionRawTerminalResult.Completed) return null; return bytes; }
+        finally { lease.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
     private SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=databasePath,Pooling=false}.ToString());c.Open();return c;}

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -24,7 +25,8 @@ public sealed class LocalAiProductionStackTests
             SqliteLocalArchiveFactSnapshotContributor.Instance,
             new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority,timeProvider:temp.TimeProvider),
             skillRegistryAuthority:authority,timeProvider:temp.TimeProvider);
-        var repository=new SqliteLocalAiRunRepositoryV1(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider);
+        var retention=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath,temp.TimeProvider),temp.TimeProvider);
+        var repository=new SqliteLocalAiRunRepositoryV1(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider,retention);
         var provider=new SequenceProvider("session-one","session-two",null,"node-one","!invalid","!block","!timeout");
         var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,repository,provider,timeProvider:temp.TimeProvider);
         await using var host=await MonitorTestHost.StartAsync(temp,testOptions:new MonitorHostTestOptions{

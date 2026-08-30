@@ -35,6 +35,20 @@ public sealed class LocalAiAnalysisFoundationTests
     }
 
     [Fact]
+    public void SessionResult_ReadDenialExpiresBeforePhysicalDeletion()
+    {
+        using var database=new Database();var now=new DateTimeOffset(2026,8,30,1,0,0,TimeSpan.Zero);var time=new MutableTimeProvider(now);var context=RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path,time);var catalog=new RetentionCatalogStore(context,time);var store=database.Store(catalog,time);store.InsertSnapshot(Snapshot());var run=Complete(store,Request(),Result());
+        using(var connection=database.Open()){using var deny=connection.CreateCommand();deny.CommandText="UPDATE retention_items SET state='deletion_queued',read_denied_at=$now,queued_at=$now,revision=revision+1 WHERE source_item_id='local_ai:result:'||(SELECT result_id FROM local_ai_runs WHERE run_id=$run);";deny.Parameters.AddWithValue("$now",now.ToString("O"));deny.Parameters.AddWithValue("$run",run.RunId);Assert.Equal(1,deny.ExecuteNonQuery());Assert.Equal(1L,Scalar(connection,"SELECT COUNT(*) FROM local_ai_results WHERE result_json IS NOT NULL;"));}
+        var report=Assert.Single(store.GetSessionReports(SessionId,null,null).Items);Assert.Equal("expired",report.ContentState);Assert.Null(report.CanonicalResult);
+    }
+
+    [Fact]
+    public void SessionWrites_RequireRetentionBeforeAnyWrite()
+    {
+        using var database=new Database();var store=database.NodeStore();var error=Assert.Throws<InvalidOperationException>(()=>store.InsertSnapshot(Snapshot()));Assert.Equal("local_ai_retention_required",error.Message);Assert.Equal(0L,database.Scalar("SELECT COUNT(*) FROM local_ai_snapshots;"));
+    }
+
+    [Fact]
     public async Task SessionSnapshot_ExpiresThroughExistingAnalysisRunRawDeletionAuthority()
     {
         using var database=new Database(); var now=new DateTimeOffset(2026,8,30,1,0,0,TimeSpan.Zero); var time=new MutableTimeProvider(now); var context=RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path,time); var catalog=new RetentionCatalogStore(context,time); var store=database.Store(catalog,time); store.InsertSnapshot(Snapshot());
@@ -47,8 +61,9 @@ public sealed class LocalAiAnalysisFoundationTests
     public void NodeCleanup_DeletesOnlyTerminalRowsAtExactTwentyFourHourBoundary()
     {
         using var database = new Database();
-        var store = database.Store();
+        var store = database.NodeStore();
         store.InsertSnapshot(Snapshot(NodeSnapshotId, "node", "node-1"));
+        store.InsertSnapshot(Snapshot(FreshOrphanSnapshotId, "node", "node-fresh"));
         var run = Complete(store, Request(NodeSnapshotId, "node", "node-1"), Result(scope: Scope("node", "node-1"), snapshotId: NodeSnapshotId));
         var requestedAt = DateTimeOffset.Parse("2026-08-30T01:00:00Z");
 
@@ -58,6 +73,7 @@ public sealed class LocalAiAnalysisFoundationTests
         using var connection = database.Open();
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + run.RunId + "';"));
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + NodeSnapshotId + "';"));
+        Assert.Equal(1L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + FreshOrphanSnapshotId + "';"));
         Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM sqlite_schema WHERE name='retention_items';"));
     }
     [Fact]
@@ -206,7 +222,7 @@ public sealed class LocalAiAnalysisFoundationTests
     [Fact]
     public void NodeSuccess_IsExcludedFromSessionHistory()
     {
-        using var database = new Database(); var store = database.Store(); store.InsertSnapshot(Snapshot(NodeSnapshotId, "node", "node-1"));
+        using var database = new Database(); var store = database.NodeStore(); store.InsertSnapshot(Snapshot(NodeSnapshotId, "node", "node-1"));
         var run = store.CreateRun(Request(NodeSnapshotId, "node", "node-1")); store.TransitionRun(run.RunId, LocalAiRunStateV1.Running, null, StartedAt);
         Assert.Equal(LocalAiRunStateV1.Succeeded, store.Complete(run.RunId, Result(scope: Scope("node", "node-1"), snapshotId: NodeSnapshotId), CompletedAt));
         Assert.Empty(store.GetSessionReports(SessionId, null, null).Items);
@@ -236,9 +252,9 @@ public sealed class LocalAiAnalysisFoundationTests
     private static string Scope(string kind="session",string? node=null)=>$"{{\"anchor_id\":\"{node??SessionId}\",\"kind\":\"{kind}\",\"node_id\":{(node is null?"null":"\""+node+"\"")},\"session_id\":\"{SessionId}\"}}";
     private static byte[] Result(string evidenceRef="ev-1",bool zero=false,string? scope=null,string snapshotId=SnapshotId,string targetKind="skill",string configurationHash=Hash64,string summary="synthetic",string provenanceExtra="",string provider="github_copilot_sdk",string startedAt="2026-08-30T01:00:01.0000000+00:00",string completedAt="2026-08-30T01:00:02.0000000+00:00",string limitations="[]",string? findingEvidenceRefs=null)=>Encoding.UTF8.GetBytes("{\"findings\":"+(zero?"[]":"[{\"evidence_refs\":"+(findingEvidenceRefs??"[\""+evidenceRef+"\"]")+",\"evidence_state\":\"supported\",\"explanation\":\"explanation\",\"finding_id\":\"f-1\",\"limitation\":\"none\",\"title\":\"title\"}]") + ",\"improvement_suggestions\":[{\"concrete_change\":\"change\",\"evidence_refs\":[\""+evidenceRef+"\"],\"expected_effect\":\"effect\",\"rationale\":\"reason\",\"risks_or_limitations\":\"risk\",\"suggestion_id\":\"s-1\",\"target_kind\":\""+targetKind+"\",\"target_label\":\"target\"}],\"limitations\":"+limitations+",\"provenance\":{\"completed_at\":\""+completedAt+"\",\"configuration_sha256\":\""+configurationHash+"\",\"coverage\":{\"content_available\":true,\"excluded\":0,\"included\":1},\"model\":\"synthetic-model\",\"prompt_template_version\":\"local-ai-analysis.prompt.v1\",\"provider\":\""+provider+"\",\"requested_at\":\"2026-08-30T01:00:00.0000000+00:00\",\"snapshot_id\":\""+snapshotId+"\",\"snapshot_sha256\":\""+PayloadHash+"\",\"started_at\":\""+startedAt+"\""+provenanceExtra+"},\"scope\":"+(scope??Scope())+",\"snapshot\":{\"payload_sha256\":\""+PayloadHash+"\",\"snapshot_id\":\""+snapshotId+"\"},\"summary\":\""+summary+"\"}");
     private static string NestedEvidenceRefs(int depth)=>new string('[',depth)+"0"+new string(']',depth);
-    private const string SnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54410",RegeneratedSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54412",NodeSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54413",SessionId="0198f5c0-1b89-7d41-8c2f-4ecba0b54411",Hash64="1111111111111111111111111111111111111111111111111111111111111111";
+    private const string SnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54410",RegeneratedSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54412",NodeSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54413",FreshOrphanSnapshotId="0198f5c0-1b89-7d41-8c2f-4ecba0b54414",SessionId="0198f5c0-1b89-7d41-8c2f-4ecba0b54411",Hash64="1111111111111111111111111111111111111111111111111111111111111111";
     private static readonly string PayloadHash=Convert.ToHexStringLower(SHA256.HashData("{\"value\":1}"u8));
     private static readonly DateTimeOffset StartedAt=DateTimeOffset.Parse("2026-08-30T01:00:01Z"),CompletedAt=DateTimeOffset.Parse("2026-08-30T01:00:02Z");
     private static long Scalar(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return Convert.ToInt64(q.ExecuteScalar());} private static string Text(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return(string)q.ExecuteScalar()!;} private static void Execute(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}
-    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(RetentionCatalogStore? catalog=null,TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path,catalog,time);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
+    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(RetentionCatalogStore? catalog=null,TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);catalog??=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(Path,time),time);return new(Path,catalog,time);}internal LocalAiAnalysisStoreV1 NodeStore(){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
 }

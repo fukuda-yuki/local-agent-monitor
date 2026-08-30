@@ -316,7 +316,7 @@ public sealed partial class RetentionCatalogStore
     private static bool TryLocalAiSourceId(string value, out string table, out string id)
     {
         table = ""; id = ""; var parts=value.Split(':');
-        if(parts.Length!=3 || parts[0]!="local_ai" || parts[1] is not ("snapshot" or "result") || !Guid.TryParseExact(parts[2],"D",out var parsed) || parsed.Version!=7 || parts[2]!=parts[2].ToLowerInvariant()) return false;
+        if(parts.Length!=3 || parts[0]!="local_ai" || parts[1] is not ("snapshot" or "result") || !global::CopilotAgentObservability.Persistence.Sqlite.LocalAi.LocalAiResultValidatorV1.CanonicalUuid7(parts[2])) return false;
         table=parts[1]=="snapshot"?"local_ai_snapshots":"local_ai_results"; id=parts[2]; return true;
     }
 

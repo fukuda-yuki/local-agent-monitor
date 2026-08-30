@@ -73,11 +73,14 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
             FROM local_ai_runs r LEFT JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run;
             """; command.Parameters.AddWithValue("$run", runId); using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new InvalidOperationException("local_ai_run_missing");
-        return new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+        var scope=reader.GetString(2); var direct=reader.IsDBNull(6)?null:(byte[])reader[6]; var resultId=scope=="session"?ReadResultId(runId):null; var content=scope=="session"?(resultId is null?null:store.ReadRetainedResult(resultId)):direct;
+        return new(reader.GetString(0), reader.GetString(1), scope, reader.GetString(3),
             reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
-            reader.IsDBNull(6) ? null : (byte[])reader[6], reader.GetString(7), reader.IsDBNull(8)?null:reader.GetString(8),
+            content, reader.GetString(7), reader.IsDBNull(8)?null:reader.GetString(8),
             reader.GetString(9),reader.GetString(10),reader.GetString(11));
     }
+
+    private string? ReadResultId(string runId){using var connection=Open(databasePath);using var command=connection.CreateCommand();command.CommandText="SELECT result_id FROM local_ai_runs WHERE run_id=$run;";command.Parameters.AddWithValue("$run",runId);return command.ExecuteScalar() as string;}
 
     public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256)
     {
