@@ -679,7 +679,16 @@
     const response = await fetch(`/api/local-monitor/v1/ai/session-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
     const run = await response.json(); if (run.scope_kind !== "session" || run.session_id !== root.dataset.sessionId || run.run_id !== runId) return;
     showSessionDialog(document.querySelector("[data-session-ai-open]"));
-    if (["succeeded", "zero_findings"].includes(run.state)) {
+    if (["queued", "running"].includes(run.state)) {
+      activeSessionRun = runId; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false;
+      showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
+      const terminal = await pollAiRun(runId, "session", generation); if (generation !== sessionPollGeneration) return;
+      activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
+      if (terminal && ["succeeded", "zero_findings"].includes(terminal.state)) {
+        const report = await findExactSessionReport(runId); showSessionReport(report ?? { ...terminal, result: null, content_state: "status_only", snapshot_changed: false }, false);
+      } else if (terminal) showSessionReport({ ...terminal, content_state: "status_only", snapshot_changed: false }, false);
+      await readSessionReports(null, false);
+    } else if (["succeeded", "zero_findings"].includes(run.state)) {
       const report = await findExactSessionReport(runId); if (report) showSessionReport(report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
     } else showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
   }
@@ -809,6 +818,7 @@
 
   async function applyRoute(route) {
     if (!state.summary) return;
+    if (!route.analysis && !route.execution && !route.node && document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi();
     if (route.analysis && !route.node) {
       await restoreExactSessionAnalysis(route.analysis);
     }

@@ -1,4 +1,5 @@
 using CopilotAgentObservability.LocalMonitor.Pages;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Playwright;
@@ -14,6 +15,23 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
     private const string AiRunId = "018f0000-0000-7000-8000-000000000071";
     private const string AiLatestRunId = "018f0000-0000-7000-8000-000000000073";
+
+    [Fact]
+    public async Task ExactRunningSessionAnalysisResumesPollingAndReachesItsTerminalReport()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var context = await browser.NewContextAsync(); await context.AddInitScriptAsync("window.setTimeout = fn => { queueMicrotask(fn); return 1; };"); var page = await context.NewPageAsync();
+        var polls = 0; var release = new TaskCompletionSource(); await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json(polls >= 3 ? $$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("restored terminal")}},"snapshot_changed":false}],"next_cursor":null}""" : """{"reports":[],"next_cursor":null}""")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiRunId}", async r => { polls++; if (polls == 2) await release.Task; await r.FulfillAsync(Json(polls < 3 ? $$"""{"run_id":"{{AiRunId}}","state":"running","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":null}""" : $$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("restored terminal")}}}""")); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}"); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "Session AI分析" }); await Expect(dialog.GetByRole(AriaRole.Button, new() { Name = "キャンセル" })).ToBeVisibleAsync(); release.SetResult(); await Expect(dialog).ToContainTextAsync("restored terminal"); Assert.True(polls >= 3);
+    }
+
+    [Fact]
+    public async Task RemovingAnalysisFromHistoryClosesReportAndReturnsFocusToOverviewAction()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("history report")}},"snapshot_changed":false}],"next_cursor":null}"""))); await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs/*", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("history report")}}}""")));
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}"); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "Session AI分析" }); await Expect(dialog).ToBeVisibleAsync(); await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ analysis: null })"); await Expect(dialog).ToBeHiddenAsync(); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" })).ToBeFocusedAsync(); await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("Session overview");
+    }
 
     [Fact]
     public async Task ExactSessionAnalysisRestoresOldExpiredReportAcrossReloadBackAndForward()
@@ -73,7 +91,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     public async Task SessionAiDisplaysEveryRunAndContentState(string state, string expected, string content)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
-        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); var successful = state is "succeeded" or "zero_findings"; var result = successful && content != "expired" ? AiResult("matrix result") : "null";
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); var successful = state is "succeeded" or "zero_findings"; var result = successful && content != "expired" ? state == "zero_findings" ? AiZeroResult("matrix result") : AiResult("matrix result") : "null";
         await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs/*", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"{{state}}","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{result}}}""")));
         await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json(successful ? $$"""{"reports":[{"run_id":"{{AiRunId}}","state":"{{state}}","content_state":"{{content}}","result":{{result}},"snapshot_changed":false}],"next_cursor":null}""" : """{"reports":[],"next_cursor":null}""")));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}"); await Expect(page.GetByRole(AriaRole.Dialog, new() { Name = "Session AI分析" })).ToContainTextAsync(expected);
@@ -83,7 +101,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     public async Task SessionHistoryPagesNewestFirstWithoutStatusOnlyFailures()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync(); var requests = 0;
-        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => { requests++; var older = r.Request.Url.Contains("cursor="); return r.FulfillAsync(Json(older ? $$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("older")}},"snapshot_changed":false}],"next_cursor":null}""" : $$"""{"reports":[{"run_id":"{{AiLatestRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("newest")}},"snapshot_changed":false}],"next_cursor":"Y3Vyc29y"}""")); });
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => { requests++; var older = r.Request.Url.Contains("cursor="); return r.FulfillAsync(Json(older ? $$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("older")}},"snapshot_changed":false}],"next_cursor":null}""" : $$"""{"reports":[{"run_id":"{{AiLatestRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("newest")}},"snapshot_changed":false},{"run_id":"018f0000-0000-7000-8000-000000000074","state":"provider_failed","content_state":"status_only","result":null,"snapshot_changed":false}],"next_cursor":"Y3Vyc29y"}""")); });
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }).ClickAsync(); var dialog = page.GetByRole(AriaRole.Dialog); await Expect(dialog).ToContainTextAsync("newest"); await dialog.GetByRole(AriaRole.Button, new() { Name = "さらに読み込む" }).ClickAsync(); await Expect(dialog.Locator("[data-session-ai-history] button")).ToHaveCountAsync(2); Assert.Equal(2, requests); await Expect(dialog).Not.ToContainTextAsync("provider_failed");
     }
 
@@ -944,6 +962,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         + ",\"findings\":[{\"finding_id\":\"f-1\",\"title\":\"Finding\",\"explanation\":\"Explanation\",\"evidence_state\":\"supported\",\"evidence_refs\":[\""
         + evidence + "\"],\"limitation\":\"none\"}],\"improvement_suggestions\":[],\"limitations\":[],\"provenance\":{\"provider\":\"github_copilot_sdk\",\"model\":\"synthetic\"}}";
 
+    private static string AiZeroResult(string summary) =>
+        "{\"scope\":{\"kind\":\"session\",\"session_id\":\"" + SessionId + "\",\"node_id\":null,\"anchor_id\":\"" + SessionId
+        + "\"},\"snapshot\":{\"snapshot_id\":\"018f0000-0000-7000-8000-000000000072\",\"payload_sha256\":\"" + new string('a', 64)
+        + "\"},\"summary\":" + System.Text.Json.JsonSerializer.Serialize(summary)
+        + ",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[],\"provenance\":{\"provider\":\"github_copilot_sdk\",\"model\":\"synthetic\"}}";
+
     private static string Readiness() => """{"provider":"github_copilot","selected_model":"synthetic","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""";
     private static Task ReadyAi(IPage page) => page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json(Readiness())));
 
@@ -1037,12 +1061,22 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
     private static MonitorHostTestOptions Options() => new()
     {
+        LocalAiAnalysisApplication = new HumanRouteLocalAiApplication(),
         AdditionalServices = services =>
         {
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
             services.AddSingleton<ILocalRepositorySessionDetailSnapshotService>(new ReadyDetailService());
         },
     };
+
+    private sealed class HumanRouteLocalAiApplication : ILocalAiAnalysisApplicationV1
+    {
+        public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult<LocalAiRunStatusV1?>(new(runId, "succeeded", "session", SessionId, null, null));
+        public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
 
     private sealed class ReadyScopeService : ILocalRepositoryScopeSnapshotService
     {

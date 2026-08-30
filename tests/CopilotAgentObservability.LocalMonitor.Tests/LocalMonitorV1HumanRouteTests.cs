@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.Pages;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.AspNetCore.Mvc;
@@ -551,11 +552,36 @@ public sealed class LocalMonitorV1HumanRouteTests
     [Theory]
     [InlineData("analysis=018f0000-0000-7000-8000-000000000071&settings=ai")]
     [InlineData("settings=ai&analysis=018f0000-0000-7000-8000-000000000071")]
-    public async Task RawDefault_CanonicalAnalysisQueryServesNormalSessionWorkspace(string query)
+    public async Task RawDefault_CanonicalExistingSessionAnalysisServesNormalSessionWorkspace(string query)
     {
-        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions());
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(new("018f0000-0000-7000-8000-000000000071", "succeeded", "session", SessionId, null, null))));
         using var response = await host.Client.GetAsync($"/sessions/{SessionId}?{query}"); var html = await response.Content.ReadAsStringAsync();
         Assert.Equal(HttpStatusCode.OK, response.StatusCode); Assert.Contains("data-session-workspace", html, StringComparison.Ordinal); Assert.Contains("data-page-state=\"\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("wrong_scope")]
+    [InlineData("wrong_session")]
+    public async Task RawDefault_AbsentOrMismatchedSessionAnalysisReturnsClosedNotFound(string disposition)
+    {
+        var run = disposition switch
+        {
+            "missing" => null,
+            "wrong_scope" => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null),
+            _ => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "session", "018f0000-0000-7000-8000-000000000099", null, null),
+        };
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(run)));
+
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?analysis=018f0000-0000-7000-8000-000000000071");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-recovery-action=\"open_session_overview\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-session-workspace", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -758,15 +784,26 @@ public sealed class LocalMonitorV1HumanRouteTests
 
     private static MonitorHostTestOptions OwnerReadyOptions(
         ILocalRepositorySessionDetailSnapshotService? detailService = null,
-        ILocalMonitorV1ComparisonApplication? comparisonApplication = null) => new()
+        ILocalMonitorV1ComparisonApplication? comparisonApplication = null,
+        ILocalAiAnalysisApplicationV1? localAiApplication = null) => new()
     {
         LocalMonitorV1ComparisonApplication = comparisonApplication,
+        LocalAiAnalysisApplication = localAiApplication,
         AdditionalServices = services =>
         {
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
             services.AddSingleton(detailService ?? new ReadyDetailService());
         },
     };
+
+    private sealed class StubLocalAiApplication(LocalAiRunStatusV1? run) : ILocalAiAnalysisApplicationV1
+    {
+        public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(run?.RunId == runId ? run : null);
+        public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
 
     private static MonitorHostTestOptions AssetOptions(IFileProvider provider) => new()
     {

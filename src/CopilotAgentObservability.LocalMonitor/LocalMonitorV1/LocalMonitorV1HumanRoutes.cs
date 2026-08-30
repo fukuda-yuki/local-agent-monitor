@@ -1,4 +1,5 @@
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.Pages;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite;
@@ -176,6 +177,7 @@ internal static class LocalMonitorV1HumanRoutes
             scopeService,
             detailService,
             context.RequestServices.GetRequiredService<ILocalMonitorV1ComparisonApplication>(),
+            context.RequestServices.GetRequiredService<ILocalAiAnalysisApplicationV1>(),
             context.RequestServices.GetRequiredService<IRazorViewEngine>(),
             context.RequestAborted);
         await Page(context, resolution.Model, resolution.StatusCode);
@@ -212,6 +214,7 @@ internal static class LocalMonitorV1HumanRoutes
         ILocalRepositoryScopeSnapshotService scopeService,
         ILocalRepositorySessionDetailSnapshotService detailService,
         ILocalMonitorV1ComparisonApplication comparisonApplication,
+        ILocalAiAnalysisApplicationV1 localAiApplication,
         IRazorViewEngine viewEngine,
         CancellationToken cancellationToken)
     {
@@ -243,6 +246,14 @@ internal static class LocalMonitorV1HumanRoutes
                         var node = snapshot.Detail.Nodes.SingleOrDefault(item => item.NodeId == query.NodeId);
                         if (node is null || query.ExecutionId is not null && node.ExecutionId != query.ExecutionId)
                             return (LocalMonitorV1PageModel.ResolvedError(path, query, "node_not_found", "open_session_overview"), 404);
+                    }
+                    if (query.AnalysisId is not null)
+                    {
+                        var run = await localAiApplication.ReadRunAsync(query.AnalysisId, cancellationToken);
+                        if (run is null
+                            || !string.Equals(run.ScopeKind, "session", StringComparison.Ordinal)
+                            || !string.Equals(run.SessionId, path.SessionId, StringComparison.Ordinal))
+                            return (LocalMonitorV1PageModel.ResolvedError(path, query, "analysis_run_not_found", "open_session_overview"), 404);
                     }
                     break;
                 case LocalMonitorV1PrimaryRouteKind.ComparisonDetail:
