@@ -3,6 +3,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalArchiveStoreReadTests
 {
     private const string SessionOne = "01900000-0000-7000-8000-000000000101";

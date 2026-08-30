@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <Compile Include="..\TestSupport\OtlpProtobufTestPayload.cs" Link="TestSupport\OtlpProtobufTestPayload.cs" />
+    <Compile Include="..\TestSupport\TestFileSystemCleanup.cs" Link="TestSupport\TestFileSystemCleanup.cs" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.LocalMonitor\CopilotAgentObservability.LocalMonitor.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.InstructionFindings\CopilotAgentObservability.InstructionFindings.csproj" />

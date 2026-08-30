@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Routing;
 using System.Reflection;
 using System.Text;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RawHttpTerminalMigrationTests
 {
     public static TheoryData<string, int> SafeProjectionTerminalFailures

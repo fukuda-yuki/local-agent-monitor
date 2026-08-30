@@ -4,6 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RetentionCleanupWorkerTests
 {
     [Fact]

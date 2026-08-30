@@ -2,6 +2,7 @@ using CopilotAgentObservability.Telemetry.Repositories;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryMutationStateValidationTests
 {
     [Fact]

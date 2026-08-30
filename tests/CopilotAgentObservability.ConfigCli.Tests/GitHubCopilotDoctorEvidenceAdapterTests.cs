@@ -14,6 +14,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class GitHubCopilotDoctorEvidenceAdapterTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 17, 1, 2, 3, TimeSpan.Zero);

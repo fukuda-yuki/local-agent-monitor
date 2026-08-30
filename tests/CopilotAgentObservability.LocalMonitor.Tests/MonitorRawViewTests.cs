@@ -3,6 +3,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public class MonitorRawViewTests
 {
     [Fact]

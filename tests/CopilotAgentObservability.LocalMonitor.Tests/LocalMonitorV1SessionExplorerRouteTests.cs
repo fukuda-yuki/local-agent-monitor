@@ -17,7 +17,7 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
 
     [Theory]
     [MemberData(nameof(ExactScopes))]
-    public async Task ExactScopeUsesTheSharedPhysicalExplorerAndOnlyItsAsset(
+    public async Task ExactScopeUsesSharedSettingsAssetsAndItsExplorerAsset(
         string path,
         string expectedScope,
         string heading,
@@ -40,8 +40,9 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
         else
             Assert.Contains($"data-repository-id=\"{expectedRepositoryId}\"", html, StringComparison.Ordinal);
         Assert.Contains("/local-monitor-v1-shared.js", html, StringComparison.Ordinal);
+        Assert.Contains("/local-monitor-repositories.js", html, StringComparison.Ordinal);
+        Assert.Contains("/local-monitor-settings.js", html, StringComparison.Ordinal);
         Assert.Contains("/local-monitor-explorer.js", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("/local-monitor-repositories.js", html, StringComparison.Ordinal);
 
         var request = Assert.Single(snapshots.Requests);
         Assert.Equal(expectedScope, request.ScopeKind.ToString().ToLowerInvariant());

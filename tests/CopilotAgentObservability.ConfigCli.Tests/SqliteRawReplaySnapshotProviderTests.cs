@@ -8,6 +8,7 @@ using CopilotAgentObservability.Telemetry.Sessions;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SqliteRawReplaySnapshotProviderTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 23, 1, 2, 3, TimeSpan.Zero);

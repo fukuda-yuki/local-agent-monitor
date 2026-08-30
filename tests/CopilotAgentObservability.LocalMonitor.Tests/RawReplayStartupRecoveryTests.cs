@@ -7,6 +7,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RawReplayStartupRecoveryTests
 {
     [Theory]

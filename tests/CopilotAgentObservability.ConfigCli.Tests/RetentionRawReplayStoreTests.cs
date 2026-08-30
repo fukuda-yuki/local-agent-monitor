@@ -8,6 +8,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RetentionRawReplayStoreTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 23, 4, 5, 6, TimeSpan.Zero);

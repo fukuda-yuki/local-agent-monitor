@@ -59,9 +59,11 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(page.Locator("[data-compare-cohort-count='a']")).ToHaveTextAsync("1件");
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("0");
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("今回の記録にはありません");
-        await Expect(page.Locator("body")).Not.ToContainTextAsync("not_observed");
-        await Expect(page.Locator("body")).Not.ToContainTextAsync("おすすめ");
-        await Expect(page.Locator("body")).Not.ToContainTextAsync("AI");
+        var compareBody = page.Locator(".local-monitor-repository-compare-body");
+        await Expect(compareBody).Not.ToContainTextAsync("not_observed");
+        await Expect(compareBody).Not.ToContainTextAsync("おすすめ");
+        await Expect(compareBody).Not.ToContainTextAsync("AI");
+        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "設定", Exact = true })).ToBeVisibleAsync();
 
         var toolSection = page.Locator(".local-monitor-compare-section").Filter(new LocatorFilterOptions { Has = page.Locator("h2", new PageLocatorOptions { HasText = "ツール" }) });
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "ツールを読み込む" }).ClickAsync();

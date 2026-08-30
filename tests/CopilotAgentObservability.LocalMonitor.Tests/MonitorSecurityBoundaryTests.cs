@@ -13,6 +13,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// refused, non-loopback Host headers are rejected, restart on the same DB recovers
 /// without loss, and raw markers never leak into error responses.
 /// </summary>
+[Trait("ValidationLane", "Nightly")]
 public class MonitorSecurityBoundaryTests
 {
     private const string ClaudeSecretMarker = "sk-task18-claude-secret-marker";

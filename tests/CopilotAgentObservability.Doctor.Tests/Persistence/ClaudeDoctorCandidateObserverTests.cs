@@ -9,6 +9,7 @@ using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.Doctor.Tests.Persistence;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class ClaudeDoctorCandidateObserverTests
 {
     private const string NativeSessionMarker = "NATIVE_SESSION_MARKER";

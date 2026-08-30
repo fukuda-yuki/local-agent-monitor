@@ -7,6 +7,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SessionEffectComparisonRouteTests
 {
     [Theory]

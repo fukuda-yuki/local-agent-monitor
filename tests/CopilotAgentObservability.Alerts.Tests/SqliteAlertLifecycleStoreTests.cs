@@ -7,6 +7,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Alerts.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SqliteAlertLifecycleStoreTests : IDisposable
 {
     private readonly string directory = Path.Combine(Path.GetTempPath(), "alert-lifecycle-tests", Guid.NewGuid().ToString("N"));

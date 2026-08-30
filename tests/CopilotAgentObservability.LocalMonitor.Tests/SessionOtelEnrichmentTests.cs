@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SessionOtelEnrichmentTests
 {
     private static readonly DateTimeOffset ObservedAt = DateTimeOffset.Parse("2026-07-12T00:00:00Z");

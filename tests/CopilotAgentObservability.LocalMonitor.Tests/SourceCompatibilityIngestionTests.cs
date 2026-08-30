@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SourceCompatibilityIngestionTests
 {
     [Fact]

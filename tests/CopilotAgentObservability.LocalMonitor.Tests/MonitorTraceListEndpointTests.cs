@@ -8,6 +8,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// D042/D044): filters, tokens-desc default sort, offset paging, cache /
 /// trace_status fields, and the no-prompt sanitized invariant.
 /// </summary>
+[Trait("ValidationLane", "Nightly")]
 public class MonitorTraceListEndpointTests
 {
     [Fact]

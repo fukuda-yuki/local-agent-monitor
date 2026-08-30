@@ -4,6 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RetentionSensitiveBundleStoreTests
 {
     [Fact]
@@ -436,7 +437,7 @@ public sealed class RetentionSensitiveBundleStoreTests
 
         public void Dispose()
         {
-            if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
+            TestFileSystemCleanup.DeleteDirectory(Root);
         }
     }
 }

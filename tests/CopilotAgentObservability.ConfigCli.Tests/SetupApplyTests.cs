@@ -29,14 +29,22 @@ public sealed class SetupApplyTests
         using var secondStarted = new ManualResetEventSlim();
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
 
-        var first = Task.Run(() => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+        var first = Task.Factory.StartNew(
+            () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         mutation.WaitUntilReached(CancellationToken.None);
-        var second = Task.Run(() =>
-        {
-            secondStarted.Set();
-            return Assert.Throws<SetupApplyException>(
-                () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
-        });
+        var second = Task.Factory.StartNew(
+            () =>
+            {
+                secondStarted.Set();
+                return Assert.Throws<SetupApplyException>(
+                    () => fixture.Coordinator.Apply(acquisition.Lock!, fixture.ChangeSetId));
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(second.IsCompleted);
 

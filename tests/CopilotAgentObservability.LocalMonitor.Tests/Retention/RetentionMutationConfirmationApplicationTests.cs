@@ -9,6 +9,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RetentionMutationConfirmationApplicationTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 20, 12, 0, 0, TimeSpan.Zero);

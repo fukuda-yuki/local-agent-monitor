@@ -2,6 +2,7 @@ using System.Reflection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryMutationPreparationTests
 {
     public static IEnumerable<object[]> PreparedCapabilityMutations()

@@ -12,6 +12,7 @@ using System.Text.Json;
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 [Collection(HistoricalEvidencePerformanceCollection.Name)]
+[Trait("ValidationLane", "Nightly")]
 public sealed class HistoricalEvidenceProductionTests
 {
     [Fact]

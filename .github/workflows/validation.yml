@@ -17,6 +17,7 @@ jobs:
   completion:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: windows-latest
+    timeout-minutes: 45
     concurrency:
       group: validation-completion-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true

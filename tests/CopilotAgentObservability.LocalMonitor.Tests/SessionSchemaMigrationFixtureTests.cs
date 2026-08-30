@@ -10,6 +10,7 @@ using SQLitePCL;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SessionSchemaMigrationFixtureTests
 {
     private const int CurrentSessionSchemaVersion = 14;
