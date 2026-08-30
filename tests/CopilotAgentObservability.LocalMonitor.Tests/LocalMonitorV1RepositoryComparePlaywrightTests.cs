@@ -203,11 +203,19 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [InlineData("near_limit", true)]
     [InlineData("over_result", false)]
     [InlineData("over_envelope", false)]
+    [InlineData("late_result_text", false)]
+    [InlineData("escape_heavy", false)]
     [Trait("ValidationLane", "CriticalSmoke")]
     public async Task CompareAiUsesSeparateRunEnvelopeAndResultWireLimits(string sizeCase, bool accepted)
     {
         var readBody = await Golden("local-monitor-comparison-read.response.json");
-        var result = SizedValidResult(sizeCase == "over_result" ? 1_048_577 : 1_048_576);
+        var result = sizeCase switch
+        {
+            "over_result" => SizedValidResult(1_048_577),
+            "late_result_text" => SizedValidResult(1_048_577, "\"result\":"),
+            "escape_heavy" => EscapeHeavyValidResult(1_048_577),
+            _ => SizedValidResult(1_048_576),
+        };
         var run = Run("succeeded", result);
         if (sizeCase == "over_envelope") run += new string(' ', 4_097);
         Assert.True(Encoding.UTF8.GetByteCount(run) > 1_048_576);
@@ -224,7 +232,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
-        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync(accepted ? "完了" : sizeCase == "over_result" ? "安全に表示できません" : "再試行");
+        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync(accepted ? "完了" : sizeCase == "over_envelope" ? "再試行" : "安全に表示できません");
     }
 
     [Fact]
@@ -644,13 +652,32 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
             .Replace("$SNAPSHOT$", SnapshotId, StringComparison.Ordinal).Replace("$SESSION$", SessionId, StringComparison.Ordinal)
             .Replace("$EXECUTION$", ExecutionId, StringComparison.Ordinal).Replace("$NODE$", NodeId, StringComparison.Ordinal);
 
-    private static string SizedValidResult(int byteCount)
+    private static string SizedValidResult(int byteCount, string suffix = "")
+    {
+        var result = JsonNode.Parse(ValidResult())!.AsObject();
+        result["summary"] = suffix;
+        var empty = result.ToJsonString();
+        result["summary"] = new string('x', byteCount - Encoding.UTF8.GetByteCount(empty)) + suffix;
+        var sized = result.ToJsonString();
+        if (suffix.Length > 0)
+        {
+            sized = sized.Replace("\\u0022result\\u0022:", "\\\"result\\\":", StringComparison.Ordinal);
+            var missing = byteCount - Encoding.UTF8.GetByteCount(sized);
+            sized = sized.Replace("\\\"result\\\":", new string('x', missing) + "\\\"result\\\":", StringComparison.Ordinal);
+        }
+        Assert.Equal(byteCount, Encoding.UTF8.GetByteCount(sized));
+        return sized;
+    }
+
+    private static string EscapeHeavyValidResult(int byteCount)
     {
         var result = JsonNode.Parse(ValidResult())!.AsObject();
         result["summary"] = string.Empty;
         var empty = result.ToJsonString();
-        result["summary"] = new string('x', byteCount - Encoding.UTF8.GetByteCount(empty));
-        var sized = result.ToJsonString();
+        const string marker = "\"summary\":\"\"";
+        var contentBytes = byteCount - Encoding.UTF8.GetByteCount(empty);
+        var escaped = string.Concat(Enumerable.Repeat("\\u0061", contentBytes / 6)) + new string('x', contentBytes % 6);
+        var sized = empty.Replace(marker, $"\"summary\":\"{escaped}\"", StringComparison.Ordinal);
         Assert.Equal(byteCount, Encoding.UTF8.GetByteCount(sized));
         return sized;
     }

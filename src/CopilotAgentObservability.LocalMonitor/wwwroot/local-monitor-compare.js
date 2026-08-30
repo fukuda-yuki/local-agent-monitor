@@ -72,9 +72,52 @@
     }
     if (quoted || stack.length) throw new TypeError("invalid json");
   }
+  function topLevelValueSpan(text, propertyName) {
+    let index = 0; while (/\s/.test(text[index] ?? "")) index++;
+    if (text[index++] !== "{") return null;
+    while (index < text.length) {
+      while (/\s/.test(text[index] ?? "")) index++;
+      if (text[index] === "}") return null;
+      if (text[index] !== "\"") return null;
+      const keyStart = index++;
+      let escaped = false;
+      while (index < text.length) {
+        const character = text[index++];
+        if (escaped) { escaped = false; continue; }
+        if (character === "\\") { escaped = true; continue; }
+        if (character === "\"") break;
+      }
+      const key = JSON.parse(text.slice(keyStart, index));
+      while (/\s/.test(text[index] ?? "")) index++;
+      if (text[index++] !== ":") return null;
+      while (/\s/.test(text[index] ?? "")) index++;
+      const valueStart = index;
+      let quoted = false; escaped = false; let depth = 0;
+      for (; index < text.length; index++) {
+        const character = text[index];
+        if (quoted) {
+          if (escaped) { escaped = false; continue; }
+          if (character === "\\") { escaped = true; continue; }
+          if (character === "\"") quoted = false;
+          continue;
+        }
+        if (character === "\"") quoted = true;
+        else if (character === "{" || character === "[") depth++;
+        else if (character === "}" || character === "]") {
+          if (depth > 0) depth--;
+          else if (character === "}") break;
+        } else if (character === "," && depth === 0) break;
+      }
+      let valueEnd = index; while (valueEnd > valueStart && /\s/.test(text[valueEnd - 1])) valueEnd--;
+      if (key === propertyName) return { start: valueStart, end: valueEnd };
+      if (text[index] === ",") index++;
+    }
+    return null;
+  }
   async function readStrictJson(response, maximumBytes, includeText = false) {
     const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > maximumBytes) throw new TypeError("json too large");
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateJsonWire(text); const value = JSON.parse(text); return includeText ? { value, text } : value;
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateJsonWire(text); const value = JSON.parse(text);
+    return includeText ? { value, text, resultSpan: topLevelValueSpan(text, "result") } : value;
   }
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -480,8 +523,8 @@
         if (generation !== aiGeneration || activeAiRun !== runId) return;
         if (!ownsComparisonRun(run, runId)) { activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
         if (["succeeded", "zero_findings"].includes(run.state)) {
-          const marker = wire.text.lastIndexOf('"result":'); const end = wire.text.lastIndexOf("}");
-          if (marker < 0 || end <= marker || new TextEncoder().encode(wire.text.slice(marker + 9, end).trim()).length > RESULT_MAXIMUM_BYTES) {
+          const span = wire.resultSpan;
+          if (!span || new TextEncoder().encode(wire.text.slice(span.start, span.end)).length > RESULT_MAXIMUM_BYTES) {
             activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
           }
         }
