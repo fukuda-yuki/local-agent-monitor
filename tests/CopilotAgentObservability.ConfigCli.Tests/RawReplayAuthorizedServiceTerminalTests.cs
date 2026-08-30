@@ -100,6 +100,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task DirectCliNonSealDeletionFailureRetainsCleanupUntilTheExactStagedPathIsRemoved()
     {
         using var directory = new TempDirectory();
@@ -149,6 +150,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
     [Theory]
     [InlineData((int)RawReplaySnapshotTerminalResult.Lost)]
     [InlineData((int)RawReplaySnapshotTerminalResult.Busy)]
+    [Trait("ValidationLane", "Nightly")]
     public async Task DirectCliSealLossDeletionFailureRetainsCleanupUntilTheExactStagedPathIsRemoved(int terminalResultValue)
     {
         using var directory = new TempDirectory();
@@ -197,32 +199,6 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         Assert.True(deleteAttempts >= 2);
     }
 
-    [Fact]
-    public void StagedFileDoesNotReachIrreversibleDisposalBeforeDeletionIsConfirmed()
-    {
-        using var directory = new TempDirectory();
-        var stagedPath = Path.Combine(directory.Path, "raw-local-replay.zip.owned.partial");
-        File.WriteAllBytes(stagedPath, [1, 2, 3]);
-        var deleteAttempts = 0;
-        var staged = new RawReplayStagedFile(
-            stagedPath,
-            Path.Combine(directory.Path, "raw-local-replay.zip"),
-            path =>
-            {
-                if (Interlocked.Increment(ref deleteAttempts) == 1) throw new IOException("synthetic delete contention");
-                File.Delete(path);
-            },
-            new InertTimeProvider());
-
-        staged.Dispose();
-        Assert.True(File.Exists(stagedPath));
-
-        staged.Dispose();
-
-        Assert.False(File.Exists(stagedPath));
-        Assert.Equal(2, deleteAttempts);
-    }
-
     [Theory]
     [InlineData("success")]
     [InlineData("loss")]
@@ -261,7 +237,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         Assert.All(ownedBuffers, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
     }
 
-    private static RawReplayArchiveService ArchiveService(
+    internal static RawReplayArchiveService ArchiveService(
         string stagedPath,
         Action<string>? deleteFile = null,
         Func<byte[], RawReplayInspection>? inspectArchive = null,
@@ -307,7 +283,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         _ => ValidSnapshot(),
     };
 
-    private static RawReplayExportControl ConfirmedControl(RawReplaySnapshot digestSnapshot)
+    internal static RawReplayExportControl ConfirmedControl(RawReplaySnapshot digestSnapshot)
     {
         var request = new RawReplayExportControl(
             RawReplayContractVersions.ExportControl,
@@ -326,7 +302,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         };
     }
 
-    private static RawReplaySnapshot ValidSnapshot() => new(
+    internal static RawReplaySnapshot ValidSnapshot() => new(
         "snapshot",
         Now,
         "monitor-v1",
@@ -391,7 +367,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
                 })));
     }
 
-    private sealed class TerminalProvider(
+    internal sealed class TerminalProvider(
         RawReplaySnapshot snapshot,
         RawReplaySnapshotTerminalResult terminalResult) : IRawReplaySnapshotProvider
     {
@@ -405,22 +381,6 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
                 operation => operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
                     ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw
                     : terminalResult)));
-    }
-
-    private sealed class InertTimeProvider : TimeProvider
-    {
-        public override ITimer CreateTimer(
-            TimerCallback callback,
-            object? state,
-            TimeSpan dueTime,
-            TimeSpan period) => new InertTimer();
-
-        private sealed class InertTimer : ITimer
-        {
-            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
-            public void Dispose() { }
-            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-        }
     }
 
     private sealed class ObservingSystemTimeProvider : TimeProvider, IDisposable
@@ -476,7 +436,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         }
     }
 
-    private sealed class TempDirectory : IDisposable
+    internal sealed class TempDirectory : IDisposable
     {
         internal TempDirectory()
         {
