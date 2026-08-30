@@ -4,11 +4,39 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using Microsoft.AspNetCore.Http;
+using System.Reflection;
+using CopilotAgentObservability.LocalMonitor.Settings;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class RuntimeBackupSurfaceTests
 {
+    [Fact]
+    public async Task Create_application_uses_owner_validation_once_without_post_publication_inspection()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers());
+        var inspectionFlushes = 0;
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.BeforeInspectionStageFlush) inspectionFlushes++;
+        });
+        var applicationType = typeof(RuntimeBackupRoutes).GetNestedType("Application", BindingFlags.NonPublic)!;
+        var application = Activator.CreateInstance(
+            applicationType,
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            args: [temp.DatabasePath, service, new RuntimeBackupStatusSnapshot(temp.TimeProvider)],
+            culture: null)!;
+
+        var result = applicationType.GetMethod("Create", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(application, null)!;
+
+        Assert.NotNull(result.GetType().GetProperty("BackupId")!.GetValue(result));
+        Assert.Null(result.GetType().GetProperty("ErrorCode")!.GetValue(result));
+        Assert.Equal(1, inspectionFlushes);
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(temp.Path, "runtime-backups"), "runtime-backup-*.zip"));
+    }
+
     [Fact]
     public async Task Sanitized_only_removes_every_runtime_backup_route_before_body_or_store_processing()
     {

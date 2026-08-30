@@ -205,8 +205,6 @@ internal static class RuntimeBackupRoutes
                     if (!existing.Success || existing.ArchiveSha256 != id) return Failed(RuntimeBackupErrorCodes.PublishFailed);
                     File.Delete(published);
                 }
-                var validation = service.Inspect(retainedPath);
-                if (!validation.Success || validation.ArchiveSha256 != id) return Failed(RuntimeBackupErrorCodes.PublishFailed);
                 results[id] = result;
                 status.Succeeded();
                 return result;
