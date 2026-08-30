@@ -1,4 +1,5 @@
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.Pages;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite;
@@ -176,6 +177,7 @@ internal static class LocalMonitorV1HumanRoutes
             scopeService,
             detailService,
             context.RequestServices.GetRequiredService<ILocalMonitorV1ComparisonApplication>(),
+            context.RequestServices.GetRequiredService<ILocalAiAnalysisApplicationV1>(),
             context.RequestServices.GetRequiredService<IRazorViewEngine>(),
             context.RequestAborted);
         await Page(context, resolution.Model, resolution.StatusCode);
@@ -212,6 +214,7 @@ internal static class LocalMonitorV1HumanRoutes
         ILocalRepositoryScopeSnapshotService scopeService,
         ILocalRepositorySessionDetailSnapshotService detailService,
         ILocalMonitorV1ComparisonApplication comparisonApplication,
+        ILocalAiAnalysisApplicationV1 localAiApplication,
         IRazorViewEngine viewEngine,
         CancellationToken cancellationToken)
     {
@@ -233,6 +236,23 @@ internal static class LocalMonitorV1HumanRoutes
                 case LocalMonitorV1PrimaryRouteKind.SessionDetail:
                     var snapshot = await detailService.ReadDetailAsync(
                         new(LocalRepositorySessionDetailRequestKind.Summary, path.SessionId!), cancellationToken);
+                    if (query.AnalysisId is not null)
+                    {
+                        var run = await localAiApplication.ReadRunAsync(query.AnalysisId, cancellationToken);
+                        if (run is null
+                            || !string.Equals(run.SessionId, path.SessionId, StringComparison.Ordinal)
+                            || run.ScopeKind is not ("session" or "node"))
+                            return (LocalMonitorV1PageModel.ResolvedError(path, query, "analysis_run_not_found", "open_session_overview"), 404);
+                        if (string.Equals(run.ScopeKind, "node", StringComparison.Ordinal))
+                        {
+                            var anchor = snapshot.Detail.Nodes.SingleOrDefault(item => item.NodeId == run.NodeId);
+                            if (anchor is null
+                                || query.NodeId is not null && query.NodeId != anchor.NodeId
+                                || query.ExecutionId is not null && query.ExecutionId != anchor.ExecutionId)
+                                return (LocalMonitorV1PageModel.ResolvedError(path, query, "analysis_run_not_found", "open_session_overview"), 404);
+                            break;
+                        }
+                    }
                     if (query.ExecutionId is not null
                         && !snapshot.Detail.Executions.Any(item => item.ExecutionId == query.ExecutionId))
                     {
@@ -244,8 +264,6 @@ internal static class LocalMonitorV1HumanRoutes
                         if (node is null || query.ExecutionId is not null && node.ExecutionId != query.ExecutionId)
                             return (LocalMonitorV1PageModel.ResolvedError(path, query, "node_not_found", "open_session_overview"), 404);
                     }
-                    if (query.AnalysisId is not null)
-                        return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.ComparisonDetail:
                     scopeSnapshot = await scopeService.ReadAsync(

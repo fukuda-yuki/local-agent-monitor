@@ -11,6 +11,7 @@ using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Pricing;
@@ -28,6 +29,8 @@ using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using System.Security.Cryptography;
+using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Pricing;
@@ -387,18 +390,22 @@ internal static class MonitorHost
                 rootsExecutionContextFactory);
         builder.Services.AddSingleton(analysisRunner);
         SettingsAiReadinessService? settingsAiReadiness = null;
+        Func<IOwnedCopilotClientV1?>? localAiClientFactory = null;
+        CopilotAnalysisOptions? localAiOptions = null;
         if (!options.SanitizedOnly)
         {
             var aiOptions = CopilotAnalysisOptions.From(builder.Configuration);
+            localAiOptions = aiOptions;
             var configured = !bool.TryParse(builder.Configuration["CopilotAnalysis:Enabled"], out var enabled) || enabled;
+            localAiClientFactory = () => OwnedCopilotSdkClientV1.TryCreate(
+                Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
+                static sdkOptions => new CopilotClient(sdkOptions),
+                static name => Environment.GetEnvironmentVariable(name) is not null,
+                out var client) ? client : null;
             settingsAiReadiness = testOptions?.SettingsAiReadiness ?? new SettingsAiReadinessService(
                 "github_copilot", aiOptions.DefaultModel, aiOptions.DefaultProfile,
                 configured,
-                () => OwnedCopilotSdkClientV1.TryCreate(
-                    Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
-                    static sdkOptions => new CopilotClient(sdkOptions),
-                    static name => Environment.GetEnvironmentVariable(name) is not null,
-                    out var client) ? client : null,
+                localAiClientFactory,
                 TimeSpan.FromSeconds(10));
             builder.Services.AddSingleton(settingsAiReadiness);
             builder.Services.AddHostedService(_ => settingsAiReadiness);
@@ -533,6 +540,7 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
+        builder.Services.AddHostedService(_ => new LocalAiNodeCleanupHostedService(options.DatabasePath,timeProvider));
         if (!options.SanitizedOnly)
         {
             var repositoryExistenceAuthority = SqliteLocalRepositoryTargetExistenceAuthority.Instance;
@@ -602,6 +610,33 @@ internal static class MonitorHost
                 services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
             builder.Services.AddSingleton<ILocalRepositoryComparisonInputSnapshotService>(services =>
                 services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
+            builder.Services.AddSingleton<ILocalAiSnapshotProjectionServiceV1>(services =>
+                services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
+            if (settingsAiReadiness is not null && localAiClientFactory is not null && localAiOptions is not null)
+            {
+                var aiConfigurationHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                    $"local-ai-v1\0{localAiOptions.DefaultModel}\0{localAiOptions.DefaultProfile}")));
+                var runRepository = SqliteLocalAiRunRepositoryV1.Create(
+                    options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider, retentionCatalog);
+                var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
+                    localAiClientFactory, localAiOptions.DefaultModel);
+                var localAiRawReader = new LocalAiRetentionRawReaderV1(
+                    new LocalWorkspaceNodeContentReader(retentionContext, timeProvider));
+                builder.Services.AddSingleton<ILocalAiAnalysisApplicationV1>(services =>
+                    testOptions?.LocalAiAnalysisApplication
+                    ?? new LocalAiAnalysisApplicationV1(
+                        async cancellationToken => string.Equals(
+                            (await settingsAiReadiness.CheckAsync(cancellationToken).ConfigureAwait(false)).ReadinessState,
+                            "ready", StringComparison.Ordinal),
+                        services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),
+                        runRepository,
+                        providerAdapter,
+                        localAiRawReader.ReadAsync,
+                        timeProvider));
+                if (testOptions?.LocalAiAnalysisApplication is null)
+                    builder.Services.AddHostedService(services =>
+                        (LocalAiAnalysisApplicationV1)services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
+            }
             var localComparisonStore = new SqliteLocalComparisonStore(options.DatabasePath, timeProvider);
             localComparisonStore.EnsureSchema();
             builder.Services.AddSingleton(localComparisonStore);
@@ -925,6 +960,7 @@ internal static class MonitorHost
             var localMonitorV1CollectionPath = LocalMonitorV1CollectionRoutes.IsPath(context.Request.Path);
             var localMonitorV1DetailPath = LocalMonitorV1SessionDetailRoutes.IsPath(context.Request.Path);
             var localMonitorV1ComparisonPath = LocalMonitorV1ComparisonRoutes.IsPath(context.Request.Path);
+            var localAiPath = !options.SanitizedOnly && LocalAiRoutesV1.IsPath(context.Request.Path);
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
@@ -955,7 +991,7 @@ internal static class MonitorHost
                     StringComparison.OrdinalIgnoreCase);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
-                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
+                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath || localAiPath
                 || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath
                 || settingsRuntimePath || settingsRuntimeNearPath || settingsStoragePath || settingsStorageNearPath
                 || settingsAiReadinessNearPath)
@@ -995,6 +1031,10 @@ internal static class MonitorHost
                 else if (settingsAiReadinessPath || settingsRuntimePath || settingsStoragePath)
                 {
                     await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (localAiPath)
+                {
+                    await LocalAiRoutesV1.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (!options.SanitizedOnly && localArchivePath)
                 {
@@ -1117,6 +1157,7 @@ internal static class MonitorHost
                 contentReader: new LocalWorkspaceNodeContentReader(retentionContext, timeProvider),
                 contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
             LocalMonitorV1ComparisonRoutes.Map(app, app.Services.GetRequiredService<ILocalMonitorV1ComparisonApplication>());
+            LocalAiRoutesV1.Map(app, app.Services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
@@ -2977,6 +3018,8 @@ internal sealed class MonitorHostTestOptions
     public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
 
     public SettingsAiReadinessService? SettingsAiReadiness { get; init; }
+
+    public ILocalAiAnalysisApplicationV1? LocalAiAnalysisApplication { get; init; }
 
     public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
 

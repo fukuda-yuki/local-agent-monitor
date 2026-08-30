@@ -150,7 +150,14 @@ public sealed partial class RetentionCatalogStore
     private static bool IsCanonicalSourceIdentity(RetentionStoreKind kind, string sourceItemId) =>
         kind == RetentionStoreKind.SessionEventContent
             ? Guid.TryParseExact(sourceItemId, "D", out var guid) && string.Equals(sourceItemId, guid.ToString("D"), StringComparison.Ordinal)
+            : kind == RetentionStoreKind.AnalysisRunRaw && sourceItemId.StartsWith("local_ai:", StringComparison.Ordinal)
+                ? TryCanonicalLocalAiIdentity(sourceItemId)
             : long.TryParse(sourceItemId, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id > 0;
+
+    private static bool TryCanonicalLocalAiIdentity(string value)
+    {
+        var parts=value.Split(':'); return parts.Length==3 && parts[0]=="local_ai" && parts[1] is "snapshot" or "result" && global::CopilotAgentObservability.Persistence.Sqlite.LocalAi.LocalAiResultValidatorV1.CanonicalUuid7(parts[2]);
+    }
 
     private static bool AdvanceCursor(SqliteConnection connection, SqliteTransaction transaction, RetentionDeleteContext context)
     {

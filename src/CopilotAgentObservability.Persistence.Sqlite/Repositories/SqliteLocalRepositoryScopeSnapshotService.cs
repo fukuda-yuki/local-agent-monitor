@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService, ILocalRepositoryComparisonInputSnapshotService
+internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService, ILocalRepositoryComparisonInputSnapshotService, ILocalAiSnapshotProjectionServiceV1
 {
     private const int MaximumSessions = 10_000;
     private const int MaximumCandidatesPerSession = 128;
@@ -76,7 +76,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken) =>
-        (await ReadCoreAsync(request, detailRequest: null, comparisonBatch: false, cancellationToken).ConfigureAwait(false)).Scope;
+        (await ReadCoreAsync(request, detailRequest: null, comparisonBatch: false, aiProjection: false, aiNodeId: null, cancellationToken).ConfigureAwait(false)).Scope;
 
     public async ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(
         LocalRepositoryScopeRequest request,
@@ -84,7 +84,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     {
         if (request.ExactTargetSessionIds is null)
             throw new ArgumentException("invalid_local_repository_scope", nameof(request));
-        var result = await ReadCoreAsync(request, detailRequest: null, comparisonBatch: true, cancellationToken).ConfigureAwait(false);
+        var result = await ReadCoreAsync(request, detailRequest: null, comparisonBatch: true, aiProjection: false, aiNodeId: null, cancellationToken).ConfigureAwait(false);
         return new(result.Scope, result.ComparisonSessions!);
     }
 
@@ -97,17 +97,53 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId))
             throw new ArgumentException("invalid_session_id", nameof(sessionId));
         ValidateDetailRequest(detailRequest);
-        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, comparisonBatch: false, cancellationToken).ConfigureAwait(false);
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, comparisonBatch: false, aiProjection: false, aiNodeId: null, cancellationToken).ConfigureAwait(false);
         if (result.Scope.Sessions.Count == 0 || result.Detail is null)
             throw new LocalWorkspaceSessionDetailException("session_not_found");
         var session = result.Scope.Sessions[0];
         return new(session, result.Detail, ComputeRevision(session, result.Detail));
     }
 
-    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail, IReadOnlyList<LocalRepositoryComparisonSessionInput>? ComparisonSessions)> ReadCoreAsync(
+    public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) =>
+        ReadAiProjectionAsync(sessionId, null, token);
+
+    public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) =>
+        ReadAiProjectionAsync(sessionId, nodeId, token);
+
+    public async ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token)
+    {
+        try
+        {
+            var current = await ReadAiProjectionAsync(snapshot.SessionId, snapshot.NodeId, token).ConfigureAwait(false);
+            return string.Equals(current.Revision, snapshot.Revision, StringComparison.Ordinal)
+                && string.Equals(current.PayloadSha256, snapshot.PayloadSha256, StringComparison.Ordinal);
+        }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_too_large")
+        {
+            throw new LocalAiScopeTooLargeException();
+        }
+        catch (LocalWorkspaceSessionDetailException)
+        {
+            return false;
+        }
+    }
+
+    private async ValueTask<LocalAiSnapshotProjectionV1> ReadAiProjectionAsync(
+        string sessionId, string? nodeId, CancellationToken token)
+    {
+        if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId) || nodeId is not null && string.IsNullOrWhiteSpace(nodeId))
+            throw new ArgumentException("invalid_local_ai_scope");
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest: null,
+            comparisonBatch: false, aiProjection: true, aiNodeId: nodeId, token).ConfigureAwait(false);
+        return result.AiProjection ?? throw new LocalWorkspaceSessionDetailException("session_not_found");
+    }
+
+    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail, IReadOnlyList<LocalRepositoryComparisonSessionInput>? ComparisonSessions, LocalAiSnapshotProjectionV1? AiProjection)> ReadCoreAsync(
         LocalRepositoryScopeRequest request,
         LocalRepositorySessionDetailRequest? detailRequest,
         bool comparisonBatch,
+        bool aiProjection,
+        string? aiNodeId,
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
@@ -183,6 +219,20 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     ValidateDetail(request.TargetSessionId!, detailRequest, detail);
                 }
 
+                LocalAiSnapshotProjectionV1? aiSnapshot = null;
+                if (aiProjection && sessionRows.Length != 0)
+                {
+                    if (detailContributor is not LocalWorkspaceSessionDetailSnapshotContributor workspaceDetail || pinnedRegistry is null)
+                        throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+                    var contribution = await capability.RunContributorAsync(ReadPhase.Archive,
+                        token => workspaceDetail.ReadAiProjectionPinnedAsync(capability, request.TargetSessionId!, aiNodeId,
+                            acceptedAt, pinnedRegistry, token), cancellationToken).ConfigureAwait(false);
+                    var currentSession=snapshot.Sessions.Single(item=>item.SessionId==request.TargetSessionId);
+                    var input=contribution.Input with { Revision=ComputeRevisionForTest(currentSession,
+                        contribution.Input.Revision,contribution.SkillRegistryGenerationIdentity) };
+                    aiSnapshot=aiNodeId is null?LocalAiSnapshotProjectionBuilderV1.BuildSession(input):LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
+                }
+
                 IReadOnlyList<LocalRepositoryComparisonSessionInput>? comparisonSessions = null;
                 if (comparisonBatch)
                 {
@@ -226,7 +276,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
 
                 finalReturnObserver?.Invoke();
                 cancellationToken.ThrowIfCancellationRequested();
-                return (snapshot, detail, comparisonSessions);
+                return (snapshot, detail, comparisonSessions, aiSnapshot);
             }
             finally
             {

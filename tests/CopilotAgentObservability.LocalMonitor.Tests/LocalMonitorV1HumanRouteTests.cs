@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.Pages;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.AspNetCore.Mvc;
@@ -112,6 +113,9 @@ public sealed class LocalMonitorV1HumanRouteTests
         { "/sessions?status=failed&status=failed", "open_all_sessions" },
         { "/sessions/unassigned?unknown=secret", "open_all_sessions" },
         { $"/sessions/{SessionId}?execution={SessionId}&execution={SessionId}", "open_all_sessions" },
+        { $"/sessions/{SessionId}?analysis=not-a-run", "open_all_sessions" },
+        { $"/sessions/{SessionId}?analysis={SessionId.ToUpperInvariant()}", "open_all_sessions" },
+        { $"/sessions/{SessionId}?analysis={SessionId}&analysis={SessionId}", "open_all_sessions" },
         { $"/repositories/{RepositoryId}/comparisons/{ComparisonId}?unknown=secret", "open_repository_selection" },
     };
 
@@ -545,6 +549,72 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.DoesNotContain("/local-monitor-session-workspace.js", explorerHtml, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("analysis=018f0000-0000-7000-8000-000000000071&settings=ai")]
+    [InlineData("settings=ai&analysis=018f0000-0000-7000-8000-000000000071")]
+    public async Task RawDefault_CanonicalExistingSessionAnalysisServesNormalSessionWorkspace(string query)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(new("018f0000-0000-7000-8000-000000000071", "succeeded", "session", SessionId, null, null))));
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?{query}"); var html = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode); Assert.Contains("data-session-workspace", html, StringComparison.Ordinal); Assert.Contains("data-page-state=\"\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("&node=node-a8a773d6614d5030f505ff195b452dd6")]
+    [InlineData("&execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6")]
+    public async Task RawDefault_NodeAnalysisAcceptsOmittedOrExactAnchorSelection(string selection)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(new("018f0000-0000-7000-8000-000000000071", "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null))));
+
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?analysis=018f0000-0000-7000-8000-000000000071{selection}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("data-session-workspace", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("&node=node-11111111111111111111111111111111")]
+    [InlineData("&execution=8a5590c8-46e3-7069-af48-3844d2bf17a4")]
+    [InlineData("&execution=8a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6")]
+    public async Task RawDefault_NodeAnalysisRejectsSelectionOutsideItsExactAnchor(string selection)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(new("018f0000-0000-7000-8000-000000000071", "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null))));
+
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?analysis=018f0000-0000-7000-8000-000000000071{selection}");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("wrong_scope")]
+    [InlineData("wrong_session")]
+    public async Task RawDefault_AbsentOrMismatchedSessionAnalysisReturnsClosedNotFound(string disposition)
+    {
+        var run = disposition switch
+        {
+            "missing" => null,
+            "wrong_scope" => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "repository", SessionId, null, null),
+            _ => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "session", "018f0000-0000-7000-8000-000000000099", null, null),
+        };
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(run)));
+
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?analysis=018f0000-0000-7000-8000-000000000071");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-recovery-action=\"open_session_overview\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-session-workspace", html, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task SanitizedOnly_DoesNotExposeSessionWorkspaceAssetOrSurface()
     {
@@ -745,15 +815,26 @@ public sealed class LocalMonitorV1HumanRouteTests
 
     private static MonitorHostTestOptions OwnerReadyOptions(
         ILocalRepositorySessionDetailSnapshotService? detailService = null,
-        ILocalMonitorV1ComparisonApplication? comparisonApplication = null) => new()
+        ILocalMonitorV1ComparisonApplication? comparisonApplication = null,
+        ILocalAiAnalysisApplicationV1? localAiApplication = null) => new()
     {
         LocalMonitorV1ComparisonApplication = comparisonApplication,
+        LocalAiAnalysisApplication = localAiApplication,
         AdditionalServices = services =>
         {
             services.AddSingleton<ILocalRepositoryScopeSnapshotService>(new ReadyScopeService());
             services.AddSingleton(detailService ?? new ReadyDetailService());
         },
     };
+
+    private sealed class StubLocalAiApplication(LocalAiRunStatusV1? run) : ILocalAiAnalysisApplicationV1
+    {
+        public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(run?.RunId == runId ? run : null);
+        public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
 
     private static MonitorHostTestOptions AssetOptions(IFileProvider provider) => new()
     {
@@ -863,9 +944,18 @@ public sealed class LocalMonitorV1HumanRouteTests
                 0,
                 true,
                 null);
+            var fact = new LocalWorkspaceFact<long>("not_observed", null);
+            var activity = new LocalWorkspaceActivityFacts(fact, fact, fact, fact, fact);
+            var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, fact, fact, fact, fact, fact, fact, fact, fact);
+            var execution = new LocalWorkspaceExecutionDetail("9a5590c8-46e3-7069-af48-3844d2bf17a4", request.SessionId,
+                "session_run", "run", 0, "completed", "completed", null, null, "missing", null, null, null, activity, tokens, ChildCount: 1, Latest: true);
+            var previousExecution = execution with { ExecutionId = "8a5590c8-46e3-7069-af48-3844d2bf17a4", Latest = false };
+            var node = new LocalWorkspaceNodeDetail("node-a8a773d6614d5030f505ff195b452dd6", request.SessionId, execution.ExecutionId,
+                "session_event", "event", 0, null, "exact", "event", "recorded", "user.message", "completed", "completed", "missing", null, null, null,
+                activity, tokens, null, null, null);
             return ValueTask.FromResult(new LocalRepositorySessionDetailSnapshot(
                 session,
-                new LocalWorkspaceSessionDetailContribution([], [], [], []),
+                new LocalWorkspaceSessionDetailContribution([execution, previousExecution], [node], [], []),
                 new string('1', 64)));
         }
     }

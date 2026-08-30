@@ -270,6 +270,10 @@ public sealed partial class RetentionCatalogStore
                     "SELECT 1 FROM monitor_analysis_runs WHERE id=$source_id AND retention_owner_token=$retention_read_source_token";
                 sourceId = analysisRunId;
                 break;
+            case RetentionStoreKind.AnalysisRunRaw when TryLocalAiSourceId(key.SourceItemId, out var localAiTable, out var localAiId):
+                sourceSql = $"SELECT 1 FROM {localAiTable} WHERE {(localAiTable == "local_ai_snapshots" ? "snapshot_id" : "result_id")}=$source_id AND retention_owner_token=$retention_read_source_token";
+                sourceId = localAiId;
+                break;
             case RetentionStoreKind.SensitiveBundle when CanonicalId(key.SourceItemId):
                 sourceSql =
                     "SELECT 1 FROM retention_file_capture_reservations WHERE capture_id=$source_id AND store_instance_id=$store_instance_id AND store_kind='sensitive_bundle' AND source_item_id=$source_id AND phase='complete' AND owner_token=$retention_read_source_token";
@@ -307,6 +311,13 @@ public sealed partial class RetentionCatalogStore
         command.Parameters.AddWithValue("$at", at.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
         publication.BindPostCommitGrantUsabilityCapability(command);
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static bool TryLocalAiSourceId(string value, out string table, out string id)
+    {
+        table = ""; id = ""; var parts=value.Split(':');
+        if(parts.Length!=3 || parts[0]!="local_ai" || parts[1] is not ("snapshot" or "result") || !global::CopilotAgentObservability.Persistence.Sqlite.LocalAi.LocalAiResultValidatorV1.CanonicalUuid7(parts[2])) return false;
+        table=parts[1]=="snapshot"?"local_ai_snapshots":"local_ai_results"; id=parts[2]; return true;
     }
 
     internal static bool IsGrantUsable(
