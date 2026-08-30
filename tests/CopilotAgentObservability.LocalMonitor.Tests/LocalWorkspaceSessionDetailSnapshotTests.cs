@@ -1575,6 +1575,101 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task AiSourceContributionAdmitsIndependentRunAndEventLimitsBeyondCombinedNodeLimit()
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,"INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,status,projected_at) VALUES(2,'ffffffffffffffffffffffffffffffff','eeeeeeeeeeeeeeee',0,'outside','error','error','2026-08-26T00:00:00.0000000+00:00');");
+        var existing=Convert.ToInt32(LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT CAST(COUNT(*) AS TEXT) FROM session_events;").Single());
+        for (var index = existing; index < 4095; index++)
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"INSERT INTO session_events(event_id,session_id,run_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('ai-event-{index:D4}','{SessionId}','{runA}','synthetic','ai-source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured');");
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction = connection.BeginTransaction();
+        var authority = FixedSkillRegistryGenerationAuthority.Load(); using var pinned = LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority);
+
+        var result = await contributor.ReadAiProjectionPinnedAsync(new DirectReadTransaction(connection, transaction), SessionId, null,
+            DateTimeOffset.UnixEpoch, pinned, CancellationToken.None);
+
+        Assert.Equal(2, result.Input.Executions.Count);
+        Assert.Equal(4095, result.Input.SourceEventCount);
+        Assert.True(result.Input.Nodes.Count > 4096);
+        Assert.Equal("completed",result.Input.SessionFacts.GetValueOrDefault().GetProperty("status").GetString());
+        Assert.Contains(result.Input.SanitizedSpanObservations,span=>span.Contains("\"tool_name\":\"Read\"",StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Input.SanitizedSpanObservations,span=>span.Contains("outside",StringComparison.Ordinal));
+        Assert.Contains(result.Input.Nodes,node=>node.Metadata is { } metadata&&metadata.TryGetProperty("subagent_activity",out _));
+        Assert.Throws<LocalAiScopeTooLargeException>(()=>LocalAiSnapshotProjectionBuilderV1.BuildSession(result.Input));
+    }
+
+    [Theory]
+    [InlineData(257, 0)]
+    [InlineData(1, 4097)]
+    public async Task AiSourceContributionRejectsEachIndependentOneOver(int runCount, int eventCount)
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        var existingRuns=Convert.ToInt32(LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT CAST(COUNT(*) AS TEXT) FROM session_runs;").Single());
+        var existingEvents=Convert.ToInt32(LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT CAST(COUNT(*) AS TEXT) FROM session_events;").Single());
+        for(var index=existingRuns;index<runCount;index++)LocalWorkspaceProjectionSchemaTests.Execute(connection,$"INSERT INTO session_runs VALUES('ai-run-{index:D4}','{SessionId}','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        for (var index=existingEvents;index<eventCount;index++) LocalWorkspaceProjectionSchemaTests.Execute(connection,$"INSERT INTO session_events(event_id,session_id,run_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('ai-event-{index:D4}','{SessionId}','{runA}','synthetic','ai-source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured');");
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction=connection.BeginTransaction();
+        var authority=FixedSkillRegistryGenerationAuthority.Load();using var pinned=LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor=new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority);
+        var error=await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(()=>contributor.ReadAiProjectionPinnedAsync(
+            new DirectReadTransaction(connection,transaction),SessionId,null,DateTimeOffset.UnixEpoch,pinned,CancellationToken.None).AsTask());
+        Assert.Equal("workspace_too_large",error.Error);
+    }
+
+    [Theory]
+    [InlineData(4096, false)]
+    [InlineData(4097, true)]
+    public async Task AiSourceContributionBoundsRealSanitizedSpanFacts(int spanCount, bool rejected)
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,"DELETE FROM monitor_spans;");
+        for(var index=0;index<spanCount;index++)LocalWorkspaceProjectionSchemaTests.Execute(connection,$"INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,status,projected_at) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{index:x16}',{index},'chat','llm_call','ok','2026-08-26T00:00:00.0000000+00:00');");
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction=connection.BeginTransaction();
+        var authority=FixedSkillRegistryGenerationAuthority.Load();using var pinned=LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor=new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority);
+
+        if(rejected)
+        {
+            var error=await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(()=>contributor.ReadAiProjectionPinnedAsync(
+                new DirectReadTransaction(connection,transaction),SessionId,null,DateTimeOffset.UnixEpoch,pinned,CancellationToken.None).AsTask());
+            Assert.Equal("workspace_too_large",error.Error);
+        }
+        else
+        {
+            var result=await contributor.ReadAiProjectionPinnedAsync(new DirectReadTransaction(connection,transaction),SessionId,null,
+                DateTimeOffset.UnixEpoch,pinned,CancellationToken.None);
+            Assert.Equal(4096,result.Input.SanitizedSpanObservations.Count);
+            Assert.Contains(result.Input.SanitizedSpanObservations,span=>span.Contains("\"operation\":\"chat\"",StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public async Task AiSourceContributionProjectsBoundedSanitizedSpanWithExactNodeOwner()
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction=connection.BeginTransaction();
+        var authority=FixedSkillRegistryGenerationAuthority.Load();using var pinned=LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor=new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority);
+
+        var result=await contributor.ReadAiProjectionPinnedAsync(new DirectReadTransaction(connection,transaction),SessionId,null,
+            DateTimeOffset.UnixEpoch,pinned,CancellationToken.None);
+        var snapshot=LocalAiSnapshotProjectionBuilderV1.BuildSession(result.Input);
+
+        using var payload=JsonDocument.Parse(snapshot.PayloadCanonicalJson);
+        var fact=Assert.Single(payload.RootElement.GetProperty("sanitized_span_observations").EnumerateArray());
+        var citation=fact.GetProperty("citation_ref").GetString();
+        Assert.Equal("Read",fact.GetProperty("observation").GetProperty("tool_name").GetString());
+        var exactOwner=Assert.Single(result.Input.Nodes,node=>node.SanitizedSpanObservation is { } observation
+            && observation.Contains("\"tool_name\":\"Read\"",StringComparison.Ordinal));
+        Assert.Equal(exactOwner.NodeId,citation);
+    }
+
+    [Fact]
     public async Task DurableNodeOverflowMarkerRejectsEveryDetailReadAndClearsAfterSourceShrink()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

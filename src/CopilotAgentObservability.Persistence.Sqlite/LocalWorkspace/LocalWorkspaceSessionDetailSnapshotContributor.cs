@@ -59,6 +59,161 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         transaction.ReadAsync((connection, sqliteTransaction, token) =>
             ReadAsync(connection, sqliteTransaction, request, acceptedAt, pinnedRegistry, revisionSession, token), cancellationToken);
 
+    internal ValueTask<LocalAiProjectionContributionV1> ReadAiProjectionPinnedAsync(
+        ILocalRepositoryReadTransaction transaction, string sessionId, string? nodeId, DateTimeOffset acceptedAt,
+        PinnedRegistryAuthority pinnedRegistry, CancellationToken cancellationToken) =>
+        transaction.ReadAsync((connection, sqliteTransaction, token) =>
+            ReadAiProjectionAsync(connection, sqliteTransaction, sessionId, nodeId, acceptedAt, pinnedRegistry, token), cancellationToken);
+
+    private static async ValueTask<LocalAiProjectionContributionV1> ReadAiProjectionAsync(
+        SqliteConnection connection, SqliteTransaction transaction, string sessionId, string? nodeId,
+        DateTimeOffset acceptedAt, PinnedRegistryAuthority pinnedRegistry, CancellationToken token)
+    {
+        using (var bounds = Command(connection, transaction, """
+            SELECT EXISTS(SELECT 1 FROM session_runs WHERE session_id=$session_id LIMIT 1 OFFSET 256),
+              EXISTS(SELECT 1 FROM session_events WHERE session_id=$session_id LIMIT 1 OFFSET 4096);
+            """, sessionId))
+        using (var reader = await bounds.ExecuteReaderAsync(token))
+        {
+            if (!await reader.ReadAsync(token) || reader.GetInt64(0) != 0 || reader.GetInt64(1) != 0)
+                throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+        }
+        var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, [sessionId], acceptedAt, pinnedRegistry);
+        currentSkills.TryGetValue(sessionId, out var skillProjection);
+        if (skillProjection?.State == "unavailable") throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        var revision = await ReadCanonicalRevisionInput(connection, transaction, sessionId, acceptedAt,
+            skillProjection, pinnedRegistry.CanonicalIdentity, token);
+        var executions = new List<string>(); var nodes = new List<LocalAiProjectionNodeV1>();
+        using (var runs = Command(connection, transaction,"""
+            SELECT run_id,source_surface,model,started_at,ended_at,input_tokens,output_tokens,total_tokens,status
+            FROM session_runs WHERE session_id=$session_id ORDER BY run_id LIMIT 257;
+            """, sessionId))
+        using (var reader = await runs.ExecuteReaderAsync(token))
+            while (await reader.ReadAsync(token))
+            {
+                var runId=reader.GetString(0);var executionId=LocalWorkspaceProjectionStore.StableExecutionId(sessionId,"session_run",runId);
+                executions.Add(executionId);nodes.Add(new(LocalWorkspaceProjectionStore.StableNodeId("execution_root",runId),executionId,null,[],
+                    System.Text.Json.JsonSerializer.SerializeToElement(new{kind="execution",source_kind="session_run",
+                        source_surface=reader.IsDBNull(1)?null:reader.GetString(1),model=reader.IsDBNull(2)?null:reader.GetString(2),
+                        started_at=reader.IsDBNull(3)?null:reader.GetString(3),ended_at=reader.IsDBNull(4)?null:reader.GetString(4),
+                        input_tokens=reader.IsDBNull(5)?(long?)null:reader.GetInt64(5),output_tokens=reader.IsDBNull(6)?(long?)null:reader.GetInt64(6),
+                        total_tokens=reader.IsDBNull(7)?(long?)null:reader.GetInt64(7),status=reader.GetString(8)})));
+            }
+        var events = new List<(string EventId,string? RunId,string? ParentId,string? TraceId,string SourceEventId,string Type,string OccurredAt,string ContentState)>();
+        using (var command = Command(connection, transaction, """
+            SELECT event_id,run_id,parent_event_id,trace_id,source_event_id,type,occurred_at,content_state
+            FROM session_events WHERE session_id=$session_id ORDER BY event_id LIMIT 4097;
+            """, sessionId))
+        using (var reader = await command.ExecuteReaderAsync(token))
+            while (await reader.ReadAsync(token)) events.Add((reader.GetString(0),reader.IsDBNull(1)?null:reader.GetString(1),
+                reader.IsDBNull(2)?null:reader.GetString(2),reader.IsDBNull(3)?null:reader.GetString(3),reader.GetString(4),reader.GetString(5),reader.GetString(6),reader.GetString(7)));
+        var spans=new List<string>();
+        var spansByExecution=new Dictionary<string,List<string>>(StringComparer.Ordinal);
+        var spansByIdentity=new Dictionary<(string TraceId,string SpanId),string>();
+        using(var spanCommand=Command(connection,transaction,"""
+            SELECT r.run_id,m.trace_id,m.span_id,m.parent_span_id,m.operation,m.category,m.tool_name,m.tool_type,
+              m.agent_name,m.request_model,m.response_model,m.input_tokens,m.output_tokens,m.total_tokens,m.reasoning_tokens,
+              m.cache_read_tokens,m.cache_creation_tokens,m.status,m.error_type,m.duration_ms,m.start_time,m.end_time
+            FROM session_runs r JOIN monitor_spans m ON m.trace_id=r.trace_id COLLATE BINARY
+            WHERE r.session_id=$session_id
+              AND (SELECT COUNT(*) FROM session_runs owner WHERE owner.session_id=r.session_id AND owner.trace_id=m.trace_id COLLATE BINARY)=1
+              AND m.span_id IS NOT NULL
+              AND (SELECT COUNT(*) FROM monitor_spans owner
+                WHERE lower(owner.trace_id)=lower(m.trace_id) COLLATE BINARY AND lower(owner.span_id)=lower(m.span_id) COLLATE BINARY)=1
+            ORDER BY m.trace_id,m.span_ordinal LIMIT 4097;
+            """,sessionId))using(var reader=await spanCommand.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {
+            var executionId=LocalWorkspaceProjectionStore.StableExecutionId(sessionId,"session_run",reader.GetString(0));
+            var traceId=reader.GetString(1);var spanId=reader.GetString(2);
+            var observation=System.Text.Json.JsonSerializer.Serialize(new{trace_id=traceId,span_id=spanId,
+                parent_span_id=reader.IsDBNull(3)?null:reader.GetString(3),operation=reader.IsDBNull(4)?null:reader.GetString(4),
+                category=reader.IsDBNull(5)?null:reader.GetString(5),tool_name=reader.IsDBNull(6)?null:reader.GetString(6),
+                tool_type=reader.IsDBNull(7)?null:reader.GetString(7),agent_name=reader.IsDBNull(8)?null:reader.GetString(8),
+                request_model=reader.IsDBNull(9)?null:reader.GetString(9),response_model=reader.IsDBNull(10)?null:reader.GetString(10),
+                input_tokens=reader.IsDBNull(11)?(long?)null:reader.GetInt64(11),output_tokens=reader.IsDBNull(12)?(long?)null:reader.GetInt64(12),
+                total_tokens=reader.IsDBNull(13)?(long?)null:reader.GetInt64(13),reasoning_tokens=reader.IsDBNull(14)?(long?)null:reader.GetInt64(14),
+                cache_read_tokens=reader.IsDBNull(15)?(long?)null:reader.GetInt64(15),cache_creation_tokens=reader.IsDBNull(16)?(long?)null:reader.GetInt64(16),
+                status=reader.IsDBNull(17)?null:reader.GetString(17),error_type=reader.IsDBNull(18)?null:reader.GetString(18),
+                duration_ms=reader.IsDBNull(19)?(double?)null:reader.GetDouble(19),start_time=reader.IsDBNull(20)?null:reader.GetString(20),
+                end_time=reader.IsDBNull(21)?null:reader.GetString(21)});
+            spans.Add(observation);spansByIdentity.Add((traceId,spanId),observation);
+            if(!spansByExecution.TryGetValue(executionId,out var owned))spansByExecution.Add(executionId,owned=[]);owned.Add(observation);
+        }
+        if(spans.Count>4096)throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+        foreach(var item in events)
+        {
+            var executionId=item.RunId is null?"unassigned":LocalWorkspaceProjectionStore.StableExecutionId(sessionId,"session_run",item.RunId);
+            var parent=item.ParentId is not null?LocalWorkspaceProjectionStore.StableNodeId("session_event",item.ParentId):item.RunId is null?null:LocalWorkspaceProjectionStore.StableNodeId("execution_root",item.RunId);
+            nodes.Add(new(LocalWorkspaceProjectionStore.StableNodeId("session_event",item.EventId),executionId,parent,[],
+                System.Text.Json.JsonSerializer.SerializeToElement(new{kind="event",type=item.Type,occurred_at=item.OccurredAt,content_state=item.ContentState})));
+        }
+        var references=new Dictionary<string,List<string>>(StringComparer.Ordinal);
+        using(var edgeCommand=Command(connection,transaction,"""
+            SELECT e.node_id,e.related_node_id FROM local_workspace_node_edges e JOIN local_workspace_nodes n ON n.node_id=e.node_id
+            WHERE n.session_id=$session_id ORDER BY e.node_id,e.source_ordinal,e.related_node_id;
+            """,sessionId))using(var reader=await edgeCommand.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {var owner=reader.GetString(0);if(!references.TryGetValue(owner,out var values))references.Add(owner,values=[]);values.Add(reader.GetString(1));}
+        using(var projected=Command(connection,transaction,"""
+            SELECT node_id,execution_id,parent_node_id,kind,trace_id,span_id,name_state,name_text,lifecycle,status,
+              time_authority,start_utc_ticks,end_utc_ticks,duration_ms,skill_activity_state,skill_activity_count,
+              tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,
+              error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,token_authority,token_state,
+              input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens
+            FROM local_workspace_nodes
+            WHERE session_id=$session_id AND source_kind NOT IN ('execution_root','session_event') ORDER BY node_id LIMIT 4097;
+            """,sessionId))using(var reader=await projected.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {
+            var owner=reader.GetString(0);string? span=null;if(!reader.IsDBNull(4)&&!reader.IsDBNull(5))
+                spansByIdentity.TryGetValue((reader.GetString(4),reader.GetString(5)),out span);
+            nodes.Add(new(owner,reader.GetString(1),reader.IsDBNull(2)?null:reader.GetString(2),
+                references.TryGetValue(owner,out var values)?values:[],System.Text.Json.JsonSerializer.SerializeToElement(new{kind=reader.GetString(3),
+                    name_state=reader.GetString(6),name=reader.IsDBNull(7)?null:reader.GetString(7),lifecycle=reader.GetString(8),status=reader.GetString(9),
+                    time_authority=reader.GetString(10),start_utc_ticks=reader.IsDBNull(11)?(long?)null:reader.GetInt64(11),
+                    end_utc_ticks=reader.IsDBNull(12)?(long?)null:reader.GetInt64(12),duration_ms=reader.IsDBNull(13)?(long?)null:reader.GetInt64(13),
+                    skill_activity=new{state=reader.GetString(14),count=reader.IsDBNull(15)?(long?)null:reader.GetInt64(15)},
+                    tool_activity=new{state=reader.GetString(16),count=reader.IsDBNull(17)?(long?)null:reader.GetInt64(17)},
+                    subagent_activity=new{state=reader.GetString(18),count=reader.IsDBNull(19)?(long?)null:reader.GetInt64(19)},
+                    error_activity=new{state=reader.GetString(20),count=reader.IsDBNull(21)?(long?)null:reader.GetInt64(21)},
+                    retry_activity=new{state=reader.GetString(22),count=reader.IsDBNull(23)?(long?)null:reader.GetInt64(23)},
+                    token_authority=reader.GetString(24),token_state=reader.GetString(25),input_tokens=reader.IsDBNull(26)?(long?)null:reader.GetInt64(26),
+                    output_tokens=reader.IsDBNull(27)?(long?)null:reader.GetInt64(27),total_tokens=reader.IsDBNull(28)?(long?)null:reader.GetInt64(28),
+                    reasoning_tokens=reader.IsDBNull(29)?(long?)null:reader.GetInt64(29),cache_read_tokens=reader.IsDBNull(30)?(long?)null:reader.GetInt64(30),
+                    cache_creation_tokens=reader.IsDBNull(31)?(long?)null:reader.GetInt64(31)}),span));
+        }
+        foreach(var root in nodes.Where(node=>node.ParentNodeId is null&&spansByExecution.ContainsKey(node.ExecutionId)).ToArray())
+        {
+            var index=nodes.IndexOf(root);if(index>=0)nodes[index]=root with{SanitizedSpanObservations=spansByExecution[root.ExecutionId]};
+        }
+        var rawEvidence=new List<LocalAiRawEvidenceV1>();
+        using (var content=Command(connection,transaction,"""
+            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,
+              c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,
+              c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
+            FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
+            WHERE n.session_id=$session_id ORDER BY c.node_id,c.part;
+            """,sessionId))
+        using(var reader=await content.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {
+            var owner=reader.GetString(0);var part=reader.GetString(1);
+            rawEvidence.Add(new($"raw:{owner}:{part}",owner,new(owner,part,reader.GetString(2),
+                reader.IsDBNull(3)?null:reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetString(5),
+                reader.IsDBNull(6)?null:reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),reader.IsDBNull(8)?null:reader.GetInt64(8),
+                reader.IsDBNull(9)?null:reader.GetString(9),reader.IsDBNull(10)?null:reader.GetString(10),reader.IsDBNull(11)?null:reader.GetString(11),
+                reader.IsDBNull(12)?null:reader.GetString(12),reader.IsDBNull(13)?null:reader.GetInt64(13),reader.IsDBNull(14)?null:(byte[])reader[14],reader.IsDBNull(15)?null:(byte[])reader[15])));
+        }
+        System.Text.Json.JsonElement? sessionFacts=null;
+        using(var session=Command(connection,transaction,"""
+            SELECT status,completeness,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at
+            FROM sessions WHERE session_id=$session_id;
+            """,sessionId))using(var reader=await session.ExecuteReaderAsync(token))if(await reader.ReadAsync(token))
+            sessionFacts=System.Text.Json.JsonSerializer.SerializeToElement(new{status=reader.GetString(0),completeness=reader.GetString(1),
+                started_at=reader.IsDBNull(2)?null:reader.GetString(2),ended_at=reader.IsDBNull(3)?null:reader.GetString(3),
+                last_seen_at=reader.GetString(4),raw_retention_state=reader.GetString(5),created_at=reader.GetString(6),updated_at=reader.GetString(7)});
+        var input=new LocalAiProjectionInputV1(sessionId,revision,executions,nodes,spans,nodeId,rawEvidence,events.Count,sessionFacts);
+        return new(input,pinnedRegistry.CanonicalIdentity);
+    }
+
     public ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
         ILocalRepositoryReadTransaction transaction, string sessionId, DateTimeOffset acceptedAt,
         PinnedRegistryAuthority pinnedRegistry, CancellationToken cancellationToken) =>

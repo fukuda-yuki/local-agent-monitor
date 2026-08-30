@@ -35,6 +35,7 @@ if ($Lane -eq 'Completion' -and -not [string]::IsNullOrWhiteSpace($Partition)) {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $solution = Join-Path $repoRoot 'CopilotAgentObservability.slnx'
 $playwrightInstaller = Join-Path $repoRoot 'scripts\test\install-playwright-chromium.ps1'
+$repositoryPolicyTests = Join-Path $repoRoot 'scripts\test\test-repository-policy.ps1'
 $repositoryPolicyGuard = Join-Path $repoRoot 'scripts\test\assert-repository-policy.ps1'
 $validationContract = Join-Path $repoRoot 'scripts\test\assert-validation-contract.ps1'
 $partitionToken = if ([string]::IsNullOrWhiteSpace($Partition)) { 'none' } else { $Partition.ToLowerInvariant() }
@@ -548,6 +549,9 @@ function Resolve-ManifestPath {
 
 function Invoke-DiscoveryPhase {
     New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
+    $policyTests = Invoke-PhaseCommand -FilePath 'pwsh' -Arguments @(
+        '-NoProfile', '-File', $repositoryPolicyTests)
+    Assert-PhaseCommand -Result $policyTests -Description 'Repository policy tests'
     $policy = Invoke-PhaseCommand -FilePath 'pwsh' -Arguments @(
         '-NoProfile', '-File', $repositoryPolicyGuard, '-RepositoryRoot', $repoRoot)
     Assert-PhaseCommand -Result $policy -Description 'Repository policy validation'
@@ -802,7 +806,17 @@ if ($Lane -eq 'Completion' -and -not [string]::IsNullOrWhiteSpace($Phase)) {
 
 New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
 Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
-    '-NoProfile', '-File', $repositoryPolicyGuard, '-RepositoryRoot', $repoRoot)
+    '-NoProfile',
+    '-File',
+    $repositoryPolicyTests
+)
+Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+    '-NoProfile',
+    '-File',
+    $repositoryPolicyGuard,
+    '-RepositoryRoot',
+    $repoRoot
+)
 Invoke-NativeCommand -FilePath 'dotnet' -Arguments @('build', $solution)
 
 if ($Lane -eq 'Completion' -and [string]::IsNullOrWhiteSpace($Phase)) {

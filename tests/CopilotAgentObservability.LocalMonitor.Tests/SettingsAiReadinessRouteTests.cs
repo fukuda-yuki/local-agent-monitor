@@ -1,8 +1,11 @@
 using System.Net;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.Settings;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using CopilotAgentObservability.Persistence.Sqlite;
 using GitHub.Copilot;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -121,6 +124,59 @@ public sealed class SettingsAiReadinessRouteTests
     }
 
     [Fact]
+    public async Task ProductionCompositionSharesInjectedClientFactoryWithReadinessAndLocalAi()
+    {
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string runA = "018f0000-0000-7000-8000-000000000010";
+        const string runB = "018f0000-0000-7000-8000-000000000020";
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority,
+            timeProvider: temp.TimeProvider);
+        var session = new LocalAiSession();
+        var factoryCalls = 0;
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            LocalRepositoryScopeSnapshotService = scope,
+            SettingsAiReadinessClientFactory = () =>
+            {
+                Interlocked.Increment(ref factoryCalls);
+                return new Client(
+                    _ => Task.FromResult<CopilotRuntimeStatusObservationV1?>(new("1.0.75", 3, null, true)),
+                    session);
+            },
+        });
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(
+            temp.DatabasePath, sessionId, runA, runB);
+        using var readinessRequest = Request(HttpMethod.Post, csrf: "local-monitor");
+        using var readinessResponse = await host.Client.SendAsync(readinessRequest);
+        Assert.Equal(HttpStatusCode.OK, readinessResponse.StatusCode);
+
+        var application = host.Services.GetRequiredService<ILocalAiAnalysisApplicationV1>();
+        var started = await application.StartSessionAsync(new(sessionId), CancellationToken.None);
+        Assert.NotNull(started.RunId);
+        LocalAiRunStatusV1? run = null;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            run = await application.ReadRunAsync(started.RunId!, CancellationToken.None);
+            if (run?.State != "running") break;
+            await Task.Delay(10);
+        }
+
+        Assert.Equal("zero_findings", run?.State);
+        Assert.True(Volatile.Read(ref factoryCalls) >= 2);
+        Assert.Equal(1, session.SendCalls);
+    }
+
+    [Fact]
     public async Task SanitizedOnlyDoesNotRegisterReadinessResource()
     {
         using var temp = new MonitorTempDirectory();
@@ -164,18 +220,44 @@ public sealed class SettingsAiReadinessRouteTests
         {
         }
 
-        internal Client(Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status) =>
+        internal Client(
+            Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status,
+            IOwnedCopilotSessionV1? session = null)
+        {
             this.status = status;
+            this.session = session;
+        }
+
+        private readonly IOwnedCopilotSessionV1? session;
 
         internal int DisposeCalls { get; private set; }
 
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) => status(cancellationToken);
-        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
+            Task.FromResult(session ?? throw new NotSupportedException());
         public ValueTask DisposeAsync()
         {
             DisposeCalls++;
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class LocalAiSession : IOwnedCopilotSessionV1
+    {
+        internal int SendCalls { get; private set; }
+        public string SessionId => "local-ai-session";
+        public Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CopilotDiscoveredSkillFactV1>?>([]);
+        public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task<string?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            SendCalls++;
+            return Task.FromResult<string?>(
+                "{\"summary\":\"shared-factory\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}");
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

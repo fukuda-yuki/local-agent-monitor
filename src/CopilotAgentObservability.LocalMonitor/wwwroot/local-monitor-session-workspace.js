@@ -24,6 +24,15 @@
   const narrowInspector = matchMedia("(max-width: 1179px)");
   let inspectorReturnFocus = null;
   let rawDialogTrigger = null;
+  let aiReady = false;
+  let sessionAiInvoker = null;
+  let sessionReports = [];
+  let sessionReportCursor = null;
+  let nodeTranscript = [];
+  let nodeAiContext = null;
+  let activeSessionRun = null;
+  let sessionPollGeneration = 0;
+  let nodePollGeneration = 0;
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -571,6 +580,252 @@
     section.append(list);
   }
 
+  const AI_STATE_LABELS = Object.freeze({
+    queued: "分析を待っています", running: "分析しています", succeeded: "分析が完了しました",
+    zero_findings: "指摘はありませんでした", provider_failed: "AI provider で分析できませんでした",
+    provider_partial: "不完全な結果のため表示できません", timed_out: "分析がタイムアウトしました",
+    canceled: "分析をキャンセルしました", stale_snapshot: "Session が更新されたため分析を完了できませんでした",
+    scope_too_large: "分析対象が上限を超えています", invalid_result: "AI結果を安全に確認できません",
+    invalid_evidence: "証拠を確認できないため結果を表示できません",
+  });
+
+  function aiPost(path, body) {
+    return fetch(path, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: JSON.stringify(body) });
+  }
+
+  function evidenceAction(reference) {
+    if (!NODE.test(reference)) return el("span", "local-monitor-ai-evidence-unavailable", "この証拠は現在のタイムラインでは表示できません");
+    const button = el("button", null, "証拠を表示"); button.type = "button";
+    button.addEventListener("click", async () => {
+      try {
+        const dialog = document.querySelector("[data-session-ai-dialog]");
+        if (dialog?.open) closeSessionAi(false);
+        await selectNode(null, reference, true);
+        root.querySelector(`[data-timeline-node='${reference}']`)?.focus();
+      }
+      catch { button.replaceWith(el("span", "local-monitor-ai-evidence-unavailable", "この証拠は現在のタイムラインでは表示できません")); }
+    });
+    return button;
+  }
+
+  function appendAiField(target, label, value) {
+    if (value === null || value === undefined || value === "") return;
+    const row = el("p"); row.append(el("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
+  }
+
+  function renderAiResult(target, result, focus = false) {
+    target.replaceChildren();
+    if (!result || typeof result !== "object" || typeof result.summary !== "string" || !Array.isArray(result.findings)
+        || !Array.isArray(result.improvement_suggestions) || !Array.isArray(result.limitations)) {
+      target.append(el("p", null, AI_STATE_LABELS.invalid_result)); return;
+    }
+    const heading = el("h3", null, "AIによる解釈"); heading.tabIndex = -1; target.append(heading);
+    if (result.scope && typeof result.scope === "object") {
+      const scope = el("section"); scope.append(el("h4", null, "対象範囲"));
+      for (const [key, label] of [["kind", "scope"], ["session_id", "Session"], ["node_id", "node"], ["anchor_id", "anchor"]]) appendAiField(scope, label, result.scope[key]);
+      target.append(scope);
+    }
+    if (result.snapshot && typeof result.snapshot === "object") {
+      const snapshot = el("section"); snapshot.append(el("h4", null, "スナップショット")); appendAiField(snapshot, "snapshot", result.snapshot.snapshot_id); appendAiField(snapshot, "payload SHA-256", result.snapshot.payload_sha256); target.append(snapshot);
+    }
+    target.append(el("h4", null, "要約"), el("p", null, result.summary));
+    if (result.findings.length) target.append(el("h4", null, "指摘"));
+    for (const finding of result.findings) {
+      const article = el("article", "local-monitor-ai-finding"); article.append(el("h5", null, String(finding.title ?? "指摘")));
+      appendAiField(article, "finding id", finding.finding_id); appendAiField(article, "explanation", finding.explanation); appendAiField(article, "evidence state", finding.evidence_state); appendAiField(article, "limitation", finding.limitation);
+      for (const reference of Array.isArray(finding.evidence_refs) ? finding.evidence_refs : []) article.append(evidenceAction(reference));
+      target.append(article);
+    }
+    if (result.improvement_suggestions.length) target.append(el("h4", null, "改善案"));
+    for (const suggestion of result.improvement_suggestions) {
+      const article = el("article", "local-monitor-ai-suggestion");
+      appendAiField(article, "suggestion id", suggestion.suggestion_id); appendAiField(article, "target kind", suggestion.target_kind); appendAiField(article, "target label", suggestion.target_label); appendAiField(article, "rationale", suggestion.rationale); appendAiField(article, "concrete change", suggestion.concrete_change); appendAiField(article, "expected effect", suggestion.expected_effect); appendAiField(article, "risks or limitations", suggestion.risks_or_limitations);
+      for (const reference of Array.isArray(suggestion.evidence_refs) ? suggestion.evidence_refs : []) article.append(evidenceAction(reference));
+      target.append(article);
+    }
+    if (result.limitations.length) { target.append(el("h4", null, "制約")); for (const limitation of result.limitations) target.append(el("p", null, String(limitation))); }
+    if (result.provenance && typeof result.provenance === "object") {
+      const provenance = el("section"); provenance.append(el("h4", null, "来歴"));
+      for (const [key, label] of [["provider", "provider"], ["model", "model"], ["configuration_sha256", "configuration"], ["prompt_template_version", "template"], ["requested_at", "requested"], ["started_at", "started"], ["completed_at", "completed"], ["snapshot_id", "snapshot"], ["snapshot_sha256", "snapshot SHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      if (result.provenance.coverage && typeof result.provenance.coverage === "object") {
+        appendAiField(provenance, "included", result.provenance.coverage.included); appendAiField(provenance, "excluded", result.provenance.coverage.excluded); appendAiField(provenance, "content", result.provenance.coverage.content_available ? "content available" : "content unavailable");
+      }
+      target.append(provenance);
+    }
+    if (focus) heading.focus();
+  }
+
+  async function pollAiRun(runId, scope, generation = null) {
+    const status = document.querySelector(scope === "session" ? "[data-session-ai-status]" : "[data-node-ai-status]");
+    const deadline = Date.now() + 610000;
+    while (Date.now() < deadline && (scope === "session" ? generation === sessionPollGeneration && activeSessionRun === runId : generation === nodePollGeneration)) {
+      try {
+        const response = await fetch(`/api/local-monitor/v1/ai/${scope}-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error("poll_failed");
+        const value = await response.json(); if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
+        if (!["queued", "running"].includes(value.state)) return value;
+      } catch { if (status) status.textContent = "AI分析の状態を一時的に確認できません。再試行しています"; }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return null;
+  }
+
+  function showSessionReport(item, updateHistory = true, focus = false) {
+    const status = document.querySelector("[data-session-ai-status]"); const target = document.querySelector("[data-session-ai-report]");
+    status.textContent = item.snapshot_changed ? "前回の分析後に記録が更新されています" : AI_STATE_LABELS[item.state] ?? "";
+    if (item.content_state === "expired") target.replaceChildren(el("p", null, "保存期間を過ぎたため分析内容を表示できません"));
+    else if (item.content_state === "status_only" && ["succeeded", "zero_findings"].includes(item.state)) target.replaceChildren(el("p", null, "この分析レポートを確認できません"));
+    else if (["succeeded", "zero_findings"].includes(item.state)) renderAiResult(target, item.result, focus);
+    else {
+      const heading = el("h3", null, AI_STATE_LABELS[item.state] ?? "AI分析を表示できません"); heading.tabIndex = -1; target.replaceChildren(heading); if (focus) heading.focus();
+    }
+    if (updateHistory && UUID_V7.test(item.run_id)) { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: item.run_id }); }
+  }
+
+  async function readSessionReports(cursor = null, open = false) {
+    const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "20"); if (cursor) url.searchParams.set("cursor", cursor);
+    const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
+    const page = await response.json(); sessionReports = cursor ? [...sessionReports, ...(page.reports ?? [])] : page.reports ?? []; sessionReportCursor = page.next_cursor ?? null;
+    const history = document.querySelector("[data-session-ai-history]"); history.replaceChildren();
+    for (const item of sessionReports) { const button = el("button", null, item.run_id); button.type = "button"; button.addEventListener("click", () => showSessionReport(item)); history.append(button); }
+    document.querySelector("[data-session-ai-more]").hidden = !sessionReportCursor;
+    if (open && sessionReports[0]) showSessionReport(sessionReports[0]);
+  }
+
+  async function readExactSessionReport(runId) {
+    let cursor = null;
+    do {
+      const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "100"); if (cursor) url.searchParams.set("cursor", cursor);
+      const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return { state: "unavailable", report: null };
+      const page = await response.json(); const exact = (page.reports ?? []).find(item => item.run_id === runId); if (exact) return { state: "found", report: exact }; cursor = page.next_cursor ?? null;
+    } while (cursor);
+    return { state: "missing", report: null };
+  }
+
+  async function findExactSessionReport(runId) { return (await readExactSessionReport(runId)).report; }
+
+  function showSessionDialog(invoker) {
+    sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); if (!dialog.open) dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
+  }
+
+  async function restoreExactSessionAnalysis(run) {
+    const runId = run.run_id;
+    showSessionDialog(document.querySelector("[data-session-ai-open]"));
+    if (["queued", "running"].includes(run.state)) {
+      activeSessionRun = runId; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false;
+      showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
+      const terminal = await pollAiRun(runId, "session", generation); if (generation !== sessionPollGeneration) return;
+      activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
+      if (terminal && ["succeeded", "zero_findings"].includes(terminal.state)) {
+        const exact = await readExactSessionReport(runId); if (exact.state === "unavailable") return closeExactAnalysisUnavailable(); showSessionReport(exact.report ?? { ...terminal, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
+      } else if (terminal) showSessionReport({ ...terminal, content_state: "status_only", snapshot_changed: false }, false, true);
+      await readSessionReports(null, false);
+    } else if (["succeeded", "zero_findings"].includes(run.state)) {
+      const exact = await readExactSessionReport(runId); if (exact.state === "unavailable") return closeExactAnalysisUnavailable(); if (exact.report) showSessionReport(exact.report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
+    } else showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
+    return "restored";
+  }
+
+  async function restoreExactNodeAnalysis(run, route) {
+    await selectNode(route.execution ?? null, run.node_id, false);
+    const section = inspector.querySelector("[data-inspector-kind]"); if (!section) return;
+    const action = section.querySelector("[data-node-ai-start] button"); if (action) action.disabled = true;
+    const surface = createNodeAiSurface(section, run.node_id); nodeTranscript = []; nodeAiContext = run.node_id;
+    if (route.execution !== state.selectedExecutionId || route.node !== run.node_id) {
+      state.ignoreRouteEvent = true; window.LocalMonitorV1History.replace({ execution: state.selectedExecutionId, node: run.node_id, analysis: run.run_id });
+    }
+    const status = surface.querySelector("[data-node-ai-status]"); status.textContent = AI_STATE_LABELS[run.state] ?? "";
+    if (["queued", "running"].includes(run.state)) {
+      const generation = ++nodePollGeneration; const terminal = await pollAiRun(run.run_id, "node", generation); if (generation !== nodePollGeneration || !terminal) return;
+      if (["succeeded", "zero_findings"].includes(terminal.state) && terminal.result) renderAiResult(surface.querySelector("[data-node-ai-result]"), terminal.result, true);
+      else focusNodeAiFailure(surface, terminal.state);
+    } else if (["succeeded", "zero_findings"].includes(run.state) && run.result) renderAiResult(surface.querySelector("[data-node-ai-result]"), run.result);
+    else focusNodeAiFailure(surface, run.state);
+  }
+
+  async function restoreExactAnalysis(runId, route) {
+    try {
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (response.status === 404) { location.reload(); return "closed"; }
+      if (!response.ok) return closeExactAnalysisUnavailable(response.status);
+      const run = await response.json();
+      if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) return closeExactAnalysisUnavailable();
+      if (run.scope_kind === "node" && NODE.test(run.node_id)) await restoreExactNodeAnalysis(run, route);
+      else if (run.scope_kind === "session") return await restoreExactSessionAnalysis(run);
+      else return closeExactAnalysisUnavailable();
+      return "restored";
+    } catch { return closeExactAnalysisUnavailable(); }
+  }
+
+  function closeExactAnalysisUnavailable(status = 503) {
+    nodePollGeneration++; nodeTranscript = []; nodeAiContext = null;
+    const dialog = document.querySelector("[data-session-ai-dialog]"); if (dialog?.open) closeSessionAi(false); else { activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; }
+    document.querySelector("[data-session-ai-report]")?.replaceChildren(); document.querySelector("[data-session-ai-history]")?.replaceChildren();
+    renderRouteRecovery({ status }); return "closed";
+  }
+
+  async function openSessionAi(invoker) {
+    showSessionDialog(invoker);
+    if (!sessionReports.length) await readSessionReports(null, false);
+    if (sessionReports[0]) showSessionReport(sessionReports[0]); else document.querySelector("[data-session-ai-status]").textContent = "まだ分析はありません";
+  }
+
+  async function startSessionAi() {
+    const response = await aiPost("/api/local-monitor/v1/ai/session-runs", { session_id: root.dataset.sessionId });
+    if (!response.ok) { document.querySelector("[data-session-ai-status]").textContent = "AI分析を開始できませんでした"; return; }
+    const started = await response.json(); activeSessionRun = started.run_id; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: started.run_id }); const run = await pollAiRun(started.run_id, "session", generation);
+    activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
+    if (run && ["succeeded", "zero_findings"].includes(run.state)) {
+      const report = await findExactSessionReport(run.run_id); showSessionReport(report ?? { ...run, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
+    } else if (run) showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false, true);
+    await readSessionReports(null, false);
+  }
+
+  function closeNodeAi(section) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; section.querySelector("[data-node-ai-surface]")?.remove(); }
+
+  async function startNodeAi(section, nodeId, question = null) {
+    if (nodeAiContext !== nodeId || question === null) { nodeTranscript = []; nodeAiContext = nodeId; }
+    const body = { session_id: root.dataset.sessionId, node_id: nodeId }; if (question !== null) { body.question = question; body.prior_turns = nodeTranscript; }
+    if (new TextEncoder().encode(JSON.stringify(body)).length > 262144 || question !== null && new TextEncoder().encode(question).length > 4096 || nodeTranscript.length > 16) {
+      section.querySelector("[data-node-ai-status]").textContent = "質問が送信可能な上限を超えています"; return;
+    }
+    const response = await aiPost("/api/local-monitor/v1/ai/node-runs", body); if (!response.ok) { section.querySelector("[data-node-ai-status]").textContent = "AI分析を開始できませんでした"; return; }
+    const started = await response.json(); state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: state.selectedExecutionId, node: nodeId, analysis: started.run_id }); const generation = ++nodePollGeneration; const run = await pollAiRun(started.run_id, "node", generation); if (!run) return;
+    if (["succeeded", "zero_findings"].includes(run.state) && run.result) {
+      renderAiResult(section.querySelector("[data-node-ai-result]"), run.result, true); const answer = run.result.summary;
+      if (new TextEncoder().encode(answer).length <= 32768) { nodeTranscript.push({ question: question ?? "", answer }); if (nodeTranscript.length > 16) nodeTranscript.shift(); }
+    } else focusNodeAiFailure(section, run.state);
+  }
+
+  function focusNodeAiFailure(section, stateName) {
+    const result = section.querySelector("[data-node-ai-result]"); const heading = el("h3", null, AI_STATE_LABELS[stateName] ?? "AI分析を表示できません"); heading.tabIndex = -1; result.replaceChildren(heading); heading.focus();
+  }
+
+  function createNodeAiSurface(section, nodeId) {
+    section.querySelector("[data-node-ai-surface]")?.remove();
+    const surface = el("section", "local-monitor-node-ai"); surface.dataset.nodeAiSurface = "";
+    surface.append(el("h3", null, "この項目のAI分析"));
+    const status = el("div"); status.dataset.nodeAiStatus = ""; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+    const result = el("div"); result.dataset.nodeAiResult = ""; const question = el("textarea"); question.setAttribute("aria-label", "追加の質問"); question.maxLength = 4096;
+    const ask = el("button", null, "質問する"); ask.type = "button"; ask.addEventListener("click", () => startNodeAi(surface, nodeId, question.value));
+    const close = el("button", null, "AI分析を閉じる"); close.type = "button"; close.addEventListener("click", () => { closeNodeAi(section); const action = section.querySelector("[data-node-ai-start] button"); if (action) { action.disabled = false; action.focus(); } });
+    surface.append(status, result, question, ask, close); const anchor = section.querySelector("[data-node-ai-start]"); if (anchor) anchor.after(surface); else section.append(surface); return surface;
+  }
+
+  function appendNodeAi(section, nodeId) {
+    if (section.querySelector("[data-node-ai-start]")) return;
+    const start = el("section", "local-monitor-node-ai-start"); start.dataset.nodeAiStart = "";
+    start.append(el("p", null, "選択した項目と利用可能な raw content は GitHub Copilot service へ送信される場合があります。"));
+    const action = el("button", null, "この項目をAIで分析"); action.type = "button";
+    action.addEventListener("click", async () => {
+      action.disabled = true;
+      await startNodeAi(createNodeAiSurface(section, nodeId), nodeId);
+    });
+    start.append(action); section.append(start);
+  }
+
+  function ensureSelectedNodeAiStart() { const section = inspector.querySelector("[data-inspector-kind]"); if (aiReady && state.selectedNodeId && section) appendNodeAi(section, state.selectedNodeId); }
+
   function renderInspector(detail) {
     const node = detail.node; const metadata = node.metadata; inspector.replaceChildren();
     inspector.setAttribute("aria-label", node.name.state === "recorded" ? node.name.text : node.kind);
@@ -583,6 +838,7 @@
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
     const overview = el("button", null, "Session overviewに戻る"); overview.type = "button"; overview.addEventListener("click", () => { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
     section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+    if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
       appendInspectorFact(section, "Start", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "End", { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "Duration", { state: node.timing.state, value: node.timing.duration_ms === null ? null : `${node.timing.duration_ms} ms` });
       appendInspectorFact(section, "Caller", metadata.caller, "node_id"); appendInspectorFact(section, "Lifecycle", metadata.lifecycle); appendInspectorFact(section, "Status", metadata.status); appendInspectorFact(section, "Exit", metadata.exit);
@@ -617,6 +873,7 @@
   }
 
   async function selectNode(executionId, nodeId, push, attempted = false) {
+    if (state.selectedNodeId !== nodeId) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; }
     const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
     const rawDetail = await requestJson(urlFactory, attempted);
     const detail = validateNode(rawDetail, nodeId, executionId);
@@ -641,8 +898,12 @@
 
   async function applyRoute(route) {
     if (!state.summary) return;
+    const closedAnalysis = !route.analysis && document.querySelector("[data-session-ai-dialog]")?.open;
+    if (closedAnalysis) closeSessionAi(!route.execution && !route.node);
+    if (route.analysis) { const outcome = await restoreExactAnalysis(route.analysis, route); if (outcome === "closed" || document.querySelector("[data-node-ai-surface]")) return; }
     if (route.node) {
-      try { await selectNode(route.execution ?? null, route.node, false); }
+      if (document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi(false);
+      try { await selectNode(route.execution ?? null, route.node, false); if (closedAnalysis) root.querySelector("[data-timeline-node][aria-selected=true]")?.focus(); }
       catch (error) { if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
     } else if (route.execution) {
       const execution = state.summary.executions.find(item => item.execution_id === route.execution);
@@ -650,7 +911,7 @@
       state.selectedExecutionId = execution.execution_id; state.selectedNodeId = null;
       for (const item of state.summary.executions) executionMemory(item.execution_id).open = item.execution_id === execution.execution_id;
       if (!executionMemory(execution.execution_id).pages.has("root")) await loadTimeline(execution.execution_id);
-      renderOverview(state.summary); renderExecutions();
+      renderOverview(state.summary); renderExecutions(); if (closedAnalysis) root.querySelector(`[data-execution-id='${route.execution}'] [data-execution-toggle]`)?.focus();
     } else fallbackSelection(false);
   }
 
@@ -782,7 +1043,7 @@
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
       const route = window.LocalMonitorV1History.current();
-      if (applyCurrentRoute && (route.node || route.execution)) await applyRoute(route);
+      if (applyCurrentRoute && (route.node || route.execution || route.analysis)) await applyRoute(route);
       else if (applyCurrentRoute) {
         const latest = summary.executions.find(execution => execution.latest);
         if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
@@ -790,6 +1051,13 @@
     } catch {
       root.querySelector("[data-session-context-content]").textContent = "Session を読み込めませんでした";
     }
+  }
+
+  async function checkAiReadiness() {
+    try {
+      const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); const value = response.ok ? await response.json() : null;
+      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady; if (aiReady) { ensureSelectedNodeAiStart(); await readSessionReports(null, false); }
+    } catch { aiReady = false; }
   }
 
   document.addEventListener("cao-route-state", event => {
@@ -812,5 +1080,14 @@
     if (event.key !== "Tab") return; const focusable = [...rawDialog.querySelectorAll("button, [tabindex]:not([tabindex='-1'])")]; if (!focusable.length) return;
     const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
-  load();
+  const sessionAiDialog = document.querySelector("[data-session-ai-dialog]");
+  function closeSessionAi(restoreFocus = true) { if (sessionAiDialog.open) sessionAiDialog.close(); activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; if (restoreFocus) sessionAiInvoker?.focus(); }
+  document.querySelector("[data-session-ai-open]")?.addEventListener("click", event => openSessionAi(event.currentTarget));
+  document.querySelector("[data-session-ai-close]")?.addEventListener("click", () => closeSessionAi());
+  document.querySelector("[data-session-ai-regenerate]")?.addEventListener("click", startSessionAi);
+  document.querySelector("[data-session-ai-cancel]")?.addEventListener("click", async () => { if (activeSessionRun) await aiPost(`/api/local-monitor/v1/ai/runs/${activeSessionRun}/cancel`, {}); });
+  document.querySelector("[data-session-ai-more]")?.addEventListener("click", () => readSessionReports(sessionReportCursor, false));
+  sessionAiDialog?.addEventListener("cancel", event => { event.preventDefault(); closeSessionAi(); });
+  window.addEventListener("pagehide", () => { nodePollGeneration++; sessionPollGeneration++; nodeTranscript = []; nodeAiContext = null; activeSessionRun = null; });
+  load().then(checkAiReadiness);
 })();

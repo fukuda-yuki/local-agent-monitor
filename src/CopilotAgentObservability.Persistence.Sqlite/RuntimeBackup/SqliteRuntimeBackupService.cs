@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalInstructionAnalysis;
+using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
@@ -43,6 +44,7 @@ public sealed class SqliteRuntimeBackupService
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
+        ["local_ai_analysis"] = LocalAiAnalysisSchemaV1.Version,
         ["local_comparison"] = LocalComparisonSchemaV1.Version,
         ["local_repository_catalog"] = 1,
         ["local_workspace_projection"] = LocalWorkspaceProjectionSchemaV1.Version,
@@ -56,7 +58,7 @@ public sealed class SqliteRuntimeBackupService
         ["skill_projection"] = 1,
     };
     private static readonly IReadOnlyDictionary<string, int> InstalledArchiveComponents = SupportedComponents
-        .Where(component => !string.Equals(component.Key, "local_comparison", StringComparison.Ordinal))
+        .Where(component => component.Key is not ("local_comparison" or "local_ai_analysis"))
         .ToDictionary(component => component.Key, component => component.Value, StringComparer.Ordinal);
     private static readonly string[] RetentionStoreKinds = ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"];
     private static readonly string[] RetentionStates = ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed"];
@@ -416,7 +418,8 @@ public sealed class SqliteRuntimeBackupService
                     database,
                     immutableReadOnly: false,
                     publicationTime,
-                    publicationAuthority: pinnedAuthority).Success)
+                    publicationAuthority: pinnedAuthority,
+                    allowDeniedLocalAiContent: true).Success)
                 return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
             var result = CreateArchive(
                 database,
@@ -525,7 +528,9 @@ public sealed class SqliteRuntimeBackupService
         ISkillRegistryGenerationAuthority? publicationAuthority = null,
         bool workspaceShapeOnly = false,
         bool reportBusy = false,
-        RetentionCoverageValidation retentionCoverageValidation = RetentionCoverageValidation.Operational)
+        RetentionCoverageValidation retentionCoverageValidation = RetentionCoverageValidation.Operational,
+        bool allowDeniedLocalAiContent = false,
+        DateTimeOffset? localAiValidationTime = null)
     {
         if (!TryFullFile(databasePath, mustExist: true, out var database)) return new(false, RuntimeBackupErrorCodes.InvalidArguments);
         try
@@ -583,7 +588,9 @@ public sealed class SqliteRuntimeBackupService
                     validationAuthority,
                     archiveWriterVersion,
                     workspaceShapeOnly,
-                    retentionCoverageValidation))
+                    retentionCoverageValidation,
+                    allowDeniedLocalAiContent,
+                    localAiValidationTime))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             var migrations = MigrationOrder.Where(component => SupportedComponents.TryGetValue(component, out var supported)
                     && (!versions.TryGetValue(component, out var current) || current < supported))
@@ -1137,6 +1144,8 @@ public sealed class SqliteRuntimeBackupService
             checkpoint?.Invoke(RuntimeBackupCheckpoints.BeforeOnlineSnapshot);
             OnlineSnapshot(databasePath, snapshot);
             RemoveLocalComparisonsFromStaging(snapshot);
+            var effectivePublicationTime = publicationTime ?? timeProvider.GetUtcNow();
+            PrepareLocalAiStaging(snapshot, effectivePublicationTime);
             checkpoint?.Invoke(RuntimeBackupCheckpoints.AfterOnlineSnapshot);
             var snapshotPreflight = PreflightForMigration(
                 snapshot,
@@ -1145,7 +1154,8 @@ public sealed class SqliteRuntimeBackupService
                 publicationAuthority: migrateSnapshotToCurrent ? null : capturedAuthority,
                 retentionCoverageValidation: migrateSnapshotToCurrent
                     ? RetentionCoverageValidation.Restorable
-                    : RetentionCoverageValidation.Operational);
+                    : RetentionCoverageValidation.Operational,
+                localAiValidationTime: effectivePublicationTime);
             if (!snapshotPreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
             if (migrateSnapshotToCurrent)
             {
@@ -1154,11 +1164,13 @@ public sealed class SqliteRuntimeBackupService
                     snapshotPreflight.ComponentVersions ?? new Dictionary<string, int>(),
                     restorableSafetyCopy: true,
                     archiveWriterVersion,
-                    capturedAuthority);
+                    capturedAuthority,
+                    effectivePublicationTime);
                 _ = ValidateInstalledDatabase(
                     snapshot,
                     immutableReadOnly: true,
-                    skillRegistryAuthority: capturedAuthority ?? skillRegistryAuthority);
+                    skillRegistryAuthority: capturedAuthority ?? skillRegistryAuthority,
+                    localAiValidationTime: effectivePublicationTime);
             }
             var capturedExternalError = ValidateDatabaseExternalRawState(snapshot, immutableReadOnly: true);
             if (capturedExternalError is not null) return CreateFailure(capturedExternalError);
@@ -1185,7 +1197,7 @@ public sealed class SqliteRuntimeBackupService
             }
             FlushFile(partial);
             if (new FileInfo(partial).Length > RuntimeBackupLimits.MaximumArchiveBytes) return CreateFailure(RuntimeBackupErrorCodes.BundleTooLarge);
-            var inspectionContext = InspectToStage(partial);
+            var inspectionContext = InspectToStage(partial, localAiValidationTime: effectivePublicationTime);
             var inspection = inspectionContext.Result;
             if (!inspectionContext.Cleanup()) return CreateFailure(RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
             if (!inspection.Success) return CreateFailure(inspection.ErrorCode!);
@@ -1214,15 +1226,22 @@ public sealed class SqliteRuntimeBackupService
         }
     }
 
-    private InspectionContext InspectToStage(string bundlePath, string? requestedStagePath = null)
+    private InspectionContext InspectToStage(
+        string bundlePath,
+        string? requestedStagePath = null,
+        DateTimeOffset? localAiValidationTime = null)
     {
         var attributes = File.GetAttributes(bundlePath);
         if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) throw new RuntimeBackupException(RuntimeBackupErrorCodes.ArchiveInvalid);
         using var file = new FileStream(bundlePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        return InspectToStage(file, bundlePath, requestedStagePath);
+        return InspectToStage(file, bundlePath, requestedStagePath, localAiValidationTime);
     }
 
-    private InspectionContext InspectToStage(FileStream file, string stageBasePath, string? requestedStagePath = null)
+    private InspectionContext InspectToStage(
+        FileStream file,
+        string stageBasePath,
+        string? requestedStagePath = null,
+        DateTimeOffset? localAiValidationTime = null)
     {
         if (!file.CanRead || !file.CanSeek) throw new RuntimeBackupException(RuntimeBackupErrorCodes.ArchiveInvalid);
         var archiveLength = file.Length;
@@ -1287,7 +1306,7 @@ public sealed class SqliteRuntimeBackupService
             if (manifest.DatabaseSize != databaseLength || !FixedEquals(databaseHash, manifest.DatabaseSha256)) throw new RuntimeBackupException(RuntimeBackupErrorCodes.ChecksumMismatch);
             var stagedExternalError = ValidateDatabaseExternalRawState(stage, immutableReadOnly: true);
             if (stagedExternalError is not null) throw new RuntimeBackupException(stagedExternalError);
-            ValidateDatabaseMatchesManifest(stage, manifest);
+            ValidateDatabaseMatchesManifest(stage, manifest, localAiValidationTime);
             file.Position = 0;
             var archiveHash = Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant();
             return new(stage, new(true, null, archiveHash, databaseHash, RuntimeBackupContractVersions.Manifest,
@@ -1368,7 +1387,36 @@ public sealed class SqliteRuntimeBackupService
         ValidateIntegrity(connection);
     }
 
-    private void ValidateDatabaseMatchesManifest(string path, RuntimeBackupManifestData manifest)
+    private static void PrepareLocalAiStaging(string path,DateTimeOffset at)
+    {
+        using var connection = Open(path, SqliteOpenMode.ReadWrite);
+        if (!TableExists(connection, "local_ai_runs")) return;
+        connection.CreateFunction<string,string,long>("local_ai_retention_delete_authorized",static (_,_)=>1L,isDeterministic:false);
+        using var transaction = connection.BeginTransaction(deferred: false);
+        foreach (var sql in new[]
+        {
+            "UPDATE local_ai_results SET result_json=NULL WHERE result_json IS NOT NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:result:'||local_ai_results.result_id AND (i.read_denied_at IS NOT NULL OR i.state NOT IN('retained_by_policy','expiring') OR (i.state='expiring' AND i.expires_at<=$now)));",
+            "UPDATE local_ai_snapshots SET payload_json=NULL,evidence_index_json=NULL WHERE scope_kind='session' AND payload_json IS NOT NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:snapshot:'||local_ai_snapshots.snapshot_id AND (i.read_denied_at IS NOT NULL OR i.state NOT IN('retained_by_policy','expiring') OR (i.state='expiring' AND i.expires_at<=$now)));",
+            "DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_runs WHERE scope_kind='node');",
+            "DELETE FROM local_ai_runs WHERE scope_kind='node';",
+            "DELETE FROM local_ai_snapshots WHERE scope_kind='node';",
+        })
+        {
+            using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText=sql;command.Parameters.AddWithValue("$now",at.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture)); command.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        using (var checkpoint = connection.CreateCommand())
+        {
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            checkpoint.ExecuteNonQuery();
+        }
+        ValidateIntegrity(connection);
+    }
+
+    private void ValidateDatabaseMatchesManifest(
+        string path,
+        RuntimeBackupManifestData manifest,
+        DateTimeOffset? localAiValidationTime = null)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: true);
         ValidateIntegrity(connection);
@@ -1383,7 +1431,8 @@ public sealed class SqliteRuntimeBackupService
                 manifest.ComponentVersions,
                 immutableReadOnly: true,
                 archiveWriterVersion: manifest.SourceApplicationVersion,
-                retentionCoverageValidation: RetentionCoverageValidation.Restorable))
+                retentionCoverageValidation: RetentionCoverageValidation.Restorable,
+                localAiValidationTime: localAiValidationTime))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         ValidateRetentionPreflightBounds(connection);
         if (manifest.ComponentVersions.ContainsKey("retention"))
@@ -1409,13 +1458,14 @@ public sealed class SqliteRuntimeBackupService
         string path,
         bool immutableReadOnly,
         InstalledDatabaseFacts? expected = null,
-        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null,
+        DateTimeOffset? localAiValidationTime = null)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly);
         ValidateIntegrity(connection);
         ValidateSchemaMetadataBounds(connection);
         var versions = ReadComponentVersions(connection);
-        if (versions.Count != InstalledArchiveComponents.Count
+        if (versions.Count != InstalledArchiveComponents.Count + (versions.ContainsKey("local_ai_analysis") ? 1 : 0)
             || InstalledArchiveComponents.Any(item => !versions.TryGetValue(item.Key, out var current) || current != item.Value))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         if (!ValidateExecutableObjects(connection, versions)) throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
@@ -1425,7 +1475,8 @@ public sealed class SqliteRuntimeBackupService
                 immutableReadOnly,
                 publicationTime: ReadWorkspacePublicationTime(connection, versions),
                 skillRegistryAuthority: skillRegistryAuthority ?? FixedSkillRegistryGenerationAuthority.Load(),
-                retentionCoverageValidation: RetentionCoverageValidation.Restorable))
+                retentionCoverageValidation: RetentionCoverageValidation.Restorable,
+                localAiValidationTime: localAiValidationTime))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         ValidateRetentionPreflightBounds(connection);
         ValidateRetentionCoverage(path, immutableReadOnly);
@@ -1585,7 +1636,9 @@ public sealed class SqliteRuntimeBackupService
         ISkillRegistryGenerationAuthority? skillRegistryAuthority = null,
         string? archiveWriterVersion = null,
         bool workspaceShapeOnly = false,
-        RetentionCoverageValidation retentionCoverageValidation = RetentionCoverageValidation.Operational)
+        RetentionCoverageValidation retentionCoverageValidation = RetentionCoverageValidation.Operational,
+        bool allowDeniedLocalAiContent = false,
+        DateTimeOffset? localAiValidationTime = null)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly);
         if (!HasColumns(connection, "schema_version", "component", "version")) return false;
@@ -1596,6 +1649,7 @@ public sealed class SqliteRuntimeBackupService
             || versions.ContainsKey("skill_invocation_snapshot")
             || versions.ContainsKey("local_workspace_projection")
             || versions.ContainsKey("local_comparison")
+            || versions.ContainsKey("local_ai_analysis")
             || workspaceShapeOnly)
         {
             if (versions.ContainsKey("local_repository_catalog")
@@ -1641,6 +1695,7 @@ public sealed class SqliteRuntimeBackupService
                         SqliteLocalRepositoryTargetExistenceAuthority.Instance);
                 if (versions.ContainsKey("skill_invocation_snapshot"))
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
+                if (versions.ContainsKey("local_ai_analysis") && (!LocalAiAnalysisSchemaV1.IsValid(connection, componentTransaction) || !ValidateLocalAiRows(connection,componentTransaction,localAiValidationTime??publicationTime??DateTimeOffset.UtcNow,allowDeniedContent:workspaceShapeOnly||allowDeniedLocalAiContent))) return false;
                 if (versions.ContainsKey("local_comparison"))
                     LocalComparisonSchemaV1.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
@@ -1917,6 +1972,12 @@ public sealed class SqliteRuntimeBackupService
             foreach (var trigger in SkillInvocationSnapshotSchemaV1.TriggerDefinitions)
                 allowed[trigger.Name] = (trigger.Table, trigger.Sql);
         }
+        if (versions.ContainsKey("local_ai_analysis"))
+        {
+            allowed["local_ai_snapshots_update_rejected"] = ("local_ai_snapshots", "CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots WHEN NOT (local_ai_retention_delete_authorized('snapshot',OLD.snapshot_id)=1 AND OLD.scope_kind='session' AND OLD.payload_json IS NOT NULL AND OLD.evidence_index_json IS NOT NULL AND NEW.payload_json IS NULL AND NEW.evidence_index_json IS NULL AND NEW.snapshot_id=OLD.snapshot_id AND NEW.scope_kind=OLD.scope_kind AND NEW.session_id=OLD.session_id AND NEW.node_id IS OLD.node_id AND NEW.anchor_id=OLD.anchor_id AND NEW.payload_sha256=OLD.payload_sha256 AND NEW.evidence_index_sha256=OLD.evidence_index_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END");
+            allowed["local_ai_results_update_rejected"] = ("local_ai_results", "CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results WHEN NOT (local_ai_retention_delete_authorized('result',OLD.result_id)=1 AND OLD.result_json IS NOT NULL AND NEW.result_json IS NULL AND NEW.result_id=OLD.result_id AND NEW.run_id=OLD.run_id AND NEW.result_sha256=OLD.result_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END");
+            allowed["local_ai_terminal_run_update_rejected"] = ("local_ai_runs", "CREATE TRIGGER local_ai_terminal_run_update_rejected BEFORE UPDATE ON local_ai_runs WHEN OLD.state NOT IN ('queued','running') BEGIN SELECT RAISE(ABORT,'local_ai_terminal_run_immutable'); END");
+        }
         if (versions.ContainsKey("local_comparison"))
         {
             foreach (var trigger in LocalComparisonSchemaV1.OwnedObjects.Where(item => item.Type == "trigger"))
@@ -2134,6 +2195,13 @@ public sealed class SqliteRuntimeBackupService
             ["runtime_backup_receipts_no_delete"] = "runtime_backup",
             ["runtime_backup_receipts_no_replace"] = "runtime_backup",
             ["first_trace_evidence_navigation"] = "first_trace_navigation",
+            ["local_ai_snapshots"] = "local_ai_analysis",
+            ["local_ai_runs"] = "local_ai_analysis",
+            ["local_ai_results"] = "local_ai_analysis",
+            ["IX_local_ai_session_reports"] = "local_ai_analysis",
+            ["local_ai_snapshots_update_rejected"] = "local_ai_analysis",
+            ["local_ai_results_update_rejected"] = "local_ai_analysis",
+            ["local_ai_terminal_run_update_rejected"] = "local_ai_analysis",
         };
         foreach (var table in SkillProjectionSchemaV1.TableNames)
             owners[table] = "skill_projection";
@@ -2186,6 +2254,8 @@ public sealed class SqliteRuntimeBackupService
             "local_comparison_",
             "IX_local_comparison_",
             "local_workspace_",
+            "local_ai_",
+            "IX_local_ai_",
         };
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT name,tbl_name FROM sqlite_schema WHERE type IN ('table','index','trigger','view') ORDER BY name;";
@@ -2203,6 +2273,59 @@ public sealed class SqliteRuntimeBackupService
         }
         return true;
     }
+
+    internal static bool ValidateLocalAiRows(SqliteConnection connection,SqliteTransaction transaction,DateTimeOffset? validationTime=null,bool allowDeniedContent=false)
+    {
+        var at=(validationTime??DateTimeOffset.UtcNow).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture);
+        using(var invalid=connection.CreateCommand())
+        {
+            invalid.Transaction=transaction; invalid.CommandText=$"""
+                SELECT EXISTS(
+                  SELECT 1 FROM local_ai_snapshots s WHERE typeof(snapshot_id)<>'text' OR typeof(scope_kind)<>'text' OR typeof(session_id)<>'text' OR typeof(anchor_id)<>'text'
+                    OR typeof(node_id) NOT IN('null','text') OR typeof(payload_json) NOT IN('null','blob') OR typeof(evidence_index_json) NOT IN('null','blob')
+                    OR typeof(created_at)<>'text' OR typeof(payload_sha256)<>'text' OR typeof(evidence_index_sha256)<>'text'
+                    OR typeof(retention_owner_token)<>'blob' OR length(retention_owner_token)<>32 OR (scope_kind='session')<>(node_id IS NULL)
+                    OR payload_sha256 GLOB '*[^0-9a-f]*' OR evidence_index_sha256 GLOB '*[^0-9a-f]*' OR (scope_kind='node' AND payload_json IS NULL)
+                    OR (payload_json IS NOT NULL AND (length(payload_json)>{LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes} OR length(evidence_index_json)>{LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes}))
+                    OR (scope_kind='session' AND (SELECT COUNT(*) FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:snapshot:'||s.snapshot_id)<>1)
+                    OR (scope_kind='session' AND payload_json IS NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:snapshot:'||s.snapshot_id AND i.read_denied_at IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now))))
+                    OR ($allowDeniedContent=0 AND scope_kind='session' AND payload_json IS NOT NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:snapshot:'||s.snapshot_id AND (i.read_denied_at IS NOT NULL OR i.state NOT IN('retained_by_policy','expiring') OR (i.state='expiring' AND i.expires_at<=$now))))
+                    OR (scope_kind='node' AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:snapshot:'||s.snapshot_id))
+                  UNION ALL SELECT 1 FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id
+                    WHERE r.scope_kind<>s.scope_kind OR r.session_id<>s.session_id OR r.node_id IS NOT s.node_id OR typeof(r.requested_at)<>'text'
+                      OR r.provider<>'github_copilot_sdk' OR length(r.model) NOT BETWEEN 1 AND 200 OR length(r.prompt_template_version) NOT BETWEEN 1 AND 200 OR r.configuration_sha256 GLOB '*[^0-9a-f]*'
+                      OR r.timeout_seconds NOT BETWEEN 1 AND 600 OR r.requested_at<s.created_at OR r.started_at<r.requested_at OR r.completed_at<r.started_at OR r.updated_at<r.created_at OR r.updated_at<coalesce(r.completed_at,r.started_at,r.requested_at)
+                      OR (r.state='queued' AND (r.started_at IS NOT NULL OR r.completed_at IS NOT NULL OR r.error_code IS NOT NULL OR r.result_id IS NOT NULL))
+                      OR (r.state='running' AND (r.started_at IS NULL OR r.completed_at IS NOT NULL OR r.error_code IS NOT NULL OR r.result_id IS NOT NULL))
+                      OR (r.state IN('succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code IS NOT NULL OR r.result_id IS NULL OR (SELECT COUNT(*) FROM local_ai_results x WHERE x.result_id=r.result_id AND x.run_id=r.run_id)<>1))
+                      OR (r.state NOT IN('queued','running','succeeded','zero_findings') AND (r.started_at IS NULL OR r.completed_at IS NULL OR r.error_code<>r.state OR r.result_id IS NOT NULL))
+                  UNION ALL SELECT 1 FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id
+                    WHERE typeof(x.retention_owner_token)<>'blob' OR length(x.retention_owner_token)<>32 OR x.result_sha256 GLOB '*[^0-9a-f]*' OR length(x.result_json)>1048576 OR r.result_id<>x.result_id OR r.state NOT IN('succeeded','zero_findings') OR x.created_at<>r.completed_at OR (r.scope_kind='node' AND x.result_json IS NULL)
+                      OR (r.scope_kind='session' AND (SELECT COUNT(*) FROM retention_items i WHERE i.store_kind='analysis_run_raw' AND i.source_item_id='local_ai:result:'||x.result_id)<>1)
+                      OR (r.scope_kind='session' AND x.result_json IS NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:result:'||x.result_id AND i.read_denied_at IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now))))
+                      OR ($allowDeniedContent=0 AND r.scope_kind='session' AND x.result_json IS NOT NULL AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:result:'||x.result_id AND (i.read_denied_at IS NOT NULL OR i.state NOT IN('retained_by_policy','expiring') OR (i.state='expiring' AND i.expires_at<=$now))))
+                      OR (r.scope_kind='node' AND EXISTS(SELECT 1 FROM retention_items i WHERE i.source_item_id='local_ai:result:'||x.result_id))
+                  UNION ALL SELECT 1 FROM local_ai_results x LEFT JOIN local_ai_runs r ON r.run_id=x.run_id WHERE r.run_id IS NULL
+                );
+                """;invalid.Parameters.AddWithValue("$now",at);invalid.Parameters.AddWithValue("$allowDeniedContent",allowDeniedContent?1:0); if(Convert.ToInt64(invalid.ExecuteScalar(),CultureInfo.InvariantCulture)!=0)return false;
+        }
+        using(var ids=connection.CreateCommand()){ids.Transaction=transaction;ids.CommandText="SELECT snapshot_id FROM local_ai_snapshots UNION ALL SELECT run_id FROM local_ai_runs UNION ALL SELECT result_id FROM local_ai_results;";using var reader=ids.ExecuteReader();var count=0;while(reader.Read()){if(++count>1_000_000 || !LocalAiResultValidatorV1.CanonicalUuid7(reader.GetString(0)))return false;}}
+        using(var facts=connection.CreateCommand()){facts.Transaction=transaction;facts.CommandText="SELECT scope_kind,session_id,node_id,created_at FROM local_ai_snapshots UNION ALL SELECT scope_kind,session_id,node_id,requested_at FROM local_ai_runs;";using var reader=facts.ExecuteReader();while(reader.Read()){if(!LocalAiResultValidatorV1.CanonicalUuid7(reader.GetString(1))||!CanonicalTimestamp(reader.GetString(3)))return false;}}
+        using(var times=connection.CreateCommand()){times.Transaction=transaction;times.CommandText="SELECT requested_at,started_at,completed_at,created_at,updated_at FROM local_ai_runs;";using var reader=times.ExecuteReader();while(reader.Read()){for(var i=0;i<5;i++)if(!reader.IsDBNull(i)&&!CanonicalTimestamp(reader.GetString(i)))return false;}}
+        using(var snapshots=connection.CreateCommand())
+        {
+            snapshots.Transaction=transaction;snapshots.CommandText="SELECT snapshot_id,scope_kind,session_id,node_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256 FROM local_ai_snapshots;";using var reader=snapshots.ExecuteReader();
+            while(reader.Read()){var node=reader.IsDBNull(3)?null:reader.GetString(3);if(!LocalAiAnalysisStoreV1.ValidateStoredSnapshotMetadata(reader.GetString(0),reader.GetString(1),reader.GetString(2),node,reader.GetString(4),reader.GetString(6),reader.GetString(8)))return false;if(!reader.IsDBNull(5)&&!LocalAiAnalysisStoreV1.ValidateStoredSnapshot(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),node,reader.GetString(4),(byte[])reader[5],reader.GetString(6),(byte[])reader[7],reader.GetString(8))))return false;}
+        }
+        using(var results=connection.CreateCommand())
+        {
+            results.Transaction=transaction;results.CommandText="SELECT x.result_json,x.result_sha256,s.evidence_index_json,s.payload_sha256,s.snapshot_id,s.scope_kind,s.session_id,s.node_id,s.anchor_id,r.provider,r.model,r.configuration_sha256,r.prompt_template_version,r.requested_at,r.started_at,r.completed_at,x.created_at,r.state FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id WHERE x.result_json IS NOT NULL;";using var reader=results.ExecuteReader();
+            while(reader.Read()){var json=(byte[])reader[0];if(Convert.ToHexStringLower(SHA256.HashData(json))!=reader.GetString(1)||!CanonicalTimestamp(reader.GetString(16))||reader.GetString(16)!=reader.GetString(15))return false;var evidence=reader.IsDBNull(2)?null:(byte[])reader[2];var expected=new LocalAiStoredResultInvariantV1(evidence,reader.GetString(3),reader.GetString(4),reader.GetString(5),reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),reader.GetString(8),reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.GetString(12),reader.GetString(13),reader.GetString(14),reader.GetString(15),reader.GetString(17));if(evidence is null?!LocalAiAnalysisStoreV1.ValidateStoredResultWithoutEvidenceMembership(json,expected):!LocalAiAnalysisStoreV1.ValidateStoredResult(json,expected))return false;}
+        }
+        return true;
+    }
+
+    private static bool CanonicalTimestamp(string value)=>DateTimeOffset.TryParseExact(value,"O",CultureInfo.InvariantCulture,DateTimeStyles.None,out var parsed)&&parsed.ToString("O",CultureInfo.InvariantCulture)==value;
 
     private static bool HasUndeclaredLocalRepositoryCatalogObjects(
         SqliteConnection connection,
@@ -2957,13 +3080,15 @@ public sealed class SqliteRuntimeBackupService
         IReadOnlyDictionary<string, int> versions,
         bool restorableSafetyCopy,
         string sourceArchiveWriterVersion,
-        ISkillRegistryGenerationAuthority? capturedAuthority = null)
+        ISkillRegistryGenerationAuthority? capturedAuthority = null,
+        DateTimeOffset? localAiValidationTime = null)
     {
         if (!PreflightForMigration(
                 path,
                 immutableReadOnly: false,
                 archiveWriterVersion: restorableSafetyCopy ? null : sourceArchiveWriterVersion,
-                retentionCoverageValidation: RetentionCoverageValidation.Restorable).Success)
+                retentionCoverageValidation: RetentionCoverageValidation.Restorable,
+                localAiValidationTime: localAiValidationTime).Success)
             throw new InvalidOperationException("Restore staging structural validation failed.");
         using var ownedAuthority = capturedAuthority is null ? CaptureSkillRegistryAuthority() : null;
         var authority = capturedAuthority ?? ownedAuthority!;
@@ -2996,7 +3121,11 @@ public sealed class SqliteRuntimeBackupService
                     SetPragma(connection, "foreign_keys", true);
                 }
             }
-            _ = ValidateInstalledDatabase(path, immutableReadOnly: false, skillRegistryAuthority: authority);
+            _ = ValidateInstalledDatabase(
+                path,
+                immutableReadOnly: false,
+                skillRegistryAuthority: authority,
+                localAiValidationTime: localAiValidationTime);
             return;
         }
 

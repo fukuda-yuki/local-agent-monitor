@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
@@ -28,6 +29,16 @@ internal static class RetentionOwnershipReceipt
     {
         if (!Valid(input, RetentionStoreKind.AnalysisRunRaw, out var writer) || input.RunId <= 0 || (input.RecordId is <= 0) || !Timestamp(input.RequestedAtText, input.RequestedAtUtcTicks)) throw Invalid();
         writer.Int64(input.RunId); writer.Timestamp(input.RequestedAtText, input.RequestedAtUtcTicks); writer.OptionalPositive(input.RecordId); writer.OptionalText(input.SpanId); return writer.Finish(input.OwnerToken);
+    }
+
+    internal static byte[] CreateLocalAi(RetentionLocalAiOwnershipReceiptInput input)
+    {
+        if (!Valid(input, RetentionStoreKind.AnalysisRunRaw, out var writer)
+            || input.Kind is not ("snapshot" or "result")
+            || !CanonicalUuid7(input.Id)
+            || !Timestamp(input.CapturedAtText, input.CapturedAtUtcTicks)) throw Invalid();
+        writer.Text("local_ai"); writer.Text(input.Kind); writer.Guid(input.Id);
+        writer.Timestamp(input.CapturedAtText, input.CapturedAtUtcTicks); return writer.Finish(input.OwnerToken);
     }
 
     internal static byte[] CreateSensitiveBundle(RetentionSensitiveBundleOwnershipReceiptInput input)
@@ -70,6 +81,7 @@ internal static class RetentionOwnershipReceipt
     private static bool Fail(out byte[] bytes) { bytes = []; return false; }
 
     private static bool CanonicalGuid(string? value) => value is not null && Guid.TryParseExact(value, "D", out var guid) && string.Equals(value, guid.ToString("D"), StringComparison.Ordinal);
+    private static bool CanonicalUuid7(string? value) => value is not null && LocalAiResultValidatorV1.CanonicalUuid7(value);
     private static bool CanonicalCaptureId(string? value) => value is { Length: 32 } && value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     private static bool Timestamp(string? text, long ticks) => text is not null && DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var value) && value.UtcDateTime.Ticks == ticks;
     private static ArgumentException Invalid() => new("Invalid retention ownership receipt input.");
@@ -106,5 +118,6 @@ internal sealed record RetentionRawRecordReceiptInput(
     int SchemaVersion,
     byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
 internal sealed record RetentionAnalysisRunOwnershipReceiptInput(string StoreInstanceId, long RunId, string RequestedAtText, long RequestedAtUtcTicks, long? RecordId, string? SpanId, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
+internal sealed record RetentionLocalAiOwnershipReceiptInput(string StoreInstanceId, string Kind, string Id, string CapturedAtText, long CapturedAtUtcTicks, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
 internal sealed record RetentionSensitiveBundleOwnershipReceiptInput(string StoreInstanceId, string CaptureId, string ReservedAtText, long ReservedAtUtcTicks, byte[] MarkerSha256, byte[] ManifestSha256, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);
 internal sealed record RetentionAnalysisSdkDirectoryOwnershipReceiptInput(string StoreInstanceId, string CaptureId, long AnalysisRunId, string RequestedAtText, long RequestedAtUtcTicks, byte[] MarkerSha256, byte[] OwnerToken) : RetentionOwnershipReceiptInput(StoreInstanceId, OwnerToken);

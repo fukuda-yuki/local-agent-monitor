@@ -390,6 +390,20 @@ public sealed class ValidationRunnerContractTests
         Assert.Contains("workflow_completion_topology=passed", result.Output);
         var workflow = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot, ".github", "workflows", "validation.yml"));
         Assert.Contains("path: ~/.nuget/packages", workflow, StringComparison.Ordinal);
+
+        using var successfulPreflight = new TempDirectory();
+        var successfulResult = await RunDiscoveryPreflightAsync(successfulPreflight.Path, failPolicyTests: false);
+        Assert.NotEqual(0, successfulResult.ExitCode);
+        Assert.Equal(
+            ["policy-tests", "policy-guard", "build"],
+            await File.ReadAllLinesAsync(Path.Combine(successfulPreflight.Path, "preflight.log")));
+
+        using var failedPolicyTests = new TempDirectory();
+        var failedResult = await RunDiscoveryPreflightAsync(failedPolicyTests.Path, failPolicyTests: true);
+        Assert.NotEqual(0, failedResult.ExitCode);
+        Assert.Equal(
+            ["policy-tests"],
+            await File.ReadAllLinesAsync(Path.Combine(failedPolicyTests.Path, "preflight.log")));
     }
 
     [Fact]
@@ -926,6 +940,58 @@ public sealed class ValidationRunnerContractTests
         startInfo.ArgumentList.Add(command);
         for (var index = 0; index < arguments.Length; index++)
             startInfo.Environment[$"VALIDATION_TEST_ARG_{index}"] = arguments[index];
+        using var process = Process.Start(startInfo)!;
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        return new(process.ExitCode, await standardOutput + await standardError);
+    }
+
+    private static async Task<ProcessResult> RunDiscoveryPreflightAsync(string root, bool failPolicyTests)
+    {
+        var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts", "test")).FullName;
+        var projectDirectory = Directory.CreateDirectory(Path.Combine(root, "src", "Probe")).FullName;
+        File.Copy(RunnerScript, Path.Combine(scripts, "run-validation.ps1"));
+        File.WriteAllText(
+            Path.Combine(scripts, "test-repository-policy.ps1"),
+            $"Add-Content -LiteralPath $env:VALIDATION_PREFLIGHT_LOG -Value 'policy-tests'\nexit {(failPolicyTests ? 23 : 0)}\n");
+        File.WriteAllText(
+            Path.Combine(scripts, "assert-repository-policy.ps1"),
+            "Add-Content -LiteralPath $env:VALIDATION_PREFLIGHT_LOG -Value 'policy-guard'\nexit 0\n");
+        File.WriteAllText(
+            Path.Combine(scripts, "assert-validation-contract.ps1"),
+            "throw 'The contract must not run after the synthetic solution inventory mismatch.'\n");
+        File.WriteAllText(
+            Path.Combine(root, "CopilotAgentObservability.slnx"),
+            "<Solution><Project Path=\"src/Probe/Probe.csproj\" /></Solution>\n");
+        File.WriteAllText(
+            Path.Combine(projectDirectory, "Probe.csproj"),
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+              <Target Name="RecordBuild" BeforeTargets="Build">
+                <WriteLinesToFile File="$(VALIDATION_PREFLIGHT_LOG)" Lines="build" Overwrite="false" />
+              </Target>
+            </Project>
+            """);
+
+        var startInfo = new ProcessStartInfo("pwsh")
+        {
+            WorkingDirectory = root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-File");
+        startInfo.ArgumentList.Add(Path.Combine(scripts, "run-validation.ps1"));
+        startInfo.ArgumentList.Add("-Lane");
+        startInfo.ArgumentList.Add("Completion");
+        startInfo.ArgumentList.Add("-Phase");
+        startInfo.ArgumentList.Add("Discovery");
+        startInfo.ArgumentList.Add("-OutputDirectory");
+        startInfo.ArgumentList.Add("artifacts/results");
+        startInfo.Environment["VALIDATION_PREFLIGHT_LOG"] = Path.Combine(root, "preflight.log");
         using var process = Process.Start(startInfo)!;
         var standardOutput = process.StandardOutput.ReadToEndAsync();
         var standardError = process.StandardError.ReadToEndAsync();
