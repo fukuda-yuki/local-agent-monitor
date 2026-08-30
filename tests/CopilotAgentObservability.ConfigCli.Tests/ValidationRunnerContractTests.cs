@@ -18,7 +18,8 @@ public sealed class ValidationRunnerContractTests
 
         var result = await RunContractAsync(
             "-Mode", "CriticalSmoke",
-            "-ResultsDirectory", directory.Path);
+            "-ResultsDirectory", directory.Path,
+            "-ExpectedFqns", $"{RepositoryCompare};{SessionExplorer}");
 
         Assert.Equal(0, result.ExitCode);
     }
@@ -31,7 +32,8 @@ public sealed class ValidationRunnerContractTests
 
         var result = await RunContractAsync(
             "-Mode", "CriticalSmoke",
-            "-ResultsDirectory", directory.Path);
+            "-ResultsDirectory", directory.Path,
+            "-ExpectedFqns", $"{RepositoryCompare};{SessionExplorer}");
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Contains("exact critical smoke identities", result.Output, StringComparison.OrdinalIgnoreCase);

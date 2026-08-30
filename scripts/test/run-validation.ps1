@@ -37,6 +37,10 @@ $operatorOnlyExclusion = 'Issue158Lane!=WindowsOwnedSession&Issue158Lane!=LinuxE
 $completionFastFilter = "ValidationLane!=Nightly&ValidationLane!=CriticalSmoke&$operatorOnlyExclusion"
 $criticalSmokeFilter = 'ValidationLane=CriticalSmoke'
 $nightlyFilter = $operatorOnlyExclusion
+$criticalSmokeExpectedFqns = @(
+    'CopilotAgentObservability.LocalMonitor.Tests.LocalMonitorV1RepositoryComparePlaywrightTests.ImmutableCompareRendersNineSectionsRowsEvidenceAndResponsiveTableWithoutRecompute'
+    'CopilotAgentObservability.LocalMonitor.Tests.LocalMonitorV1SessionExplorerPlaywrightTests.ComparePreviewCreatesFromTransientOrderedCohortsAndNavigatesOnlyByServerLocation'
+)
 
 function Invoke-NativeCommand {
     param(
@@ -109,7 +113,9 @@ if ($Lane -eq 'Completion') {
         '-Mode',
         'CriticalSmoke',
         '-ResultsDirectory',
-        $criticalResults
+        $criticalResults,
+        '-ExpectedFqns',
+        ($criticalSmokeExpectedFqns -join ';')
     )
     Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
         '-NoProfile',

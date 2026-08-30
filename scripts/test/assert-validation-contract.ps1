@@ -6,6 +6,8 @@ param(
 
     [string]$ResultsDirectory,
 
+    [string]$ExpectedFqns,
+
     [double]$ElapsedSeconds
 )
 
@@ -23,11 +25,14 @@ if ($Mode -eq 'CompletionBudget') {
 if ([string]::IsNullOrWhiteSpace($ResultsDirectory)) {
     throw 'Critical smoke validation requires a results directory.'
 }
+if ([string]::IsNullOrWhiteSpace($ExpectedFqns)) {
+    throw 'Critical smoke validation requires expected identities.'
+}
 
-$expected = @(
-    'CopilotAgentObservability.LocalMonitor.Tests.LocalMonitorV1RepositoryComparePlaywrightTests.ImmutableCompareRendersNineSectionsRowsEvidenceAndResponsiveTableWithoutRecompute'
-    'CopilotAgentObservability.LocalMonitor.Tests.LocalMonitorV1SessionExplorerPlaywrightTests.ComparePreviewCreatesFromTransientOrderedCohortsAndNavigatesOnlyByServerLocation'
-)
+$expected = @($ExpectedFqns.Split(';', [StringSplitOptions]::RemoveEmptyEntries))
+if ($expected.Count -ne 2 -or @($expected | Select-Object -Unique).Count -ne 2) {
+    throw 'Critical smoke validation requires exactly two distinct expected identities.'
+}
 $trxFiles = @(Get-ChildItem -LiteralPath $ResultsDirectory -Filter '*.trx' -File -Recurse)
 if ($trxFiles.Count -eq 0) {
     throw 'Critical smoke validation produced no TRX files.'
