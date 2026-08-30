@@ -114,7 +114,9 @@ public sealed class SetupEnvironmentStepTests
         var expectedArtifact = originalBytes;
         using var barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
         var operationCount = platform.Operations.Count;
-        var reading = Task.Run(() => step.ReadBackup("private.backup", ["VALUE"]));
+        var readingActor = BlockingTestActor.Start(() => step.ReadBackup("private.backup", ["VALUE"]));
+        await readingActor.Entered;
+        var reading = readingActor.Completion;
         try
         {
             barrier.WaitUntilReached(CancellationToken.None);
@@ -195,7 +197,9 @@ public sealed class SetupEnvironmentStepTests
         if (afterRead)
         {
             barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
-            reading = Task.Run(() => step.ReadBackup("private.backup", ["VALUE"]));
+            var readingActor = BlockingTestActor.Start(() => step.ReadBackup("private.backup", ["VALUE"]));
+            await readingActor.Entered;
+            reading = readingActor.Completion;
             barrier.WaitUntilReached(CancellationToken.None);
             platform.InjectFault("file.metadata:private.backup", new IOException(marker));
             barrier.Release();
@@ -243,8 +247,10 @@ public sealed class SetupEnvironmentStepTests
         var applied = step.ApplyMember("VALUE", capture.Members[0].Hash, UserEnvironmentValue.Present("desired"));
         using var barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
         var operationCount = platform.Operations.Count;
-        var restoring = Task.Run(() => step.RestoreMember(
+        var restoringActor = BlockingTestActor.Start(() => step.RestoreMember(
             "VALUE", "private.backup", applied.AppliedHash, capture.Members[0].Hash));
+        await restoringActor.Entered;
+        var restoring = restoringActor.Completion;
         try
         {
             barrier.WaitUntilReached(CancellationToken.None);
@@ -666,10 +672,14 @@ public sealed class SetupEnvironmentStepTests
             : Encoding.UTF8.GetBytes("foreign private value");
         const string operation = "file.try-write-new-flushed:private.backup";
         using var barrier = platform.AddBarrier(operation);
-        var task = Task.Run(() => step.CreateOrValidateBackup("private.backup", capture));
+        var actor = BlockingTestActor.Start(() => step.CreateOrValidateBackup("private.backup", capture));
+        await actor.Entered;
+        var task = actor.Completion;
         try
         {
-            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            var barrierActor = BlockingTestActor.Start(() => barrier.WaitUntilReached(CancellationToken.None));
+            await barrierActor.Entered;
+            await barrierActor.Completion;
             platform.SeedFile("private.backup", candidate);
             barrier.Release();
             if (exactCollision)
@@ -723,10 +733,14 @@ public sealed class SetupEnvironmentStepTests
         step.CreateBackup("private.backup", capture);
         var original = platform.ReadSeededFile("private.backup");
         using var barrier = platform.AddBarrier("file.read-bounded:private.backup:2097152");
-        var task = Task.Run(() => step.CreateOrValidateBackup("private.backup", capture));
+        var actor = BlockingTestActor.Start(() => step.CreateOrValidateBackup("private.backup", capture));
+        await actor.Entered;
+        var task = actor.Completion;
         try
         {
-            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            var barrierActor = BlockingTestActor.Start(() => barrier.WaitUntilReached(CancellationToken.None));
+            await barrierActor.Entered;
+            await barrierActor.Completion;
             platform.SeedPathMetadata(
                 "private.backup",
                 new(true, SetupPathKind.File, FileAttributes.ReparsePoint));

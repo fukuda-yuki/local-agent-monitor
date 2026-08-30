@@ -84,25 +84,30 @@ public sealed class LocalArchiveAtomicityTests
         using var blocker = database.Open(sharedCache: true);
         using var writeTransaction = blocker.BeginTransaction(deferred: false);
         var writerCalls = 0;
-        var stopwatch = Stopwatch.StartNew();
 
-        var attempt = Task.Run(() => database.CreateStore().Mutate(
-            LocalArchiveAction.Archive,
-            LocalArchiveTargetKind.Session,
-            [new(Target, 0)],
-            _ =>
-            {
-                writerCalls++;
-                return "unused"u8.ToArray();
-            },
-            CancellationToken.None));
-        var completed = await Task.WhenAny(attempt, Task.Delay(TimeSpan.FromSeconds(2)));
-        stopwatch.Stop();
+        var attempt = BlockingTestActor.Start(() =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var result = database.CreateStore().Mutate(
+                LocalArchiveAction.Archive,
+                LocalArchiveTargetKind.Session,
+                [new(Target, 0)],
+                _ =>
+                {
+                    writerCalls++;
+                    return "unused"u8.ToArray();
+                },
+                CancellationToken.None);
+            stopwatch.Stop();
+            return (Result: result, Elapsed: stopwatch.Elapsed);
+        });
+        await attempt.Entered;
+        var completed = await Task.WhenAny(attempt.Completion, Task.Delay(TimeSpan.FromSeconds(2)));
         writeTransaction.Dispose();
-        var result = await attempt.WaitAsync(TimeSpan.FromSeconds(5));
+        var (result, elapsed) = await attempt.Completion.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Same(attempt, completed);
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"writer contention exceeded the 2 second bound ({stopwatch.Elapsed})");
+        Assert.Same(attempt.Completion, completed);
+        Assert.True(elapsed < TimeSpan.FromSeconds(2), $"writer contention exceeded the 2 second bound ({elapsed})");
         Assert.Equal(LocalArchiveStoreError.PersistenceBusy, result.Error);
         Assert.Equal(0, writerCalls);
         Assert.Equal(0, database.EventCount());

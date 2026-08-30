@@ -1099,7 +1099,7 @@ public sealed class SourceCompatibilityStoreTests
         var batch = CreateBatch("batch-race", BuildOverflowInventory());
         using var barrier = new Barrier(participantCount: 3);
 
-        Task<CommitAttempt> StartAttempt() => Task.Run(() =>
+        BlockingActor<CommitAttempt> StartAttempt() => BlockingTestActor.Start(() =>
         {
             barrier.SignalAndWait();
             try
@@ -1114,8 +1114,9 @@ public sealed class SourceCompatibilityStoreTests
 
         var firstTask = StartAttempt();
         var secondTask = StartAttempt();
+        await Task.WhenAll(firstTask.Entered, secondTask.Entered);
         barrier.SignalAndWait();
-        var attempts = await Task.WhenAll(firstTask, secondTask);
+        var attempts = await Task.WhenAll(firstTask.Completion, secondTask.Completion);
         var committedIds = attempts.Where(attempt => attempt.Ids is not null).Select(attempt => attempt.Ids!).ToArray();
         Assert.NotEmpty(committedIds);
         var committed = committedIds[0];

@@ -1,3 +1,4 @@
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
@@ -230,15 +231,16 @@ public sealed class RetentionMutationTransactionBoundaryTests
         });
 
         var first = secondStartsFirst
-            ? Task.Run(() => loserApplication.ExecuteMutation(request, fixture.WorkflowKey(40)))
-            : Task.Run(() => winnerApplication.ExecuteMutation(request, fixture.WorkflowKey(40)));
+            ? BlockingTestActor.Start(() => loserApplication.ExecuteMutation(request, fixture.WorkflowKey(40)))
+            : BlockingTestActor.Start(() => winnerApplication.ExecuteMutation(request, fixture.WorkflowKey(40)));
         var second = secondStartsFirst
-            ? Task.Run(() => winnerApplication.ExecuteMutation(request, fixture.WorkflowKey(40)))
-            : Task.Run(() => loserApplication.ExecuteMutation(request, fixture.WorkflowKey(40)));
+            ? BlockingTestActor.Start(() => winnerApplication.ExecuteMutation(request, fixture.WorkflowKey(40)))
+            : BlockingTestActor.Start(() => loserApplication.ExecuteMutation(request, fixture.WorkflowKey(40)));
+        await Task.WhenAll(first.Entered, second.Entered);
         await entryReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await winnerStateReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         releaseWinner.TrySetResult();
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(first.Completion, second.Completion);
 
         Assert.Equal(2, entryCount);
         Assert.Single(results, static result => result.ErrorCode is null && result.Result?.IdempotentReplay != true);
@@ -291,12 +293,13 @@ public sealed class RetentionMutationTransactionBoundaryTests
             }
         });
 
-        var mismatched = Task.Run(() =>
+        var mismatched = BlockingTestActor.Start(() =>
         {
             try { return mismatchedApplication.ExecuteMutation(request, mismatchedKey); }
             finally { mismatchedFinished.TrySetResult(); }
         });
-        var valid = Task.Run(() => validApplication.ExecuteMutation(request, validKey));
+        var valid = BlockingTestActor.Start(() => validApplication.ExecuteMutation(request, validKey));
+        await Task.WhenAll(mismatched.Entered, valid.Entered);
         if (!mismatchedRequestStartsFirst)
         {
             await validStateReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
@@ -305,7 +308,7 @@ public sealed class RetentionMutationTransactionBoundaryTests
         await entryReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         if (mismatchedRequestStartsFirst) await mismatchedFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
         releaseValid.TrySetResult();
-        var results = await Task.WhenAll(mismatched, valid);
+        var results = await Task.WhenAll(mismatched.Completion, valid.Completion);
 
         Assert.Equal(2, entryCount);
         Assert.Single(results, static result => result.ErrorCode is null);
@@ -345,11 +348,13 @@ public sealed class RetentionMutationTransactionBoundaryTests
             }
         });
 
-        var first = Task.Run(() => gatedApplication.ExecuteMutation(firstRequest, firstKey));
+        var first = BlockingTestActor.Start(() => gatedApplication.ExecuteMutation(firstRequest, firstKey));
+        await first.Entered;
         await entered.Task;
-        var second = Task.Run(() => fixture.Application.ExecuteMutation(secondRequest, secondKey));
+        var second = BlockingTestActor.Start(() => fixture.Application.ExecuteMutation(secondRequest, secondKey));
+        await second.Entered;
         release.TrySetResult();
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(first.Completion, second.Completion);
 
         Assert.Single(results, static result => result.ErrorCode is null);
         Assert.Single(results, static result => result.ErrorCode == RetentionMutationErrorCodes.ConfirmationVersionChanged);

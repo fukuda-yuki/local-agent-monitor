@@ -657,16 +657,19 @@ public sealed class CopilotAnalysisSdkExecutorTests
         using var fixture = new OwnedFixture(control: new OwnedExecutionControl(
             OwnedExecutionPhase.None, nativeReadPhase: phase));
 
-        var execution = Task.Run(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
-            fixture.Scope.ChildDirectory,
-            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-            new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None));
+        var executionActor = BlockingTestActor.Start(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+                fixture.Scope.ChildDirectory,
+                new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+                new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult());
 
+        await executionActor.Entered;
         await fixture.Control!.NativeReadBarrier.Entered;
         if (authority == CancellationAuthority.HostStopping) fixture.StopHost();
         else fixture.Scope.LoseLease();
         fixture.Control.NativeReadBarrier.Release();
-        await Assert.ThrowsAnyAsync<Exception>(() => execution);
+        await Assert.ThrowsAnyAsync<Exception>(() => executionActor.Completion);
 
         Assert.True(fixture.Control.NativeReadTokenCanBeCanceled);
         Assert.True(fixture.Control.NativeReadTokenWasCanceled);

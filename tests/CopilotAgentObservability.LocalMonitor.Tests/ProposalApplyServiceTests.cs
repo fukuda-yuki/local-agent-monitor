@@ -469,7 +469,8 @@ public sealed class ProposalApplyServiceTests
             point => { if (point == "after_prepared_journal") { authorized.Set(); release.Wait(TimeSpan.FromSeconds(10)); } });
         var approved = ApproveSingleFile(service, proposalId, "concurrent.txt", "after-concurrent\n");
 
-        var apply = Task.Run(() => service.ApplyWithId(approved.DraftId));
+        var apply = BlockingTestActor.Start(() => service.ApplyWithId(approved.DraftId));
+        await apply.Entered;
         Assert.True(authorized.Wait(TimeSpan.FromSeconds(10)), "Apply did not reach the authorized barrier.");
         var blocked = Assert.Throws<ImprovementProposalStoreException>(() => store.UpdateImprovementProposalStatus(proposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(1)));
         Assert.Equal(ImprovementProposalFailure.InvalidStatus, blocked.Failure);
@@ -477,7 +478,7 @@ public sealed class ProposalApplyServiceTests
         Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposalId)!.Status);
 
         release.Set();
-        Assert.Equal(ApplyTransactionResult.Applied, (await apply).Result);
+        Assert.Equal(ApplyTransactionResult.Applied, (await apply.Completion).Result);
         store.UpdateImprovementProposalStatus(proposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(2));
         Assert.Equal(2, store.GetImprovementProposal(proposalId)!.Revision);
         Assert.Equal(ImprovementProposalStatus.Candidate, store.GetImprovementProposal(proposalId)!.Status);
@@ -496,17 +497,20 @@ public sealed class ProposalApplyServiceTests
             if (point == "after_current_application_revalidated") { comparisonRevalidated.Set(); releaseComparison.Wait(TimeSpan.FromSeconds(10)); }
         });
 
-        var comparing = Task.Run(() => service.RecordCurrentEffectComparison(request, DateTimeOffset.UtcNow));
+        var comparing = BlockingTestActor.Start(
+            () => service.RecordCurrentEffectComparison(request, DateTimeOffset.UtcNow));
+        await comparing.Entered;
         Assert.True(comparisonRevalidated.Wait(TimeSpan.FromSeconds(10)), "Comparison did not revalidate the current application.");
-        var rollingBack = Task.Run(() => { rollbackAttempted.Set(); return service.Rollback(applyId); });
+        var rollingBack = BlockingTestActor.Start(() => { rollbackAttempted.Set(); return service.Rollback(applyId); });
+        await rollingBack.Entered;
         Assert.True(rollbackAttempted.Wait(TimeSpan.FromSeconds(10)), "Rollback did not attempt the shared mutation boundary.");
-        Assert.False(rollingBack.IsCompleted, "Rollback passed the shared mutation boundary before comparison released it.");
+        Assert.False(rollingBack.Completion.IsCompleted, "Rollback passed the shared mutation boundary before comparison released it.");
         Assert.Equal(0L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM proposal_apply_pending;"));
 
         releaseComparison.Set();
-        var receipt = await comparing;
+        var receipt = await comparing.Completion;
         Assert.Equal(EffectVerdict.Improved, receipt.Result.Verdict);
-        Assert.Equal(ApplyTransactionResult.RolledBack, await rollingBack);
+        Assert.Equal(ApplyTransactionResult.RolledBack, await rollingBack.Completion);
 
         var detail = store.GetEffectComparison(receipt.ComparisonId)!;
         Assert.Equal("invalidated", detail.Receipt.VerificationState);
@@ -527,16 +531,18 @@ public sealed class ProposalApplyServiceTests
             if (point == "after_rollback_prepared") { rollbackPrepared.Set(); releaseRollback.Wait(TimeSpan.FromSeconds(10)); }
         }, null);
 
-        var rollingBack = Task.Run(() => service.Rollback(applyId));
+        var rollingBack = BlockingTestActor.Start(() => service.Rollback(applyId));
+        await rollingBack.Entered;
         Assert.True(rollbackPrepared.Wait(TimeSpan.FromSeconds(10)), "Rollback did not reach the shared mutation boundary.");
-        var comparing = Task.Run(() => { comparisonAttempted.Set(); return RecordComparisonResult(service, request); });
+        var comparing = BlockingTestActor.Start(() => { comparisonAttempted.Set(); return RecordComparisonResult(service, request); });
+        await comparing.Entered;
         Assert.True(comparisonAttempted.Wait(TimeSpan.FromSeconds(10)), "Comparison did not attempt the shared mutation boundary.");
-        Assert.False(comparing.IsCompleted, "Comparison passed the shared mutation boundary while rollback held it.");
+        Assert.False(comparing.Completion.IsCompleted, "Comparison passed the shared mutation boundary while rollback held it.");
         Assert.Equal(0L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
 
         releaseRollback.Set();
-        Assert.Equal(ApplyTransactionResult.RolledBack, await rollingBack);
-        Assert.Equal("application_not_active", await comparing);
+        Assert.Equal(ApplyTransactionResult.RolledBack, await rollingBack.Completion);
+        Assert.Equal("application_not_active", await comparing.Completion);
         Assert.Equal(0L, Scalar(directory.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
         Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposalId)!.Status);
     }

@@ -261,10 +261,14 @@ public sealed class SetupFileStepTests
             : Encoding.UTF8.GetBytes("foreign private value");
         var operation = $"file.try-write-new-flushed:{backup}";
         using var barrier = platform.AddBarrier(operation);
-        var task = Task.Run(() => step.CreateOrValidateBackup(backup, capture));
+        var actor = BlockingTestActor.Start(() => step.CreateOrValidateBackup(backup, capture));
+        await actor.Entered;
+        var task = actor.Completion;
         try
         {
-            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            var barrierActor = BlockingTestActor.Start(() => barrier.WaitUntilReached(CancellationToken.None));
+            await barrierActor.Entered;
+            await barrierActor.Completion;
             platform.SeedFile(backup, candidate);
             barrier.Release();
             if (exactCollision)

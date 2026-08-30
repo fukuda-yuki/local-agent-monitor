@@ -117,9 +117,10 @@ public sealed class ClaudeIngestionConcurrencyTests
         var first = ClaudeBatch(Guid.CreateVersion7(), "racing-native-a", "racing-source-id");
         var second = ClaudeBatch(Guid.CreateVersion7(), "racing-native-b", "racing-source-id");
 
-        var outcomes = await Task.WhenAll(
-            Task.Run(() => CaptureWrite(firstStore, first)),
-            Task.Run(() => CaptureWrite(secondStore, second)));
+        var firstActor = BlockingTestActor.Start(() => CaptureWrite(firstStore, first));
+        var secondActor = BlockingTestActor.Start(() => CaptureWrite(secondStore, second));
+        await Task.WhenAll(firstActor.Entered, secondActor.Entered);
+        var outcomes = await Task.WhenAll(firstActor.Completion, secondActor.Completion);
 
         Assert.Single(outcomes, outcome => outcome is null);
         Assert.Single(outcomes, outcome => outcome is SessionIdentityConflictException);

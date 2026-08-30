@@ -1,4 +1,5 @@
 using CopilotAgentObservability.LocalMonitor.Retention;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
@@ -88,8 +89,9 @@ public sealed class RetentionWorkerMaintenanceMatrixTests
         var key = new RetentionOwnershipKey(storeId, RetentionStoreKind.RawRecord, source);
         await fixture.Store.RecordCleanCycleAsync(true, fixture.Now, CancellationToken.None);
         fixture.Protocol.Block = true;
-        var maintenance = Task.Run(() => fixture.Store.TryRunMaintenanceAsync(fixture.Now, CancellationToken.None).AsTask());
-        fixture.Protocol.Entered.Wait();
+        var maintenance = BlockingTestActor.Start(() => fixture.Store.TryRunMaintenanceAsync(fixture.Now, CancellationToken.None).AsTask().GetAwaiter().GetResult());
+        await maintenance.Entered;
+        await fixture.Protocol.Entered.Task;
         var second = new RetentionCatalogStore(fixture.Path, fixture.Time);
         var before = string.Join("|", Scalar(fixture.Path, "SELECT state || ':' || revision FROM retention_items WHERE item_id='fenced'"), Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases"));
         foreach (var kind in new[] { RetentionReadKind.Access, RetentionReadKind.Operation })
@@ -100,7 +102,7 @@ public sealed class RetentionWorkerMaintenanceMatrixTests
         var claim = await second.TryClaimDeletionAsync(new("fenced", 1, RetentionWorkKind.Queued), "worker", fixture.Now, CancellationToken.None);
         Assert.Equal(RetentionClaimDisposition.Contended, claim.Disposition); Assert.Equal(0L, Convert.ToInt64(Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases")));
         Assert.Equal(before, string.Join("|", Scalar(fixture.Path, "SELECT state || ':' || revision FROM retention_items WHERE item_id='fenced'"), Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases")));
-        fixture.Protocol.Release.Set(); Assert.True(await maintenance);
+        fixture.Protocol.Release.Set(); Assert.True(await maintenance.Completion);
         Assert.Null(Scalar(fixture.Path, "SELECT maintenance_owner FROM retention_worker_state"));
         var after = await second.TryClaimDeletionAsync(new("fenced", 1, RetentionWorkKind.Queued), "worker", fixture.Now, CancellationToken.None);
         Assert.Equal(RetentionClaimDisposition.Claimed, after.Disposition);
@@ -128,6 +130,6 @@ public sealed class RetentionWorkerMaintenanceMatrixTests
     private static string? Scalar(string path, string sql) { using var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q = c.CreateCommand(); q.CommandText = sql; return q.ExecuteScalar() is { } value and not DBNull ? Convert.ToString(value) : null; }
     private static void Execute(string path, string sql, params (string Name, object Value)[] values) { using var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); using var q = c.CreateCommand(); q.CommandText = sql; foreach (var (name, value) in values) q.Parameters.AddWithValue(name, value); q.ExecuteNonQuery(); }
     private sealed class Adapter(RetentionStoreKind kind, RetentionAdapterResult? result = null) : IRetentionDeletionAdapter { public RetentionStoreKind StoreKind => kind; public ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context) => ValueTask.FromResult(result ?? RetentionAdapterResult.Deleted); }
-    private sealed class Protocol { internal int Calls; internal bool Result; internal bool ThrowSqliteBusy; internal bool Block; internal readonly ManualResetEventSlim Entered = new(false); internal readonly ManualResetEventSlim Release = new(false); internal bool Run(SqliteConnection connection, CancellationToken cancellationToken) { Calls++; cancellationToken.ThrowIfCancellationRequested(); if (ThrowSqliteBusy) throw new SqliteException("sqlite busy", 5); if (Block) { Entered.Set(); Release.Wait(cancellationToken); } return Result; } }
+    private sealed class Protocol { internal int Calls; internal bool Result; internal bool ThrowSqliteBusy; internal bool Block; internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously); internal readonly ManualResetEventSlim Release = new(false); internal bool Run(SqliteConnection connection, CancellationToken cancellationToken) { Calls++; cancellationToken.ThrowIfCancellationRequested(); if (ThrowSqliteBusy) throw new SqliteException("sqlite busy", 5); if (Block) { Entered.SetResult(); Release.Wait(cancellationToken); } return Result; } }
     private sealed record Fixture(string Path, DateTimeOffset Now, MutableTimeProvider Time, RetentionCatalogStore Store, Protocol Protocol, RetentionAdapterResult? Result) : IDisposable { public void Dispose() { SqliteConnection.ClearAllPools(); foreach (var file in new[] { Path, Path + "-wal", Path + "-shm" }) if (File.Exists(file)) File.Delete(file); } }
 }

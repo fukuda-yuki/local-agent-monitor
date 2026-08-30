@@ -516,7 +516,9 @@ public sealed class SetupRollbackTests
         ]);
         var baseline = fixture.Platform.Operations.Count;
         using var notification = fixture.Platform.AddBarrier("environment.notify");
-        var rollingBack = Task.Run(fixture.Rollback);
+        var rollbackActor = BlockingTestActor.Start(fixture.Rollback);
+        await rollbackActor.Entered;
+        var rollingBack = rollbackActor.Completion;
         notification.WaitUntilReached(CancellationToken.None);
         fixture.InjectNotificationCompletionFault(boundary, afterEffect);
         notification.Release();
@@ -599,7 +601,9 @@ public sealed class SetupRollbackTests
         ]);
         using var boundary = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
-        var rollingBack = Task.Run(fixture.Rollback);
+        var rollbackActor = BlockingTestActor.Start(fixture.Rollback);
+        await rollbackActor.Entered;
+        var rollingBack = rollbackActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedUserEnvironment("ENV_NOOP", "third-party");
         var baseline = fixture.Platform.Operations.Count;
@@ -675,7 +679,9 @@ public sealed class SetupRollbackTests
         ]);
         using var boundary = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
-        var rollingBack = Task.Run(fixture.Rollback);
+        var rollbackActor = BlockingTestActor.Start(fixture.Rollback);
+        await rollbackActor.Entered;
+        var rollingBack = rollbackActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedUserEnvironment("ENV_B", "third-party");
         boundary.Release();
@@ -737,13 +743,17 @@ public sealed class SetupRollbackTests
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
         using var secondStarted = new ManualResetEventSlim();
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
-        var first = Task.Run(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        var firstActor = BlockingTestActor.Start(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        await firstActor.Entered;
+        var first = firstActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
-        var second = Task.Run(() =>
+        var secondActor = BlockingTestActor.Start(() =>
         {
             secondStarted.Set();
             return fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId);
         });
+        await secondActor.Entered;
+        var second = secondActor.Completion;
         Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(second.IsCompleted);
 
@@ -867,7 +877,9 @@ public sealed class SetupRollbackTests
         using var boundary = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
-        var rollingBack = Task.Run(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        var rollbackActor = BlockingTestActor.Start(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        await rollbackActor.Entered;
+        var rollingBack = rollbackActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedFile(fixture.TargetPaths[0], Encoding.UTF8.GetBytes("third-party"));
         boundary.Release();
@@ -892,7 +904,9 @@ public sealed class SetupRollbackTests
         using var boundary = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
-        var rollingBack = Task.Run(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        var rollbackActor = BlockingTestActor.Start(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        await rollbackActor.Entered;
+        var rollingBack = rollbackActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
         fixture.Platform.SeedFile(fixture.TargetPaths[0], Encoding.UTF8.GetBytes("old-0"));
         boundary.Release();
@@ -1078,13 +1092,17 @@ public sealed class SetupRollbackTests
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
         using var secondStarted = new ManualResetEventSlim();
         using var acquisition = SetupLock.TryAcquire(fixture.Platform, fixture.Paths);
-        var first = Task.Run(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        var firstActor = BlockingTestActor.Start(() => fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId));
+        await firstActor.Entered;
+        var first = firstActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
-        var second = Task.Run(() =>
+        var secondActor = BlockingTestActor.Start(() =>
         {
             secondStarted.Set();
             return fixture.Coordinator.Rollback(acquisition.Lock!, fixture.ChangeSetId);
         });
+        await secondActor.Entered;
+        var second = secondActor.Completion;
         Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(second.IsCompleted);
 
@@ -1121,7 +1139,9 @@ public sealed class SetupRollbackTests
         {
             using var checkpoint = fixture.Platform.AddBarrier(
                 $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
-            var rollingBack = Task.Run(fixture.Rollback);
+            var rollbackActor = BlockingTestActor.Start(fixture.Rollback);
+            await rollbackActor.Entered;
+            var rollingBack = rollbackActor.Completion;
             checkpoint.WaitUntilReached(CancellationToken.None);
             fixture.InjectTerminalLedgerFault(afterEffect);
             checkpoint.Release();
@@ -1224,7 +1244,9 @@ public sealed class SetupRollbackTests
             includeEnvironmentNoOp: true);
         using var boundary = fixture.Platform.AddBarrier(
             $"checkpoint:{SetupFaultPoint.AfterJournalPreparedBeforeLedger}");
-        var rollingBack = Task.Run(fixture.Rollback);
+        var rollbackActor = BlockingTestActor.Start(fixture.Rollback);
+        await rollbackActor.Entered;
+        var rollingBack = rollbackActor.Completion;
         boundary.WaitUntilReached(CancellationToken.None);
         switch (conflict)
         {

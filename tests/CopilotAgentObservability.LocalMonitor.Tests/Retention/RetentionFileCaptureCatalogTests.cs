@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -188,10 +189,11 @@ public sealed class RetentionFileCaptureCatalogTests
         var digest = SHA256.HashData("legacy"u8);
         using var barrier = new Barrier(2);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var firstTask = Task.Run(() => { barrier.SignalAndWait(timeout.Token); return fixture.Catalog.PlanLegacySensitiveBundle(first, Fixture.Plan(), digest); }, timeout.Token);
-        var secondTask = Task.Run(() => { barrier.SignalAndWait(timeout.Token); return fixture.Catalog.PlanLegacySensitiveBundle(second, Fixture.Plan(), digest); }, timeout.Token);
+        var firstTask = BlockingTestActor.Start(() => { barrier.SignalAndWait(timeout.Token); return fixture.Catalog.PlanLegacySensitiveBundle(first, Fixture.Plan(), digest); });
+        var secondTask = BlockingTestActor.Start(() => { barrier.SignalAndWait(timeout.Token); return fixture.Catalog.PlanLegacySensitiveBundle(second, Fixture.Plan(), digest); });
+        await Task.WhenAll(firstTask.Entered, secondTask.Entered);
 
-        var results = await Task.WhenAll(firstTask, secondTask).WaitAsync(timeout.Token);
+        var results = await Task.WhenAll(firstTask.Completion, secondTask.Completion).WaitAsync(timeout.Token);
 
         Assert.Equal(1, results.Count(result => result == RetentionCaptureMutationDisposition.Applied));
         Assert.Equal(1, results.Count(result => result == RetentionCaptureMutationDisposition.StaleNoOp));

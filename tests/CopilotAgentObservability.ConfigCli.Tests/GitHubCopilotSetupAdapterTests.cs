@@ -981,19 +981,20 @@ public sealed class GitHubCopilotSetupAdapterTests
         using var accessBarrier = new Barrier(2);
         var context = new GitHubCopilotPartitionContext(platform, CreateRequest("vscode"));
 
-        var first = Task.Run(() =>
+        var first = BlockingTestActor.Start(() =>
         {
             accessBarrier.SignalAndWait();
             return context.Endpoint;
         });
-        var second = Task.Run(() =>
+        var second = BlockingTestActor.Start(() =>
         {
             accessBarrier.SignalAndWait();
             return context.Endpoint;
         });
+        await Task.WhenAll(first.Entered, second.Entered);
         barrier.WaitUntilReached(CancellationToken.None);
         barrier.Release();
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(first.Completion, second.Completion);
 
         Assert.Equal([GitHubCopilotEndpointClassification.LocalMonitorLive, GitHubCopilotEndpointClassification.LocalMonitorLive], results);
         Assert.Equal(1, ProbeCallCount(platform));
@@ -1007,19 +1008,20 @@ public sealed class GitHubCopilotSetupAdapterTests
         using var accessBarrier = new Barrier(2);
         var context = new GitHubCopilotPartitionContext(platform, CreateRequest("vscode"));
 
-        var first = Task.Run(() =>
+        var first = BlockingTestActor.Start(() =>
         {
             accessBarrier.SignalAndWait();
             return context.Observations;
         });
-        var second = Task.Run(() =>
+        var second = BlockingTestActor.Start(() =>
         {
             accessBarrier.SignalAndWait();
             return context.Observations;
         });
+        await Task.WhenAll(first.Entered, second.Entered);
         barrier.WaitUntilReached(CancellationToken.None);
         barrier.Release();
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(first.Completion, second.Completion);
 
         Assert.Same(results[0], results[1]);
         Assert.Equal(3, ProcessCallCount(platform));

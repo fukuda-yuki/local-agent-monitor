@@ -21,11 +21,12 @@ public sealed class GitHubCopilotDoctorEvidenceConcurrencyTests
         var fixture = CreateExactFixture(database.Path);
         using var start = new Barrier(participantCount: 3);
 
-        var first = Task.Run(() => ObserveAfterBarrier(database.Path, fixture, start));
-        var second = Task.Run(() => ObserveAfterBarrier(database.Path, fixture, start));
+        var first = BlockingTestActor.Start(() => ObserveAfterBarrier(database.Path, fixture, start));
+        var second = BlockingTestActor.Start(() => ObserveAfterBarrier(database.Path, fixture, start));
+        await Task.WhenAll(first.Entered, second.Entered);
         start.SignalAndWait();
 
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(first.Completion, second.Completion);
 
         Assert.All(results, result =>
         {

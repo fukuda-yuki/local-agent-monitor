@@ -55,11 +55,12 @@ public sealed class ClaudeSetupTransactionHardeningTests
             $"checkpoint:{SetupFaultPoint.AfterLedgerTransitionBeforeMutationIntent}");
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-        var applying = Task.Run(() => fixture.Apply(changeSetId));
+        var applying = BlockingTestActor.Start(() => fixture.Apply(changeSetId));
+        await applying.Entered;
         barrier.WaitUntilReached(cancellation.Token);
         fixture.Platform.SeedFile(SettingsPath, external);
         barrier.Release();
-        var apply = await applying;
+        var apply = await applying.Completion;
 
         Assert.False(apply.Success);
         Assert.Equal(SetupCodes.PartialApply, apply.Code);
@@ -184,11 +185,12 @@ public sealed class ClaudeSetupTransactionHardeningTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var operationStart = fixture.Platform.Operations.Count;
 
-        var first = Task.Run(() => fixture.Apply(changeSetId));
+        var first = BlockingTestActor.Start(() => fixture.Apply(changeSetId));
+        await first.Entered;
         barrier.WaitUntilReached(cancellation.Token);
         var second = fixture.Apply(changeSetId);
         barrier.Release();
-        var firstResult = await first;
+        var firstResult = await first.Completion;
 
         Assert.True(firstResult.Success);
         Assert.Equal(SetupCodes.ApplySucceeded, firstResult.Code);
