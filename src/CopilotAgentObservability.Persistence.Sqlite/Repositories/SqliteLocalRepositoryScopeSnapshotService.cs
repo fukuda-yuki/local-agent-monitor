@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService, ILocalRepositoryComparisonInputSnapshotService
+internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService, ILocalRepositoryComparisonInputSnapshotService, ILocalAiSnapshotProjectionServiceV1
 {
     private const int MaximumSessions = 10_000;
     private const int MaximumCandidatesPerSession = 128;
@@ -103,6 +103,143 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         var session = result.Scope.Sessions[0];
         return new(session, result.Detail, ComputeRevision(session, result.Detail));
     }
+
+    public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) =>
+        ReadAiProjectionAsync(sessionId, null, token);
+
+    public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) =>
+        ReadAiProjectionAsync(sessionId, nodeId, token);
+
+    public async ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token)
+    {
+        try
+        {
+            var current = await ReadAiProjectionAsync(snapshot.SessionId, snapshot.NodeId, token).ConfigureAwait(false);
+            return string.Equals(current.Revision, snapshot.Revision, StringComparison.Ordinal)
+                && string.Equals(current.PayloadSha256, snapshot.PayloadSha256, StringComparison.Ordinal);
+        }
+        catch (LocalWorkspaceSessionDetailException)
+        {
+            return false;
+        }
+    }
+
+    private async ValueTask<LocalAiSnapshotProjectionV1> ReadAiProjectionAsync(
+        string sessionId, string? nodeId, CancellationToken token)
+    {
+        if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId) || nodeId is not null && string.IsNullOrWhiteSpace(nodeId))
+            throw new ArgumentException("invalid_local_ai_scope");
+        token.ThrowIfCancellationRequested();
+        await using var publicationLease = await publicationGate.AcquireReadAsync(token).ConfigureAwait(false);
+        using var connection = Open();
+        Execute(connection, null, $"PRAGMA busy_timeout={busyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};");
+        Execute(connection, null, "PRAGMA query_only=ON;");
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        string revision;
+        using (var revisionCommand = connection.CreateCommand())
+        {
+            revisionCommand.Transaction = transaction;
+            revisionCommand.CommandText = """
+                SELECT w.revision_seed || ':' ||
+                  COALESCE((SELECT revision FROM session_repository_assignment_revisions WHERE session_id=w.session_id),0) || ':' ||
+                  COALESCE((SELECT revision FROM local_archive_current WHERE target_kind='session' AND target_id=w.session_id),0)
+                FROM local_workspace_sessions w WHERE w.session_id=$session;
+                """;
+            revisionCommand.Parameters.AddWithValue("$session", sessionId);
+            revision = revisionCommand.ExecuteScalar() as string
+                ?? throw new LocalWorkspaceSessionDetailException("session_not_found");
+        }
+
+        var executions = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT execution_id FROM local_workspace_execution_headers WHERE session_id=$session ORDER BY execution_id LIMIT 257;";
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false)) executions.Add(reader.GetString(0));
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id=$session LIMIT 1 OFFSET 4096);";
+            command.Parameters.AddWithValue("$session", sessionId);
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(token).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+                throw new LocalAiScopeTooLargeException();
+        }
+
+        var nodes = new List<LocalAiProjectionNodeV1>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT n.node_id,n.execution_id,n.parent_node_id,
+                  COALESCE((SELECT json_group_array(e.related_node_id) FROM local_workspace_node_edges e
+                    JOIN local_workspace_nodes related ON related.node_id=e.related_node_id
+                    WHERE e.node_id=n.node_id AND related.execution_id=n.execution_id),'[]'),
+                  n.kind,n.name_state,n.name_text,n.lifecycle,n.status,n.duration_ms,
+                  n.skill_activity_state,n.skill_activity_count,n.tool_activity_state,n.tool_activity_count,
+                  n.subagent_activity_state,n.subagent_activity_count,n.error_activity_state,n.error_activity_count,
+                  n.retry_activity_state,n.retry_activity_count,n.token_state,n.input_token_state,n.input_tokens,
+                  n.output_token_state,n.output_tokens,n.total_token_state,n.total_tokens,n.cache_read_token_state,n.cache_read_tokens,
+                  n.cache_creation_token_state,n.cache_creation_tokens,n.new_input_token_state,n.new_input_tokens
+                FROM local_workspace_nodes n WHERE n.session_id=$session ORDER BY n.node_id LIMIT 4097;
+                """;
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                var references = JsonSerializer.Deserialize<string[]>(reader.GetString(3)) ?? [];
+                var metadata=JsonSerializer.SerializeToElement(new { kind=reader.GetString(4),name_state=reader.GetString(5),name=S(reader,6),
+                    lifecycle=reader.GetString(7),status=reader.GetString(8),duration_ms=L(reader,9),
+                    skill=new{state=reader.GetString(10),count=L(reader,11)},tool=new{state=reader.GetString(12),count=L(reader,13)},
+                    subagent=new{state=reader.GetString(14),count=L(reader,15)},error=new{state=reader.GetString(16),count=L(reader,17)},
+                    retry=new{state=reader.GetString(18),count=L(reader,19)},token_state=reader.GetString(20),
+                    input_tokens=new{state=reader.GetString(21),value=L(reader,22)},output_tokens=new{state=reader.GetString(23),value=L(reader,24)},
+                    total_tokens=new{state=reader.GetString(25),value=L(reader,26)},cache_read_tokens=new{state=reader.GetString(27),value=L(reader,28)},
+                    cache_creation_tokens=new{state=reader.GetString(29),value=L(reader,30)},new_input_tokens=new{state=reader.GetString(31),value=L(reader,32)}});
+                nodes.Add(new(reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), references,metadata));
+            }
+        }
+
+        var spans = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT DISTINCT trace_id || ':' || span_id FROM local_workspace_nodes WHERE session_id=$session AND trace_id IS NOT NULL ORDER BY 1 LIMIT 4097;";
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false)) spans.Add(reader.GetString(0));
+        }
+        var rawEvidence = new List<LocalAiRawEvidenceV1>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,
+                  c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,
+                  c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
+                FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
+                WHERE n.session_id=$session ORDER BY c.node_id,c.part;
+                """;
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                var node = reader.GetString(0); var part = reader.GetString(1); var evidenceId = $"raw:{node}:{part}";
+                rawEvidence.Add(new(evidenceId, node, new(node, part, reader.GetString(2), S(reader,3), S(reader,4), S(reader,5),
+                    S(reader,6),S(reader,7),L(reader,8),S(reader,9),S(reader,10),S(reader,11),S(reader,12),L(reader,13),
+                    reader.IsDBNull(14)?null:(byte[])reader[14],reader.IsDBNull(15)?null:(byte[])reader[15])));
+            }
+        }
+        var input = new LocalAiProjectionInputV1(sessionId, revision, executions, nodes, spans, nodeId, rawEvidence);
+        return nodeId is null ? LocalAiSnapshotProjectionBuilderV1.BuildSession(input) : LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
+    }
+
+    private static string? S(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+    private static long? L(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
     private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail, IReadOnlyList<LocalRepositoryComparisonSessionInput>? ComparisonSessions)> ReadCoreAsync(
         LocalRepositoryScopeRequest request,
