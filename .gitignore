@@ -17,7 +17,14 @@ secrets.json
 *.suo
 *.rsuser
 *.DotSettings.user
-.superpowers/*
+
+# Task-local agent output and repository-side work tracking
+/.superpowers/
+/docs/superpowers/
+/docs/sprints/
+/docs/BUG_ISSUE/
+/docs/task.md
+/docs/agent-guides/sprint-history.md
 
 # ============================================================
 # .NET / C# build outputs
@@ -161,7 +168,6 @@ loki-data/
 # Rider
 .idea/
 *.sln.iml
-docs/superpowers/*
 
 # ============================================================
 # OS generated files

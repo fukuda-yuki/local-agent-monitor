@@ -25,8 +25,8 @@ Supported values:
 | `remote-managed-collector` | Sends telemetry to a managed Collector endpoint. |
 | `raw-local-receiver` | Sends telemetry directly to a repository-hosted local receiver that writes raw telemetry for the raw data loop. |
 
-All profiles are product support targets. Sprint6 implements profile selection
-and the non-receiver routing profiles. Sprint7 implements `raw-local-receiver`.
+All profiles are product support targets. Collection Profiles implements profile selection
+and the non-receiver routing profiles. Local Raw Receiver implements `raw-local-receiver`.
 
 ## Required Behavior
 

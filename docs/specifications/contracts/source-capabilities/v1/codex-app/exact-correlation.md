@@ -91,16 +91,17 @@ for content.
 
 Issue #92 is `NO-GO` for Codex App Desktop production integration. Standalone
 CLI/app-server attestation cannot authorize a `codex-app` adapter. Issue #93
-production adapter, Setup, Doctor, UI, trace-manifest promotion, and future
-registry activation remain blocked and must not start from this attestation. A
+production adapter, Setup, Doctor, UI, trace-manifest promotion, and release
+validation remain blocked and must not start from this attestation. A
 separately approved discovery retry and prerequisite configuration contract
 must first capture Desktop-owned execution with a retained repository-safe
 replay harness and establish exact supported configuration and detection, safe
 log-export policy, source identity and parentage, and
 exact-or-explicitly-unbound native correlation.
 
-Codex CLI and generic standalone app-server support remain out of scope. The
-Issue #91 future registry remains `not_available`.
+Codex CLI and generic standalone app-server support remain out of scope.
+Production integration remains blocked until a separately approved discovery
+retry satisfies the release-validation gate owned by Issue #93.
 
 ## Primary references
 

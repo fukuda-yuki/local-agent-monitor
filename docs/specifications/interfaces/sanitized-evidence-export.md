@@ -312,15 +312,13 @@ fact pairs, illegal tuple outcomes, aggregate/completeness drift, and proof that
 the shared select-only validator reads facts without reading content or leaking
 private fact names/values into carriers, hashes, diagnostics, or logs.
 
-## Validation matrix transition
+## Validation
 
-Issue #91 validation uses active evidence rows `91-E-085` and `91-S-085` after
-this surface is implemented. The shared `future-surface-registry.v1` schema
-permits only `not_available` entries. Integration must therefore remove this
-surface's future entry, or supersede the registry through a versioned canonical
-transition; it must not write `active` into the v1 registry or inherit a pass
-from the former placeholder. The machine-readable handoff is
-`contracts/sanitized-evidence/v1/issue-91-validation-handoff.json`.
+Focused export tests cover the canonical schemas, golden request/archive,
+strict producer admission, content boundaries, and repository-safe scanner.
+Candidate-specific matrices, handoffs, checksums, and validation ledgers are
+not committed; run results belong in the Pull Request, active Issue, or GitHub
+Actions artifact.
 
 ## Alert-engine v2 coexistence
 

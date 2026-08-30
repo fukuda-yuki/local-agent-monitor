@@ -61,7 +61,7 @@ Telemetry ingestion must support:
 
 `raw-only` is the minimum profile and does not require a live receiver.
 `docker-desktop-langfuse` is the standard full profile.
-`raw-local-receiver` is a required support target to be implemented in Sprint7
+`raw-local-receiver` is a required support target to be implemented in Local Raw Receiver
 and is split from other routing profiles because it introduces a long-running
 local process.
 
@@ -192,7 +192,7 @@ it: the Config CLI receiver keeps `http://127.0.0.1:4319`, and the monitor
 defaults to `http://127.0.0.1:4320` with `--port` / `--url` override. The Config
 CLI receiver is not removed or deprecated. The monitor default avoids `4317` /
 `4318` (the Collector profile's OTLP gRPC / HTTP ports — see Collector Relay
-Path and the `ConfigSamples` constants) and `4319` (the Sprint7 CLI receiver),
+Path and the `ConfigSamples` constants) and `4319` (the Local Raw Receiver CLI receiver),
 so all three can coexist on loopback; `4320` is the next free port. The
 `raw-local-receiver` profile output defaults to the CLI-receiver endpoint
 (`4319`); to send VS Code telemetry to the monitor instead, generate the
@@ -351,9 +351,9 @@ Monitor read API (sanitized, cursor pagination):
   one key, so a divergence between a projection-row id and `raw_record_id` cannot
   skip or repeat rows.
 
-`/api/monitor/traces` rows include the rollup columns added by Sprint9:
+`/api/monitor/traces` rows include the rollup columns added by Monitor Agent Execution View:
 `input_tokens`, `output_tokens`, `total_tokens`, `turn_count`,
-`agent_invocation_count`, `duration_ms`, `primary_model`, plus the Sprint16
+`agent_invocation_count`, `duration_ms`, `primary_model`, plus the Canvas Repository Metadata
 repository metadata fields `repository_name`, `workspace_label`, and
 `repo_snapshot` when present (see
 [raw-store-normalization.md](raw-store-normalization.md) for the full schema).
@@ -432,7 +432,7 @@ serves the filtered trace list from the same rollup columns. Both stay inside
 the sanitized `/api/monitor/*` boundary (see
 [../security-data-boundaries.md](../security-data-boundaries.md)).
 
-The Sprint10 monitor **design views** (Flow Chart, Cache Explorer, timeline
+The Monitor Design Views monitor **design views** (Flow Chart, Cache Explorer, timeline
 filter/sort, themed trace-detail UI) are **client-side presentation over this
 existing endpoint only** — they add no new endpoint, query parameter, or response
 field. Every field they need (`parent_span_id`, category, agent/tool/MCP names,
@@ -442,7 +442,7 @@ status / `error_type`, and span timing) is already in this sanitized row. See
 sanitized-only consumption invariant and the out-of-scope items (Cache Explorer
 raw prefix-diff, `conversation_id` cross-trace stitching).
 
-The Sprint11 GitHub Copilot app Canvas adapter is a consumer of the same Local
+The Canvas Adapter GitHub Copilot app Canvas adapter is a consumer of the same Local
 Monitor surface and may be used with the normal raw-default monitor. Canvas
 actions read `GET /api/monitor/traces`,
 `GET /api/monitor/traces/{traceId}/spans`, and `/health/ready` as needed, then
@@ -451,10 +451,10 @@ documented actions are `monitor_health()`,
 `list_recent_traces({ limit, status?, model? })`,
 `get_trace_summary({ traceId })`, `get_trace_span_tree({ traceId })`, and
 `get_cache_summary({ traceId })`; `list_recent_traces.limit` is bounded to
-`1..50` for Canvas action output. Sprint11 adds no telemetry input, SQLite
+`1..50` for Canvas action output. Canvas Adapter adds no telemetry input, SQLite
 schema, projection column, endpoint, query parameter, response field, raw route,
 normalized dataset field, candidate record field, or dashboard contract.
-Sprint16 supersedes only the schema / projection / response-field part of that
+Canvas Repository Metadata supersedes only the schema / projection / response-field part of that
 statement for the three sanitized repository metadata fields
 `repository_name`, `workspace_label`, and `repo_snapshot`; it does not add a
 new telemetry input, raw route, query parameter, normalized dataset field,
@@ -467,7 +467,7 @@ Local Monitor v1 supersedes the installed metadata-only screen behavior:
 `--sanitized-only` is the receiver-only posture from Issue #159, not a Canvas
 requirement, and registers no human UI.
 
-Sprint11 M5 adds an optional UI-to-Copilot analysis trigger (D029). `open()`
+Canvas Adapter M5 adds an optional UI-to-Copilot analysis trigger (D029). `open()`
 returns an extension-owned loopback helper page (per-launch token) that proxies
 sanitized `GET /api/monitor/traces?limit=50` for a trace dropdown and
 exposes an "Analyze selected trace with Copilot" button. The button posts to a
@@ -478,7 +478,7 @@ local Monitor UI data and are not copied into Canvas action responses, logs,
 committed files, or static artifacts. No monitor payload is embedded in the
 trigger instruction. M5 adds no telemetry input, schema, endpoint, query
 parameter, response field, raw route, or dependency.
-That statement describes the Sprint11 M5 trigger scope; it does not prohibit the
+That statement describes the Canvas Adapter M5 trigger scope; it does not prohibit the
 separate Issue #51 Session interfaces.
 
 Raw / PII exposure follows the Local Ingestion Monitor boundary in
@@ -491,7 +491,7 @@ for the full single-record payload by default. The former prompt-bearing
 dashboard and trace-list are retired: `/` is Repository selection, while exact
 one-segment `/traces` and `/traces/` return empty no-store `404` for every
 method, case variant and query. Technical `/traces/{traceId}` descendants and
-the frozen `/api/monitor/trace-list` remain. The Sprint12 Flow Chart / Span Tree
+the frozen `/api/monitor/trace-list` remain. The Monitor UX Redesign Flow Chart / Span Tree
 views are plain DOM over the sanitized spans API (the
 Cytoscape / dagre vendored dependency is removed, D033). `/api/monitor/*` and SSE
 never carry raw / PII. The installed metadata-only tab shell and shortened
@@ -1196,7 +1196,7 @@ additional trace DTO field.
 
 ## Canvas Analysis Options
 
-Sprint17 keeps the Canvas helper analysis trigger on the existing
+Canvas Analysis UX keeps the Canvas helper analysis trigger on the existing
 `session.send()` path. The helper does not start the Local Monitor Copilot raw
 analysis runner and does not call `/traces/{traceId}/analysis`.
 

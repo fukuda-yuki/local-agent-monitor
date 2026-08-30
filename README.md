@@ -47,7 +47,7 @@ VS Code Copilot Chat からテレメトリを直接受信し、ローカル DB �
 > [!IMPORTANT]
 > Local Monitor v1 の採用済み製品形は Repository → Session Explorer →
 > Session detail / deterministic Compare です。詳細は
-> [製品定義](docs/superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)
+> [製品定義](docs/specifications/interfaces/local-monitor-v1-product-definition.md)
 > と [IA 仕様](docs/specifications/interfaces/local-monitor-v1-ia.md) を参照してください。
 > 以下の画面説明と画像は、置換 Issue の完了まで残るインストール済み pre-v1 UI の
 > 操作ガイドです。#148 が統合実装後のガイドを更新します。
@@ -245,7 +245,6 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 | [Architecture](docs/architecture.md) | コンポーネント構成と設計方針 |
 | [Decisions](docs/decisions.md) | 設計判断の記録 |
 | [Contributor Guide](docs/contributor-guide.md) | 開発・テスト手順 |
-| [Roadmap / History](docs/task.md) | ロードマップと履歴 |
 
 ---
 

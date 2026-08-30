@@ -75,7 +75,7 @@
       "hash_values_retained": false,
       "command_line_read": false,
       "merge_authority": false,
-      "replay_template": "scripts/validation/issue-92/observe-desktop-process-tree.ps1"
+      "replay_template": "scripts/validation/codex-app-discovery/observe-desktop-process-tree.ps1"
     },
     "live_probe_attestation": {
       "classification": "non_replayable_attestation",
@@ -271,7 +271,7 @@
       "setup_integration",
       "doctor_integration",
       "ui_integration",
-      "future_registry_activation"
+      "release_validation"
     ],
     "promotion_condition": "A separately approved discovery retry and prerequisite configuration contract must first establish Desktop-owned execution with a retained repository-safe replay harness, exact supported configuration and detection, safe log-export policy, source identity and parentage, and exact-or-explicitly-unbound native correlation."
   }

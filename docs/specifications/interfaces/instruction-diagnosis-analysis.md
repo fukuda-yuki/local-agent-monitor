@@ -211,7 +211,7 @@ Rules:
 - A finding without an accepted `submit_instruction_finding` call is
   forbidden.
 - Citations must refer to spans/turns present in the analyzed trace or trace
-  ids present in the emitted bounded conversation window. The Sprint21 M5
+  ids present in the emitted bounded conversation window. The Conversation Scope M5
   live-validation gate checks citation existence, trace-specificity, bounded
   window compliance, and sibling relationship clarity.
 - Zero findings is a valid result and must be stated explicitly.

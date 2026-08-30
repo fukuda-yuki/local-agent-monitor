@@ -349,7 +349,7 @@ Comparison and AI URLs carry opaque snapshot/run IDs only; draft cohort
 checkboxes and follow-up transcripts stay in the current page. Generated
 Markdown/HTML is not executed and color is never the sole signal.
 
-The Local Ingestion Monitor (Sprint8) receives the same raw telemetry as the
+The Local Ingestion Monitor (Local Ingestion Monitor) receives the same raw telemetry as the
 `raw-local-receiver` profile and may surface it under an explicit opt-in.
 Because the raw store and OTLP payloads can contain raw prompt / response /
 system prompt / tool arguments / tool results / source paths / identity
@@ -530,9 +530,9 @@ Mandatory negative tests:
   `error_type`) are guarded out of the projection tables, `/api/monitor/*`
   JSON, and SSE. A receiver-only host has no default human UI.
 
-Sprint10 design views (client-side presentation, boundary unchanged):
+Monitor Design Views design views (client-side presentation, boundary unchanged):
 
-- the installed pre-v1 Sprint10 design views (Flow Chart, Cache Explorer,
+- the installed pre-v1 Monitor Design Views design views (Flow Chart, Cache Explorer,
   timeline filter/sort, themed trace-detail UI) are **client-side rendering over
   the sanitized `/api/monitor/*` JSON and SSE only**. They never read a
   raw-bearing route, add no raw-bearing route, and add no new endpoint / field.
@@ -556,13 +556,13 @@ Sprint10 design views (client-side presentation, boundary unchanged):
   `Html.Raw`); the design views add no CSP / sanitizer / XSS-matrix apparatus
   (AGENTS.md Local-First Risk Posture, D020).
 
-Sprint11 GitHub Copilot app Canvas adapter (bounded adapter, boundary
+Canvas Adapter GitHub Copilot app Canvas adapter (bounded adapter, boundary
 unchanged):
 
 - The Canvas adapter is a thin project-scoped extension over the existing Local
-  Monitor. Sprint11 itself did not add telemetry input, schema, API field,
+  Monitor. Canvas Adapter itself did not add telemetry input, schema, API field,
   raw-bearing route, repository-stored monitor output, or a replacement monitor
-  UI, except for the Sprint16 scoped sanitized repository metadata fields
+  UI, except for the Canvas Repository Metadata scoped sanitized repository metadata fields
   recorded below (D040). Issue #51 supersedes this prohibition only for the
   separate Session ingest/storage/workspace interfaces and exact-link OTel
   enrichment defined in D051.
@@ -587,7 +587,7 @@ unchanged):
 - The Canvas adapter introduces no CDN, remote runtime fetch, or third-party
   origin dependency. It reads the configured loopback Local Monitor and serves
   extension-owned helper pages from loopback only.
-- Sprint11 M5 UI-to-Copilot trigger (D029): `open()` returns an
+- Canvas Adapter M5 UI-to-Copilot trigger (D029): `open()` returns an
   extension-owned loopback helper page (per-launch token in the page URL) that
   shows monitor health, a trace dropdown, a focus selector, and an
   "Analyze selected trace with Copilot" button. The helper page proxies
@@ -613,7 +613,7 @@ unchanged):
   validation tools are unavailable, implementation records the blocker and stops;
   hand-written fallback requires explicit product-owner approval.
 
-Sprint15 Canvas diagnostic surface — child A helper UX (boundary unchanged,
+Canvas Diagnostic Surface Canvas diagnostic surface — child A helper UX (boundary unchanged,
 D036):
 
 - Child A improves only the extension-owned helper page presentation. It
@@ -639,7 +639,7 @@ D036):
   index page; it must stay within the sanitized `/api/monitor/*` boundary (no
   prompt body, no raw payload).
 
-Sprint15 child B/C/D/E resolution (D037):
+Canvas Diagnostic Surface child B/C/D/E resolution (D037):
 
 - **Child B — `GET /api/monitor/summary`.** Loopback-only, no same-origin/
   no-store requirement (sanitized, not raw-bearing, same as `/api/monitor/traces`).
@@ -710,7 +710,7 @@ Sprint15 child B/C/D/E resolution (D037):
   check is delegated to a GitHub Copilot app session, once, covering every
   child together.
 
-Sprint15 continuation — prompt-aware trace selection (D039, implemented, M7):
+Canvas Diagnostic Surface continuation — prompt-aware trace selection (D039, implemented, M7):
 
 - **New raw-bearing JSON route, `GET /traces/{traceId}/prompt-label`.** Not
   part of the `/api/monitor/*` sanitized family (D032's "no `/api/monitor/*`/
@@ -752,10 +752,9 @@ Sprint15 continuation — prompt-aware trace selection (D039, implemented, M7):
   truncation, this is judged a narrow, already-precedented extension, not a
   new exposure category. See D039 in `docs/decisions.md` for the full
   discussion and rationale.
-- Implementation (Local Monitor endpoint, Canvas-side consumption, and
-  contract tests) is complete (Sprint15 M7), following the same two-stage
-  (design confirmed → implementation authorized) process D037/D038 already
-  used.
+- The Local Monitor endpoint, Canvas-side consumption, and contract tests must
+  preserve the two-stage design-confirmed then implementation-authorized
+  boundary established by D037/D038.
 
 Canvas helper prompt/response preview (D050):
 
@@ -781,10 +780,10 @@ Canvas helper prompt/response preview (D050):
   committed files, screenshots intended for repository evidence, CI artifacts,
   and static artifacts must not include the prompt/response preview.
 
-Sprint16 Canvas cross-repo adapter metadata (D040):
+Canvas Repository Metadata Canvas cross-repo adapter metadata (D040):
 
 - `.github/extensions/otel-monitor-canvas/` is the only copyable Canvas
-  extension distribution unit for this sprint. No mirror folder, package
+  extension distribution unit for this capability. No mirror folder, package
   manifest, lockfile, `node_modules`, or new runtime/development dependency is
   introduced.
 - The Local Monitor may project only these sanitized repository metadata fields
@@ -806,7 +805,7 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
   `unknown repository` when it cannot derive a repository label.
 - No `repository_full_name`, `workspace_hash`, `git_branch`, `git_commit_sha`,
   `source_kind`, current-repository auto-match, raw endpoint, raw JSON API, or
-  Canvas action raw payload is added in Sprint16.
+  Canvas action raw payload is added in Canvas Repository Metadata.
 - `vcs.repository.url.full` is not emitted to Canvas helper routes or bounded
   Canvas action DTOs. The owner and raw URL are never persisted in the monitor
   projection. Embedded credentials, ports, query/fragment, percent escapes,
@@ -826,7 +825,7 @@ Sprint16 Canvas cross-repo adapter metadata (D040):
   wire shapes remain unchanged. Repository metadata statuses are diagnostic
   reason codes, not Session binding or repository identity evidence.
 
-Sprint17 Canvas analysis requested options:
+Canvas Analysis UX Canvas analysis requested options:
 
 - The Canvas helper's "analyze" button remains a `session.send()` trigger that
   instructs Copilot to use existing bounded Canvas actions. It does not invoke
@@ -850,7 +849,7 @@ Sprint17 Canvas analysis requested options:
   the helper UI cancels in-flight Copilot agent work after `session.send()`
   succeeds.
 
-Sprint18 Local Monitor UI redesign (D042/D043/D044/D045):
+Local Monitor UI Redesign Local Monitor UI redesign (D042/D043/D044/D045):
 
 - **New raw-bearing JSON route, `GET /traces/{traceId}/spans/{spanId}/detail`
   (D043).** Serves the span inspector's formatted / raw tabs. Follows the same
@@ -889,7 +888,7 @@ Sprint18 Local Monitor UI redesign (D042/D043/D044/D045):
   `createElement` / `textContent` only (no `innerHTML`), and sanitized-context
   pages never fetch raw-bearing routes.
 
-Sprint12 UX redesign history (prompt identification + DOM views, superseded
+Monitor UX Redesign UX redesign history (prompt identification + DOM views, superseded
 where noted):
 
 - **Superseded prompt-identified dashboard / trace list (D032).** The former
@@ -904,7 +903,7 @@ where noted):
   the sanitized `/api/monitor/*` JSON and the SSE stream were unchanged and
   never carried it. No projection schema or API field was added
   **for the `/api/monitor/*` family** — updated by D039, which adds a
-  narrowly-scoped new endpoint *outside* that family (see "Sprint15
+  narrowly-scoped new endpoint *outside* that family (see "Canvas Diagnostic Surface
   continuation" above); `/api/monitor/*` and SSE themselves remain unchanged
   and prompt-free. The
   old `/ingestions` page was retired and its ingestion list was folded into the
@@ -927,7 +926,7 @@ where noted):
 
 ## Local Monitor Copilot Raw Analysis Boundary
 
-The Sprint13 raw analysis surface is local runtime behavior for the single
+The Local Monitor Raw Analysis raw analysis surface is local runtime behavior for the single
 trusted local user. It may send raw trace / raw record / raw span context to a
 .NET GitHub Copilot SDK analysis session so Copilot can diagnose the captured
 Copilot/agent execution.

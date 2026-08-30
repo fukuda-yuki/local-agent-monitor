@@ -71,14 +71,13 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         var partition = Partition.For(selection.Target);
         var gateKey = ObservationGateKey(databasePath, selection.VerificationId);
         var observationGate = AcquireObservationGate(gateKey);
-        if (!Monitor.TryEnter(observationGate.SerializationLock, storePolicy.BusyTimeoutMilliseconds))
-        {
-            ReleaseObservationGate(gateKey, observationGate);
-            return Empty(StoreBusy(), partition, selection.VerificationId, timeProvider.GetUtcNow());
-        }
-
+        var entered = false;
         try
         {
+            // BusyTimeout bounds SQLite waits, not the in-process sibling. Timing out
+            // that lock reports DoctorStoreBusy while the first Observe is still
+            // writing the one evidence set this caller must reuse.
+            Monitor.Enter(observationGate.SerializationLock, ref entered);
             return ObserveCoreAsync(databasePath, timeProvider, selection, storePolicy, partition).GetAwaiter().GetResult();
         }
         catch (InjectedDoctorStoreBusyException)
@@ -91,7 +90,11 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         }
         finally
         {
-            Monitor.Exit(observationGate.SerializationLock);
+            if (entered)
+            {
+                Monitor.Exit(observationGate.SerializationLock);
+            }
+
             ReleaseObservationGate(gateKey, observationGate);
         }
     }

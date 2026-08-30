@@ -225,7 +225,7 @@ test("compactTrace: exposes the expected sanitized field set and no raw key", ()
 
 test("compactTrace: Issue #91 synthetic corpus cannot enter Canvas action output", async () => {
     const corpus = JSON.parse(await readFile(
-        new URL("../../../scripts/validation/issue-91/fixtures/secret-corpus.v1.json", import.meta.url),
+        new URL("../../../scripts/validation/release-matrix/fixtures/secret-corpus.v1.json", import.meta.url),
         "utf8",
     ));
     const markers = corpus.cases.map((entry) => entry.marker);
