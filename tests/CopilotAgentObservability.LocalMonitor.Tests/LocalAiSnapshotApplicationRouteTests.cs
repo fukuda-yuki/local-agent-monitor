@@ -177,6 +177,22 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
 
     [Fact]
+    public async Task ExplicitCancelRacingProviderCompletionIsDisposalSafeAndTerminal()
+    {
+        var runs=new LifecycleRuns();var provider=new CompletionRaceProvider();
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new FixedSnapshots(true),runs,provider);
+        var started=await application.StartSessionAsync(new(SessionId,60),CancellationToken.None);
+        await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(await application.CancelAsync(started.RunId!,CancellationToken.None));
+        provider.Release.TrySetResult();
+        await provider.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await application.StopAsync(CancellationToken.None);
+
+        Assert.Equal("canceled",runs.State);
+    }
+
+    [Fact]
     public async Task HostStopDrainsReadinessReservationBeforeAnyPersistence()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -364,6 +380,14 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
         { Entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return LocalAiProviderOutcomeV1.Failed(); }
     }
+    private sealed class CompletionRaceProvider : ILocalAiProviderAdapterV1
+    {
+        internal TaskCompletionSource Entered { get; }=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release { get; }=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Completed { get; }=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request,CancellationToken token)
+        {Entered.TrySetResult();await Release.Task;Completed.TrySetResult();return LocalAiProviderOutcomeV1.Complete(ValidResult());}
+    }
     private sealed class FixedSnapshots(bool current) : ILocalAiSnapshotProjectionServiceV1
     {
         private readonly LocalAiSnapshotProjectionV1 snapshot = LocalAiSnapshotProjectionBuilderV1.BuildNode(
@@ -378,8 +402,8 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         internal string PersistedText { get; private set; }=string.Empty;
         public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout) { PersistedText=Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson); return Status(); }
         public void Start(string runId)=>State="running";
-        public LocalAiRunStatusV1 Complete(string runId,LocalAiProviderOutcomeV1 outcome,DateTimeOffset completedAt) { State=outcome.Kind==LocalAiProviderOutcomeKindV1.Partial?"provider_partial":outcome.Kind==LocalAiProviderOutcomeKindV1.Failed?"provider_failed":"succeeded"; return Status(); }
-        public LocalAiRunStatusV1 Fail(string runId,string errorCode){State=errorCode;return Status();}
+        public LocalAiRunStatusV1 Complete(string runId,LocalAiProviderOutcomeV1 outcome,DateTimeOffset completedAt) { if(State=="canceled")return Status();State=outcome.Kind==LocalAiProviderOutcomeKindV1.Partial?"provider_partial":outcome.Kind==LocalAiProviderOutcomeKindV1.Failed?"provider_failed":"succeeded"; return Status(); }
+        public LocalAiRunStatusV1 Fail(string runId,string errorCode){if(State=="canceled")return Status();State=errorCode;return Status();}
         public LocalAiRunStatusV1 Read(string runId)=>Status();
         public bool Cancel(string runId){State="canceled";return true;}
         public LocalAiReportPageResponseV1 Reports(string sessionId,int? limit,string? cursor,string revision)=>new([],null);

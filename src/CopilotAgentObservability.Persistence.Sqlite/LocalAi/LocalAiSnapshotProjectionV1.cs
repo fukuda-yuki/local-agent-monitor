@@ -6,7 +6,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed record LocalAiProjectionNodeV1(
     string NodeId, string ExecutionId, string? ParentNodeId, IReadOnlyList<string> ExactReferences, JsonElement? Metadata = null,
-    string? SanitizedSpanObservation = null);
+    string? SanitizedSpanObservation = null, IReadOnlyList<string>? SanitizedSpanObservations = null);
 internal sealed record LocalAiRawEvidenceV1(string EvidenceId, string NodeId, LocalWorkspaceContentAvailability Locator);
 
 internal sealed record LocalAiProjectionInputV1(
@@ -17,7 +17,8 @@ internal sealed record LocalAiProjectionInputV1(
     IReadOnlyList<string> SanitizedSpanObservations,
     string? AnchorNodeId = null,
     IReadOnlyList<LocalAiRawEvidenceV1>? RawEvidence = null,
-    int? SourceEventCount = null);
+    int? SourceEventCount = null,
+    JsonElement? SessionFacts = null);
 
 internal sealed record LocalAiProjectionContributionV1(LocalAiProjectionInputV1 Input, string SkillRegistryGenerationIdentity);
 
@@ -77,6 +78,7 @@ internal static class LocalAiSnapshotProjectionBuilderV1
         var admittedNodes = input.Nodes.Where(node => admitted.Contains(node.NodeId)).ToArray();
         return Build(input, "node", anchor.NodeId, anchor.NodeId,
             admitted.Concat(admittedNodes.Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
+                .Concat(admittedNodes.SelectMany(static node => node.SanitizedSpanObservations ?? []))
                 .Concat(raw.Select(static item => item.EvidenceId)), raw, admittedNodes);
     }
 
@@ -103,6 +105,7 @@ internal static class LocalAiSnapshotProjectionBuilderV1
             node_id = nodeId,
             anchor_id = anchorId,
             revision = input.Revision,
+            session_facts = input.SessionFacts,
             executions = input.Executions.Order(StringComparer.Ordinal).ToArray(),
             nodes = input.Nodes.Where(node => evidence.Contains(node.NodeId, StringComparer.Ordinal))
                 .OrderBy(static node => node.NodeId, StringComparer.Ordinal)
@@ -110,7 +113,8 @@ internal static class LocalAiSnapshotProjectionBuilderV1
                     parent_node_id = node.ParentNodeId, facts = node.Metadata }).ToArray(),
             sanitized_span_observations = (kind == "session" ? input.SanitizedSpanObservations : []).Concat(projectedNodes
                 .Where(static node => node.SanitizedSpanObservation is not null).Select(static node => node.SanitizedSpanObservation!))
-                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                .Concat(projectedNodes.SelectMany(static node => node.SanitizedSpanObservations ?? []))
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Select(SanitizedSpanFact).ToArray(),
             raw_content = rawEvidence.OrderBy(static item => item.EvidenceId, StringComparer.Ordinal)
                 .Select(static item => new { evidence_id=item.EvidenceId, state=item.Locator.State,
                     selected_utf8_bytes=item.Locator.SelectedUtf8Bytes }).ToArray(),
@@ -119,6 +123,12 @@ internal static class LocalAiSnapshotProjectionBuilderV1
         return new(Guid.CreateVersion7().ToString(), kind, input.SessionId, nodeId, anchorId, input.Revision,
             payload, index, Convert.ToHexStringLower(SHA256.HashData(payload)), evidence.ToHashSet(StringComparer.Ordinal),
             rawEvidence.ToDictionary(static item => item.EvidenceId, StringComparer.Ordinal));
+    }
+
+    private static JsonElement SanitizedSpanFact(string value)
+    {
+        try { return JsonSerializer.Deserialize<JsonElement>(value); }
+        catch (JsonException) { return JsonSerializer.SerializeToElement(new { evidence_id = value }); }
     }
 }
 

@@ -160,9 +160,9 @@ internal sealed class LocalAiAnalysisApplicationV1(
     public ValueTask<bool> CancelAsync(string runId, CancellationToken token)
     {
         var canceled = runs.Cancel(runId);
-        CancellationTokenSource? execution = null;
-        lock (lifecycleGate) if (canceled) execution = active.Values.FirstOrDefault(item => item.RunId == runId)?.Cancellation;
-        execution?.Cancel();
+        lock (lifecycleGate)
+            if (canceled && active.Values.FirstOrDefault(item => item.RunId == runId)?.Cancellation is { } execution)
+                try { execution.Cancel(); } catch (ObjectDisposedException) { }
         return ValueTask.FromResult(canceled);
     }
 
