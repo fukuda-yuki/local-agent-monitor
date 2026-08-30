@@ -83,6 +83,27 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(all.Locator("#session-ai-open")).ToBeHiddenAsync();
     }
 
+    [Theory]
+    [InlineData(16, false)]
+    [InlineData(17, true)]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task RepositoryAiPreviewEnforcesExactModelFactMaximum(int modelCount, bool rejected)
+    {
+        var hash=new string('a',64);var models=Enumerable.Range(0,modelCount).Select(index=>$"model-{index:D2}").ToArray();
+        var preview=JsonSerializer.Serialize(new{schema_version="local-ai-repository-preview.response.v1",snapshot_id="018f0000-0000-7000-8000-000000000020",payload_sha256=hash,expires_at="2026-08-31T12:00:00.0000000+00:00",included=new[]{new{session_id=SessionId,session_archive_state="active",session_archive_revision=1,repository_archive_state="active",repository_archive_revision=2,archive_exclusion_reason=(string?)null,source=new{state="recorded",values=new[]{"vscode"}},model=new{state="recorded",values=models},completeness="full",content_state="not_captured",workspace_revision=hash,truncated=false}},excluded=Array.Empty<object>(),truncated=false});
+        using var temp=new MonitorTempDirectory();await using var host=await MonitorTestHost.StartAsync(temp,testOptions:Options(includeRepository:true));
+        PlaywrightBrowserPath.ConfigureDefault();using var playwright=await Playwright.CreateAsync();await using var browser=await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions{Headless=true});var page=await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions",route=>route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness",route=>route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview",route=>route.FulfillAsync(Json(preview)));
+        await page.GotoAsync(host.Url+$"/repositories/{RepositoryId}/sessions",new PageGotoOptions{WaitUntil=WaitUntilState.DOMContentLoaded});
+
+        await page.Locator("#session-ai-open").ClickAsync();await page.Locator("#session-ai-preview").ClickAsync();
+
+        if(rejected){await Expect(page.Locator("#session-ai-status")).ToContainTextAsync("分析対象を確認できませんでした。");await Expect(page.Locator("#session-ai-start")).ToBeDisabledAsync();}
+        else await Expect(page.Locator("#session-ai-start")).ToBeEnabledAsync();
+    }
+
     [Fact]
     [Trait("ValidationLane", "Nightly")]
     public async Task RepositoryAiRendersClosedResultAndOnlyCanonicalEvidenceAsAnExactLink()

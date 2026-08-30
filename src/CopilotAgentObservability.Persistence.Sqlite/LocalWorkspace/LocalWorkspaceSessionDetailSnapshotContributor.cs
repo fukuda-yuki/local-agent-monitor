@@ -186,21 +186,28 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             var index=nodes.IndexOf(root);if(index>=0)nodes[index]=root with{SanitizedSpanObservations=spansByExecution[root.ExecutionId]};
         }
         var rawEvidence=new List<LocalAiRawEvidenceV1>();
-        using (var content=Command(connection,transaction,"""
-            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,
+        using (var content=Command(connection,transaction,$$"""
+            SELECT c.node_id,c.part,{{LocalWorkspaceContentAuthority.EffectiveAvailabilitySql}},c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,
               c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,
               c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
             FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
+              JOIN session_events e ON e.event_id=c.source_item_id AND e.session_id=n.session_id
+              LEFT JOIN session_event_content s ON s.event_id=e.event_id
+              LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+              LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id
             WHERE n.session_id=$session_id ORDER BY c.node_id,c.part;
             """,sessionId))
-        using(var reader=await content.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
         {
-            var owner=reader.GetString(0);var part=reader.GetString(1);
-            rawEvidence.Add(new($"raw:{owner}:{part}",owner,new(owner,part,reader.GetString(2),
-                reader.IsDBNull(3)?null:reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetString(5),
-                reader.IsDBNull(6)?null:reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),reader.IsDBNull(8)?null:reader.GetInt64(8),
-                reader.IsDBNull(9)?null:reader.GetString(9),reader.IsDBNull(10)?null:reader.GetString(10),reader.IsDBNull(11)?null:reader.GetString(11),
-                reader.IsDBNull(12)?null:reader.GetString(12),reader.IsDBNull(13)?null:reader.GetInt64(13),reader.IsDBNull(14)?null:(byte[])reader[14],reader.IsDBNull(15)?null:(byte[])reader[15])));
+            content.Parameters.AddWithValue("$now",Canonical(acceptedAt));
+            using var reader=await content.ExecuteReaderAsync(token);while(await reader.ReadAsync(token))
+            {
+                var owner=reader.GetString(0);var part=reader.GetString(1);
+                rawEvidence.Add(new($"raw:{owner}:{part}",owner,new(owner,part,reader.GetString(2),
+                    reader.IsDBNull(3)?null:reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetString(5),
+                    reader.IsDBNull(6)?null:reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),reader.IsDBNull(8)?null:reader.GetInt64(8),
+                    reader.IsDBNull(9)?null:reader.GetString(9),reader.IsDBNull(10)?null:reader.GetString(10),reader.IsDBNull(11)?null:reader.GetString(11),
+                    reader.IsDBNull(12)?null:reader.GetString(12),reader.IsDBNull(13)?null:reader.GetInt64(13),reader.IsDBNull(14)?null:(byte[])reader[14],reader.IsDBNull(15)?null:(byte[])reader[15])));
+            }
         }
         System.Text.Json.JsonElement? sessionFacts=null;
         using(var session=Command(connection,transaction,"""

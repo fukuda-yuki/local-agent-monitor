@@ -304,7 +304,7 @@
       && archive(value.repository_archive_state) && revision(value.repository_archive_revision)
       && reasons.has(value.archive_exclusion_reason)
       && fact(value.source, SOURCES.size, item => SOURCES.has(item))
-      && fact(value.model, 64, item => boundedText(item, 256))
+      && fact(value.model, 16, item => boundedText(item, 256))
       && (value.completeness === null || boundedText(value.completeness, 128))
       && (value.content_state === null || ["available", "not_captured", "expired_pending_deletion"].includes(value.content_state))
       && (value.workspace_revision === null || REVISION.test(value.workspace_revision))

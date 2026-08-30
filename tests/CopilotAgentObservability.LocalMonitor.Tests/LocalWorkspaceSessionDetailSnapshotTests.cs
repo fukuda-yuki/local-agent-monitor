@@ -1601,6 +1601,32 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Theory]
+    [InlineData("readable", "2026-08-27T00:00:00Z", "available")]
+    [InlineData("expired", "2026-09-02T00:00:00Z", "expired")]
+    [InlineData("read_denied", "2026-08-27T00:00:00Z", "read_denied")]
+    [InlineData("deleted", "2026-08-27T00:00:00Z", "deleted")]
+    public async Task AiSourceContributionUsesEffectiveContentAuthorityAtAcceptedInstant(
+        string transition, string acceptedAtText, string expected)
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        AddAiReadableContent(connection,SessionId,runB);
+        if(transition=="read_denied")
+            LocalWorkspaceProjectionSchemaTests.Execute(connection,"UPDATE retention_items SET state='deletion_queued',read_denied_at='2026-08-27T00:00:00.0000000+00:00',queued_at='2026-08-27T00:00:00.0000000+00:00' WHERE store_kind='session_event_content';");
+        if(transition=="deleted")
+            LocalWorkspaceProjectionSchemaTests.Execute(connection,"UPDATE retention_items SET state='deleted',deleted_at='2026-08-27T00:00:00.0000000+00:00' WHERE store_kind='session_event_content'; INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) SELECT item_id,'2026-08-27T00:00:00.0000000+00:00','2026-08-27T00:00:00.0000000+00:00' FROM retention_items WHERE store_kind='session_event_content'; DELETE FROM session_event_content;");
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction=connection.BeginTransaction();
+        var authority=FixedSkillRegistryGenerationAuthority.Load();using var pinned=LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor=new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority);
+
+        var result=await contributor.ReadAiProjectionPinnedAsync(new DirectReadTransaction(connection,transaction),SessionId,null,
+            DateTimeOffset.Parse(acceptedAtText),pinned,CancellationToken.None);
+
+        var target=Assert.Single(result.Input.RawEvidence!,item=>item.Locator.SourceItemId=="018f0000-0000-7000-8000-000000000025");
+        Assert.Equal(expected,target.Locator.State);
+    }
+
+    [Theory]
     [InlineData(257, 0)]
     [InlineData(1, 4097)]
     public async Task AiSourceContributionRejectsEachIndependentOneOver(int runCount, int eventCount)
@@ -2027,6 +2053,23 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
                 """);
             LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-26T00:10:00Z"));
         }
+    }
+
+    private static void AddAiReadableContent(SqliteConnection connection,string sessionId,string runId)
+    {
+        const string eventId="018f0000-0000-7000-8000-000000000025",captured="2026-08-26T00:00:05.2500000+00:00",expires="2026-09-01T00:00:00.0000000+00:00";
+        LocalWorkspaceProjectionSchemaTests.Execute(connection,$$"""
+            UPDATE session_events SET content_state='available' WHERE event_id='{{eventId}}';
+            INSERT INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token)
+            VALUES('{{eventId}}','application/json','{"value":"raw"}','{{captured}}','{{expires}}',randomblob(32));
+            INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version)
+            SELECT 'ai-content-item',store_instance_id,'session_event_content','{{eventId}}',1,randomblob(32),'{{captured}}','{{expires}}','raw-default-90d',1,'expiring',1,1
+            FROM retention_store_instances WHERE id=1;
+            """);
+        string storeId;byte[] token;using(var owner=connection.CreateCommand()){owner.CommandText="SELECT i.store_instance_id,c.retention_owner_token FROM retention_items i JOIN session_event_content c ON c.event_id=i.source_item_id WHERE i.item_id='ai-content-item';";using var reader=owner.ExecuteReader();Assert.True(reader.Read());storeId=reader.GetString(0);token=(byte[])reader.GetValue(1);}
+        var receipt=CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateSession(new(storeId,eventId,"application/json",captured,DateTimeOffset.Parse(captured).UtcTicks,expires,DateTimeOffset.Parse(expires).UtcTicks,sessionId,runId,"synthetic","generic-event",token));
+        using(var update=connection.CreateCommand()){update.CommandText="UPDATE retention_items SET ownership_receipt=$receipt WHERE item_id='ai-content-item';";update.Parameters.AddWithValue("$receipt",receipt);Assert.Equal(1,update.ExecuteNonQuery());}
+        using var transaction=connection.BeginTransaction();LocalWorkspaceProjectionStore.Refresh(connection,transaction,DateTimeOffset.Parse("2026-08-26T00:10:01Z"),FixedSkillRegistryGenerationAuthority.Load());transaction.Commit();
     }
 
     private static void InitializeLabelSummaryFixture(string databasePath, string sessionId)
