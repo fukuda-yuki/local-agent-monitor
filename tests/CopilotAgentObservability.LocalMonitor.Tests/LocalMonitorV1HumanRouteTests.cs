@@ -561,6 +561,37 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     [Theory]
+    [InlineData("")]
+    [InlineData("&node=node-a8a773d6614d5030f505ff195b452dd6")]
+    [InlineData("&execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6")]
+    public async Task RawDefault_NodeAnalysisAcceptsOmittedOrExactAnchorSelection(string selection)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(new("018f0000-0000-7000-8000-000000000071", "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null))));
+
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?analysis=018f0000-0000-7000-8000-000000000071{selection}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("data-session-workspace", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("&node=node-11111111111111111111111111111111")]
+    [InlineData("&execution=8a5590c8-46e3-7069-af48-3844d2bf17a4")]
+    [InlineData("&execution=8a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6")]
+    public async Task RawDefault_NodeAnalysisRejectsSelectionOutsideItsExactAnchor(string selection)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
+            localAiApplication: new StubLocalAiApplication(new("018f0000-0000-7000-8000-000000000071", "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null))));
+
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?analysis=018f0000-0000-7000-8000-000000000071{selection}");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("data-page-state=\"analysis_run_not_found\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("missing")]
     [InlineData("wrong_scope")]
     [InlineData("wrong_session")]
@@ -569,7 +600,7 @@ public sealed class LocalMonitorV1HumanRouteTests
         var run = disposition switch
         {
             "missing" => null,
-            "wrong_scope" => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "node", SessionId, "node-a8a773d6614d5030f505ff195b452dd6", null),
+            "wrong_scope" => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "repository", SessionId, null, null),
             _ => new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000071", "succeeded", "session", "018f0000-0000-7000-8000-000000000099", null, null),
         };
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(
@@ -913,9 +944,18 @@ public sealed class LocalMonitorV1HumanRouteTests
                 0,
                 true,
                 null);
+            var fact = new LocalWorkspaceFact<long>("not_observed", null);
+            var activity = new LocalWorkspaceActivityFacts(fact, fact, fact, fact, fact);
+            var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, fact, fact, fact, fact, fact, fact, fact, fact);
+            var execution = new LocalWorkspaceExecutionDetail("9a5590c8-46e3-7069-af48-3844d2bf17a4", request.SessionId,
+                "session_run", "run", 0, "completed", "completed", null, null, "missing", null, null, null, activity, tokens, ChildCount: 1, Latest: true);
+            var previousExecution = execution with { ExecutionId = "8a5590c8-46e3-7069-af48-3844d2bf17a4", Latest = false };
+            var node = new LocalWorkspaceNodeDetail("node-a8a773d6614d5030f505ff195b452dd6", request.SessionId, execution.ExecutionId,
+                "session_event", "event", 0, null, "exact", "event", "recorded", "user.message", "completed", "completed", "missing", null, null, null,
+                activity, tokens, null, null, null);
             return ValueTask.FromResult(new LocalRepositorySessionDetailSnapshot(
                 session,
-                new LocalWorkspaceSessionDetailContribution([], [], [], []),
+                new LocalWorkspaceSessionDetailContribution([execution, previousExecution], [node], [], []),
                 new string('1', 64)));
         }
     }
