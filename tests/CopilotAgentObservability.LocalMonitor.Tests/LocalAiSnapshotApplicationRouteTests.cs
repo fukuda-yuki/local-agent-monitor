@@ -97,6 +97,32 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
 
     [Theory]
+    [InlineData("expired", "denied", false)]
+    [InlineData("expired", "available", true)]
+    public void ResultEnvelopeContentCoverageRequiresAtLeastOneAvailableRawLocator(
+        string firstState, string secondState, bool expected)
+    {
+        var input = ProjectionInput(1, 2, 0) with
+        {
+            RawEvidence =
+            [
+                new("raw-1", "node-0", new("node-0", "body", firstState)),
+                new("raw-2", "node-1", new("node-1", "body", secondState)),
+            ],
+        };
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(input);
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null);
+
+        var bytes = LocalAiResultEnvelopeV1.Compose(
+            Encoding.UTF8.GetBytes("""{"summary":"ok","findings":[],"improvement_suggestions":[],"limitations":[]}"""),
+            snapshot, run, DateTimeOffset.UtcNow);
+
+        using var document = JsonDocument.Parse(bytes);
+        Assert.Equal(expected, document.RootElement.GetProperty("provenance").GetProperty("coverage")
+            .GetProperty("content_available").GetBoolean());
+    }
+
+    [Theory]
     [InlineData("{\"summary\":\"ok\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[],\"extra\":true}")]
     [InlineData("{\"summary\":\"ok\",\"summary\":\"again\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}")]
     [InlineData("{\"summary\":1,\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}")]
@@ -163,6 +189,38 @@ public sealed class LocalAiSnapshotApplicationRouteTests
 
         Assert.NotNull(response.RunId);
         Assert.Equal(expected, runs.State);
+    }
+
+    [Fact]
+    public async Task PostProviderScopeGrowthPersistsScopeTooLargeInsteadOfProviderFailure()
+    {
+        var runs = new LifecycleRuns(); var provider = new CompletionRaceProvider();
+        var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true),
+            new ScopeGrowthSnapshots(), runs, provider);
+
+        var response = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        provider.Release.TrySetResult();
+        for (var index=0; index<100 && runs.State=="running"; index++) await Task.Delay(10);
+
+        Assert.NotNull(response.RunId);
+        Assert.Equal("scope_too_large", runs.State);
+    }
+
+    [Theory]
+    [InlineData("node_missing", "node_not_found")]
+    [InlineData("projection_unavailable", "projection_unavailable")]
+    public async Task NodeProjectionResourceFailuresCreateNoRunAndReturnFixedError(string failure, string expected)
+    {
+        var runs = new RecordingRuns();
+        var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true),
+            new FailingNodeSnapshots(failure), runs, new Provider(LocalAiProviderOutcomeV1.Complete(ValidResult())));
+
+        var response = await application.StartNodeAsync(
+            new(SessionId, "node-0123456789abcdef0123456789abcdef"), CancellationToken.None);
+
+        Assert.Equal(expected, response.ErrorCode);
+        Assert.Equal(0, runs.Creates);
     }
 
     [Fact]
@@ -267,6 +325,39 @@ public sealed class LocalAiSnapshotApplicationRouteTests
 
         using var invalidId = await host.GetAsync("/api/local-monitor/v1/ai/runs/018f0000-0000-6000-8000-000000000001");
         Assert.Equal(HttpStatusCode.BadRequest, invalidId.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("node-anchor")]
+    [InlineData("node-0123456789ABCDEF0123456789abcdef")]
+    [InlineData("node-0123456789abcdef0123456789abcde")]
+    public async Task NodeMutationRejectsNonCanonicalNodeIdentityBeforeApplication(string nodeId)
+    {
+        var application = new RecordingNodeApplication(new(null, "node_not_found"));
+        await using var host = await Host(application);
+
+        using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/node-runs",
+            $$"""{"session_id":"{{SessionId}}","node_id":"{{nodeId}}"}"""));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_request\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal(0, application.NodeStarts);
+    }
+
+    [Theory]
+    [InlineData("node_not_found", HttpStatusCode.NotFound)]
+    [InlineData("projection_unavailable", HttpStatusCode.ServiceUnavailable)]
+    public async Task NodeMutationMapsFixedResourceErrors(string code, HttpStatusCode expected)
+    {
+        var application = new RecordingNodeApplication(new(null, code));
+        await using var host = await Host(application);
+
+        using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/node-runs",
+            $$"""{"session_id":"{{SessionId}}","node_id":"node-0123456789abcdef0123456789abcdef"}"""));
+
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Equal($$"""{"error":"{{code}}"}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal(1, application.NodeStarts);
     }
 
     [Fact]
@@ -416,6 +507,24 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId,string nodeId,CancellationToken token) => ValueTask.FromResult(snapshot);
         public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token) => ValueTask.FromResult(current);
     }
+    private sealed class ScopeGrowthSnapshots : ILocalAiSnapshotProjectionServiceV1
+    {
+        private readonly LocalAiSnapshotProjectionV1 snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1,1,0));
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId,CancellationToken token) => ValueTask.FromResult(snapshot);
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId,string nodeId,CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token) => throw new LocalAiScopeTooLargeException();
+    }
+    private sealed class FailingNodeSnapshots(string failure) : ILocalAiSnapshotProjectionServiceV1
+    {
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId,CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId,string nodeId,CancellationToken token) => failure switch
+        {
+            "node_missing" => throw new ArgumentException("local_ai_node_anchor_not_found"),
+            "projection_unavailable" => throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"),
+            _ => throw new InvalidOperationException(),
+        };
+        public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token) => throw new NotSupportedException();
+    }
     private sealed class LifecycleRuns : ILocalAiRunRepositoryV1
     {
         internal string State { get; private set; }="queued";
@@ -435,6 +544,16 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult<LocalAiRunStatusV1?>(null);
         public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => ValueTask.FromResult(false);
+        public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
+    }
+    private sealed class RecordingNodeApplication(LocalAiStartResponseV1 response) : ILocalAiAnalysisApplicationV1
+    {
+        internal int NodeStarts { get; private set; }
+        public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token)
+        { NodeStarts++; return ValueTask.FromResult(response); }
+        public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
     }
 }

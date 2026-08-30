@@ -144,7 +144,7 @@ internal static class LocalAiRoutesV1
     {
         request=null; if(!TryObject(bytes,["session_id","node_id","timeout_seconds","question","prior_turns"],["session_id","node_id"],out var root))return false;
         if(!TryUuid(root.GetProperty("session_id"),out var session)||root.GetProperty("node_id").ValueKind!=JsonValueKind.String)return false;
-        var node=root.GetProperty("node_id").GetString(); if(string.IsNullOrWhiteSpace(node))return false;
+        var node=root.GetProperty("node_id").GetString(); if(!CanonicalNodeId(node))return false;
         var timeout=60;if(root.TryGetProperty("timeout_seconds",out var timeoutValue)&&(timeoutValue.ValueKind!=JsonValueKind.Number||!timeoutValue.TryGetInt32(out timeout)))return false;
         string? question=null; if(root.TryGetProperty("question",out var q)){if(q.ValueKind!=JsonValueKind.String)return false;question=q.GetString();}
         var turns=new List<LocalAiPriorTurnV1>(); if(root.TryGetProperty("prior_turns",out var prior))
@@ -170,6 +170,8 @@ internal static class LocalAiRoutesV1
     private static bool RouteUuid(HttpContext context,string key,out string? id){id=context.Request.RouteValues[key]?.ToString();return CanonicalUuid(id);}
     private static bool CanonicalUuid(string? id)=>id is {Length:36}&&Guid.TryParseExact(id,"D",out var parsed)&&parsed.Version==7
         && id==id.ToLowerInvariant() && id[19] is '8' or '9' or 'a' or 'b';
+    private static bool CanonicalNodeId(string? id)=>id is {Length:37}&&id.StartsWith("node-",StringComparison.Ordinal)
+        && id.AsSpan(5).IndexOfAnyExcept("0123456789abcdef")<0;
     private static bool TryReportsQuery(HttpContext context,out int? limit,out string? cursor)
     { limit=null;cursor=null;foreach(var pair in context.Request.Query){if(pair.Value.Count!=1)return false;if(pair.Key=="limit"){if(!int.TryParse(pair.Value[0],out var value)||value is <1 or >100)return false;limit=value;}else if(pair.Key=="cursor"){cursor=pair.Value[0];if(string.IsNullOrEmpty(cursor)||cursor.Length>512||!TryBase64(cursor))return false;}else return false;}return true; }
 
@@ -186,7 +188,8 @@ internal static class LocalAiRoutesV1
     { context.Response.StatusCode=404;context.Response.Headers.CacheControl="no-store";context.Response.ContentLength=0;return Task.CompletedTask; }
 
     private static Task StartResponse(HttpContext context,LocalAiStartResponseV1 result)=>result.ErrorCode is null
-        ? Json(context,201,new{run_id=result.RunId}) : Error(context,result.ErrorCode switch{"provider_unavailable"=>503,"session_not_found"=>404,_=>409},result.ErrorCode);
+        ? Json(context,201,new{run_id=result.RunId}) : Error(context,result.ErrorCode switch
+        {"provider_unavailable" or "projection_unavailable"=>503,"session_not_found" or "node_not_found"=>404,_=>409},result.ErrorCode);
     internal static Task Error(HttpContext context,int status,string code)=>Json(context,status,new{error=code});
     private static async Task Json(HttpContext context,int status,object entity)
     { var bytes=JsonSerializer.SerializeToUtf8Bytes(entity);context.Response.StatusCode=status;context.Response.ContentType="application/json; charset=utf-8";context.Response.Headers.CacheControl="no-store";context.Response.ContentLength=bytes.Length;if(!HttpMethods.IsHead(context.Request.Method))await context.Response.Body.WriteAsync(bytes,context.RequestAborted); }

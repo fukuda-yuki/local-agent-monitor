@@ -102,9 +102,11 @@ internal sealed class LocalAiAnalysisApplicationV1(
         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_too_large")
         { CompleteAdmission(admissionId, admission); return new(null, "scope_too_large"); }
         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "session_not_found")
-        { CompleteAdmission(admissionId, admission); return new(null, "session_not_found"); }
+        { CompleteAdmission(admissionId, admission); return new(null, nodeId is null ? "session_not_found" : "node_not_found"); }
         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "local_monitor_ui_unavailable")
         { CompleteAdmission(admissionId, admission); return new(null, "projection_unavailable"); }
+        catch (ArgumentException exception) when (nodeId is not null && exception.Message == "local_ai_node_anchor_not_found")
+        { CompleteAdmission(admissionId, admission); return new(null, "node_not_found"); }
         catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
         { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
         catch { CompleteAdmission(admissionId, admission); throw; }
@@ -151,6 +153,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
         { if (runs.Read(runId).State == "canceled") return; runs.Fail(runId, "timed_out"); }
         catch (OperationCanceledException) { runs.Cancel(runId); }
+        catch (LocalAiScopeTooLargeException) { runs.Fail(runId, "scope_too_large"); }
         catch { runs.Fail(runId, "provider_failed"); }
         finally { CompleteAdmission(admissionId, admission); }
     }
@@ -244,7 +247,8 @@ internal static class LocalAiResultEnvelopeV1
                     prompt_template_version=run.PromptTemplateVersion, requested_at=run.RequestedAt, started_at=run.StartedAt,
                     completed_at=completedAt.ToUniversalTime().ToString("O"), snapshot_id=snapshot.SnapshotId,
                     snapshot_sha256=snapshot.PayloadSha256, coverage=new { included=snapshot.EvidenceIdentifiers.Count, excluded=0,
-                        content_available=snapshot.RawEvidence is { Count: > 0 } } },
+                        content_available=snapshot.RawEvidence?.Values.Any(static evidence =>
+                            string.Equals(evidence.Locator.State,"available",StringComparison.Ordinal)) == true } },
             };
             return JsonSerializer.SerializeToUtf8Bytes(entity);
         }

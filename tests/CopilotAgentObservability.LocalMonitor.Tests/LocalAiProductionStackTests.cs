@@ -60,7 +60,24 @@ public sealed class LocalAiProductionStackTests
         Assert.Contains(items,item=>item.GetProperty("snapshot_changed").GetBoolean());
 
         string nodeId;using(var connection=Open(temp.DatabasePath))
-        {using var command=connection.CreateCommand();command.CommandText="SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND kind='tool' ORDER BY node_id LIMIT 1;";command.Parameters.AddWithValue("$session",SessionId);nodeId=(string)command.ExecuteScalar()!;}
+        {
+            using var command=connection.CreateCommand();command.CommandText="SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND kind='tool' ORDER BY node_id LIMIT 1;";command.Parameters.AddWithValue("$session",SessionId);nodeId=(string)command.ExecuteScalar()!;
+            var sessionColumns=new List<string>();using var pragma=connection.CreateCommand();pragma.CommandText="PRAGMA table_info(sessions);";
+            using(var reader=pragma.ExecuteReader())while(reader.Read())sessionColumns.Add(reader.GetString(1));
+            command.CommandText=$"INSERT INTO sessions({string.Join(',',sessionColumns)}) SELECT $other,{string.Join(',',sessionColumns.Skip(1))} FROM sessions WHERE session_id=$session;";
+            command.Parameters.AddWithValue("$other","018f0000-0000-7000-8000-000000000002");command.ExecuteNonQuery();
+        }
+        using(var malformed=Post("/api/local-monitor/v1/ai/node-runs",$$"""{"session_id":"{{SessionId}}","node_id":"node-anchor"}"""))
+        using(var malformedResponse=await host.Client.SendAsync(malformed))Assert.Equal(HttpStatusCode.BadRequest,malformedResponse.StatusCode);
+        foreach(var body in new[]{
+            $$"""{"session_id":"{{SessionId}}","node_id":"node-00000000000000000000000000000000"}""",
+            $$"""{"session_id":"018f0000-0000-7000-8000-000000000002","node_id":"{{nodeId}}"}"""})
+        {
+            using var missingNode=Post("/api/local-monitor/v1/ai/node-runs",body);using var missingNodeResponse=await host.Client.SendAsync(missingNode);
+            Assert.Equal(HttpStatusCode.NotFound,missingNodeResponse.StatusCode);
+            Assert.Equal("{\"error\":\"node_not_found\"}",await missingNodeResponse.Content.ReadAsStringAsync());
+        }
+        using(var noRejectedRows=Open(temp.DatabasePath)){using var countRejected=noRejectedRows.CreateCommand();countRejected.CommandText="SELECT COUNT(*) FROM local_ai_runs WHERE scope_kind='node';";Assert.Equal(0L,(long)countRejected.ExecuteScalar()!);}
         var nodeRun=await Start(host.Client,"/api/local-monitor/v1/ai/node-runs",$$"""{"session_id":"{{SessionId}}","node_id":"{{nodeId}}"}""");
         var nodeStatus=await Poll(host.Client,$"/api/local-monitor/v1/ai/node-runs/{nodeRun}");
         Assert.Equal("node-one",nodeStatus.GetProperty("result").GetProperty("summary").GetString());
