@@ -760,7 +760,8 @@ public class MonitorShellPlaywrightTests
                 "missing" => route.FulfillAsync(new() { Status = 404, ContentType = "application/json", Body = "{\"error\":\"target_not_found\"}" }),
                 "wrong-schema" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"hostile-schema","target_kind":"session","target_id":"{{searchedSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00"}""" }),
                 "wrong-kind" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"repository","target_id":"{{searchedSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00"}""" }),
-                "wrong-id" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"session","target_id":"{{otherSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00","path":"SECRET_PATH","label":"SECRET_LABEL"}""" }),
+                "wrong-id" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"session","target_id":"{{otherSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00"}""" }),
+                "hostile-extra" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"session","target_id":"{{searchedSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00","path":"SECRET_PATH","label":"SECRET_LABEL"}""" }),
                 "busy" => route.FulfillAsync(new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"persistence_busy\"}" }),
                 "malformed" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = "{\"schema_version\":\"SECRET_MALFORMED\"" }),
                 "network" => route.AbortAsync("failed"),
@@ -792,7 +793,7 @@ public class MonitorShellPlaywrightTests
         Assert.NotNull(restoreRequest);
         Assert.Equal($$"""{"schema_version":"local-archive-action.v1","action":"restore","target_kind":"session","targets":[{"target_id":"{{searchedSession}}","expected_revision":3}]}""", restoreRequest.PostData);
 
-        foreach (var state in new[] { "active", "missing", "wrong-schema", "wrong-kind", "wrong-id", "busy", "malformed", "network", "failure" })
+        foreach (var state in new[] { "active", "missing", "wrong-schema", "wrong-kind", "wrong-id", "hostile-extra", "busy", "malformed", "network", "failure" })
         {
             mode = state;
             await search.FillAsync("");
@@ -801,14 +802,14 @@ public class MonitorShellPlaywrightTests
             {
                 "active" => "このセッションはアクティブで、アーカイブされていません。",
                 "missing" => "セッションが見つかりません。",
-                "wrong-schema" or "wrong-kind" or "wrong-id" => "検索結果が指定したセッションと一致しません。",
+                "wrong-schema" or "wrong-kind" or "wrong-id" or "hostile-extra" => "検索結果が指定したセッションと一致しません。",
                 "busy" => "保存先が使用中です。しばらくしてからもう一度お試しください。",
                 _ => "セッションを読み込めませんでした。",
             };
             await Expect(result).ToHaveTextAsync(expected);
         }
         await Expect(result).Not.ToContainTextAsync("SECRET_");
-        Assert.Equal(10, directCalls);
+        Assert.Equal(11, directCalls);
     }
 
     [Fact]
