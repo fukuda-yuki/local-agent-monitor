@@ -516,7 +516,7 @@ public class MonitorShellPlaywrightTests
         {
             ViewportSize = new ViewportSize { Width = 1366, Height = 768 },
         });
-        await page.RouteAsync("**/api/retention/v1/status", route => route.FulfillAsync(new RouteFulfillOptions
+        await page.RouteAsync("**/api/local-monitor/v1/settings/storage", route => route.FulfillAsync(new RouteFulfillOptions
         {
             Status = 503,
             ContentType = "application/json",
@@ -611,13 +611,13 @@ public class MonitorShellPlaywrightTests
             Body = "{\"application_started_at\":\"2026-08-30T01:02:03.0000000+00:00\",\"receiver_readiness\":\"degraded\",\"endpoint\":{\"transport\":\"http\",\"scope\":\"loopback\",\"port\":4320},\"activity_state\":\"available\",\"latest_received_at\":\"2026-08-30T01:06:00.0000000+00:00\",\"recent_received_count\":4,\"projection_backlog\":7,\"capture_reasons\":[\"ingestion_backpressure\"],\"projection_reasons\":[\"projection_lag\"],\"restart_requirement\":\"unavailable\"}",
         }));
         var releaseHistory = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await page.RouteAsync("**/api/historical-import/v1/history?limit=1", async route =>
+        await page.RouteAsync("**/api/local-monitor/v1/settings/storage", async route =>
         {
             await releaseHistory.Task;
             await route.FulfillAsync(new()
             {
                 Status = 200, ContentType = "application/json",
-                Body = "{\"contract_version\":\"historical-import-workflow/v1\",\"schema_version\":\"historical-import-workflow-import-history/v1\",\"items\":[{\"operation_id\":\"SECRET_OPERATION\",\"state\":\"succeeded\",\"outcome\":\"committed\",\"source_kind\":\"historical\",\"source_surface\":\"SECRET_SOURCE\",\"source_badge\":\"historical\",\"source_tier\":\"tier_b\",\"profile_id\":\"SECRET_PROFILE\",\"adapter_id\":\"SECRET_ADAPTER\",\"new_observation_count\":1,\"duplicate_count\":0,\"conflict_count\":0,\"completeness\":\"partial\",\"completeness_reasons\":[],\"content_state\":\"not_captured\",\"retention_disposition\":\"not_applicable\"}]}",
+                Body = "{\"schema_version\":\"settings-storage-summary.v1\",\"database_file_size_bytes\":4096,\"retention\":{\"state\":\"idle\",\"pending_count\":2,\"failed_count\":1,\"last_successful_run_at\":null},\"backup\":{\"state\":\"idle\",\"last_successful_at\":null,\"validation_state\":\"unknown\"},\"historical_import\":{\"state\":\"running\"},\"restart_requirement\":\"not_required\"}",
             });
         });
         IRequest? backupRequest = null;
@@ -670,20 +670,17 @@ public class MonitorShellPlaywrightTests
         Assert.Equal("application/json", restoreRequest.Headers["content-type"]);
         Assert.Equal("local-monitor", restoreRequest.Headers["x-monitor-csrf"]);
         Assert.Equal($$"""{"schema_version":"local-archive-action.v1","action":"restore","target_kind":"session","targets":[{"target_id":"{{archivedSession}}","expected_revision":1}]}""", restoreRequest.PostData);
+        releaseHistory.TrySetResult();
         await page.Locator("[data-settings-navigation='storage']").ClickAsync();
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("保留 2件");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("待機 0件 · 削除中 0件");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("所在不明 0件 · 期限切れ閲覧可能 0件");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("最古の保留 3秒 · cleanup 待機中");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("保存場所・データサイズ・直近のバックアップ: 現在の情報では確認できません。");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("データベース 4096 bytes");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("直近の履歴取り込み running");
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: 対応していません。");
-        Assert.Contains(requestedUrls, url => url.EndsWith("/api/historical-import/v1/history?limit=1", StringComparison.Ordinal));
+        Assert.Contains(requestedUrls, url => url.EndsWith("/api/local-monitor/v1/settings/storage", StringComparison.Ordinal));
         await Expect(page.Locator("[data-settings-section='storage'] a[href='/diagnostics#retention-diagnostics']")).ToHaveCountAsync(1);
         await page.Locator("[data-settings-backup-now]").ClickAsync();
         await Expect(page.Locator("[data-settings-backup-download]")).ToBeVisibleAsync();
         await Expect(page.Locator("[data-settings-backup-result]")).ToContainTextAsync("生の記録を含むため、リポジトリへ保存せず安全な場所で管理してください。保持処理では削除されません。");
-        releaseHistory.TrySetResult();
-        await Expect(page.Locator("[data-settings-import-result]")).ToContainTextAsync("直近の履歴取り込みは完了しています");
         await Expect(page.Locator("[data-settings-backup-download]")).ToBeVisibleAsync();
         await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
         await Expect(page.Locator("[data-settings-diagnostics-health]")).ToContainTextAsync("受信状態に注意が必要です");
@@ -701,11 +698,11 @@ public class MonitorShellPlaywrightTests
         Assert.Equal("application/json", backupRequest.Headers["content-type"]);
         Assert.Equal("local-monitor", backupRequest.Headers["x-monitor-csrf"]);
 
-        await page.UnrouteAsync("**/api/retention/v1/status");
-        await page.RouteAsync("**/api/retention/v1/status", route => route.FulfillAsync(new()
+        await page.UnrouteAsync("**/api/local-monitor/v1/settings/storage");
+        await page.RouteAsync("**/api/local-monitor/v1/settings/storage", route => route.FulfillAsync(new()
         {
             Status = 200, ContentType = "application/json",
-            Body = "{\"schema_version\":1,\"pending_count\":0,\"queued_count\":0,\"deleting_count\":0,\"failed_count\":0,\"retry_exhausted_count\":0,\"orphan_or_unexpected_missing_count\":0,\"expired_but_readable_violation_count\":0,\"oldest_pending_age_seconds\":0,\"worker_state\":\"idle\",\"last_successful_run_at\":\"SECRET_TIMESTAMP\",\"inventory_version\":1,\"adapter_coverage_version\":1,\"items\":[]}",
+            Body = "{\"schema_version\":\"settings-storage-summary.v1\",\"hostile\":\"SECRET_TIMESTAMP\"}",
         }));
         await page.Locator("[data-settings-navigation='state']").ClickAsync();
         await page.Locator("[data-settings-navigation='storage']").ClickAsync();

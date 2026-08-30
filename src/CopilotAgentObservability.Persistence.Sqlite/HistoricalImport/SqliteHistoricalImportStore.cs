@@ -757,6 +757,17 @@ public sealed class SqliteHistoricalImportStore
             : null;
     }
 
+    internal string? ReadLatestOperationStateOrNull()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT status_json FROM historical_import_operations ORDER BY created_at DESC,operation_id DESC LIMIT 1;";
+        return command.ExecuteScalar() is string json
+            ? HistoricalImportJson.Deserialize<HistoricalImportStatus>(json).State
+            : null;
+    }
+
     internal HistoricalImportResult? ReadResultOrNull(string operationId)
     {
         using var connection = Open();

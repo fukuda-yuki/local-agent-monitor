@@ -7,6 +7,22 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class HistoricalImportStoreTests
 {
+    [Fact]
+    public void Latest_operation_state_includes_nonterminal_rows_and_uses_created_at_then_id()
+    {
+        using var database = new HistoricalImportTestDatabase();
+        var store = new SqliteHistoricalImportStore(database.Path);
+        store.CreateSchema();
+        using (var connection = database.Open())
+        {
+            InsertOperation(connection, "operation-a", "2026-08-30T00:00:00.0000000+00:00", "succeeded");
+            InsertOperation(connection, "operation-b", "2026-08-30T00:01:00.0000000+00:00", "queued");
+            InsertOperation(connection, "operation-c", "2026-08-30T00:01:00.0000000+00:00", "running");
+        }
+
+        Assert.Equal("running", store.ReadLatestOperationStateOrNull());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -214,6 +230,20 @@ public sealed class HistoricalImportStoreTests
     {
         using var command = connection.CreateCommand();
         command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertOperation(SqliteConnection connection, string operationId, string createdAt, string state)
+    {
+        var status = new HistoricalImportStatus(
+            "historical-import-workflow/v1", "historical-import-workflow-import-status/v1", operationId,
+            "request", 1, state, [state], state == "succeeded" ? "committed" : "not_started",
+            new(1, 0, 0, 0, 0, 0), state == "succeeded", null);
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA foreign_keys=OFF; INSERT INTO historical_import_operations(operation_id,request_id,idempotency_key_hash,request_digest,preview_id,source_surface,profile_id,adapter_id,status_json,result_json,new_observation_count,duplicate_count,conflict_count,created_at,completed_at) VALUES($id,'request',$id || '-key','digest','preview','surface','profile','adapter',$status,NULL,0,0,0,$created,NULL);";
+        command.Parameters.AddWithValue("$id", operationId);
+        command.Parameters.AddWithValue("$status", System.Text.Encoding.UTF8.GetString(HistoricalImportJson.Serialize(status)));
+        command.Parameters.AddWithValue("$created", createdAt);
         command.ExecuteNonQuery();
     }
 }

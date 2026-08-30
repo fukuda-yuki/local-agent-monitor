@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.Mime;
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using CopilotAgentObservability.LocalMonitor.Settings;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
@@ -14,9 +15,9 @@ internal static class RuntimeBackupRoutes
         || path == "/backup-restore"
         || path == "/backup-restore/";
 
-    internal static void Map(WebApplication app, string databasePath, SqliteRuntimeBackupService service)
+    internal static void Map(WebApplication app, string databasePath, SqliteRuntimeBackupService service, RuntimeBackupStatusSnapshot status)
     {
-        var application = new Application(databasePath, service);
+        var application = new Application(databasePath, service, status);
         app.MapPost("/api/runtime-backup/v1/backups", context => CreateAsync(context, application));
         app.MapGet("/api/runtime-backup/v1/backups/{backupId}", (string backupId, HttpContext context) => ResultAsync(context, application, backupId));
         app.MapGet("/api/runtime-backup/v1/backups/{backupId}/archive", (string backupId, HttpContext context) => DownloadAsync(context, application, backupId));
@@ -169,29 +170,31 @@ internal static class RuntimeBackupRoutes
         private readonly string databasePath;
         private readonly string outputDirectory;
         private readonly SqliteRuntimeBackupService service;
+        private readonly RuntimeBackupStatusSnapshot status;
         private readonly ConcurrentDictionary<string, BackupApiResult> results = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, string> files = new(StringComparer.Ordinal);
 
-        internal Application(string databasePath, SqliteRuntimeBackupService service)
+        internal Application(string databasePath, SqliteRuntimeBackupService service, RuntimeBackupStatusSnapshot status)
         {
             this.databasePath = Path.GetFullPath(databasePath);
             outputDirectory = Path.Combine(Path.GetDirectoryName(this.databasePath)!, "runtime-backups");
             this.service = service ?? throw new ArgumentNullException(nameof(service));
+            this.status = status;
         }
 
         internal BackupApiResult Create()
         {
+            status.Running();
             var published = Path.Combine(outputDirectory, $"runtime-backup-{Guid.NewGuid():N}.zip");
             var retained = false;
             try
             {
                 if (File.Exists(outputDirectory))
-                    return new(null, RuntimeBackupErrorCodes.SnapshotStoreUnavailable, null, null, null);
+                    return Failed(RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
                 var created = service.CreateAndPublish(databasePath, published);
                 if (!created.Success)
-                    return new(null, created.ErrorCode == RuntimeBackupErrorCodes.InvalidArguments
-                        ? RuntimeBackupErrorCodes.SnapshotStoreUnavailable
-                        : created.ErrorCode, null, null, null);
+                    return Failed(created.ErrorCode == RuntimeBackupErrorCodes.InvalidArguments
+                        ? RuntimeBackupErrorCodes.SnapshotStoreUnavailable : created.ErrorCode!);
                 var id = created.ArchiveSha256!;
                 var result = new BackupApiResult(id, null, id, RuntimeBackupWarnings.All, $"/api/runtime-backup/v1/backups/{id}/archive");
                 var retainedPath = files.GetOrAdd(id, published);
@@ -199,15 +202,24 @@ internal static class RuntimeBackupRoutes
                 if (!retained)
                 {
                     var existing = service.Inspect(retainedPath);
-                    if (!existing.Success || existing.ArchiveSha256 != id) return new(null, RuntimeBackupErrorCodes.PublishFailed, null, null, null);
+                    if (!existing.Success || existing.ArchiveSha256 != id) return Failed(RuntimeBackupErrorCodes.PublishFailed);
                     File.Delete(published);
                 }
+                var validation = service.Inspect(retainedPath);
+                if (!validation.Success || validation.ArchiveSha256 != id) return Failed(RuntimeBackupErrorCodes.PublishFailed);
                 results[id] = result;
+                status.Succeeded();
                 return result;
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-            { return new(null, RuntimeBackupErrorCodes.PublishFailed, null, null, null); }
+            { return Failed(RuntimeBackupErrorCodes.PublishFailed); }
             finally { try { if (!retained && File.Exists(published)) File.Delete(published); } catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { } }
+        }
+
+        private BackupApiResult Failed(string errorCode)
+        {
+            status.Failed();
+            return new(null, errorCode, null, null, null);
         }
 
         internal bool TryGet(string id, out BackupApiResult result)

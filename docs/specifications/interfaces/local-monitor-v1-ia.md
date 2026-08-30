@@ -467,6 +467,18 @@ last-check states, and the fixed provider-egress notice. The POST action
 `接続を確認` uses the owned Copilot SDK status and runtime identity certifier;
 it creates no analysis run, SDK session, snapshot, result or retained item.
 
+The raw-default `保存・バックアップ` section reads the exact same-origin,
+no-store `GET /api/local-monitor/v1/settings/storage` aggregate. It reports
+only the configured primary database file size, the existing Retention runtime
+state, one process-local backup operation snapshot (including the last
+successful instant and closed validation state), the latest historical import
+operation state, and whether the active monitor lease proves restart is not
+required. Unavailable owners produce closed `unknown` or `null` facts. The
+aggregate never scans directories or backup files and never returns paths,
+file names, operation IDs, policy values, failure reasons, or exception text.
+It is absent under `--sanitized-only`; focused backup, retention, and historical
+import actions retain their owning routes and workflows.
+
 ## 13. Archive behavior
 
 - archive is reversible local metadata;

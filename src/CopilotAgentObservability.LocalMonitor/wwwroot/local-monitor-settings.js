@@ -20,6 +20,7 @@
   let selectedSettings = null;
   let aiCheckController = null;
   let receiverRuntimeController = null;
+  let storageController = null;
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const DIGEST = /^[0-9a-f]{64}$/;
   const READINESS_REASONS = Object.freeze({
@@ -114,7 +115,9 @@
         check,
         element("p", "local-monitor-settings-note", "選択した内容は、明示的にAI操作を開始した場合に限りGitHub Copilotへ送信されます。資格情報は表示されません。"));
     } else if (token === "storage") {
-      section.append(card("保存状態", "保存状態を確認しています。"));
+      const storage = card("保存状態", "保存状態を確認しています。");
+      storage.dataset.settingsStorageSummary = "";
+      section.append(storage);
       const actions = element("div", "local-monitor-settings-actions");
       const backupNow = element("button", null, "今すぐバックアップ");
       backupNow.type = "button";
@@ -124,11 +127,10 @@
       const backupResult = element("p", "local-monitor-settings-note");
       backupResult.dataset.settingsBackupResult = "";
       backupResult.setAttribute("aria-live", "polite");
-      const importResult = element("p", "local-monitor-settings-note", "履歴取り込み状態を確認しています。");
-      importResult.dataset.settingsImportResult = "";
-      importResult.setAttribute("aria-live", "polite");
-      section.append(actions, backupResult, importResult, element("p", "local-monitor-settings-note",
-        "保存場所・データサイズ・直近のバックアップ: 現在の情報では確認できません。"),
+      const operationResult = element("p", "local-monitor-settings-note", "操作状態を確認しています。");
+      operationResult.dataset.settingsStorageOperations = "";
+      operationResult.setAttribute("aria-live", "polite");
+      section.append(actions, backupResult, operationResult,
         element("p", "local-monitor-settings-note", "自動バックアップ: 対応していません。"),
         element("p", "local-monitor-settings-note",
           "アーカイブは元に戻せる管理情報です。削除・保持・固定とは異なります。復元や削除など影響のある操作は、移動先で確認してから実行します。"));
@@ -382,28 +384,51 @@
     } catch { if (generation === requestGeneration && target) target.textContent = "取得元の状態を読み込めませんでした。"; }
   }
 
-  async function loadImportSummary(generation) {
-    const result = owned.get("storage").querySelector("[data-settings-import-result]");
+  async function loadStorageSummary(generation) {
+    storageController?.abort();
+    const controller = storageController = new AbortController();
+    const summary = owned.get("storage").querySelector("[data-settings-storage-summary] p");
+    const operations = owned.get("storage").querySelector("[data-settings-storage-operations]");
     try {
-      const response = await fetch("/api/historical-import/v1/history?limit=1", { cache: "no-store", credentials: "same-origin" });
+      const response = await fetch("/api/local-monitor/v1/settings/storage", {
+        cache: "no-store", credentials: "same-origin", signal: controller.signal,
+      });
       if (!response.ok) throw new Error();
       const value = await response.json();
-      if (!exact(value, ["contract_version", "schema_version", "items"])
-          || value.contract_version !== "historical-import-workflow/v1"
-          || value.schema_version !== "historical-import-workflow-import-history/v1"
-          || !Array.isArray(value.items) || value.items.length > 1) throw new Error();
-      let text = "履歴の取り込みはまだありません。";
-      if (value.items.length === 1) {
-        const item = value.items[0];
-        const keys = ["operation_id", "state", "outcome", "source_kind", "source_surface", "source_badge", "source_tier", "profile_id",
-          "adapter_id", "new_observation_count", "duplicate_count", "conflict_count", "completeness", "completeness_reasons", "content_state", "retention_disposition"];
-        if (!exact(item, keys) || !["succeeded", "failed", "rejected"].includes(item.state)
-            || !["committed", "rolled_back", "not_started"].includes(item.outcome)) throw new Error();
-        text = item.state === "succeeded" ? "直近の履歴取り込みは完了しています。" : "直近の履歴取り込みは完了していません。";
+      if (!exact(value, ["schema_version", "database_file_size_bytes", "retention", "backup", "historical_import", "restart_requirement"])
+          || value.schema_version !== "settings-storage-summary.v1"
+          || value.database_file_size_bytes !== null && !count(value.database_file_size_bytes)
+          || !exact(value.retention, ["state", "pending_count", "failed_count", "last_successful_run_at"])
+          || !["idle", "running", "degraded", "disabled", "unknown"].includes(value.retention.state)
+          || value.retention.pending_count !== null && !count(value.retention.pending_count)
+          || value.retention.failed_count !== null && !count(value.retention.failed_count)
+          || value.retention.last_successful_run_at !== null && !timestamp(value.retention.last_successful_run_at)
+          || !exact(value.backup, ["state", "last_successful_at", "validation_state"])
+          || !["idle", "running", "succeeded", "failed"].includes(value.backup.state)
+          || value.backup.last_successful_at !== null && !timestamp(value.backup.last_successful_at)
+          || !["passed", "unknown"].includes(value.backup.validation_state)
+          || !exact(value.historical_import, ["state"])
+          || !["none", "queued", "running", "succeeded", "failed", "rejected"].includes(value.historical_import.state)
+          || !["not_required", "unknown"].includes(value.restart_requirement)) throw new Error();
+      if (controller.signal.aborted || generation !== requestGeneration || selectedSettings !== "storage") return;
+      const bytes = value.database_file_size_bytes === null ? "確認できません" : `${value.database_file_size_bytes} bytes`;
+      const retention = value.retention.state === "unknown" ? "保持状態は確認できません"
+        : `保持 ${RETENTION_WORKER_STATES[value.retention.state]} · 保留 ${value.retention.pending_count}件 · 失敗 ${value.retention.failed_count}件`;
+      summary.textContent = `データベース ${bytes} · ${retention} · 再起動 ${value.restart_requirement === "not_required" ? "不要" : "確認できません"}`;
+      const backup = value.backup.state === "idle" ? "バックアップ操作なし"
+        : value.backup.state === "running" ? "バックアップ作成中"
+          : value.backup.state === "succeeded" ? `バックアップ成功 · 検証済み · 最終成功 ${value.backup.last_successful_at}` : "バックアップ失敗";
+      const imported = value.historical_import.state === "none" ? "履歴取り込みなし" : `直近の履歴取り込み ${value.historical_import.state}`;
+      operations.textContent = `${backup} · ${imported}`;
+    } catch {
+      if (!controller.signal.aborted && generation === requestGeneration && selectedSettings === "storage") {
+        summary.textContent = "保存状態を読み込めませんでした。";
+        operations.textContent = "操作状態を読み込めませんでした。";
       }
-      if (generation === requestGeneration) result.textContent = text;
-    } catch { if (generation === requestGeneration) result.textContent = "履歴取り込み状態を読み込めませんでした。"; }
+    } finally { if (storageController === controller) storageController = null; }
   }
+
+  function invalidateStorageLoad() { storageController?.abort(); storageController = null; }
 
   async function createBackup() {
     const section = owned.get("storage");
@@ -478,8 +503,9 @@
     }
     if (section === "ai" || section === "state") loadAi(generation);
     if (section === "archive") loadArchivedSessions();
-    if (section === "storage" || section === "state") {
-      if (section === "storage") loadImportSummary(generation);
+    if (section === "storage") {
+      loadStorageSummary(generation);
+    } else if (section === "state") {
       try {
         const response = await fetch("/api/retention/v1/status", { cache: "no-store", credentials: "same-origin" });
         if (!response.ok) throw new Error();
@@ -554,6 +580,7 @@
     if (selectedSettings === "archive" && selected !== "archive") invalidateArchiveLoad();
     if (selectedSettings === "ai" && selected !== "ai") { aiCheckController?.abort(); aiCheckController = null; }
     if (selectedSettings === "receiver") invalidateReceiverRuntimeLoad();
+    if (selectedSettings === "storage" && selected !== "storage") invalidateStorageLoad();
     selectedSettings = selected;
     for (const [token] of sections) {
       const nav = navigation.querySelector(`[data-settings-navigation='${token}']`);
@@ -572,6 +599,7 @@
       aiCheckController?.abort();
       aiCheckController = null;
       invalidateReceiverRuntimeLoad();
+      invalidateStorageLoad();
       invalidateArchiveLoad();
     }
   });
@@ -590,6 +618,7 @@
     aiCheckController?.abort();
     aiCheckController = null;
     invalidateReceiverRuntimeLoad();
+    invalidateStorageLoad();
     invalidateArchiveLoad();
   });
   const initial = window.LocalMonitorV1History.current();

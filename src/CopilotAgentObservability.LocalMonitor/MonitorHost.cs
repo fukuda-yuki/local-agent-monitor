@@ -465,6 +465,10 @@ internal static class MonitorHost
         }
 
         var retentionCatalog = new RetentionCatalogStore(retentionContext, timeProvider);
+        var backupStatus = new RuntimeBackupStatusSnapshot(timeProvider);
+        var settingsStorage = options.SanitizedOnly ? null : new SettingsStorageSummary(
+            options.DatabasePath, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true,
+            historicalImportStore, backupStatus, monitorLease);
         var retentionAdapters = new RetentionAdapterRegistry([
             new SessionEventContentRetentionAdapter(retentionCatalog, timeProvider, workspaceParticipant, publicationGate),
             new RawRecordRetentionAdapter(retentionCatalog, timeProvider, workspaceParticipant, publicationGate),
@@ -676,6 +680,27 @@ internal static class MonitorHost
                 }
                 context.Response.ContentType = "application/json; charset=utf-8";
                 await JsonSerializer.SerializeAsync(context.Response.Body, settingsRuntime.Read(), cancellationToken: context.RequestAborted);
+            });
+        }
+        if (settingsStorage is not null)
+        {
+            const string path = "/api/local-monitor/v1/settings/storage";
+            app.MapMethods(path, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"], async context =>
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                if (!string.Equals(context.Request.Path.Value, path, StringComparison.Ordinal))
+                { context.Response.StatusCode = StatusCodes.Status404NotFound; return; }
+                if (!IsValidHostHeader(context.Request.Host.Host)) { await WriteSettingsAiErrorAsync(context, 400, "invalid_host"); return; }
+                if (IsCrossSiteRequest(context)) { await WriteSettingsAiErrorAsync(context, 403, "cross_origin_forbidden"); return; }
+                if (!HttpMethods.IsGet(context.Request.Method))
+                {
+                    context.Response.Headers.Allow = "GET";
+                    await WriteSettingsAiErrorAsync(context, 405, "method_not_allowed"); return;
+                }
+                if (context.Request.QueryString.HasValue || context.Request.ContentLength is > 0 || context.Request.Headers.TransferEncoding.Count > 0)
+                { await WriteSettingsAiErrorAsync(context, 400, "invalid_request"); return; }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                await JsonSerializer.SerializeAsync(context.Response.Body, settingsStorage.Read(), cancellationToken: context.RequestAborted);
             });
         }
         if (settingsAiReadiness is not null)
@@ -1088,7 +1113,7 @@ internal static class MonitorHost
             app.MapRazorPages();
             DoctorUiRoutes.Map(app, doctorUiApplication);
             DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
-            RuntimeBackupRoutes.Map(app, options.DatabasePath, runtimeBackupService);
+            RuntimeBackupRoutes.Map(app, options.DatabasePath, runtimeBackupService, backupStatus);
             SessionRoutes.MapRawContentRoute(
                 app,
                 sessionStore,
