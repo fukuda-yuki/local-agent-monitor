@@ -84,6 +84,48 @@ public sealed class RuntimeBackupLocalAiComponentTests
     }
 
     [Fact]
+    public void Restore_CreatesSafetyBackupWithLocalAiValidationAtItsSampledStagingTime()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-local-ai-safety-time-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var time = Time();
+            var source = Path.Combine(root, "source.db");
+            var sourceCatalog = Initialize(source, time);
+            new LocalAiAnalysisStoreV1(source, sourceCatalog, time).InsertSnapshot(
+                new(SessionSnapshot, "session", SessionId, null, SessionId, "{}"u8.ToArray(), "{\"evidence_refs\":[]}"u8.ToArray()));
+            var archive = Path.Combine(root, "backup.zip");
+            var service = new SqliteRuntimeBackupService(time);
+            Assert.True(service.CreateAndPublish(source, archive).Success);
+
+            var target = Path.Combine(root, "target.db");
+            Assert.True(service.Restore(archive, target, new RuntimeRestoreOptions()).Success);
+            using (var connection = Open(target))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE retention_items SET state='expiring',expires_at='2050-01-01T00:00:00.0000000+00:00' WHERE source_item_id LIKE 'local_ai:%';";
+                Assert.Equal(1, command.ExecuteNonQuery());
+            }
+            time.Advance(new DateTimeOffset(2099, 8, 30, 1, 0, 0, TimeSpan.Zero) - time.GetUtcNow());
+
+            var safetyBackup = Path.Combine(root, "safety.zip");
+            var restored = service.Restore(
+                archive,
+                target,
+                new RuntimeRestoreOptions(PreRestoreOutputPath: safetyBackup));
+
+            Assert.True(File.Exists(safetyBackup), restored.ErrorCode);
+            Assert.True(restored.PreRestoreBackupCreated);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public async Task Backup_ScrubsDeniedSessionBytesOnlyInStagingAndRestoresExpiredMetadata()
     {
         var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-local-ai-denied-{Guid.NewGuid():N}");
