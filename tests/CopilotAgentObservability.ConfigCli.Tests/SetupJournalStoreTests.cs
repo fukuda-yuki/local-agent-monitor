@@ -343,6 +343,8 @@ public sealed class SetupJournalStoreTests
         string boundary)
     {
         using var disposeRequested = new ManualResetEventSlim();
+        using var supersedeEntered = new ManualResetEventSlim();
+        using var disposeEntered = new ManualResetEventSlim();
         var context = CreateCommittedApplyContext(disposeRequested.Set);
         context.Store.MarkEnvironmentNotificationCompleted(context.Lock, ChangeSetId);
         var destination = context.Paths.GetTransactionJournal(ChangeSetId);
@@ -350,6 +352,29 @@ public sealed class SetupJournalStoreTests
         var createdAt = context.Store.Load(ChangeSetId)!.CreatedAt;
         SetupTestBarrier? prerequisite = null;
         SetupTestBarrier? operationBarrier = null;
+        var harnessReady = false;
+        var operationBarrierReached = false;
+        var lockContended = false;
+        var lockReacquired = false;
+
+        string Checkpoints() =>
+            $"boundary={boundary} harness-ready={harnessReady} " +
+            $"supersede-entered={supersedeEntered.IsSet} dispose-entered={disposeEntered.IsSet} " +
+            $"operation-barrier-reached={operationBarrierReached} dispose-observer={disposeRequested.IsSet} " +
+            $"lock-contended={lockContended} lock-reacquired={lockReacquired}";
+
+        void WaitUntilReached(SetupTestBarrier barrier, string checkpoint)
+        {
+            try
+            {
+                barrier.WaitUntilReached(CancellationToken.None);
+            }
+            catch (TimeoutException exception)
+            {
+                throw new Xunit.Sdk.XunitException(
+                    $"SetupJournal diagnostic timed out awaiting {checkpoint}: {Checkpoints()}. {exception.Message}");
+            }
+        }
 
         try
         {
@@ -363,26 +388,40 @@ public sealed class SetupJournalStoreTests
                     boundary, destination, temporary));
             }
 
-            var supersede = Task.Run(() => context.Store.SupersedeWithPreparedRollback(
-                context.Lock, ChangeSetId, ValidTargets()));
+            harnessReady = true;
+            var supersede = Task.Run(() =>
+            {
+                supersedeEntered.Set();
+                return context.Store.SupersedeWithPreparedRollback(
+                    context.Lock, ChangeSetId, ValidTargets());
+            });
             if (prerequisite is not null)
             {
-                prerequisite.WaitUntilReached(CancellationToken.None);
+                WaitUntilReached(prerequisite, "destination-revalidation-prerequisite");
                 operationBarrier = context.Platform.AddBarrier($"file.metadata:{destination}");
                 prerequisite.Release();
             }
 
-            operationBarrier!.WaitUntilReached(CancellationToken.None);
-            var dispose = Task.Run(context.Lock.Dispose);
+            var blockingBarrier = operationBarrier!;
+            WaitUntilReached(blockingBarrier, "operation-barrier");
+            operationBarrierReached = true;
+            var dispose = Task.Run(() =>
+            {
+                disposeEntered.Set();
+                context.Lock.Dispose();
+            });
             try
             {
-                Assert.True(disposeRequested.Wait(TimeSpan.FromSeconds(10)));
+                Assert.True(
+                    disposeRequested.Wait(TimeSpan.FromSeconds(10)),
+                    $"SetupJournal diagnostic timed out awaiting dispose-observer: {Checkpoints()}.");
                 using var contended = SetupLock.TryAcquire(context.Platform, context.Paths);
                 Assert.False(contended.Acquired);
+                lockContended = true;
             }
             finally
             {
-                operationBarrier.Release();
+                blockingBarrier.Release();
             }
 
             Assert.Equal(SetupPreparedJournalOpenResult.Created, await supersede);
@@ -394,6 +433,13 @@ public sealed class SetupJournalStoreTests
             Assert.Equivalent(ValidTargets(), rollback.Targets, strict: true);
             using var reacquired = SetupLock.TryAcquire(context.Platform, context.Paths);
             Assert.True(reacquired.Acquired);
+            lockReacquired = true;
+            Assert.True(supersedeEntered.IsSet, Checkpoints());
+            Assert.True(disposeEntered.IsSet, Checkpoints());
+            Assert.True(operationBarrierReached, Checkpoints());
+            Assert.True(disposeRequested.IsSet, Checkpoints());
+            Assert.True(lockContended, Checkpoints());
+            Assert.True(lockReacquired, Checkpoints());
         }
         finally
         {

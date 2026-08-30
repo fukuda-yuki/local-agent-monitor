@@ -394,12 +394,14 @@ internal static class MonitorHost
             settingsAiReadiness = testOptions?.SettingsAiReadiness ?? new SettingsAiReadinessService(
                 "github_copilot", aiOptions.DefaultModel, aiOptions.DefaultProfile,
                 configured,
-                () => OwnedCopilotSdkClientV1.TryCreate(
-                    Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
-                    static sdkOptions => new CopilotClient(sdkOptions),
-                    static name => Environment.GetEnvironmentVariable(name) is not null,
-                    out var client) ? client : null,
-                TimeSpan.FromSeconds(10));
+                testOptions?.SettingsAiReadinessClientFactory ?? (() =>
+                    OwnedCopilotSdkClientV1.TryCreate(
+                        Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
+                        static sdkOptions => new CopilotClient(sdkOptions),
+                        static name => Environment.GetEnvironmentVariable(name) is not null,
+                        out var client) ? client : null),
+                TimeSpan.FromSeconds(10),
+                timeProvider);
             builder.Services.AddSingleton(settingsAiReadiness);
             builder.Services.AddHostedService(_ => settingsAiReadiness);
         }
@@ -2977,6 +2979,8 @@ internal sealed class MonitorHostTestOptions
     public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
 
     public SettingsAiReadinessService? SettingsAiReadiness { get; init; }
+
+    public Func<IOwnedCopilotClientV1?>? SettingsAiReadinessClientFactory { get; init; }
 
     public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
 

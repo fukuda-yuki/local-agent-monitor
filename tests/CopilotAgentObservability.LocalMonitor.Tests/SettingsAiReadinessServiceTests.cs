@@ -86,31 +86,103 @@ public sealed class SettingsAiReadinessServiceTests
     [Fact]
     public async Task CheckAsync_IsBoundedWhenProviderIgnoresCancellationAndDisposesExactlyOnce()
     {
+        var timeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         var never = new TaskCompletionSource<CopilotRuntimeStatusObservationV1?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var client = new Client(_ => never.Task);
-        var service = Service(() => client, timeout: TimeSpan.FromMilliseconds(30));
-        var result = await service.CheckAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+        var providerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var providerExpiryDelivered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new Client(
+            cancellationToken =>
+            {
+                cancellationToken.Register(() => providerExpiryDelivered.TrySetResult());
+                providerEntered.TrySetResult();
+                return never.Task;
+            },
+            () => disposeEntered.TrySetResult());
+        var service = Service(
+            () => client,
+            timeout: TimeSpan.FromMilliseconds(30),
+            timeProvider: timeProvider);
+        var check = service.CheckAsync(CancellationToken.None);
+        await providerEntered.Task;
+        Assert.False(check.IsCompleted);
+
+        timeProvider.Advance(TimeSpan.FromMilliseconds(30));
+        var result = await check.WaitAsync(TimeSpan.FromSeconds(10));
+
         Assert.Equal("check_failed", result.ReadinessState);
+        Assert.True(providerExpiryDelivered.Task.IsCompleted);
+        Assert.True(disposeEntered.Task.IsCompleted);
         Assert.Equal(1, client.DisposeCalls);
+        Assert.Equal(result, service.GetSnapshot());
+    }
+
+    [Fact]
+    public async Task CheckAsync_DisposalExpiryIsControllableWhenDisposeIgnoresCompletionAndInvokesDisposeExactlyOnce()
+    {
+        var timeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
+        var disposeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var neverDisposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new Client(
+            _ => Task.FromResult<CopilotRuntimeStatusObservationV1?>(Status(true)),
+            () => disposeEntered.TrySetResult(),
+            neverDisposed.Task);
+        var service = Service(
+            () => client,
+            timeout: TimeSpan.FromMilliseconds(30),
+            timeProvider: timeProvider);
+
+        var check = service.CheckAsync(CancellationToken.None);
+        await disposeEntered.Task;
+        Assert.False(check.IsCompleted);
+
+        timeProvider.Advance(TimeSpan.FromMilliseconds(30));
+        var result = await check.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("ready", result.ReadinessState);
+        Assert.False(neverDisposed.Task.IsCompleted);
+        Assert.Equal(1, client.DisposeCalls);
+        Assert.Equal(result, service.GetSnapshot());
     }
 
     private static CopilotRuntimeStatusObservationV1 Status(bool authenticated) => new("1.0.75", 3, null, authenticated);
 
-    private static SettingsAiReadinessService Service(Func<IOwnedCopilotClientV1?> factory, bool enabled = true, TimeSpan? timeout = null) =>
-        new("github_copilot", "gpt-5", "standard", enabled, factory, timeout ?? TimeSpan.FromSeconds(1));
+    private static SettingsAiReadinessService Service(
+        Func<IOwnedCopilotClientV1?> factory,
+        bool enabled = true,
+        TimeSpan? timeout = null,
+        TimeProvider? timeProvider = null) =>
+        new(
+            "github_copilot",
+            "gpt-5",
+            "standard",
+            enabled,
+            factory,
+            timeout ?? TimeSpan.FromSeconds(1),
+            timeProvider ?? TimeProvider.System);
 
     private sealed class Client : IOwnedCopilotClientV1
     {
         private readonly Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status;
         private readonly Action? dispose;
+        private readonly Task? disposeTask;
         internal Client(CopilotRuntimeStatusObservationV1? value) : this(_ => Task.FromResult(value)) { }
         internal Client(Task<CopilotRuntimeStatusObservationV1?> value) : this(_ => value) { }
-        internal Client(Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status, Action? dispose = null) => (this.status, this.dispose) = (status, dispose);
+        internal Client(
+            Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status,
+            Action? dispose = null,
+            Task? disposeTask = null) =>
+            (this.status, this.dispose, this.disposeTask) = (status, dispose, disposeTask);
         internal int StatusCalls { get; private set; }
         internal int DisposeCalls { get; private set; }
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public async Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) { StatusCalls++; return await status(cancellationToken); }
         public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("Readiness must not create an SDK session.");
-        public ValueTask DisposeAsync() { DisposeCalls++; dispose?.Invoke(); return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            dispose?.Invoke();
+            return disposeTask is null ? ValueTask.CompletedTask : new(disposeTask);
+        }
     }
 }

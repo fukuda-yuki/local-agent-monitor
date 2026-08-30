@@ -87,6 +87,40 @@ public sealed class SettingsAiReadinessRouteTests
     }
 
     [Fact]
+    public async Task ProductionCompositionUsesHostTimeProviderForReadinessExpiry()
+    {
+        using var temp = new MonitorTempDirectory();
+        var timeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
+        var providerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var never = new TaskCompletionSource<CopilotRuntimeStatusObservationV1?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new Client(_ =>
+        {
+            providerEntered.TrySetResult();
+            return never.Task;
+        });
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            TimeProvider = timeProvider,
+            SettingsAiReadinessClientFactory = () => client,
+        });
+        using var request = Request(HttpMethod.Post, csrf: "local-monitor");
+
+        var responseTask = host.Client.SendAsync(request);
+        await providerEntered.Task;
+        Assert.False(responseTask.IsCompleted);
+
+        timeProvider.Advance(TimeSpan.FromSeconds(10));
+        using var response = await responseTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"readiness_state\":\"check_failed\"", await response.Content.ReadAsStringAsync());
+        Assert.Equal(1, client.DisposeCalls);
+    }
+
+    [Fact]
     public async Task SanitizedOnlyDoesNotRegisterReadinessResource()
     {
         using var temp = new MonitorTempDirectory();
@@ -117,15 +151,31 @@ public sealed class SettingsAiReadinessRouteTests
     private static Task<RunningMonitorHost> Host(MonitorTempDirectory temp)
     {
         var service = new SettingsAiReadinessService("github_copilot", "gpt-5", "standard", true,
-            () => new Client(), TimeSpan.FromSeconds(1));
+            () => new Client(), TimeSpan.FromSeconds(1), TimeProvider.System);
         return MonitorTestHost.StartAsync(temp, testOptions: new() { SettingsAiReadiness = service });
     }
 
     private sealed class Client : IOwnedCopilotClientV1
     {
+        private readonly Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status;
+
+        internal Client() : this(_ => Task.FromResult<CopilotRuntimeStatusObservationV1?>(
+            new("1.0.75", 3, null, true)))
+        {
+        }
+
+        internal Client(Func<CancellationToken, Task<CopilotRuntimeStatusObservationV1?>> status) =>
+            this.status = status;
+
+        internal int DisposeCalls { get; private set; }
+
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) => Task.FromResult<CopilotRuntimeStatusObservationV1?>(new("1.0.75", 3, null, true));
+        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) => status(cancellationToken);
         public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            return ValueTask.CompletedTask;
+        }
     }
 }
