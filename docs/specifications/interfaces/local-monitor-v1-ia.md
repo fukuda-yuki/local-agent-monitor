@@ -459,6 +459,18 @@ Sections:
 
 Each section shows current state and primary supported action together. Complex or destructive workflows open a focused detail or confirmation dialog. There is no separate Settings dashboard or nested permanent navigation.
 
+The raw-default `アーカイブ` section keeps its paged archived Session list and
+offers an independent exact Session ID search. Only a canonical UUIDv7 starts
+the direct no-store owner read at
+`GET /api/local-monitor/v1/archive?target_kind=session&target_id=<uuidv7>`;
+invalid input is rejected locally. Search replacement, clear, section leave,
+and modal close abort and invalidate only the exact search. They do not change
+the loaded archived list, its cursor, pagination availability, list request, or
+list generation. The result exposes only fixed states, the entered canonical
+Session ID as a direct Session link when archived, and the existing restore
+action using the exact read revision. It does not render server labels, paths,
+repository/workspace metadata, or opaque error text.
+
 The raw-default `AI設定` section reads and explicitly checks one closed
 Settings-owned readiness resource at
 `/api/local-monitor/v1/settings/ai-readiness`. Its GET and POST expose only the

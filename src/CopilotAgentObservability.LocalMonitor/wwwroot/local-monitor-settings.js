@@ -175,18 +175,25 @@
   const sessionSearch = document.createElement("input");
   sessionSearch.type = "search";
   sessionSearch.setAttribute("aria-label", "アーカイブ済みセッションID");
-  sessionSearch.placeholder = "セッションIDで絞り込み";
+  sessionSearch.placeholder = "セッションIDで検索";
+  const sessionSearchResult = element("div", "local-monitor-settings-list");
+  sessionSearchResult.dataset.settingsArchivedSessionSearchResult = "";
+  sessionSearchResult.setAttribute("aria-live", "polite");
   const sessionList = element("div", "local-monitor-settings-list");
   const sessionMore = element("button", null, "さらに読み込む");
   sessionMore.type = "button";
   sessionMore.hidden = true;
-  sessionArchive.append(sessionSearch, sessionList, sessionMore);
+  sessionArchive.append(sessionSearch, sessionSearchResult, sessionList, sessionMore);
   archiveSection?.append(sessionArchive);
   let archivedSessions = [];
   let archivedCursor = null;
   let archiveController = null;
   let archiveGeneration = 0;
   let archivePending = false;
+  let exactSearchController = null;
+  let exactSearchGeneration = 0;
+  let exactSearchPending = false;
+  let exactSearchResult = null;
 
   function invalidateArchiveLoad() {
     archiveController?.abort();
@@ -196,45 +203,140 @@
     sessionMore.disabled = false;
   }
 
+  function invalidateExactSearch(clear = true) {
+    exactSearchController?.abort();
+    exactSearchController = null;
+    exactSearchGeneration++;
+    exactSearchPending = false;
+    if (clear) {
+      exactSearchResult = null;
+      sessionSearchResult.replaceChildren();
+    }
+  }
+
+  function validateArchiveTarget(value, expectedId) {
+    if (!exact(value, ["schema_version", "target_kind", "target_id", "state", "revision", "archived_at", "updated_at"])
+        || value.schema_version !== "local-archive.response.v1" || value.target_kind !== "session"
+        || value.target_id !== expectedId || !["active", "archived"].includes(value.state)
+        || !count(value.revision) || value.state === "archived" !== (value.revision > 0 && value.revision % 2 === 1)
+        || value.state === "archived" && (!timestamp(value.archived_at) || !timestamp(value.updated_at))
+        || value.state === "active" && (value.archived_at !== null || value.updated_at !== null && !timestamp(value.updated_at))) throw new TypeError();
+    return value;
+  }
+
+  async function restoreArchivedSession(item, button, onRestored) {
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/local-monitor/v1/archive-actions", { method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "content-type": "application/json", "x-monitor-csrf": "local-monitor" },
+        body: JSON.stringify({ schema_version: "local-archive-action.v1", action: "restore", target_kind: "session",
+          targets: [{ target_id: item.target_id, expected_revision: item.revision }] }) });
+      if (!response.ok) throw new Error();
+      const value = await response.json();
+      if (!exact(value, ["schema_version", "action", "target_kind", "targets"])
+          || value.schema_version !== "local-archive-action.response.v1" || value.action !== "restore"
+          || value.target_kind !== "session" || !Array.isArray(value.targets) || value.targets.length !== 1
+          || !exact(value.targets[0], ["target_id", "state", "revision", "archived_at", "updated_at"])
+          || value.targets[0].target_id !== item.target_id || value.targets[0].state !== "active"
+          || value.targets[0].revision !== item.revision + 1 || value.targets[0].revision % 2 !== 0
+          || value.targets[0].archived_at !== null || !timestamp(value.targets[0].updated_at)) throw new Error();
+      onRestored();
+    } catch { button.textContent = "復元できませんでした"; }
+    finally { if (button.isConnected) button.disabled = false; }
+  }
+
+  function archivedSessionRow(item, onRestored) {
+    const row = element("div", "local-monitor-settings-row");
+    const direct = link(window.LocalMonitorV1Paths.session(item.target_id), item.target_id);
+    direct.dataset.archivedSessionId = "";
+    const restore = element("button", null, "復元");
+    restore.type = "button";
+    restore.addEventListener("click", () => restoreArchivedSession(item, restore, onRestored));
+    row.append(direct, restore);
+    return row;
+  }
+
   function renderArchivedSessions() {
-    const query = sessionSearch.value;
-    const visible = query === "" ? archivedSessions : UUID_V7.test(query)
-      ? archivedSessions.filter(item => item.target_id === query) : [];
-    sessionList.replaceChildren(...visible.map(item => {
-      const row = element("div", "local-monitor-settings-row");
-      const direct = link(window.LocalMonitorV1Paths.session(item.target_id), item.target_id);
-      direct.dataset.archivedSessionId = "";
-      const restore = element("button", null, "復元");
-      restore.type = "button";
-      restore.addEventListener("click", async () => {
-        restore.disabled = true;
-        try {
-          const response = await fetch("/api/local-monitor/v1/archive-actions", { method: "POST", cache: "no-store", credentials: "same-origin",
-            headers: { "content-type": "application/json", "x-monitor-csrf": "local-monitor" },
-            body: JSON.stringify({ schema_version: "local-archive-action.v1", action: "restore", target_kind: "session",
-              targets: [{ target_id: item.target_id, expected_revision: item.revision }] }) });
-          if (!response.ok) throw new Error();
-          const value = await response.json();
-          if (!exact(value, ["schema_version", "action", "target_kind", "targets"])
-              || value.schema_version !== "local-archive-action.response.v1" || value.action !== "restore"
-              || value.target_kind !== "session" || !Array.isArray(value.targets) || value.targets.length !== 1
-              || !exact(value.targets[0], ["target_id", "state", "revision", "archived_at", "updated_at"])
-              || value.targets[0].target_id !== item.target_id || value.targets[0].state !== "active"
-              || !count(value.targets[0].revision) || value.targets[0].revision <= 0 || value.targets[0].revision % 2 !== 0
-              || value.targets[0].archived_at !== null
-              || !timestamp(value.targets[0].updated_at)) throw new Error();
-          archivedSessions = archivedSessions.filter(candidate => candidate.target_id !== item.target_id);
-          renderArchivedSessions();
-        } catch { restore.textContent = "復元できませんでした"; }
-        finally { if (restore.isConnected) restore.disabled = false; }
-      });
-      row.append(direct, restore);
-      return row;
-    }));
-    if (visible.length === 0) sessionList.textContent = query && !UUID_V7.test(query)
-      ? "正しいセッションIDを入力してください。" : "アーカイブ済みセッションはありません。";
+    sessionList.replaceChildren(...archivedSessions.map(item => archivedSessionRow(item, () => {
+      archivedSessions = archivedSessions.filter(candidate => candidate.target_id !== item.target_id);
+      renderArchivedSessions();
+    })));
+    if (archivedSessions.length === 0) sessionList.textContent = "アーカイブ済みセッションはありません。";
     sessionMore.hidden = archivedCursor === null;
     sessionArchive.querySelector("p").textContent = `${archivedSessions.length}件を表示しています。`;
+  }
+
+  function renderExactSearchResult() {
+    sessionSearchResult.replaceChildren();
+    if (exactSearchPending) {
+      sessionSearchResult.textContent = "セッションを検索しています。";
+      return;
+    }
+    if (!exactSearchResult) return;
+    if (exactSearchResult.kind === "archived") {
+      const summary = element("p", "local-monitor-settings-note", "アーカイブ済みです。");
+      sessionSearchResult.append(summary, archivedSessionRow(exactSearchResult.item, () => {
+        exactSearchResult = { kind: "active" };
+        renderExactSearchResult();
+      }));
+      return;
+    }
+    const messages = {
+      invalid: "正しいセッションIDを入力してください。",
+      active: "このセッションはアクティブで、アーカイブされていません。",
+      missing: "セッションが見つかりません。",
+      wrong: "検索結果が指定したセッションと一致しません。",
+      busy: "保存先が使用中です。しばらくしてからもう一度お試しください。",
+      error: "セッションを読み込めませんでした。",
+    };
+    sessionSearchResult.textContent = messages[exactSearchResult.kind];
+  }
+
+  async function searchArchivedSession() {
+    const targetId = sessionSearch.value;
+    invalidateExactSearch(false);
+    if (targetId === "") {
+      exactSearchResult = null;
+      renderExactSearchResult();
+      return;
+    }
+    if (!UUID_V7.test(targetId)) {
+      exactSearchResult = { kind: "invalid" };
+      renderExactSearchResult();
+      return;
+    }
+    const controller = new AbortController();
+    exactSearchController = controller;
+    const generation = ++exactSearchGeneration;
+    exactSearchPending = true;
+    exactSearchResult = null;
+    renderExactSearchResult();
+    try {
+      const response = await fetch(`/api/local-monitor/v1/archive?target_kind=session&target_id=${encodeURIComponent(targetId)}`,
+        { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+      let result;
+      if (response.ok) {
+        const value = validateArchiveTarget(await response.json(), targetId);
+        result = value.state === "archived" ? { kind: "archived", item: value } : { kind: "active" };
+      } else if (response.status === 404) {
+        const value = await response.json();
+        result = exact(value, ["error"]) && value.error === "target_not_found" ? { kind: "missing" } : { kind: "error" };
+      } else if (response.status === 503) {
+        const value = await response.json();
+        result = exact(value, ["error"]) && value.error === "persistence_busy" ? { kind: "busy" } : { kind: "error" };
+      } else result = { kind: "error" };
+      if (controller.signal.aborted || generation !== exactSearchGeneration) return;
+      exactSearchResult = result;
+    } catch (error) {
+      if (controller.signal.aborted || generation !== exactSearchGeneration) return;
+      exactSearchResult = error instanceof TypeError ? { kind: "wrong" } : { kind: "error" };
+    } finally {
+      if (generation === exactSearchGeneration) {
+        exactSearchController = null;
+        exactSearchPending = false;
+        renderExactSearchResult();
+      }
+    }
   }
 
   async function loadArchivedSessions(after = null) {
@@ -282,7 +384,7 @@
       }
     }
   }
-  sessionSearch.addEventListener("input", renderArchivedSessions);
+  sessionSearch.addEventListener("input", searchArchivedSession);
   sessionMore.addEventListener("click", () => archivedCursor && loadArchivedSessions(archivedCursor));
 
   function fixedFailure(target) {
@@ -582,7 +684,11 @@
 
   function select(section) {
     const selected = sections.some(([token]) => token === section) ? section : "state";
-    if (selectedSettings === "archive" && selected !== "archive") invalidateArchiveLoad();
+    if (selectedSettings === "archive" && selected !== "archive") {
+      invalidateArchiveLoad();
+      invalidateExactSearch();
+      sessionSearch.value = "";
+    }
     if (selectedSettings === "ai" && selected !== "ai") { aiCheckController?.abort(); aiCheckController = null; }
     if (selectedSettings === "receiver") invalidateReceiverRuntimeLoad();
     if (selectedSettings === "storage" && selected !== "storage") invalidateStorageLoad();
@@ -606,6 +712,8 @@
       invalidateReceiverRuntimeLoad();
       invalidateStorageLoad();
       invalidateArchiveLoad();
+      invalidateExactSearch();
+      sessionSearch.value = "";
     }
   });
   document.addEventListener("cao-repository-settings-summary", event => {
@@ -625,6 +733,8 @@
     invalidateReceiverRuntimeLoad();
     invalidateStorageLoad();
     invalidateArchiveLoad();
+    invalidateExactSearch();
+    sessionSearch.value = "";
   });
   const initial = window.LocalMonitorV1History.current();
   if (initial.settings) select(initial.settings);

@@ -732,6 +732,180 @@ public class MonitorShellPlaywrightTests
     }
 
     [Fact]
+    public async Task Shell_UnifiedSettings_ArchivedSessionExactSearchUsesDirectSafeClosedStatesAndDirectRevision()
+    {
+        const string searchedSession = "01890f65-4c31-7f42-8a7d-333333333333";
+        const string otherSession = "01890f65-4c31-7f42-8a7d-444444444444";
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var directCalls = 0;
+        var mode = "found";
+        IRequest? restoreRequest = null;
+        await page.RouteAsync("**/api/local-monitor/v1/archived-items?target_kind=session&limit=50", route => route.FulfillAsync(new()
+        {
+            Status = 200, ContentType = "application/json",
+            Body = "{\"schema_version\":\"local-archived-items.response.v1\",\"target_kind\":\"session\",\"items\":[],\"next_cursor\":null}",
+        }));
+        await page.RouteAsync("**/api/local-monitor/v1/archive?target_kind=session&target_id=*", route =>
+        {
+            directCalls++;
+            return mode switch
+            {
+                "found" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"session","target_id":"{{searchedSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00"}""" }),
+                "active" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"session","target_id":"{{searchedSession}}","state":"active","revision":4,"archived_at":null,"updated_at":"2026-08-09T12:34:56.1234567+00:00"}""" }),
+                "missing" => route.FulfillAsync(new() { Status = 404, ContentType = "application/json", Body = "{\"error\":\"target_not_found\"}" }),
+                "wrong" => route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"repository","target_id":"{{otherSession}}","state":"archived","revision":3,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00","path":"SECRET_PATH","label":"SECRET_LABEL"}""" }),
+                "busy" => route.FulfillAsync(new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"persistence_busy\"}" }),
+                _ => route.FulfillAsync(new() { Status = 500, ContentType = "text/plain", Body = "SECRET_FAILURE" }),
+            };
+        });
+        await page.RouteAsync("**/api/local-monitor/v1/archive-actions", async route =>
+        {
+            restoreRequest = route.Request;
+            await route.FulfillAsync(new()
+            {
+                Status = 200, ContentType = "application/json",
+                Body = $$"""{"schema_version":"local-archive-action.response.v1","action":"restore","target_kind":"session","targets":[{"target_id":"{{searchedSession}}","state":"active","revision":4,"archived_at":null,"updated_at":"2026-08-09T12:35:56.1234567+00:00"}]}""",
+            });
+        });
+
+        await page.GotoAsync($"{host.Url}/sessions?settings=archive", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+        var search = page.GetByRole(AriaRole.Searchbox, new() { Name = "アーカイブ済みセッションID" });
+        var result = page.Locator("[data-settings-archived-session-search-result]");
+        await search.FillAsync(searchedSession.ToUpperInvariant());
+        await Expect(result).ToHaveTextAsync("正しいセッションIDを入力してください。");
+        Assert.Equal(0, directCalls);
+
+        await search.FillAsync(searchedSession);
+        await Expect(result.GetByRole(AriaRole.Link, new() { Name = searchedSession, Exact = true })).ToHaveAttributeAsync("href", $"/sessions/{searchedSession}");
+        await Expect(result).ToContainTextAsync("アーカイブ済みです。");
+        await Expect(result).Not.ToContainTextAsync("2026-08-09");
+        await result.GetByRole(AriaRole.Button, new() { Name = "復元", Exact = true }).ClickAsync();
+        Assert.NotNull(restoreRequest);
+        Assert.Equal($$"""{"schema_version":"local-archive-action.v1","action":"restore","target_kind":"session","targets":[{"target_id":"{{searchedSession}}","expected_revision":3}]}""", restoreRequest.PostData);
+
+        foreach (var state in new[] { "active", "missing", "wrong", "busy", "failure" })
+        {
+            mode = state;
+            await search.FillAsync("");
+            await search.FillAsync(searchedSession);
+            var expected = state switch
+            {
+                "active" => "このセッションはアクティブで、アーカイブされていません。",
+                "missing" => "セッションが見つかりません。",
+                "wrong" => "検索結果が指定したセッションと一致しません。",
+                "busy" => "保存先が使用中です。しばらくしてからもう一度お試しください。",
+                _ => "セッションを読み込めませんでした。",
+            };
+            await Expect(result).ToHaveTextAsync(expected);
+        }
+        await Expect(result).Not.ToContainTextAsync("SECRET_");
+        Assert.Equal(6, directCalls);
+    }
+
+    [Fact]
+    public async Task Shell_UnifiedSettings_ArchivedSessionExactSearchPreservesListCursorAndDropsStaleResponses()
+    {
+        const string listedSession = "01890f65-4c31-7f42-8a7d-111111111111";
+        const string searchedSession = "01890f65-4c31-7f42-8a7d-222222222222";
+        const string replacementSession = "01890f65-4c31-7f42-8a7d-333333333333";
+        const string leaveSession = "01890f65-4c31-7f42-8a7d-444444444444";
+        const string closeSession = "01890f65-4c31-7f42-8a7d-555555555555";
+        var paginationCursor = new string('A', 136);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.AddInitScriptAsync("""
+            window.__archiveExactAbortCount = 0;
+            const originalFetch = window.fetch;
+            window.fetch = (input, init = {}) => {
+              const url = typeof input === 'string' ? input : input.url;
+              if (url.includes('/api/local-monitor/v1/archive?') && init.signal)
+                init.signal.addEventListener('abort', () => window.__archiveExactAbortCount++);
+              return originalFetch(input, init);
+            };
+            """);
+        await page.RouteAsync("**/api/local-monitor/v1/archived-items?target_kind=session&limit=50", route => route.FulfillAsync(new()
+        {
+            Status = 200, ContentType = "application/json",
+            Body = $$"""{"schema_version":"local-archived-items.response.v1","target_kind":"session","items":[{"target_id":"{{listedSession}}","state":"archived","revision":1,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00"}],"next_cursor":"{{paginationCursor}}"}""",
+        }));
+        var cursorCalls = 0;
+        await page.RouteAsync($"**/api/local-monitor/v1/archived-items?target_kind=session&limit=50&after={paginationCursor}", route =>
+        {
+            cursorCalls++;
+            return route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = "{\"schema_version\":\"local-archived-items.response.v1\",\"target_kind\":\"session\",\"items\":[],\"next_cursor\":null}" });
+        });
+        var releases = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal)
+        {
+            [searchedSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [replacementSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [leaveSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [closeSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var started = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal)
+        {
+            [searchedSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [replacementSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [leaveSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [closeSession] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        await page.RouteAsync("**/api/local-monitor/v1/archive?target_kind=session&target_id=*", async route =>
+        {
+            var id = route.Request.Url.Split("target_id=", StringSplitOptions.None)[1];
+            started[id].TrySetResult();
+            await releases[id].Task;
+            try
+            {
+                await route.FulfillAsync(new() { Status = 200, ContentType = "application/json", Body = $$"""{"schema_version":"local-archive.response.v1","target_kind":"session","target_id":"{{id}}","state":"archived","revision":1,"archived_at":"2026-08-09T12:34:56.1234567+00:00","updated_at":"2026-08-09T12:34:56.1234567+00:00"}""" });
+            }
+            catch (PlaywrightException) { }
+        });
+
+        await page.GotoAsync($"{host.Url}/sessions?settings=archive", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+        var archive = page.Locator("[data-settings-archived-sessions]");
+        var search = page.GetByRole(AriaRole.Searchbox, new() { Name = "アーカイブ済みセッションID" });
+        var result = page.Locator("[data-settings-archived-session-search-result]");
+        var more = archive.GetByRole(AriaRole.Button, new() { Name = "さらに読み込む" });
+        await Expect(archive.GetByRole(AriaRole.Link, new() { Name = listedSession, Exact = true })).ToBeVisibleAsync();
+        await Expect(more).ToBeEnabledAsync();
+
+        await search.FillAsync(searchedSession);
+        await started[searchedSession].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await search.FillAsync(replacementSession);
+        await started[replacementSession].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releases[searchedSession].TrySetResult();
+        await Expect(result).Not.ToContainTextAsync(searchedSession);
+        await search.FillAsync("");
+        releases[replacementSession].TrySetResult();
+        await Expect(result).ToBeEmptyAsync();
+        await Expect(archive.GetByRole(AriaRole.Link, new() { Name = listedSession, Exact = true })).ToBeVisibleAsync();
+        await Expect(more).ToBeEnabledAsync();
+        await more.ClickAsync();
+        Assert.Equal(1, cursorCalls);
+
+        await search.FillAsync(leaveSession);
+        await started[leaveSession].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await page.Locator("[data-settings-navigation='state']").ClickAsync();
+        await page.Locator("[data-settings-navigation='archive']").ClickAsync();
+        await Expect(result).ToBeEmptyAsync();
+        releases[leaveSession].TrySetResult();
+        await search.FillAsync(closeSession);
+        await started[closeSession].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await page.Locator("#settings-modal-close").ClickAsync();
+        await Expect(page.Locator("#settings-modal")).ToBeHiddenAsync();
+        releases[closeSession].TrySetResult();
+        Assert.True(await page.EvaluateAsync<int>("window.__archiveExactAbortCount") >= 4);
+    }
+
+    [Fact]
     public async Task Shell_UnifiedSettings_ArchivePaginationCancelsStalePagesAndSerializesLoadMore()
     {
         const string firstSession = "01890f65-4c31-7f42-8a7d-111111111111";
