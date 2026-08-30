@@ -114,7 +114,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     {
         try
         {
-            var current = await ReadAiProjectionAsync(snapshot.SessionId, snapshot.NodeId, token).ConfigureAwait(false);
+            var current = await ReadAiProjectionAsync(snapshot.SessionId!, snapshot.NodeId, token).ConfigureAwait(false);
             return string.Equals(current.Revision, snapshot.Revision, StringComparison.Ordinal)
                 && string.Equals(current.PayloadSha256, snapshot.PayloadSha256, StringComparison.Ordinal);
         }

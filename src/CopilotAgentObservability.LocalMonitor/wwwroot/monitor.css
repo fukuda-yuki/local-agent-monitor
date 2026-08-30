@@ -4314,6 +4314,32 @@ a.kpi-card:hover {
   outline-offset: 2px;
 }
 
+#session-ai-dialog {
+  background: var(--surface-raised, #161b22);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 10px;
+  color: inherit;
+  max-height: calc(100vh - 32px);
+  max-width: min(760px, calc(100vw - 32px));
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 20px;
+  width: 100%;
+}
+#session-ai-preview-content,
+#session-ai-result,
+[data-compare-ai-result] { min-width: 0; overflow-wrap: anywhere; }
+#session-ai-preview-content ul,
+#session-ai-result ul,
+[data-compare-ai-result] ul { padding-inline-start: 24px; }
+[data-compare-ai] { border-top: 1px solid var(--border, #30363d); margin-top: 16px; padding-top: 16px; }
+[data-compare-ai] :focus-visible,
+#session-ai-dialog :focus-visible { outline: 2px solid var(--focus, #58a6ff); outline-offset: 2px; }
+
+@media (max-width: 560px) {
+  #session-ai-dialog { box-sizing: border-box; max-height: calc(100vh - 16px); max-width: calc(100vw - 16px); padding: 12px; }
+}
+
 @media (max-width: 850px) {
   .local-monitor-session-explorer-filters {
     grid-template-columns: repeat(4, minmax(0, 1fr));

@@ -17,6 +17,13 @@
     </header>
     <p id="repository-compare-status" role="status" aria-live="polite">比較結果を読み込んでいます。</p>
     <div class="local-monitor-repository-compare-body" data-compare-sections></div>
+    <section data-compare-ai hidden aria-labelledby="repository-compare-ai-title">
+        <h2 id="repository-compare-ai-title">比較のAI解釈</h2>
+        <button type="button" data-compare-ai-start>AIで解釈</button>
+        <button type="button" data-compare-ai-cancel hidden>キャンセル</button>
+        <p data-compare-ai-status role="status" aria-live="polite"></p>
+        <div data-compare-ai-result></div>
+    </section>
 
     <dialog id="repository-compare-evidence-dialog" class="local-monitor-comparison-preview-dialog" aria-labelledby="repository-compare-evidence-title" aria-describedby="repository-compare-evidence-status">
         <h2 id="repository-compare-evidence-title">根拠</h2>

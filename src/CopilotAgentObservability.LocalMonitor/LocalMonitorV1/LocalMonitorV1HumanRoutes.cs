@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 
@@ -46,6 +47,17 @@ internal static class LocalMonitorV1HumanRoutes
     }
 
     internal static Task RetireTraceListAsync(HttpContext context) =>
+        Empty(context, StatusCodes.Status404NotFound);
+
+    internal static bool IsRetiredHistoricalAnalysis(HttpContext context)
+    {
+        var rawPath = RawPath(context);
+        return string.Equals(rawPath, "/historical-analysis", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(rawPath, "/historical-analysis/", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(rawPath, "/monitor-historical-analysis.js", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static Task RetireHistoricalAnalysisAsync(HttpContext context) =>
         Empty(context, StatusCodes.Status404NotFound);
 
     internal static Task<bool> TryDispatchUnavailableAssetAsync(HttpContext context, IFileProvider webRootFileProvider)
@@ -131,7 +143,8 @@ internal static class LocalMonitorV1HumanRoutes
     internal static async Task<bool> TryDispatchAsync(
         HttpContext context,
         ILocalRepositoryScopeSnapshotService scopeService,
-        ILocalRepositorySessionDetailSnapshotService detailService)
+        ILocalRepositorySessionDetailSnapshotService detailService,
+        TimeProvider timeProvider)
     {
         if (!IsCandidate(context)) return false;
 
@@ -179,6 +192,7 @@ internal static class LocalMonitorV1HumanRoutes
             context.RequestServices.GetRequiredService<ILocalMonitorV1ComparisonApplication>(),
             context.RequestServices.GetRequiredService<ILocalAiAnalysisApplicationV1>(),
             context.RequestServices.GetRequiredService<IRazorViewEngine>(),
+            timeProvider,
             context.RequestAborted);
         await Page(context, resolution.Model, resolution.StatusCode);
         return true;
@@ -216,6 +230,7 @@ internal static class LocalMonitorV1HumanRoutes
         ILocalMonitorV1ComparisonApplication comparisonApplication,
         ILocalAiAnalysisApplicationV1 localAiApplication,
         IRazorViewEngine viewEngine,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         LocalRepositoryScopeSnapshot? scopeSnapshot = null;
@@ -232,6 +247,19 @@ internal static class LocalMonitorV1HumanRoutes
                     break;
                 case LocalMonitorV1PrimaryRouteKind.RepositorySessions:
                     scopeSnapshot = await scopeService.ReadAsync(new(LocalRepositoryScopeKind.Repository, path.RepositoryId), cancellationToken);
+                    if (query.AnalysisId is not null)
+                    {
+                        var run = await localAiApplication.ReadRunAsync(query.AnalysisId, cancellationToken);
+                        if (run is null
+                            || run.ScopeKind != "repository_selection"
+                            || run.RepositoryId != path.RepositoryId
+                            || run.ExpiresAt is null
+                            || run.ExpiresAt <= timeProvider.GetUtcNow())
+                        {
+                            return (LocalMonitorV1PageModel.ResolvedError(
+                                path, query, "analysis_run_not_found", "open_repository_selection"), 404);
+                        }
+                    }
                     break;
                 case LocalMonitorV1PrimaryRouteKind.SessionDetail:
                     var snapshot = await detailService.ReadDetailAsync(
@@ -283,6 +311,20 @@ internal static class LocalMonitorV1HumanRoutes
                         return (LocalMonitorV1PageModel.ResolvedError(path, query, "persistence_busy", "retry"), 503);
                     if (comparison.StatusCode != 200)
                         return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
+                    if (query.AnalysisId is not null)
+                    {
+                        var run = await localAiApplication.ReadRunAsync(query.AnalysisId, cancellationToken);
+                        if (run is null
+                            || run.ScopeKind != "comparison"
+                            || run.RepositoryId != path.RepositoryId
+                            || run.ComparisonId != path.ComparisonId
+                            || run.ExpiresAt is null
+                            || run.ExpiresAt <= timeProvider.GetUtcNow())
+                        {
+                            return (LocalMonitorV1PageModel.ResolvedError(
+                                path, query, "analysis_run_not_found", "open_repository_selection"), 404);
+                        }
+                    }
                     break;
             }
         }
@@ -307,6 +349,10 @@ internal static class LocalMonitorV1HumanRoutes
             return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
         }
         catch (LocalRepositoryScopeSnapshotException)
+        {
+            return (LocalMonitorV1PageModel.ResolvedError(path, query, "persistence_busy", "retry"), 503);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
             return (LocalMonitorV1PageModel.ResolvedError(path, query, "persistence_busy", "retry"), 503);
         }

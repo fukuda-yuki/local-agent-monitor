@@ -5,9 +5,10 @@
   if (!host) return;
 
   const SETTINGS = new Set(["state", "receiver", "ai", "repositories", "archive", "storage", "diagnostics"]);
-  const EXPLORER_KEYS = new Set(["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope", "cursor", "mode", "settings"]);
+  const EXPLORER_KEYS = new Set(["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope", "cursor", "mode", "analysis", "settings"]);
   const SESSION_KEYS = new Set(["execution", "node", "analysis", "settings"]);
   const SELECTION_KEYS = new Set(["settings"]);
+  const COMPARISON_KEYS = new Set(["analysis", "settings"]);
   const FORBIDDEN = new Set(["q", "model", "limit", "draft", "raw", "repository_url", "repository_path", "search"]);
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const NODE = /^node-[0-9a-f]{32}$/;
@@ -68,8 +69,10 @@
   });
 
   function allowedKeys() {
-    if (["RepositorySessions", "AllSessions", "UnassignedSessions"].includes(routeKind)) return EXPLORER_KEYS;
+    if (routeKind === "RepositorySessions") return EXPLORER_KEYS;
+    if (["AllSessions", "UnassignedSessions"].includes(routeKind)) return new Set([...EXPLORER_KEYS].filter(key => key !== "analysis"));
     if (routeKind === "SessionDetail") return SESSION_KEYS;
+    if (routeKind === "ComparisonDetail") return COMPARISON_KEYS;
     return SELECTION_KEYS;
   }
 
@@ -187,8 +190,8 @@
     const order = routeKind === "SessionDetail"
       ? ["execution", "node", "analysis", "settings"]
       : ["RepositorySessions", "AllSessions", "UnassignedSessions"].includes(routeKind)
-        ? ["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope", "cursor", "mode", "settings"]
-        : ["settings"];
+        ? ["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope", "cursor", "mode", "analysis", "settings"]
+        : routeKind === "ComparisonDetail" ? ["analysis", "settings"] : ["settings"];
     for (const key of order) append(parts, key, state[key]);
     return window.location.pathname + (parts.length ? `?${parts.join("&")}` : "");
   }

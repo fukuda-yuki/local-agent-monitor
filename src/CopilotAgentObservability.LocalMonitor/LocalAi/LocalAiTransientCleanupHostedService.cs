@@ -2,13 +2,13 @@ using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
-internal sealed class LocalAiNodeCleanupHostedService(
+internal sealed class LocalAiTransientCleanupHostedService(
     string databasePath,
     TimeProvider? timeProvider = null) : BackgroundService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
 
-    internal int RunOnce() => LocalAiAnalysisStoreV1.DeleteExpiredNodeRunsIfPresent(databasePath,clock.GetUtcNow());
+    internal int RunOnce() => LocalAiAnalysisStoreV1.DeleteExpiredTransientRunsIfPresent(databasePath,clock.GetUtcNow());
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

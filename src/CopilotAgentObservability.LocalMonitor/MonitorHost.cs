@@ -62,7 +62,6 @@ internal static class MonitorHost
         "/backup-restore",
         "/costs",
         "/diagnostics",
-        "/historical-analysis",
         "/historical-import",
         "/ingestions",
         "/sanitized-import",
@@ -76,7 +75,6 @@ internal static class MonitorHost
         "/monitor-drawer.js",
         "/monitor-error-mode.js",
         "/monitor-flow.js",
-        "/monitor-historical-analysis.js",
         "/monitor-historical-import.js",
         "/monitor-inspector.js",
         "/monitor-overview.js",
@@ -543,7 +541,7 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
-        builder.Services.AddHostedService(_ => new LocalAiNodeCleanupHostedService(options.DatabasePath,timeProvider));
+        builder.Services.AddHostedService(_ => new LocalAiTransientCleanupHostedService(options.DatabasePath,timeProvider));
         if (!options.SanitizedOnly)
         {
             var repositoryExistenceAuthority = SqliteLocalRepositoryTargetExistenceAuthority.Instance;
@@ -635,7 +633,9 @@ internal static class MonitorHost
                         runRepository,
                         providerAdapter,
                         localAiRawReader.ReadAsync,
-                        timeProvider));
+                        timeProvider,
+                        new LocalAiComparisonSnapshotAdapterV1(services.GetRequiredService<SqliteLocalComparisonStore>()),
+                        new LocalAiRepositorySnapshotAdapterV1(services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(),services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),services.GetRequiredService<IHistoricalEvidenceSnapshotSourceV1>(),timeProvider)));
                 if (testOptions?.LocalAiAnalysisApplication is null)
                     builder.Services.AddHostedService(services =>
                         (LocalAiAnalysisApplicationV1)services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
@@ -967,6 +967,11 @@ internal static class MonitorHost
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
+            if (LocalMonitorV1HumanRoutes.IsRetiredHistoricalAnalysis(context))
+            {
+                await LocalMonitorV1HumanRoutes.RetireHistoricalAnalysisAsync(context);
+                return;
+            }
             var requestPath = context.Request.Path.Value ?? string.Empty;
             var settingsAiReadinessPath = !options.SanitizedOnly
                 && string.Equals(requestPath, "/api/local-monitor/v1/settings/ai-readiness", StringComparison.Ordinal);
@@ -1152,7 +1157,7 @@ internal static class MonitorHost
                 if (await LocalMonitorV1HumanRoutes.TryDispatchUnavailableAssetAsync(
                         context,
                         app.Environment.WebRootFileProvider)) return;
-                if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService)) return;
+                if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService, timeProvider)) return;
                 await next(context);
             });
             LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);

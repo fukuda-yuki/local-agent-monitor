@@ -4,6 +4,9 @@
   if (!root || !window.LocalMonitorV1FactState) return;
 
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const RESULT_MAXIMUM_BYTES = 1_048_576;
+  const RUN_MAXIMUM_BYTES = RESULT_MAXIMUM_BYTES + 4_096;
+  const SMALL_RESPONSE_MAXIMUM_BYTES = 4_096;
   const SHA256 = /^[0-9a-f]{64}$/;
   const NODE = /^node-[0-9a-f]{32}$/;
   const SECTIONS = [
@@ -30,13 +33,92 @@
   const evidenceItems = root.querySelector("[data-compare-evidence-items]");
   const evidenceMore = root.querySelector("#repository-compare-evidence-more");
   const evidenceClose = root.querySelector("#repository-compare-evidence-close");
+  const aiSurface = root.querySelector("[data-compare-ai]");
+  const aiStart = root.querySelector("[data-compare-ai-start]");
+  const aiCancel = root.querySelector("[data-compare-ai-cancel]");
+  const aiStatus = root.querySelector("[data-compare-ai-status]");
+  const aiResult = root.querySelector("[data-compare-ai-result]");
   const repositoryId = root.dataset.repositoryId;
   const comparisonId = root.dataset.comparisonId;
   if (!UUID_V7.test(repositoryId ?? "") || !UUID_V7.test(comparisonId ?? "")) return;
   const base = `/api/local-monitor/v1/repositories/${repositoryId}/comparisons/${comparisonId}`;
+  let activeAiRun = null;
+  let aiGeneration = 0;
+  let restoredAiRun = null;
+  let aiCancelFailed = false;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && Object.keys(value).every((key, index) => key === keys[index]);
+  const exactSet = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  function validateJsonWire(text) {
+    const stack = []; let quoted = false; let escaped = false; let start = -1;
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (quoted) {
+        if (escaped) { escaped = false; continue; }
+        if (character === "\\") { escaped = true; continue; }
+        if (character !== "\"") continue;
+        quoted = false;
+        if (start >= 0) {
+          let next = index + 1; while (/\s/.test(text[next] ?? "")) next++;
+          if (text[next] === ":") { const owner = stack.at(-1); if (!owner || owner.type !== "object") throw new TypeError("invalid json"); const key = JSON.parse(text.slice(start, index + 1)); if (owner.keys.has(key)) throw new TypeError("duplicate json key"); owner.keys.add(key); }
+        }
+        continue;
+      }
+      if (character === "\"") { quoted = true; start = index; }
+      else if (character === "{" || character === "[") { stack.push({ type: character === "{" ? "object" : "array", keys: new Set() }); if (stack.length > 16) throw new TypeError("json too deep"); }
+      else if (character === "}" || character === "]") { const owner = stack.pop(); if (!owner || owner.type !== (character === "}" ? "object" : "array")) throw new TypeError("invalid json"); }
+    }
+    if (quoted || stack.length) throw new TypeError("invalid json");
+  }
+  function topLevelValueSpan(text, propertyName) {
+    let index = 0; while (/\s/.test(text[index] ?? "")) index++;
+    if (text[index++] !== "{") return null;
+    while (index < text.length) {
+      while (/\s/.test(text[index] ?? "")) index++;
+      if (text[index] === "}") return null;
+      if (text[index] !== "\"") return null;
+      const keyStart = index++;
+      let escaped = false;
+      while (index < text.length) {
+        const character = text[index++];
+        if (escaped) { escaped = false; continue; }
+        if (character === "\\") { escaped = true; continue; }
+        if (character === "\"") break;
+      }
+      const key = JSON.parse(text.slice(keyStart, index));
+      while (/\s/.test(text[index] ?? "")) index++;
+      if (text[index++] !== ":") return null;
+      while (/\s/.test(text[index] ?? "")) index++;
+      const valueStart = index;
+      let quoted = false; escaped = false; let depth = 0;
+      for (; index < text.length; index++) {
+        const character = text[index];
+        if (quoted) {
+          if (escaped) { escaped = false; continue; }
+          if (character === "\\") { escaped = true; continue; }
+          if (character === "\"") quoted = false;
+          continue;
+        }
+        if (character === "\"") quoted = true;
+        else if (character === "{" || character === "[") depth++;
+        else if (character === "}" || character === "]") {
+          if (depth > 0) depth--;
+          else if (character === "}") break;
+        } else if (character === "," && depth === 0) break;
+      }
+      let valueEnd = index; while (valueEnd > valueStart && /\s/.test(text[valueEnd - 1])) valueEnd--;
+      if (key === propertyName) return { start: valueStart, end: valueEnd };
+      if (text[index] === ",") index++;
+    }
+    return null;
+  }
+  async function readStrictJson(response, maximumBytes, includeText = false) {
+    const bytes = new Uint8Array(await response.arrayBuffer()); if (bytes.length > maximumBytes) throw new TypeError("json too large");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); validateJsonWire(text); const value = JSON.parse(text);
+    return includeText ? { value, text, resultSpan: topLevelValueSpan(text, "result") } : value;
+  }
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -297,11 +379,241 @@
   evidenceClose.addEventListener("click", closeEvidence);
   evidenceMore.addEventListener("click", () => { if (state.evidenceCursor) loadEvidence(true); });
   evidenceDialog.addEventListener("cancel", event => { event.preventDefault(); closeEvidence(); });
-  window.addEventListener("pagehide", () => { state.controller?.abort(); closeEvidence(); });
+
+  const AI_STATES = Object.freeze({
+    queued: "AI解釈を待っています。", running: "AIが比較を解釈しています。",
+    succeeded: "AI解釈が完了しました。", zero_findings: "AIからの指摘はありませんでした。",
+    provider_failed: "AI provider で解釈できませんでした。", provider_partial: "不完全なAI結果のため表示できません。",
+    timed_out: "AI解釈がタイムアウトしました。", canceled: "AI解釈をキャンセルしました。",
+    stale_snapshot: "比較の保存期間またはスナップショットが更新されたため表示できません。",
+    invalid_result: "AI結果を安全に表示できません。", invalid_evidence: "AIの根拠を確認できないため表示できません。",
+    scope_too_large: "比較がAI解釈の上限を超えています。",
+  });
+
+  function appendAiField(target, label, value) {
+    if (value === null || value === undefined || value === "") return;
+    const row = element("p"); row.append(element("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
+  }
+
+  function aiEvidenceLink(reference) {
+    if (typeof reference !== "string") return null;
+    const match = /^\/sessions\/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:\?execution=([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:&node=(node-[0-9a-f]{32}))?|\?node=(node-[0-9a-f]{32}))?$/.exec(reference);
+    return match ? reference : null;
+  }
+
+  const RESULT_KEYS = ["scope", "snapshot", "summary", "findings", "improvement_suggestions", "limitations", "provenance"];
+  const FINDING_KEYS = ["finding_id", "title", "explanation", "evidence_state", "evidence_refs", "limitation"];
+  const SUGGESTION_KEYS = ["suggestion_id", "target_kind", "target_label", "concrete_change", "rationale", "expected_effect", "risks_or_limitations", "evidence_refs"];
+  const PROVENANCE_KEYS = ["provider", "model", "configuration_sha256", "prompt_template_version", "requested_at", "started_at", "completed_at", "snapshot_id", "snapshot_sha256", "coverage"];
+  const TARGET_KINDS = new Set(["instructions", "skill", "agent", "subagent_input", "tool_configuration"]);
+  const HASH = /^[0-9a-f]{64}$/;
+  const nonblank = value => typeof value === "string" && value.trim().length > 0;
+  const timestamp = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}(?:Z|[+-]\d{2}:\d{2})$/.test(value) && !Number.isNaN(Date.parse(value));
+
+  function validateAiRefs(value, accepted) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 16) return false;
+    const local = new Set();
+    for (const reference of value) {
+      const href = aiEvidenceLink(reference);
+      if (!href || local.has(href)) return false;
+      local.add(href);
+      accepted.add(href);
+    }
+    return true;
+  }
+
+  function validateAiResult(result) {
+    if (!exactSet(result, RESULT_KEYS) || new TextEncoder().encode(JSON.stringify(result)).length > RESULT_MAXIMUM_BYTES
+        || !exactSet(result.scope, ["kind", "repository_id", "comparison_id", "anchor_id"])
+        || result.scope.kind !== "comparison" || result.scope.repository_id !== repositoryId
+        || result.scope.comparison_id !== comparisonId || result.scope.anchor_id !== comparisonId
+        || !exactSet(result.snapshot, ["snapshot_id", "payload_sha256"])
+        || !UUID_V7.test(result.snapshot.snapshot_id ?? "") || !HASH.test(result.snapshot.payload_sha256 ?? "")
+        || typeof result.summary !== "string" || !Array.isArray(result.findings)
+        || !Array.isArray(result.improvement_suggestions) || !Array.isArray(result.limitations)
+        || result.limitations.some(item => typeof item !== "string") || !exactSet(result.provenance, PROVENANCE_KEYS)) return null;
+    const provenance = result.provenance;
+    if (!["provider", "model", "configuration_sha256", "prompt_template_version", "requested_at", "started_at", "completed_at", "snapshot_id", "snapshot_sha256"].every(key => nonblank(provenance[key]))
+        || !HASH.test(provenance.configuration_sha256) || !HASH.test(provenance.snapshot_sha256)
+        || !UUID_V7.test(provenance.snapshot_id) || provenance.snapshot_id !== result.snapshot.snapshot_id
+        || !timestamp(provenance.requested_at) || !timestamp(provenance.started_at) || !timestamp(provenance.completed_at)
+        || Date.parse(provenance.requested_at) > Date.parse(provenance.started_at) || Date.parse(provenance.started_at) > Date.parse(provenance.completed_at)
+        || !exactSet(provenance.coverage, ["included", "excluded", "content_available"])
+        || !Number.isInteger(provenance.coverage.included) || provenance.coverage.included < 0
+        || !Number.isInteger(provenance.coverage.excluded) || provenance.coverage.excluded < 0
+        || typeof provenance.coverage.content_available !== "boolean") return null;
+    const accepted = new Set();
+    for (const finding of result.findings) {
+      if (!exactSet(finding, FINDING_KEYS) || !["finding_id", "title", "explanation", "limitation"].every(key => nonblank(finding[key]))
+          || !["supported", "limited"].includes(finding.evidence_state) || !validateAiRefs(finding.evidence_refs, accepted)) return null;
+    }
+    for (const suggestion of result.improvement_suggestions) {
+      if (!exactSet(suggestion, SUGGESTION_KEYS) || !["suggestion_id", "target_kind", "target_label", "concrete_change", "rationale", "expected_effect", "risks_or_limitations"].every(key => nonblank(suggestion[key]))
+          || !TARGET_KINDS.has(suggestion.target_kind) || !validateAiRefs(suggestion.evidence_refs, accepted)) return null;
+    }
+    return [...accepted];
+  }
+
+  function appendAiEvidence(target, references) {
+    for (const reference of Array.isArray(references) ? references : []) {
+      const href = aiEvidenceLink(reference);
+      if (!href) continue;
+      const link = element("a", null, "正確な根拠を開く"); link.href = href; target.append(link);
+    }
+  }
+
+  function renderAiResult(result) {
+    aiResult.replaceChildren();
+    const acceptedEvidence = validateAiResult(result);
+    if (!acceptedEvidence) {
+      aiStatus.textContent = AI_STATES.invalid_result; return false;
+    }
+    aiResult.append(element("h3", null, "AIによる解釈"));
+    if (result.scope && typeof result.scope === "object") {
+      const scope = element("section"); scope.append(element("h4", null, "対象範囲"));
+      for (const [key, label] of [["kind", "scope"], ["repository_id", "Repository"], ["comparison_id", "comparison"], ["anchor_id", "anchor"]]) appendAiField(scope, label, result.scope[key]);
+      aiResult.append(scope);
+    }
+    if (result.snapshot && typeof result.snapshot === "object") {
+      const snapshot = element("section"); snapshot.append(element("h4", null, "スナップショット"));
+      appendAiField(snapshot, "snapshot", result.snapshot.snapshot_id); appendAiField(snapshot, "payload SHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
+    }
+    aiResult.append(element("h4", null, "要約"), element("p", null, result.summary));
+    if (result.findings.length) aiResult.append(element("h4", null, "指摘（AIによる解釈）"));
+    for (const finding of result.findings) {
+      const article = element("article"); article.append(element("h5", null, String(finding.title ?? "指摘")));
+      for (const [key, label] of [["explanation", "解釈"], ["evidence_state", "根拠の状態"], ["limitation", "制約"]]) appendAiField(article, label, finding[key]);
+      appendAiEvidence(article, finding.evidence_refs); aiResult.append(article);
+    }
+    if (result.improvement_suggestions.length) aiResult.append(element("h4", null, "改善案（AIによる提案）"));
+    for (const suggestion of result.improvement_suggestions) {
+      const article = element("article");
+      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "予想（決定的事実ではありません）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
+      appendAiEvidence(article, suggestion.evidence_refs); aiResult.append(article);
+    }
+    if (result.limitations.length) { aiResult.append(element("h4", null, "制約")); for (const limitation of result.limitations) aiResult.append(element("p", null, String(limitation))); }
+    const evidence = element("section"); evidence.append(element("h4", null, "正確な根拠"));
+    const evidenceList = element("ul"); for (const href of acceptedEvidence) { const item = element("li"); const link = element("a", null, href); link.href = href; item.append(link); evidenceList.append(item); }
+    evidence.append(evidenceList); aiResult.append(evidence);
+    if (result.provenance && typeof result.provenance === "object") {
+      const provenance = element("section"); provenance.append(element("h4", null, "来歴"));
+      for (const [key, label] of [["provider", "provider"], ["model", "model"], ["configuration_sha256", "configuration"], ["prompt_template_version", "template"], ["snapshot_id", "snapshot"], ["snapshot_sha256", "snapshot SHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      aiResult.append(provenance);
+    }
+    return true;
+  }
+
+  function ownsComparisonRun(run, runId) {
+    if (!exactSet(run, ["run_id", "state", "scope_kind", "session_id", "node_id", "repository_id", "comparison_id", "error", "result"])
+        || run.run_id !== runId || !UUID_V7.test(run.run_id ?? "") || run.scope_kind !== "comparison"
+        || run.repository_id !== repositoryId || run.comparison_id !== comparisonId || run.session_id !== null || run.node_id !== null) return false;
+    const states = ["queued", "running", "succeeded", "zero_findings", "provider_failed", "provider_partial", "invalid_result", "invalid_evidence", "stale_snapshot", "scope_too_large", "timed_out", "canceled"];
+    if (!states.includes(run.state)) return false;
+    if (["queued", "running"].includes(run.state)) return run.error === null && run.result === null;
+    if (["succeeded", "zero_findings"].includes(run.state)) return run.error === null && run.result !== null && typeof run.result === "object";
+    return run.error === run.state && run.result === null;
+  }
+
+  async function pollAiRun(runId, generation) {
+    while (generation === aiGeneration && activeAiRun === runId) {
+      try {
+        const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { method: "GET", credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) throw new Error("poll_failed");
+        const wire = await readStrictJson(response, RUN_MAXIMUM_BYTES, true); const run = wire.value;
+        if (generation !== aiGeneration || activeAiRun !== runId) return;
+        if (!ownsComparisonRun(run, runId)) { activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
+        if (["succeeded", "zero_findings"].includes(run.state)) {
+          const span = wire.resultSpan;
+          if (!span || new TextEncoder().encode(wire.text.slice(span.start, span.end)).length > RESULT_MAXIMUM_BYTES) {
+            activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+          }
+        }
+        if (["succeeded", "zero_findings"].includes(run.state)
+            && (!validateAiResult(run.result) || (run.state === "zero_findings") !== (run.result.findings.length === 0))) {
+          activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+        }
+        if (!aiCancelFailed || !["queued", "running"].includes(run.state)) aiStatus.textContent = AI_STATES[run.state] ?? "AI解釈を表示できません。";
+        if (!["queued", "running"].includes(run.state)) {
+          activeAiRun = null; aiCancelFailed = false; aiCancel.hidden = true;
+          if (["succeeded", "zero_findings"].includes(run.state) && !renderAiResult(run.result)) return;
+          return;
+        }
+      } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiStatus.textContent = "AI解釈の状態を確認できません。再試行しています。"; }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+
+  async function startAi() {
+    aiResult.replaceChildren(); aiCancelFailed = false; aiCancel.disabled = false; aiStatus.textContent = "AI解釈を開始しています。"; aiStart.disabled = true;
+    try {
+      const response = await fetch("/api/local-monitor/v1/ai/comparison-runs", {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
+        body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
+      });
+      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
+      const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
+      activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
+      try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
+      await pollAiRun(activeAiRun, generation);
+    } catch { aiStatus.textContent = "AI解釈を開始できませんでした。"; }
+    finally { aiStart.disabled = false; }
+  }
+
+  async function restoreAi(runId) {
+    if (!UUID_V7.test(runId ?? "") || restoredAiRun === runId || activeAiRun === runId) return;
+    restoredAiRun = runId;
+    activeAiRun = runId; const generation = ++aiGeneration; aiCancel.hidden = false; await pollAiRun(runId, generation);
+  }
+
+  function validReadiness(value) {
+    const readinessStates = ["unconfigured", "configured_not_checked", "ready", "authentication_required", "unavailable", "check_failed"];
+    const checkResults = ["not_checked", "ready", "authentication_required", "unavailable", "check_failed"];
+    return exactSet(value, ["provider", "selected_model", "selected_configuration", "readiness_state", "last_check_result", "provider_egress_notice"])
+      && value.provider === "github_copilot" && (value.selected_model === null || nonblank(value.selected_model))
+      && (value.selected_configuration === null || nonblank(value.selected_configuration))
+      && readinessStates.includes(value.readiness_state) && checkResults.includes(value.last_check_result)
+      && value.provider_egress_notice === "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"
+      && (value.readiness_state !== "ready" || value.last_check_result === "ready" && nonblank(value.selected_model) && nonblank(value.selected_configuration));
+  }
+
+  async function checkAiReadiness() {
+    try {
+      const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { method: "GET", credentials: "same-origin", cache: "no-store" });
+      if (!response.ok) return;
+      const readiness = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES);
+      if (!validReadiness(readiness) || readiness.readiness_state !== "ready") return;
+      aiSurface.hidden = false;
+      const route = window.LocalMonitorV1History?.current(); if (route?.analysis) await restoreAi(route.analysis);
+    } catch { /* deterministic Compare remains available without AI */ }
+  }
+
+  aiStart.addEventListener("click", startAi);
+  aiCancel.addEventListener("click", async () => {
+    if (!activeAiRun || aiCancel.disabled) return;
+    aiCancel.disabled = true;
+    const runId = activeAiRun;
+    const generation = aiGeneration;
+    try {
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}/cancel`, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: "{}" });
+      if (generation !== aiGeneration || activeAiRun !== runId) return;
+      const value = response.ok ? await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES) : null;
+      if (generation !== aiGeneration || activeAiRun !== runId) return;
+      if (!response.ok || !exactSet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; return; }
+      aiGeneration++; activeAiRun = null; aiCancel.hidden = true; aiStatus.textContent = AI_STATES.canceled;
+    } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
+  });
+  document.addEventListener("cao-route-state", event => {
+    if (aiSurface.hidden) return;
+    const runId = event.detail?.analysis;
+    if (UUID_V7.test(runId ?? "")) { restoreAi(runId); return; }
+    if (restoredAiRun) { aiGeneration++; activeAiRun = null; restoredAiRun = null; aiCancel.hidden = true; aiCancel.disabled = false; aiStatus.textContent = ""; aiResult.replaceChildren(); }
+  });
+  window.addEventListener("pagehide", () => { state.controller?.abort(); aiGeneration++; closeEvidence(); });
 
   (async () => {
     const generation = ++state.generation; state.controller?.abort(); state.controller = new AbortController();
-    try { const snapshot = validateRead(await get(base, state.controller.signal)); if (generation === state.generation) renderRead(snapshot); }
+    try { const snapshot = validateRead(await get(base, state.controller.signal)); if (generation === state.generation) { renderRead(snapshot); await checkAiReadiness(); } }
     catch (error) {
       if (state.controller.signal.aborted || generation !== state.generation) return;
       status.textContent = error.code === "comparison_expired" ? "比較結果の保存期間が終了しました。" : "比較結果を読み込めませんでした。";

@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed record LocalAiProjectionNodeV1(
     string NodeId, string ExecutionId, string? ParentNodeId, IReadOnlyList<string> ExactReferences, JsonElement? Metadata = null,
     string? SanitizedSpanObservation = null, IReadOnlyList<string>? SanitizedSpanObservations = null);
-internal sealed record LocalAiRawEvidenceV1(string EvidenceId, string NodeId, LocalWorkspaceContentAvailability Locator);
+internal sealed record LocalAiRawEvidenceV1(string EvidenceId, string NodeId, LocalWorkspaceContentAvailability Locator, string? SessionId = null);
 
 internal sealed record LocalAiProjectionInputV1(
     string SessionId,
@@ -25,7 +25,7 @@ internal sealed record LocalAiProjectionContributionV1(LocalAiProjectionInputV1 
 internal sealed record LocalAiSnapshotProjectionV1(
     string SnapshotId,
     string ScopeKind,
-    string SessionId,
+    string? SessionId,
     string? NodeId,
     string AnchorId,
     string Revision,
@@ -33,7 +33,10 @@ internal sealed record LocalAiSnapshotProjectionV1(
     byte[] EvidenceIndexCanonicalJson,
     string PayloadSha256,
     IReadOnlySet<string> EvidenceIdentifiers,
-    IReadOnlyDictionary<string, LocalAiRawEvidenceV1>? RawEvidence = null);
+    IReadOnlyDictionary<string, LocalAiRawEvidenceV1>? RawEvidence = null,
+    string? RepositoryId = null,
+    string? ComparisonId = null,
+    DateTimeOffset? ExpiresAt = null);
 
 internal sealed class LocalAiScopeTooLargeException : Exception
 {

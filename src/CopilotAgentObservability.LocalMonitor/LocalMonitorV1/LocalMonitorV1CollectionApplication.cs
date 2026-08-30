@@ -47,7 +47,7 @@ internal static class LocalMonitorV1CollectionApplication
     internal static byte[] SerializeSessions(LocalRepositoryScopeSnapshot snapshot, LocalMonitorV1SessionSearchRequest request, byte[] cursorKey, string? collectionRevisionOverride = null, string? itemRevisionOverride = null)
     {
         var rows = snapshot.Sessions
-            .Where(row => InScope(row, request) && Matches(row, request))
+            .Where(row => SelectorMatches(row, request))
             .Select(row => (Scope: row, Projection: (LocalWorkspaceProjectionRow)row.Session))
             .OrderBy(row => row.Projection.SortGroup)
             .ThenByDescending(row => row.Projection.SortEpochMilliseconds)
@@ -143,6 +143,8 @@ internal static class LocalMonitorV1CollectionApplication
             && Fact(p.CurrentSkillFilter ?? p.Activity.Skill, request.HasSkill) && Fact(p.Activity.Subagent, request.HasSubagent) && Fact(p.Activity.Error, request.HasError) && Fact(p.Activity.Retry, request.HasRetry)
             && (request.QueryNormalized is null || p.SearchTexts.Any(text => text.Contains(request.QueryNormalized, StringComparison.Ordinal)));
     }
+
+    internal static bool SelectorMatches(LocalRepositoryScopeSessionSnapshot row,LocalMonitorV1SessionSearchRequest request)=>InScope(row,request)&&Matches(row,request);
 
     private static bool Fact(LocalWorkspaceFact<long> fact, bool? wanted) => wanted is null
         || wanted == true && fact.State == "recorded" && fact.Value > 0

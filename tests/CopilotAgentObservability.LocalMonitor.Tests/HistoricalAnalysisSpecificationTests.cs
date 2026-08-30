@@ -15,7 +15,8 @@ public sealed class HistoricalAnalysisSpecificationTests
 
         Assert.All(
         [
-            "GET /historical-analysis",
+            "standalone `/historical-analysis` presentation",
+            "retired with empty 404 responses",
             "POST /api/historical-analysis/v1/preview",
             "POST /api/historical-analysis/v1/instruction-runs",
             "GET /api/historical-analysis/v1/instruction-runs/{analysisRunId}",
@@ -30,13 +31,12 @@ public sealed class HistoricalAnalysisSpecificationTests
             "Cache-Control: no-store",
             "strict unknown-field rejection",
             "no CORS",
-            "inert text",
-            "no browser storage",
+            "no browser state, storage, history, navigation",
             "no combined analyze-all action",
             "no heuristic lookup",
             "`selection.sanitized_only=false`",
             "before #72 owner access",
-            "After transient rendering, the only long-lived preview binding is exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`",
+            "Machine responses remain bounded repository-safe DTOs",
         ], required => Assert.Contains(required, normalizedSpecification, StringComparison.Ordinal));
     }
 
@@ -66,14 +66,9 @@ public sealed class HistoricalAnalysisSpecificationTests
             "before the #72 owner",
             security,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "長寿命 browser state は `extraction_id`、`raw_local_sha256`、`repository_safe_sha256` の3フィールドだけ",
-            requirements,
-            StringComparison.Ordinal);
-        const string BrowserBindingInvariant =
-            "long-lived browser state contains exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`";
-        Assert.Contains(BrowserBindingInvariant, specification.ReplaceLineEndings(" "), StringComparison.Ordinal);
-        Assert.Contains(BrowserBindingInvariant, security.ReplaceLineEndings(" "), StringComparison.Ordinal);
+        Assert.Contains("standalone `/historical-analysis` human page", requirements, StringComparison.Ordinal);
+        Assert.Contains("only active route family is `/api/historical-analysis/v1/*`", specification, StringComparison.Ordinal);
+        Assert.Contains("The retired surface creates no browser state or storage.", security, StringComparison.Ordinal);
     }
 
     [Fact]

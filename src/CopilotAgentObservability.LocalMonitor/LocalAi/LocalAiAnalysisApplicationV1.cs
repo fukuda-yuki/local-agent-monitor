@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
@@ -9,10 +10,11 @@ internal sealed record LocalAiPriorTurnV1(string Question, string Answer);
 internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, int TimeoutSeconds = 60,
     string? Question = null, IReadOnlyList<LocalAiPriorTurnV1>? PriorTurns = null);
 internal sealed record LocalAiStartResponseV1(string? RunId, string? ErrorCode);
-internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string SessionId,
+internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string? SessionId,
     string? NodeId, string? ErrorCode, byte[]? ResultJson = null, string? RequestedAt = null,
     string? StartedAt = null, string? Model = null, string? ConfigurationSha256 = null,
-    string? PromptTemplateVersion = null);
+    string? PromptTemplateVersion = null, string? RepositoryId = null, string? ComparisonId = null,
+    DateTimeOffset? ExpiresAt = null);
 internal sealed record LocalAiReportItemResponseV1(string RunId, string State, byte[]? ResultJson, string ContentState, bool SnapshotChanged);
 internal sealed record LocalAiReportPageResponseV1(IReadOnlyList<LocalAiReportItemResponseV1> Reports, string? NextCursor);
 
@@ -42,11 +44,21 @@ internal interface ILocalAiRunRepositoryV1
     bool Cancel(string runId);
     LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256);
 }
+internal interface ILocalAiAcceptedSnapshotRepositoryV1
+{
+    void StoreAccepted(LocalAiSnapshotProjectionV1 snapshot);
+    LocalAiSnapshotProjectionV1? ReadAccepted(string snapshotId);
+}
 
 internal interface ILocalAiAnalysisApplicationV1
 {
     ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token);
     ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token);
+    ValueTask<LocalAiStartResponseV1> StartComparisonAsync(LocalAiComparisonRunRequestV1 request, CancellationToken token) =>
+        ValueTask.FromResult(new LocalAiStartResponseV1(null, "provider_unavailable"));
+    ValueTask<LocalAiRepositoryPreviewResultV1> PreviewRepositoryAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)=>
+        ValueTask.FromException<LocalAiRepositoryPreviewResultV1>(new InvalidOperationException("provider_unavailable"));
+    ValueTask<LocalAiStartResponseV1> StartRepositoryAsync(LocalAiRepositoryRunRequestV1 request,CancellationToken token)=>ValueTask.FromResult(new LocalAiStartResponseV1(null,"provider_unavailable"));
     ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token);
     ValueTask<bool> CancelAsync(string runId, CancellationToken token);
     ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token);
@@ -58,7 +70,9 @@ internal sealed class LocalAiAnalysisApplicationV1(
     ILocalAiRunRepositoryV1 runs,
     ILocalAiProviderAdapterV1 provider,
     Func<string, LocalAiRawEvidenceV1, CancellationToken, ValueTask<byte[]>>? rawReader = null,
-    TimeProvider? timeProvider = null) : ILocalAiAnalysisApplicationV1, IHostedService
+    TimeProvider? timeProvider = null,
+    ILocalAiComparisonSnapshotAdapterV1? comparisons = null,
+    ILocalAiRepositorySnapshotAdapterV1? repositories = null) : ILocalAiAnalysisApplicationV1, IHostedService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
@@ -71,6 +85,46 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         ValidateTranscript(request);
         return StartAsync(request.SessionId, request.NodeId, request.TimeoutSeconds, request.Question, request.PriorTurns ?? [], token);
+    }
+
+    public async ValueTask<LocalAiStartResponseV1> StartComparisonAsync(LocalAiComparisonRunRequestV1 request, CancellationToken token)
+    {
+        if (comparisons is null) return new(null, "provider_unavailable");
+        return await StartProjectedAsync(request.TimeoutSeconds,
+            cancellationToken => ValueTask.FromResult(comparisons.Read(request.RepositoryId, request.ComparisonId, cancellationToken)), token).ConfigureAwait(false);
+    }
+    public async ValueTask<LocalAiRepositoryPreviewResultV1> PreviewRepositoryAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)
+    {
+        if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)throw new InvalidOperationException("provider_unavailable");
+        var preview=await repositories.PreviewAsync(request,token).ConfigureAwait(false);accepted.StoreAccepted(preview.Snapshot);return preview;
+    }
+    public async ValueTask<LocalAiStartResponseV1> StartRepositoryAsync(LocalAiRepositoryRunRequestV1 request,CancellationToken token)
+    {
+        if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)return new(null,"provider_unavailable");
+        LocalAiSnapshotProjectionV1? snapshot;try{snapshot=accepted.ReadAccepted(request.SnapshotId);}catch(SqliteException exception) when(exception.SqliteErrorCode is 5 or 6){return new(null,"persistence_busy");}catch(LocalRepositoryScopeSnapshotException exception){return new(null,exception.ErrorCode);}if(snapshot is null)return new(null,"snapshot_not_found");if(snapshot.ExpiresAt<=clock.GetUtcNow())return new(null,"snapshot_expired");if(snapshot.PayloadSha256!=request.PayloadSha256)return new(null,"stale_snapshot");
+        LocalAiSnapshotProjectionV1? current;
+        try{current=await repositories.RehydrateCurrentAsync(snapshot,token).ConfigureAwait(false);}
+        catch(LocalRepositoryScopeSnapshotException exception){return new(null,exception.ErrorCode);}
+        if(current is null)return new(null,"stale_snapshot");
+        return await StartProjectedAsync(request.TimeoutSeconds,_=>ValueTask.FromResult(current),token).ConfigureAwait(false);
+    }
+
+    private async ValueTask<LocalAiStartResponseV1> StartProjectedAsync(int timeout,
+        Func<CancellationToken, ValueTask<LocalAiSnapshotProjectionV1>> capture, CancellationToken token)
+    {
+        if (timeout is < 1 or > 600) return new(null, "invalid_request");
+        if (!await providerReady(token).ConfigureAwait(false)) return new(null, "provider_unavailable");
+        LocalAiSnapshotProjectionV1 snapshot;
+        try { snapshot = await capture(token).ConfigureAwait(false); }
+        catch (LocalAiScopeSnapshotException exception) { return new(null, exception.Error); }
+        catch (LocalAiScopeTooLargeException) { return new(null, "scope_too_large"); }
+        var run = runs.Create(snapshot, timeout); runs.Start(run.RunId);
+        var admissionId = Guid.CreateVersion7().ToString();
+        var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token)) { RunId=run.RunId };
+        lock (lifecycleGate) { if (!accepting) { runs.Cancel(run.RunId); admission.Cancellation.Dispose(); return new(null,"provider_unavailable"); } active.Add(admissionId,admission); }
+        admission.Cancellation.CancelAfter(TimeSpan.FromSeconds(timeout));
+        _ = ExecuteAsync(admissionId,admission,run.RunId,snapshot,null,[]);
+        return new(run.RunId,null);
     }
 
     private async ValueTask<LocalAiStartResponseV1> StartAsync(string sessionId, string? nodeId, int timeout,
@@ -137,11 +191,12 @@ internal sealed class LocalAiAnalysisApplicationV1(
         {
             var raw = new LocalAiRawReadCapabilityV1(snapshot.RawEvidence?.Keys ?? [],
                 (identifier, cancellationToken) => snapshot.RawEvidence?.TryGetValue(identifier, out var evidence) == true && rawReader is not null
-                    ? rawReader(snapshot.SessionId, evidence, cancellationToken)
+                    ? rawReader(evidence.SessionId ?? snapshot.SessionId!, evidence, cancellationToken)
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));
             var startedRun = runs.Read(runId);
             var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), admission.Cancellation.Token).ConfigureAwait(false);
-            if (!await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false))
+            if (snapshot.ScopeKind is "session" or "node" && !await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false)
+                || snapshot.ScopeKind=="repository_selection"&&repositories is not null&&!await repositories.IsCurrentAsync(snapshot,CancellationToken.None).ConfigureAwait(false))
                 runs.Fail(runId, "stale_snapshot");
             else
             {
@@ -237,9 +292,16 @@ internal static class LocalAiResultEnvelopeV1
                 || content.GetProperty("findings").ValueKind != JsonValueKind.Array
                 || content.GetProperty("improvement_suggestions").ValueKind != JsonValueKind.Array
                 || content.GetProperty("limitations").ValueKind != JsonValueKind.Array) return [];
+            object scope = snapshot.ScopeKind switch
+            {
+                "session" or "node" => new { kind=snapshot.ScopeKind, session_id=snapshot.SessionId, node_id=snapshot.NodeId, anchor_id=snapshot.AnchorId },
+                "repository_selection" => new { kind=snapshot.ScopeKind, repository_id=snapshot.RepositoryId, anchor_id=snapshot.AnchorId },
+                "comparison" => new { kind=snapshot.ScopeKind, repository_id=snapshot.RepositoryId, comparison_id=snapshot.ComparisonId, anchor_id=snapshot.AnchorId },
+                _ => throw new InvalidOperationException("local_ai_scope_invalid"),
+            };
             var entity = new
             {
-                scope = new { kind=snapshot.ScopeKind, session_id=snapshot.SessionId, node_id=snapshot.NodeId, anchor_id=snapshot.AnchorId },
+                scope,
                 snapshot = new { snapshot_id=snapshot.SnapshotId, payload_sha256=snapshot.PayloadSha256 },
                 summary = content.GetProperty("summary").Clone(),
                 findings = content.GetProperty("findings").Clone(),
