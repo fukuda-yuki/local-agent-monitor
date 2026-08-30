@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalInstructionAnalysis;
+using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
@@ -43,6 +44,7 @@ public sealed class SqliteRuntimeBackupService
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
+        ["local_ai_analysis"] = LocalAiAnalysisSchemaV1.Version,
         ["local_comparison"] = LocalComparisonSchemaV1.Version,
         ["local_repository_catalog"] = 1,
         ["local_workspace_projection"] = LocalWorkspaceProjectionSchemaV1.Version,
@@ -56,7 +58,7 @@ public sealed class SqliteRuntimeBackupService
         ["skill_projection"] = 1,
     };
     private static readonly IReadOnlyDictionary<string, int> InstalledArchiveComponents = SupportedComponents
-        .Where(component => !string.Equals(component.Key, "local_comparison", StringComparison.Ordinal))
+        .Where(component => component.Key is not ("local_comparison" or "local_ai_analysis"))
         .ToDictionary(component => component.Key, component => component.Value, StringComparer.Ordinal);
     private static readonly string[] RetentionStoreKinds = ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"];
     private static readonly string[] RetentionStates = ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed"];
@@ -1137,6 +1139,7 @@ public sealed class SqliteRuntimeBackupService
             checkpoint?.Invoke(RuntimeBackupCheckpoints.BeforeOnlineSnapshot);
             OnlineSnapshot(databasePath, snapshot);
             RemoveLocalComparisonsFromStaging(snapshot);
+            RemoveLocalAiNodesFromStaging(snapshot);
             checkpoint?.Invoke(RuntimeBackupCheckpoints.AfterOnlineSnapshot);
             var snapshotPreflight = PreflightForMigration(
                 snapshot,
@@ -1368,6 +1371,23 @@ public sealed class SqliteRuntimeBackupService
         ValidateIntegrity(connection);
     }
 
+    private static void RemoveLocalAiNodesFromStaging(string path)
+    {
+        using var connection = Open(path, SqliteOpenMode.ReadWrite);
+        if (!TableExists(connection, "local_ai_runs")) return;
+        using var transaction = connection.BeginTransaction(deferred: false);
+        foreach (var sql in new[]
+        {
+            "DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_runs WHERE scope_kind='node');",
+            "DELETE FROM local_ai_runs WHERE scope_kind='node';",
+            "DELETE FROM local_ai_snapshots WHERE scope_kind='node';",
+        })
+        {
+            using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText=sql; command.ExecuteNonQuery();
+        }
+        transaction.Commit(); ValidateIntegrity(connection);
+    }
+
     private void ValidateDatabaseMatchesManifest(string path, RuntimeBackupManifestData manifest)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: true);
@@ -1415,7 +1435,7 @@ public sealed class SqliteRuntimeBackupService
         ValidateIntegrity(connection);
         ValidateSchemaMetadataBounds(connection);
         var versions = ReadComponentVersions(connection);
-        if (versions.Count != InstalledArchiveComponents.Count
+        if (versions.Count != InstalledArchiveComponents.Count + (versions.ContainsKey("local_ai_analysis") ? 1 : 0)
             || InstalledArchiveComponents.Any(item => !versions.TryGetValue(item.Key, out var current) || current != item.Value))
             throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
         if (!ValidateExecutableObjects(connection, versions)) throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
@@ -1596,6 +1616,7 @@ public sealed class SqliteRuntimeBackupService
             || versions.ContainsKey("skill_invocation_snapshot")
             || versions.ContainsKey("local_workspace_projection")
             || versions.ContainsKey("local_comparison")
+            || versions.ContainsKey("local_ai_analysis")
             || workspaceShapeOnly)
         {
             if (versions.ContainsKey("local_repository_catalog")
@@ -1641,6 +1662,8 @@ public sealed class SqliteRuntimeBackupService
                         SqliteLocalRepositoryTargetExistenceAuthority.Instance);
                 if (versions.ContainsKey("skill_invocation_snapshot"))
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
+                if (versions.ContainsKey("local_ai_analysis") && !LocalAiAnalysisSchemaV1.IsValid(connection, componentTransaction))
+                    return false;
                 if (versions.ContainsKey("local_comparison"))
                     LocalComparisonSchemaV1.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
@@ -1916,6 +1939,12 @@ public sealed class SqliteRuntimeBackupService
         {
             foreach (var trigger in SkillInvocationSnapshotSchemaV1.TriggerDefinitions)
                 allowed[trigger.Name] = (trigger.Table, trigger.Sql);
+        }
+        if (versions.ContainsKey("local_ai_analysis"))
+        {
+            allowed["local_ai_snapshots_update_rejected"] = ("local_ai_snapshots", "CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots WHEN NOT (OLD.scope_kind='session' AND OLD.payload_json IS NOT NULL AND OLD.evidence_index_json IS NOT NULL AND NEW.payload_json IS NULL AND NEW.evidence_index_json IS NULL AND NEW.snapshot_id=OLD.snapshot_id AND NEW.scope_kind=OLD.scope_kind AND NEW.session_id=OLD.session_id AND NEW.node_id IS OLD.node_id AND NEW.anchor_id=OLD.anchor_id AND NEW.payload_sha256=OLD.payload_sha256 AND NEW.evidence_index_sha256=OLD.evidence_index_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END");
+            allowed["local_ai_results_update_rejected"] = ("local_ai_results", "CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results WHEN NOT (OLD.result_json IS NOT NULL AND NEW.result_json IS NULL AND NEW.result_id=OLD.result_id AND NEW.run_id=OLD.run_id AND NEW.result_sha256=OLD.result_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END");
+            allowed["local_ai_terminal_run_update_rejected"] = ("local_ai_runs", "CREATE TRIGGER local_ai_terminal_run_update_rejected BEFORE UPDATE ON local_ai_runs WHEN OLD.state NOT IN ('queued','running') BEGIN SELECT RAISE(ABORT,'local_ai_terminal_run_immutable'); END");
         }
         if (versions.ContainsKey("local_comparison"))
         {

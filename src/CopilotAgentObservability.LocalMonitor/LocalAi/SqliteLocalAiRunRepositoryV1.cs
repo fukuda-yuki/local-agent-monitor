@@ -2,22 +2,25 @@ using System.Globalization;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
 internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string model,
-    string configurationSha256, TimeProvider? timeProvider = null) : ILocalAiRunRepositoryV1
+    string configurationSha256, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null) : ILocalAiRunRepositoryV1
 {
-    private readonly LocalAiAnalysisStoreV1 store = new(databasePath);
+    private readonly LocalAiAnalysisStoreV1 store = new(databasePath, retentionCatalog, timeProvider);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
 
     internal static SqliteLocalAiRunRepositoryV1 Create(string databasePath, string model,
-        string configurationSha256, TimeProvider? timeProvider = null)
+        string configurationSha256, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null)
     {
         using var connection = Open(databasePath); LocalAiAnalysisSchemaV1.Ensure(connection);
-        return new(databasePath, model, configurationSha256, timeProvider);
+        return new(databasePath, model, configurationSha256, timeProvider, retentionCatalog);
     }
+
+    internal int CleanupExpiredNodes() => store.DeleteExpiredNodeRuns(clock.GetUtcNow());
 
     public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout)
     {

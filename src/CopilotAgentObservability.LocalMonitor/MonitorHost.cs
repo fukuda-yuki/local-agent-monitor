@@ -616,7 +616,8 @@ internal static class MonitorHost
                 var aiConfigurationHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
                     $"local-ai-v1\0{localAiOptions.DefaultModel}\0{localAiOptions.DefaultProfile}")));
                 var runRepository = SqliteLocalAiRunRepositoryV1.Create(
-                    options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider);
+                    options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider, retentionCatalog);
+                builder.Services.AddHostedService(_ => new LocalAiNodeCleanupHostedService(runRepository, timeProvider));
                 var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
                     localAiClientFactory, localAiOptions.DefaultModel);
                 var localAiRawReader = new LocalAiRetentionRawReaderV1(

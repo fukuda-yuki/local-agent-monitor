@@ -206,6 +206,30 @@ public sealed partial class RetentionCatalogStore
         catch (SqliteException) { throw new RetentionMigrationBlockedException(); }
     }
 
+    internal void RegisterLocalAiRaw(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string contentKind,
+        string contentId,
+        DateTimeOffset capturedAt,
+        byte[] ownerToken)
+    {
+        try
+        {
+            var capturedAtText = Timestamp(capturedAt);
+            var storeInstanceId = StoreId(connection, transaction);
+            var receipt = RetentionOwnershipReceipt.CreateLocalAi(new(
+                storeInstanceId, contentKind, contentId, capturedAtText,
+                capturedAt.UtcDateTime.Ticks, ownerToken));
+            Add(connection, transaction, storeInstanceId, RetentionStoreKind.AnalysisRunRaw,
+                $"local_ai:{contentKind}:{contentId}", capturedAtText, null, receipt,
+                timeProvider.GetUtcNow());
+        }
+        catch (RetentionMigrationBlockedException) { throw; }
+        catch (ArgumentException) { throw new RetentionMigrationBlockedException(); }
+        catch (SqliteException) { throw new RetentionMigrationBlockedException(); }
+    }
+
     internal void AssertAnalysisRunRawWritable(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -1067,9 +1091,8 @@ public sealed partial class RetentionCatalogStore
                 ? "SELECT COUNT(*) FROM session_event_content;"
                 : "SELECT 0;",
             RetentionStoreKind.RawRecord => "SELECT COUNT(*) FROM raw_records;",
-            RetentionStoreKind.AnalysisRunRaw => TableExists(connection, transaction, "monitor_analysis_runs")
-                ? "SELECT COUNT(*) FROM monitor_analysis_runs WHERE result_markdown IS NOT NULL OR error_message IS NOT NULL OR EXISTS(SELECT 1 FROM monitor_analysis_events e WHERE e.run_id=monitor_analysis_runs.id);"
-                : "SELECT 0;",
+            RetentionStoreKind.AnalysisRunRaw =>
+                $"SELECT {(TableExists(connection, transaction, "monitor_analysis_runs") ? "(SELECT COUNT(*) FROM monitor_analysis_runs WHERE result_markdown IS NOT NULL OR error_message IS NOT NULL OR EXISTS(SELECT 1 FROM monitor_analysis_events e WHERE e.run_id=monitor_analysis_runs.id))" : "0")} + {(TableExists(connection, transaction, "local_ai_snapshots") ? "(SELECT COUNT(*) FROM local_ai_snapshots WHERE scope_kind='session' AND payload_json IS NOT NULL AND evidence_index_json IS NOT NULL)+(SELECT COUNT(*) FROM local_ai_results x JOIN local_ai_runs r ON r.run_id=x.run_id WHERE r.scope_kind='session' AND x.result_json IS NOT NULL)" : "0")};",
             _ => "SELECT 0;"
         };
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
@@ -1207,6 +1230,12 @@ public sealed partial class RetentionCatalogStore
     {
         var catalogReceipt = CatalogReceipt(c, t, key);
         if (catalogReceipt is null) return SourceReceiptProof.InvalidIdentity;
+        if (key.StoreKind == RetentionStoreKind.AnalysisRunRaw && TryLocalAiIdentity(key.SourceItemId, out var localKind, out var contentId))
+        {
+            using var local=LocalAiCommand(c,t,localKind=="snapshot"?"SELECT created_at,retention_owner_token FROM local_ai_snapshots WHERE snapshot_id=$id AND payload_json IS NOT NULL AND evidence_index_json IS NOT NULL;":"SELECT created_at,retention_owner_token FROM local_ai_results WHERE result_id=$id AND result_json IS NOT NULL;",contentId);
+            using var row=local.ExecuteReader(); if(!row.Read()) return SourceReceiptProof.Missing; var at=row.GetString(0); var localReceipt=RetentionOwnershipReceipt.CreateLocalAi(new(key.StoreInstanceId,localKind,contentId,at,Parse(at).UtcDateTime.Ticks,Blob(row,1)));
+            return RetentionOwnershipReceipt.Matches(localReceipt,catalogReceipt)?SourceReceiptProof.Match:SourceReceiptProof.InvalidOrMismatched;
+        }
         if (key.StoreKind == RetentionStoreKind.SensitiveBundle)
         {
             using var item = c.CreateCommand();
@@ -1248,6 +1277,11 @@ public sealed partial class RetentionCatalogStore
     }
     private static byte[]? SourceToken(SqliteConnection connection, SqliteTransaction transaction, RetentionOwnershipKey key)
     {
+        if (key.StoreKind == RetentionStoreKind.AnalysisRunRaw && TryLocalAiIdentity(key.SourceItemId, out var localKind, out var contentId))
+        {
+            using var local=LocalAiCommand(connection,transaction,localKind=="snapshot"?"SELECT retention_owner_token FROM local_ai_snapshots WHERE snapshot_id=$id;":"SELECT retention_owner_token FROM local_ai_results WHERE result_id=$id;",contentId);
+            return local.ExecuteScalar() is byte[] localToken && localToken.Length==32?localToken:null;
+        }
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = key.StoreKind switch
@@ -1289,6 +1323,8 @@ public sealed partial class RetentionCatalogStore
     private static bool HasMatchingDeleteIntent(SqliteConnection c, SqliteTransaction t, RetentionCatalogItem item) { using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "SELECT EXISTS(SELECT 1 FROM retention_delete_journal WHERE item_id=$id AND expected_revision=$revision);"; q.Parameters.AddWithValue("$id", item.ItemId); q.Parameters.AddWithValue("$revision", item.Revision); return Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) == 1; }
     private enum SourceReceiptProof { Match, Missing, InvalidIdentity, InvalidOrMismatched, CatalogBusy }
     private static bool TrySourceId(string sourceItemId, out long id) => long.TryParse(sourceItemId, CultureInfo.InvariantCulture, out id);
+    private static bool TryLocalAiIdentity(string value,out string kind,out string id){kind="";id="";var p=value.Split(':');if(p.Length!=3||p[0]!="local_ai"||p[1] is not("snapshot" or "result")||!Guid.TryParseExact(p[2],"D",out var g)||g.Version!=7||p[2]!=p[2].ToLowerInvariant())return false;kind=p[1];id=p[2];return true;}
+    private static SqliteCommand LocalAiCommand(SqliteConnection c,SqliteTransaction t,string sql,string id){var command=c.CreateCommand();command.Transaction=t;command.CommandText=sql;command.Parameters.AddWithValue("$id",id);return command;}
     private static long? AcquireLease(SqliteConnection c, SqliteTransaction t, string itemId, RetentionLeaseKind kind, string owner, DateTimeOffset now) =>
         AcquireLease(c, t, itemId, kind, owner, now, now.Add(RetentionV1Constants.LeaseDuration));
     private static long? AcquireLease(SqliteConnection c, SqliteTransaction t, string itemId, RetentionLeaseKind kind, string owner, DateTimeOffset now, DateTimeOffset expiresAt) { var wireKind = kind.ToString().ToLowerInvariant(); using (var expired = c.CreateCommand()) { expired.Transaction = t; expired.CommandText = "DELETE FROM retention_leases WHERE item_id=$id AND lease_kind <> $kind AND expires_at <= $now;"; expired.Parameters.AddWithValue("$id", itemId); expired.Parameters.AddWithValue("$kind", wireKind); expired.Parameters.AddWithValue("$now", Timestamp(now)); expired.ExecuteNonQuery(); } using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) SELECT $id,$kind,$owner,$expires,1 WHERE NOT EXISTS (SELECT 1 FROM retention_worker_state WHERE id=1 AND maintenance_owner IS NOT NULL AND maintenance_lease_expires_at>$now) AND NOT EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$id AND (($kind='deletion' AND lease_kind IN ('access','operation')) OR ($kind IN ('access','operation') AND lease_kind='deletion'))) ON CONFLICT(item_id,lease_kind) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,generation=retention_leases.generation+1 WHERE retention_leases.expires_at <= $now AND NOT EXISTS (SELECT 1 FROM retention_worker_state WHERE id=1 AND maintenance_owner IS NOT NULL AND maintenance_lease_expires_at>$now) RETURNING generation;"; q.Parameters.AddWithValue("$id", itemId); q.Parameters.AddWithValue("$kind", wireKind); q.Parameters.AddWithValue("$owner", owner); q.Parameters.AddWithValue("$expires", Timestamp(expiresAt)); q.Parameters.AddWithValue("$now", Timestamp(now)); var value = q.ExecuteScalar(); return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture); }

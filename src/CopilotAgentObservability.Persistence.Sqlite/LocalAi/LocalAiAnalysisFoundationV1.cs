@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.LocalAi;
@@ -27,15 +28,15 @@ internal static class LocalAiAnalysisSchemaV1
     internal const int Version = 1;
     private static readonly string[] Definitions =
     [
-        """CREATE TABLE local_ai_snapshots(snapshot_id TEXT PRIMARY KEY,scope_kind TEXT NOT NULL CHECK(scope_kind IN ('session','node')),session_id TEXT NOT NULL,node_id TEXT,anchor_id TEXT NOT NULL,payload_json BLOB NOT NULL,payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256=lower(payload_sha256)),evidence_index_json BLOB NOT NULL,evidence_index_sha256 TEXT NOT NULL CHECK(length(evidence_index_sha256)=64 AND evidence_index_sha256=lower(evidence_index_sha256)),created_at TEXT NOT NULL,CHECK((scope_kind='session' AND node_id IS NULL) OR (scope_kind='node' AND node_id IS NOT NULL)))""",
+        """CREATE TABLE local_ai_snapshots(snapshot_id TEXT PRIMARY KEY,scope_kind TEXT NOT NULL CHECK(scope_kind IN ('session','node')),session_id TEXT NOT NULL,node_id TEXT,anchor_id TEXT NOT NULL,payload_json BLOB,payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256=lower(payload_sha256)),evidence_index_json BLOB,evidence_index_sha256 TEXT NOT NULL CHECK(length(evidence_index_sha256)=64 AND evidence_index_sha256=lower(evidence_index_sha256)),retention_owner_token BLOB NOT NULL CHECK(length(retention_owner_token)=32),created_at TEXT NOT NULL,CHECK((scope_kind='session' AND node_id IS NULL) OR (scope_kind='node' AND node_id IS NOT NULL)),CHECK((payload_json IS NULL)=(evidence_index_json IS NULL)))""",
         """CREATE TABLE local_ai_runs(run_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL REFERENCES local_ai_snapshots(snapshot_id),scope_kind TEXT NOT NULL,session_id TEXT NOT NULL,node_id TEXT,state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','zero_findings','provider_failed','provider_partial','invalid_result','invalid_evidence','stale_snapshot','scope_too_large','timed_out','canceled')),provider TEXT NOT NULL,model TEXT NOT NULL,configuration_sha256 TEXT NOT NULL CHECK(length(configuration_sha256)=64 AND configuration_sha256=lower(configuration_sha256)),prompt_template_version TEXT NOT NULL,requested_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 600),error_code TEXT,result_id TEXT UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""",
-        """CREATE TABLE local_ai_results(result_id TEXT PRIMARY KEY,run_id TEXT NOT NULL UNIQUE REFERENCES local_ai_runs(run_id),result_json BLOB NOT NULL,result_sha256 TEXT NOT NULL CHECK(length(result_sha256)=64 AND result_sha256=lower(result_sha256)),created_at TEXT NOT NULL)""",
+        """CREATE TABLE local_ai_results(result_id TEXT PRIMARY KEY,run_id TEXT NOT NULL UNIQUE REFERENCES local_ai_runs(run_id),result_json BLOB,result_sha256 TEXT NOT NULL CHECK(length(result_sha256)=64 AND result_sha256=lower(result_sha256)),retention_owner_token BLOB NOT NULL CHECK(length(retention_owner_token)=32),created_at TEXT NOT NULL)""",
     ];
     private static readonly string[] AdditionalDefinitions =
     [
         "CREATE INDEX IX_local_ai_session_reports ON local_ai_runs(scope_kind,session_id,state,completed_at DESC,run_id DESC)",
-        "CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END",
-        "CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END",
+        "CREATE TRIGGER local_ai_snapshots_update_rejected BEFORE UPDATE ON local_ai_snapshots WHEN NOT (OLD.scope_kind='session' AND OLD.payload_json IS NOT NULL AND OLD.evidence_index_json IS NOT NULL AND NEW.payload_json IS NULL AND NEW.evidence_index_json IS NULL AND NEW.snapshot_id=OLD.snapshot_id AND NEW.scope_kind=OLD.scope_kind AND NEW.session_id=OLD.session_id AND NEW.node_id IS OLD.node_id AND NEW.anchor_id=OLD.anchor_id AND NEW.payload_sha256=OLD.payload_sha256 AND NEW.evidence_index_sha256=OLD.evidence_index_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_snapshot_immutable'); END",
+        "CREATE TRIGGER local_ai_results_update_rejected BEFORE UPDATE ON local_ai_results WHEN NOT (OLD.result_json IS NOT NULL AND NEW.result_json IS NULL AND NEW.result_id=OLD.result_id AND NEW.run_id=OLD.run_id AND NEW.result_sha256=OLD.result_sha256 AND NEW.retention_owner_token=OLD.retention_owner_token AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'local_ai_result_immutable'); END",
         "CREATE TRIGGER local_ai_terminal_run_update_rejected BEFORE UPDATE ON local_ai_runs WHEN OLD.state NOT IN ('queued','running') BEGIN SELECT RAISE(ABORT,'local_ai_terminal_run_immutable'); END",
     ];
 
@@ -58,6 +59,9 @@ internal static class LocalAiAnalysisSchemaV1
         Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_ai_analysis',1);");
         transaction.Commit();
     }
+
+    internal static bool IsValid(SqliteConnection connection, SqliteTransaction transaction) =>
+        ReadVersion(connection, transaction) == Version && OwnedCount(connection, transaction) == Definitions.Length + AdditionalDefinitions.Length && HasExactSchema(connection, transaction);
 
     private static long? ReadVersion(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -216,7 +220,9 @@ internal static class LocalAiCanonicalJsonV1
 internal sealed class LocalAiAnalysisStoreV1
 {
     private readonly string databasePath;
-    internal LocalAiAnalysisStoreV1(string databasePath) { ArgumentException.ThrowIfNullOrWhiteSpace(databasePath); this.databasePath = databasePath; }
+    private readonly RetentionCatalogStore? retentionCatalog;
+    private readonly TimeProvider clock;
+    internal LocalAiAnalysisStoreV1(string databasePath, RetentionCatalogStore? retentionCatalog = null, TimeProvider? timeProvider = null) { ArgumentException.ThrowIfNullOrWhiteSpace(databasePath); this.databasePath = databasePath; this.retentionCatalog = retentionCatalog; clock = timeProvider ?? TimeProvider.System; }
 
     internal void InsertSnapshot(LocalAiSnapshotV1 snapshot)
     {
@@ -224,18 +230,19 @@ internal sealed class LocalAiAnalysisStoreV1
         var payload = Canonical(snapshot.PayloadCanonicalJson); var evidence = Canonical(snapshot.EvidenceIndexCanonicalJson);
         if (!payload.SequenceEqual(snapshot.PayloadCanonicalJson) || !evidence.SequenceEqual(snapshot.EvidenceIndexCanonicalJson)) throw new InvalidOperationException("local_ai_snapshot_not_canonical");
         ValidateEvidenceIndex(evidence);
-        using var connection = Open(); using var command = connection.CreateCommand();
+        using var connection = Open(); using var transaction = connection.BeginTransaction(); using var command = connection.CreateCommand(); command.Transaction=transaction;
+        var ownerToken=RandomNumberGenerator.GetBytes(32); var created=clock.GetUtcNow();
         command.CommandText = """
-            INSERT INTO local_ai_snapshots(snapshot_id,scope_kind,session_id,node_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256,created_at)
-            VALUES($id,$scope,$session,$node,$anchor,$payload,$payloadHash,$evidence,$evidenceHash,$created) ON CONFLICT(snapshot_id) DO NOTHING;
+            INSERT INTO local_ai_snapshots(snapshot_id,scope_kind,session_id,node_id,anchor_id,payload_json,payload_sha256,evidence_index_json,evidence_index_sha256,retention_owner_token,created_at)
+            VALUES($id,$scope,$session,$node,$anchor,$payload,$payloadHash,$evidence,$evidenceHash,$owner,$created) ON CONFLICT(snapshot_id) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$id", snapshot.SnapshotId); command.Parameters.AddWithValue("$scope", snapshot.ScopeKind); command.Parameters.AddWithValue("$session", snapshot.SessionId);
         command.Parameters.AddWithValue("$node", (object?)snapshot.NodeId ?? DBNull.Value); command.Parameters.AddWithValue("$anchor", snapshot.AnchorId);
         command.Parameters.Add("$payload", SqliteType.Blob).Value=payload; command.Parameters.AddWithValue("$payloadHash", Hash(payload)); command.Parameters.Add("$evidence",SqliteType.Blob).Value=evidence;
-        command.Parameters.AddWithValue("$evidenceHash",Hash(evidence)); command.Parameters.AddWithValue("$created",Now());
-        if (command.ExecuteNonQuery() == 1) return;
-        using var read=connection.CreateCommand(); read.CommandText="SELECT scope_kind,session_id,node_id,anchor_id,payload_json,evidence_index_json FROM local_ai_snapshots WHERE snapshot_id=$id;"; read.Parameters.AddWithValue("$id",snapshot.SnapshotId);
-        using var reader=read.ExecuteReader(); if (!reader.Read() || reader.GetString(0)!=snapshot.ScopeKind || reader.GetString(1)!=snapshot.SessionId || (reader.IsDBNull(2)?null:reader.GetString(2))!=snapshot.NodeId || reader.GetString(3)!=snapshot.AnchorId || !((byte[])reader[4]).SequenceEqual(payload) || !((byte[])reader[5]).SequenceEqual(evidence)) throw new InvalidOperationException("local_ai_snapshot_conflict");
+        command.Parameters.AddWithValue("$evidenceHash",Hash(evidence)); command.Parameters.Add("$owner",SqliteType.Blob).Value=ownerToken; command.Parameters.AddWithValue("$created",created.ToUniversalTime().ToString("O",CultureInfo.InvariantCulture));
+        if (command.ExecuteNonQuery() == 1) { if(snapshot.ScopeKind=="session") retentionCatalog?.RegisterLocalAiRaw(connection,transaction,"snapshot",snapshot.SnapshotId,created,ownerToken); transaction.Commit(); return; }
+        using var read=connection.CreateCommand(); read.Transaction=transaction; read.CommandText="SELECT scope_kind,session_id,node_id,anchor_id,payload_json,evidence_index_json FROM local_ai_snapshots WHERE snapshot_id=$id;"; read.Parameters.AddWithValue("$id",snapshot.SnapshotId);
+        using var reader=read.ExecuteReader(); if (!reader.Read() || reader.GetString(0)!=snapshot.ScopeKind || reader.GetString(1)!=snapshot.SessionId || (reader.IsDBNull(2)?null:reader.GetString(2))!=snapshot.NodeId || reader.GetString(3)!=snapshot.AnchorId || reader.IsDBNull(4) || reader.IsDBNull(5) || !((byte[])reader[4]).SequenceEqual(payload) || !((byte[])reader[5]).SequenceEqual(evidence)) throw new InvalidOperationException("local_ai_snapshot_conflict"); reader.Close(); transaction.Commit();
     }
 
     internal LocalAiRunV1 CreateRun(LocalAiRunRequestV1 request)
@@ -275,9 +282,16 @@ internal sealed class LocalAiAnalysisStoreV1
         if(validation.Code==LocalAiResultValidationCodeV1.Valid && !MatchesExpected(validation.CanonicalBytes!,expected)) validation=new(LocalAiResultValidationCodeV1.InvalidResult);
         if(validation.Code!=LocalAiResultValidationCodeV1.Valid) { var failed=validation.Code==LocalAiResultValidationCodeV1.InvalidEvidence?LocalAiRunStateV1.InvalidEvidence:LocalAiRunStateV1.InvalidResult; TransitionRun(runId,failed,failed==LocalAiRunStateV1.InvalidEvidence?"invalid_evidence":"invalid_result"); return failed; }
         var canonical=validation.CanonicalBytes!; var root=JsonDocument.Parse(canonical).RootElement; var state=root.GetProperty("findings").GetArrayLength()==0?LocalAiRunStateV1.ZeroFindings:LocalAiRunStateV1.Succeeded;
-        using var transaction=connection.BeginTransaction(); using var insert=connection.CreateCommand(); insert.Transaction=transaction; var resultId=Guid.CreateVersion7().ToString(); var now=completion;
-        insert.CommandText="INSERT INTO local_ai_results(result_id,run_id,result_json,result_sha256,created_at) VALUES($result,$run,$json,$hash,$now);"; insert.Parameters.AddWithValue("$result",resultId); insert.Parameters.AddWithValue("$run",runId); insert.Parameters.Add("$json",SqliteType.Blob).Value=canonical; insert.Parameters.AddWithValue("$hash",Hash(canonical)); insert.Parameters.AddWithValue("$now",now); insert.ExecuteNonQuery();
-        using var update=connection.CreateCommand(); update.Transaction=transaction; update.CommandText="UPDATE local_ai_runs SET state=$state,completed_at=$now,result_id=$result,error_code=NULL,updated_at=$now WHERE run_id=$run AND state='running' AND completed_at IS NULL AND result_id IS NULL;"; update.Parameters.AddWithValue("$state",Wire(state)); update.Parameters.AddWithValue("$now",now); update.Parameters.AddWithValue("$result",resultId); update.Parameters.AddWithValue("$run",runId); if(update.ExecuteNonQuery()!=1) throw new InvalidOperationException("local_ai_run_transition_conflict"); transaction.Commit(); return state;
+        using var transaction=connection.BeginTransaction(); using var insert=connection.CreateCommand(); insert.Transaction=transaction; var resultId=Guid.CreateVersion7().ToString(); var now=completion; var ownerToken=RandomNumberGenerator.GetBytes(32);
+        insert.CommandText="INSERT INTO local_ai_results(result_id,run_id,result_json,result_sha256,retention_owner_token,created_at) VALUES($result,$run,$json,$hash,$owner,$now);"; insert.Parameters.AddWithValue("$result",resultId); insert.Parameters.AddWithValue("$run",runId); insert.Parameters.Add("$json",SqliteType.Blob).Value=canonical; insert.Parameters.AddWithValue("$hash",Hash(canonical)); insert.Parameters.Add("$owner",SqliteType.Blob).Value=ownerToken; insert.Parameters.AddWithValue("$now",now); insert.ExecuteNonQuery();
+        using var update=connection.CreateCommand(); update.Transaction=transaction; update.CommandText="UPDATE local_ai_runs SET state=$state,completed_at=$now,result_id=$result,error_code=NULL,updated_at=$now WHERE run_id=$run AND state='running' AND completed_at IS NULL AND result_id IS NULL;"; update.Parameters.AddWithValue("$state",Wire(state)); update.Parameters.AddWithValue("$now",now); update.Parameters.AddWithValue("$result",resultId); update.Parameters.AddWithValue("$run",runId); if(update.ExecuteNonQuery()!=1) throw new InvalidOperationException("local_ai_run_transition_conflict"); if(expected.ScopeKind=="session") retentionCatalog?.RegisterLocalAiRaw(connection,transaction,"result",resultId,DateTimeOffset.Parse(completion,CultureInfo.InvariantCulture),ownerToken); transaction.Commit(); return state;
+    }
+
+    internal int DeleteExpiredNodeRuns(DateTimeOffset now)
+    {
+        var cutoff=now.AddHours(-24).ToUniversalTime().ToString("O",CultureInfo.InvariantCulture); using var connection=Open(); using var transaction=connection.BeginTransaction();
+        using var count=connection.CreateCommand(); count.Transaction=transaction; count.CommandText="SELECT COUNT(*) FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff;"; count.Parameters.AddWithValue("$cutoff",cutoff); var deleted=Convert.ToInt32(count.ExecuteScalar(),CultureInfo.InvariantCulture);
+        using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText="DELETE FROM local_ai_results WHERE run_id IN (SELECT run_id FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff); DELETE FROM local_ai_runs WHERE scope_kind='node' AND state NOT IN ('queued','running') AND requested_at<=$cutoff; DELETE FROM local_ai_snapshots WHERE scope_kind='node' AND NOT EXISTS(SELECT 1 FROM local_ai_runs WHERE local_ai_runs.snapshot_id=local_ai_snapshots.snapshot_id);"; command.Parameters.AddWithValue("$cutoff",cutoff); command.ExecuteNonQuery(); transaction.Commit(); return deleted;
     }
 
     internal LocalAiReportPageV1 GetSessionReports(string sessionId, int? limit, string? cursor)

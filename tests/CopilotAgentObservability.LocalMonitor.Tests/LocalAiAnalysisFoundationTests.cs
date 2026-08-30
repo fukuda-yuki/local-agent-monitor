@@ -1,12 +1,65 @@
 using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.LocalMonitor.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalAiAnalysisFoundationTests
 {
+    [Fact]
+    public void SessionContent_IsCatalogOwnedAndReadableAfterRestart()
+    {
+        using var database = new Database();
+        var now = new DateTimeOffset(2026, 8, 30, 1, 0, 0, TimeSpan.Zero);
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var catalog = new RetentionCatalogStore(context, time);
+        var store = database.Store(catalog, time);
+
+        store.InsertSnapshot(Snapshot());
+        var run = Complete(store, Request(), Result());
+
+        using (var connection = database.Open())
+        {
+            Assert.Equal(2L, Scalar(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='analysis_run_raw' AND source_item_id IN ('local_ai:snapshot:' || '" + SnapshotId + "','local_ai:result:' || (SELECT result_id FROM local_ai_runs WHERE run_id='" + run.RunId + "')) AND policy_id='raw-default-90d';"));
+        }
+
+        var report = Assert.Single(new LocalAiAnalysisStoreV1(database.Path,catalog,time).GetSessionReports(SessionId, null, null).Items);
+        Assert.Equal("retained", report.ContentState);
+        Assert.NotNull(report.CanonicalResult);
+        using var read = database.Open();
+        Assert.Equal(1L, Scalar(read, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + run.RunId + "' AND state='succeeded' AND result_id IS NOT NULL AND completed_at IS NOT NULL;"));
+    }
+
+    [Fact]
+    public async Task SessionSnapshot_ExpiresThroughExistingAnalysisRunRawDeletionAuthority()
+    {
+        using var database=new Database(); var now=new DateTimeOffset(2026,8,30,1,0,0,TimeSpan.Zero); var time=new MutableTimeProvider(now); var context=RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path,time); var catalog=new RetentionCatalogStore(context,time); var store=database.Store(catalog,time); store.InsertSnapshot(Snapshot());
+        string itemId; using(var connection=database.Open()){using(var coverage=connection.CreateCommand()){coverage.CommandText="INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);";coverage.ExecuteNonQuery();}using var item=connection.CreateCommand();item.CommandText="SELECT item_id FROM retention_items WHERE source_item_id='local_ai:snapshot:"+SnapshotId+"';";itemId=(string)item.ExecuteScalar()!;using var queue=connection.CreateCommand();queue.CommandText="UPDATE retention_items SET state='deletion_queued',revision=1,read_denied_at=$now,queued_at=$now WHERE item_id=$id;";queue.Parameters.AddWithValue("$now",now.ToString("O"));queue.Parameters.AddWithValue("$id",itemId);queue.ExecuteNonQuery();}
+        var claim=(await catalog.TryClaimDeletionAsync(new(itemId,1,RetentionWorkKind.Queued),"local-ai-test",now,CancellationToken.None)).Claim!; var intent=await catalog.EnsureDeleteIntentAsync(claim.Fence,0,now,CancellationToken.None); var deleteContext=new RetentionDeleteContext(claim.Fence.ItemId,claim.StoreInstanceId,claim.StoreKind,claim.Fence.ExpectedRevision,claim.Fence.LeaseOwner,claim.Fence.LeaseGeneration,claim.SourceIdentity,null,intent.IntentCursor,CancellationToken.None);
+        Assert.Same(RetentionAdapterResult.Deleted,await new MonitorAnalysisRetentionAdapter(catalog).DeleteAsync(deleteContext)); using var read=database.Open();Assert.Equal(1L,Scalar(read,"SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='"+SnapshotId+"' AND payload_json IS NULL AND evidence_index_json IS NULL;"));Assert.Equal("deleted",Text(read,"SELECT state FROM retention_items WHERE item_id='"+itemId+"';"));
+    }
+
+    [Fact]
+    public void NodeCleanup_DeletesOnlyTerminalRowsAtExactTwentyFourHourBoundary()
+    {
+        using var database = new Database();
+        var store = database.Store();
+        store.InsertSnapshot(Snapshot(NodeSnapshotId, "node", "node-1"));
+        var run = Complete(store, Request(NodeSnapshotId, "node", "node-1"), Result(scope: Scope("node", "node-1"), snapshotId: NodeSnapshotId));
+        var requestedAt = DateTimeOffset.Parse("2026-08-30T01:00:00Z");
+
+        Assert.Equal(0, store.DeleteExpiredNodeRuns(requestedAt.AddHours(24).AddTicks(-1)));
+        Assert.Equal(1, store.DeleteExpiredNodeRuns(requestedAt.AddHours(24)));
+        Assert.Equal(0, store.DeleteExpiredNodeRuns(requestedAt.AddHours(48)));
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_runs WHERE run_id='" + run.RunId + "';"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM local_ai_snapshots WHERE snapshot_id='" + NodeSnapshotId + "';"));
+        Assert.Equal(0L, Scalar(connection, "SELECT COUNT(*) FROM sqlite_schema WHERE name='retention_items';"));
+    }
     [Fact]
     public void Schema_MigratesExistingVersionTableAndRejectsMalformedCompleteInventory()
     {
@@ -187,5 +240,5 @@ public sealed class LocalAiAnalysisFoundationTests
     private static readonly string PayloadHash=Convert.ToHexStringLower(SHA256.HashData("{\"value\":1}"u8));
     private static readonly DateTimeOffset StartedAt=DateTimeOffset.Parse("2026-08-30T01:00:01Z"),CompletedAt=DateTimeOffset.Parse("2026-08-30T01:00:02Z");
     private static long Scalar(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return Convert.ToInt64(q.ExecuteScalar());} private static string Text(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return(string)q.ExecuteScalar()!;} private static void Execute(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}
-    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
+    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(RetentionCatalogStore? catalog=null,TimeProvider? time=null){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path,catalog,time);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
 }
