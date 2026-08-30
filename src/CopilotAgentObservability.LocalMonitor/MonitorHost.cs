@@ -83,6 +83,7 @@ internal static class MonitorHost
         "/monitor-waterfall.js",
         "/local-monitor-v1-shared.js",
         "/local-monitor-repositories.js",
+        "/local-monitor-settings.js",
         "/local-monitor-explorer.js",
         "/local-monitor-compare.js",
         "/local-monitor-workspace.js",

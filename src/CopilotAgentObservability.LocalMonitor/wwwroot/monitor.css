@@ -639,6 +639,64 @@ body {
     border-right: 1px solid var(--monitor-border);
 }
 
+.local-monitor-settings-nav,
+.local-monitor-repository-settings-nav {
+    display: block;
+    width: 100%;
+    padding: 10px 12px;
+    border: 0;
+    border-radius: var(--monitor-radius-xs);
+    background: transparent;
+    color: var(--monitor-ink-subtle);
+    text-align: left;
+}
+
+.local-monitor-settings-nav[aria-current="page"],
+.local-monitor-repository-settings-nav[aria-current="page"] {
+    background: var(--monitor-selected-bg);
+    color: var(--monitor-ink);
+}
+
+.local-monitor-settings-section {
+    display: grid;
+    align-content: start;
+    gap: var(--monitor-space-4);
+}
+
+.local-monitor-settings-section[hidden] { display: none; }
+.local-monitor-settings-section h3,
+.local-monitor-settings-section h4,
+.local-monitor-settings-section p { margin: 0; }
+
+.local-monitor-settings-card {
+    display: grid;
+    gap: var(--monitor-space-2);
+    padding: var(--monitor-space-4);
+    border: 1px solid var(--monitor-border);
+    border-radius: var(--monitor-radius-xs);
+    background: var(--monitor-surface-panel);
+}
+
+.local-monitor-settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--monitor-space-2);
+}
+
+.local-monitor-settings-action { color: var(--monitor-accent); }
+.local-monitor-settings-note { color: var(--monitor-ink-subtle); }
+
+.local-monitor-settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--monitor-space-2);
+    padding: var(--monitor-space-2) 0;
+    border-bottom: 1px solid var(--monitor-border-subtle);
+}
+
+.local-monitor-settings-row code { overflow-wrap: anywhere; }
+
 .local-monitor-repository-selection {
     width: 100%;
     min-width: 0;

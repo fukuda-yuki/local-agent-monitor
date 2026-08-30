@@ -411,12 +411,15 @@
     const repositoriesNav = element("button", "local-monitor-repository-settings-nav", "リポジトリ");
     repositoriesNav.type = "button";
     repositoriesNav.dataset.repositorySettingsNavigation = "repositories";
+    repositoriesNav.dataset.settingsNavigation = "repositories";
     const archiveNav = element("button", "local-monitor-repository-settings-nav", "アーカイブ");
     archiveNav.type = "button";
     archiveNav.dataset.repositorySettingsNavigation = "archive";
+    archiveNav.dataset.settingsNavigation = "archive";
     navigationHost.append(repositoriesNav, archiveNav);
     const repositoriesSection = element("section", "local-monitor-repository-settings-section");
     repositoriesSection.dataset.repositorySettingsSection = "repositories";
+    repositoriesSection.dataset.settingsSection = "repositories";
     repositoriesSection.hidden = true;
     const repositoriesHeading = element("h3", null, "リポジトリ");
     repositoriesHeading.tabIndex = -1;
@@ -430,6 +433,8 @@
     createForm.append(createHeading, createDisplay.label, createLocator.label, createSubmit);
     const repositoriesStatus = element("p", "local-monitor-repository-settings-status", "リポジトリを読み込んでいます。");
     repositoriesStatus.setAttribute("aria-live", "polite");
+    const unassignedEntry = element("a", "local-monitor-repository-inline-action");
+    unassignedEntry.href = window.LocalMonitorV1Paths.unassignedSessions();
     const repositoriesList = element("div", "local-monitor-repository-settings-list");
     const repositoriesLoadMore = element("button", null, "さらに読み込む");
     repositoriesLoadMore.type = "button";
@@ -463,10 +468,11 @@
     archiveSubmit.setAttribute("aria-describedby", archiveNote.id);
     archiveSubmit.disabled = true;
     manager.append(managerHeading, renameStatus, renameForm, archiveNote, archiveConfirmation, archiveSubmit);
-    repositoriesSection.append(repositoriesHeading, createForm, repositoriesStatus,
+    repositoriesSection.append(repositoriesHeading, createForm, repositoriesStatus, unassignedEntry,
       repositoriesList, repositoriesLoadMore, manager);
     const archiveSection = element("section", "local-monitor-repository-settings-section");
     archiveSection.dataset.repositorySettingsSection = "archive";
+    archiveSection.dataset.settingsSection = "archive";
     archiveSection.hidden = true;
     const archiveHeading = element("h3", null, "アーカイブ済みリポジトリ");
     archiveHeading.tabIndex = -1;
@@ -487,7 +493,7 @@
     settingsDom = {
       repositoriesNav, archiveNav, repositoriesSection, repositoriesHeading,
       createForm, createDisplay: createDisplay.input, createLocator: createLocator.input,
-      createSubmit, repositoriesStatus, repositoriesList, repositoriesLoadMore,
+      createSubmit, repositoriesStatus, unassignedEntry, repositoriesList, repositoriesLoadMore,
       manager, managerHeading, renameStatus, renameForm, renameDisplay: renameDisplay.input,
       renameSubmit, archiveConfirm, archiveSubmit, archiveSection, archiveHeading, archiveStatus,
       archiveList, archiveLoadMore, result,
@@ -583,6 +589,7 @@
     settingsDom.archiveList.replaceChildren(...archived.map(renderArchivedSettingsItem));
     setSettingsStatus(settingsDom.repositoriesStatus,
       active.length === 0 ? "登録されたアクティブなリポジトリはありません。" : `${countText(active.length)}を表示しています。`);
+    settingsDom.unassignedEntry.textContent = `リポジトリ未設定のセッション ${countText(settingsState.totals.unassignedActiveSessionCount)}`;
     setSettingsStatus(settingsDom.archiveStatus,
       archived.length === 0 ? "アーカイブ済みリポジトリはありません。" : `${countText(archived.length)}を表示しています。`);
     settingsDom.repositoriesLoadMore.hidden = settingsState.nextCursor === null;
@@ -618,6 +625,26 @@
       if (controller.signal.aborted || generation !== settingsState.requestGeneration) return false;
       setSettingsStatus(status, "リポジトリを読み込めませんでした。", () => refreshSettings(section));
       return false;
+    }
+  }
+
+  async function publishDiagnosticsSummary() {
+    settingsState.controller?.abort();
+    const controller = new AbortController();
+    settingsState.controller = controller;
+    const generation = ++settingsState.requestGeneration;
+    try {
+      const page = await fetchCollection("include_archived", null, controller.signal);
+      if (controller.signal.aborted || generation !== settingsState.requestGeneration) return;
+      document.dispatchEvent(new CustomEvent("cao-repository-settings-summary", { detail: {
+        repositoryCount: page.repositories.length,
+        archivedRepositoryCount: page.archivedRepositoryCount,
+        unassignedActiveSessionCount: page.unassignedActiveSessionCount,
+      } }));
+    } catch {
+      if (!controller.signal.aborted && generation === settingsState.requestGeneration) {
+        document.dispatchEvent(new CustomEvent("cao-repository-settings-summary", { detail: null }));
+      }
     }
   }
 
@@ -950,6 +977,13 @@
     buildSettings();
     if (!settingsDom) return;
     const section = state?.settings ?? null;
+    if (section === "diagnostics") {
+      discardRepositoryForms();
+      settingsState.section = null;
+      renderSettingsVisibility(null);
+      publishDiagnosticsSummary();
+      return;
+    }
     if (section !== "repositories" && section !== "archive") {
       settingsState.controller?.abort();
       settingsState.requestGeneration++;
@@ -999,6 +1033,6 @@
   }
   if (window.LocalMonitorV1History) {
     const initial = window.LocalMonitorV1History.current();
-    if (initial.settings === "repositories" || initial.settings === "archive") handleRouteState(initial);
+    if (["repositories", "archive", "diagnostics"].includes(initial.settings)) handleRouteState(initial);
   }
 })();

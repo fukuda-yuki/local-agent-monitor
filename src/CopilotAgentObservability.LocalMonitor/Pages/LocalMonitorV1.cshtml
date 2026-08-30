@@ -56,12 +56,10 @@ else
     @if (Model.RouteKind is not null)
     {
         <script src="/local-monitor-v1-shared.js" defer></script>
-    }
-    @if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.RepositorySelection)
-    {
         <script src="/local-monitor-repositories.js" defer></script>
+        <script src="/local-monitor-settings.js" defer></script>
     }
-    else if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+    @if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
              or LocalMonitorV1PrimaryRouteKind.AllSessions
              or LocalMonitorV1PrimaryRouteKind.UnassignedSessions)
     {
