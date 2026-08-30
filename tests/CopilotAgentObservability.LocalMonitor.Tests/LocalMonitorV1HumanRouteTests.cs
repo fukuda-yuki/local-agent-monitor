@@ -112,6 +112,9 @@ public sealed class LocalMonitorV1HumanRouteTests
         { "/sessions?status=failed&status=failed", "open_all_sessions" },
         { "/sessions/unassigned?unknown=secret", "open_all_sessions" },
         { $"/sessions/{SessionId}?execution={SessionId}&execution={SessionId}", "open_all_sessions" },
+        { $"/sessions/{SessionId}?analysis=not-a-run", "open_all_sessions" },
+        { $"/sessions/{SessionId}?analysis={SessionId.ToUpperInvariant()}", "open_all_sessions" },
+        { $"/sessions/{SessionId}?analysis={SessionId}&analysis={SessionId}", "open_all_sessions" },
         { $"/repositories/{RepositoryId}/comparisons/{ComparisonId}?unknown=secret", "open_repository_selection" },
     };
 
@@ -543,6 +546,16 @@ public sealed class LocalMonitorV1HumanRouteTests
         Assert.Contains("/local-monitor-session-workspace.js", detailHtml, StringComparison.Ordinal);
         Assert.DoesNotContain("data-session-workspace", explorerHtml, StringComparison.Ordinal);
         Assert.DoesNotContain("/local-monitor-session-workspace.js", explorerHtml, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("analysis=018f0000-0000-7000-8000-000000000071&settings=ai")]
+    [InlineData("settings=ai&analysis=018f0000-0000-7000-8000-000000000071")]
+    public async Task RawDefault_CanonicalAnalysisQueryServesNormalSessionWorkspace(string query)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions());
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?{query}"); var html = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode); Assert.Contains("data-session-workspace", html, StringComparison.Ordinal); Assert.Contains("data-page-state=\"\"", html, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -31,6 +31,8 @@
   let nodeTranscript = [];
   let nodeAiContext = null;
   let activeSessionRun = null;
+  let sessionPollGeneration = 0;
+  let nodePollGeneration = 0;
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -595,7 +597,12 @@
     if (!NODE.test(reference)) return el("span", "local-monitor-ai-evidence-unavailable", "この証拠は現在のタイムラインでは表示できません");
     const button = el("button", null, "証拠を表示"); button.type = "button";
     button.addEventListener("click", async () => {
-      try { await selectNode(null, reference, true); }
+      try {
+        const dialog = document.querySelector("[data-session-ai-dialog]");
+        if (dialog?.open) closeSessionAi(false);
+        await selectNode(null, reference, true);
+        root.querySelector(`[data-timeline-node='${reference}']`)?.focus();
+      }
       catch { button.replaceWith(el("span", "local-monitor-ai-evidence-unavailable", "この証拠は現在のタイムラインでは表示できません")); }
     });
     return button;
@@ -619,13 +626,16 @@
     if (result.limitations.length) { target.append(el("h4", null, "制約")); for (const limitation of result.limitations) target.append(el("p", null, String(limitation))); }
   }
 
-  async function pollAiRun(runId, scope) {
+  async function pollAiRun(runId, scope, generation = null) {
     const status = document.querySelector(scope === "session" ? "[data-session-ai-status]" : "[data-node-ai-status]");
-    for (let attempt = 0; attempt < 120; attempt++) {
-      const response = await fetch(`/api/local-monitor/v1/ai/${scope}-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
-      if (!response.ok) { if (status) status.textContent = "AI分析を読み込めませんでした"; return null; }
-      const value = await response.json(); if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
-      if (!["queued", "running"].includes(value.state)) return value;
+    const deadline = Date.now() + 610000;
+    while (Date.now() < deadline && (scope === "session" ? generation === sessionPollGeneration && activeSessionRun === runId : generation === nodePollGeneration)) {
+      try {
+        const response = await fetch(`/api/local-monitor/v1/ai/${scope}-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error("poll_failed");
+        const value = await response.json(); if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
+        if (!["queued", "running"].includes(value.state)) return value;
+      } catch { if (status) status.textContent = "AI分析の状態を一時的に確認できません。再試行しています"; }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     return null;
@@ -635,6 +645,7 @@
     const status = document.querySelector("[data-session-ai-status]"); const target = document.querySelector("[data-session-ai-report]");
     status.textContent = item.snapshot_changed ? "前回の分析後に記録が更新されています" : AI_STATE_LABELS[item.state] ?? "";
     if (item.content_state === "expired") target.replaceChildren(el("p", null, "保存期間を過ぎたため分析内容を表示できません"));
+    else if (item.content_state === "status_only" && ["succeeded", "zero_findings"].includes(item.state)) target.replaceChildren(el("p", null, "この分析レポートを確認できません"));
     else if (["succeeded", "zero_findings"].includes(item.state)) renderAiResult(target, item.result);
     else target.replaceChildren(el("p", null, AI_STATE_LABELS[item.state] ?? "AI分析を表示できません"));
     if (updateHistory && UUID_V7.test(item.run_id)) { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: item.run_id }); }
@@ -650,8 +661,31 @@
     if (open && sessionReports[0]) showSessionReport(sessionReports[0]);
   }
 
+  async function findExactSessionReport(runId) {
+    let cursor = null;
+    do {
+      const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "100"); if (cursor) url.searchParams.set("cursor", cursor);
+      const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return null;
+      const page = await response.json(); const exact = (page.reports ?? []).find(item => item.run_id === runId); if (exact) return exact; cursor = page.next_cursor ?? null;
+    } while (cursor);
+    return null;
+  }
+
+  function showSessionDialog(invoker) {
+    sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); if (!dialog.open) dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
+  }
+
+  async function restoreExactSessionAnalysis(runId) {
+    const response = await fetch(`/api/local-monitor/v1/ai/session-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
+    const run = await response.json(); if (run.scope_kind !== "session" || run.session_id !== root.dataset.sessionId || run.run_id !== runId) return;
+    showSessionDialog(document.querySelector("[data-session-ai-open]"));
+    if (["succeeded", "zero_findings"].includes(run.state)) {
+      const report = await findExactSessionReport(runId); if (report) showSessionReport(report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
+    } else showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
+  }
+
   async function openSessionAi(invoker) {
-    sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
+    showSessionDialog(invoker);
     if (!sessionReports.length) await readSessionReports(null, false);
     if (sessionReports[0]) showSessionReport(sessionReports[0]); else document.querySelector("[data-session-ai-status]").textContent = "まだ分析はありません";
   }
@@ -659,12 +693,15 @@
   async function startSessionAi() {
     const response = await aiPost("/api/local-monitor/v1/ai/session-runs", { session_id: root.dataset.sessionId });
     if (!response.ok) { document.querySelector("[data-session-ai-status]").textContent = "AI分析を開始できませんでした"; return; }
-    const started = await response.json(); activeSessionRun = started.run_id; document.querySelector("[data-session-ai-cancel]").hidden = false; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: started.run_id }); const run = await pollAiRun(started.run_id, "session");
+    const started = await response.json(); activeSessionRun = started.run_id; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: started.run_id }); const run = await pollAiRun(started.run_id, "session", generation);
     activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
-    if (run) showSessionReport({ ...run, content_state: run.result ? "retained" : "status_only", snapshot_changed: false }, false); await readSessionReports(null, false);
+    if (run && ["succeeded", "zero_findings"].includes(run.state)) {
+      const report = await findExactSessionReport(run.run_id); showSessionReport(report ?? { ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
+    } else if (run) showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
+    await readSessionReports(null, false);
   }
 
-  function closeNodeAi(section) { nodeTranscript = []; nodeAiContext = null; section.querySelector("[data-node-ai-surface]")?.remove(); }
+  function closeNodeAi(section) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; section.querySelector("[data-node-ai-surface]")?.remove(); }
 
   async function startNodeAi(section, nodeId, question = null) {
     if (nodeAiContext !== nodeId || question === null) { nodeTranscript = []; nodeAiContext = nodeId; }
@@ -673,7 +710,7 @@
       section.querySelector("[data-node-ai-status]").textContent = "質問が送信可能な上限を超えています"; return;
     }
     const response = await aiPost("/api/local-monitor/v1/ai/node-runs", body); if (!response.ok) { section.querySelector("[data-node-ai-status]").textContent = "AI分析を開始できませんでした"; return; }
-    const started = await response.json(); const run = await pollAiRun(started.run_id, "node"); if (!run) return;
+    const started = await response.json(); const generation = ++nodePollGeneration; const run = await pollAiRun(started.run_id, "node", generation); if (!run) return;
     if (["succeeded", "zero_findings"].includes(run.state) && run.result) {
       renderAiResult(section.querySelector("[data-node-ai-result]"), run.result); const answer = run.result.summary;
       if (new TextEncoder().encode(answer).length <= 32768) { nodeTranscript.push({ question: question ?? "", answer }); if (nodeTranscript.length > 16) nodeTranscript.shift(); }
@@ -681,18 +718,24 @@
   }
 
   function appendNodeAi(section, nodeId) {
+    if (section.querySelector("[data-node-ai-start]")) return;
+    const start = el("section", "local-monitor-node-ai-start"); start.dataset.nodeAiStart = "";
+    start.append(el("p", null, "選択した項目と利用可能な raw content は GitHub Copilot service へ送信される場合があります。"));
     const action = el("button", null, "この項目をAIで分析"); action.type = "button";
     action.addEventListener("click", async () => {
+      action.disabled = true;
       const surface = el("section", "local-monitor-node-ai"); surface.dataset.nodeAiSurface = "";
-      surface.append(el("h3", null, "この項目のAI分析"), el("p", null, "選択した項目と利用可能な raw content は GitHub Copilot service へ送信される場合があります。"));
+      surface.append(el("h3", null, "この項目のAI分析"));
       const status = el("div"); status.dataset.nodeAiStatus = ""; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
       const result = el("div"); result.dataset.nodeAiResult = ""; const question = el("textarea"); question.setAttribute("aria-label", "追加の質問"); question.maxLength = 4096;
       const ask = el("button", null, "質問する"); ask.type = "button"; ask.addEventListener("click", () => startNodeAi(surface, nodeId, question.value));
-      const close = el("button", null, "AI分析を閉じる"); close.type = "button"; close.addEventListener("click", () => { closeNodeAi(section); action.focus(); });
-      surface.append(status, result, question, ask, close); section.insertBefore(surface, action.nextSibling); await startNodeAi(surface, nodeId);
+      const close = el("button", null, "AI分析を閉じる"); close.type = "button"; close.addEventListener("click", () => { closeNodeAi(section); action.disabled = false; action.focus(); });
+      surface.append(status, result, question, ask, close); section.insertBefore(surface, start.nextSibling); await startNodeAi(surface, nodeId);
     });
-    section.append(action);
+    start.append(action); section.append(start);
   }
+
+  function ensureSelectedNodeAiStart() { const section = inspector.querySelector("[data-inspector-kind]"); if (aiReady && state.selectedNodeId && section) appendNodeAi(section, state.selectedNodeId); }
 
   function renderInspector(detail) {
     const node = detail.node; const metadata = node.metadata; inspector.replaceChildren();
@@ -741,7 +784,7 @@
   }
 
   async function selectNode(executionId, nodeId, push, attempted = false) {
-    if (state.selectedNodeId !== nodeId) { nodeTranscript = []; nodeAiContext = null; }
+    if (state.selectedNodeId !== nodeId) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; }
     const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
     const rawDetail = await requestJson(urlFactory, attempted);
     const detail = validateNode(rawDetail, nodeId, executionId);
@@ -767,10 +810,10 @@
   async function applyRoute(route) {
     if (!state.summary) return;
     if (route.analysis && !route.node) {
-      const response = await fetch(`/api/local-monitor/v1/ai/session-runs/${route.analysis}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
-      if (response.ok) { const run = await response.json(); if (run.session_id === root.dataset.sessionId) { await openSessionAi(document.querySelector("[data-session-ai-open]")); showSessionReport({ ...run, content_state: run.result ? "retained" : "status_only", snapshot_changed: false }, false); } }
+      await restoreExactSessionAnalysis(route.analysis);
     }
     if (route.node) {
+      if (document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi(false);
       try { await selectNode(route.execution ?? null, route.node, false); }
       catch (error) { if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
     } else if (route.execution) {
@@ -911,7 +954,7 @@
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
       const route = window.LocalMonitorV1History.current();
-      if (applyCurrentRoute && (route.node || route.execution)) await applyRoute(route);
+      if (applyCurrentRoute && (route.node || route.execution || route.analysis)) await applyRoute(route);
       else if (applyCurrentRoute) {
         const latest = summary.executions.find(execution => execution.latest);
         if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
@@ -924,7 +967,7 @@
   async function checkAiReadiness() {
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); const value = response.ok ? await response.json() : null;
-      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady; if (aiReady) await readSessionReports(null, false);
+      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady; if (aiReady) { ensureSelectedNodeAiStart(); await readSessionReports(null, false); }
     } catch { aiReady = false; }
   }
 
@@ -949,12 +992,13 @@
     const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   const sessionAiDialog = document.querySelector("[data-session-ai-dialog]");
+  function closeSessionAi(restoreFocus = true) { if (sessionAiDialog.open) sessionAiDialog.close(); activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; if (restoreFocus) sessionAiInvoker?.focus(); }
   document.querySelector("[data-session-ai-open]")?.addEventListener("click", event => openSessionAi(event.currentTarget));
-  document.querySelector("[data-session-ai-close]")?.addEventListener("click", () => { sessionAiDialog.close(); sessionAiInvoker?.focus(); });
+  document.querySelector("[data-session-ai-close]")?.addEventListener("click", () => closeSessionAi());
   document.querySelector("[data-session-ai-regenerate]")?.addEventListener("click", startSessionAi);
   document.querySelector("[data-session-ai-cancel]")?.addEventListener("click", async () => { if (activeSessionRun) await aiPost(`/api/local-monitor/v1/ai/runs/${activeSessionRun}/cancel`, {}); });
   document.querySelector("[data-session-ai-more]")?.addEventListener("click", () => readSessionReports(sessionReportCursor, false));
-  sessionAiDialog?.addEventListener("cancel", event => { event.preventDefault(); sessionAiDialog.close(); sessionAiInvoker?.focus(); });
-  window.addEventListener("pagehide", () => { nodeTranscript = []; nodeAiContext = null; });
+  sessionAiDialog?.addEventListener("cancel", event => { event.preventDefault(); closeSessionAi(); });
+  window.addEventListener("pagehide", () => { nodePollGeneration++; sessionPollGeneration++; nodeTranscript = []; nodeAiContext = null; activeSessionRun = null; });
   load().then(checkAiReadiness);
 })();

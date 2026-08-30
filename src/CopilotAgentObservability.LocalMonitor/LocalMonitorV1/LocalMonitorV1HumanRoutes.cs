@@ -244,8 +244,6 @@ internal static class LocalMonitorV1HumanRoutes
                         if (node is null || query.ExecutionId is not null && node.ExecutionId != query.ExecutionId)
                             return (LocalMonitorV1PageModel.ResolvedError(path, query, "node_not_found", "open_session_overview"), 404);
                     }
-                    if (query.AnalysisId is not null)
-                        return (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"), 503);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.ComparisonDetail:
                     scopeSnapshot = await scopeService.ReadAsync(
