@@ -1755,6 +1755,8 @@ internal static class MonitorHost
             // no-store, and the payload rendered as HTML-encoded inert text.
             app.MapGet("/traces/{rawRecordId:long}/raw", async (long rawRecordId, HttpContext context) =>
             {
+                context.Response.Headers["Cache-Control"] = "no-store";
+
                 if (IsCrossSiteRequest(context))
                 {
                     await WriteFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The raw detail view is same-origin only.");
@@ -1809,7 +1811,6 @@ internal static class MonitorHost
                         return;
                     }
                     context.Response.StatusCode = StatusCodes.Status200OK;
-                    context.Response.Headers["Cache-Control"] = "no-store";
                     context.Response.ContentType = "text/html; charset=utf-8";
                     await context.Response.WriteAsync(entity);
                 }
