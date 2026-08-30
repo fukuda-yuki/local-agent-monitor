@@ -6,6 +6,7 @@ using CopilotAgentObservability.Telemetry.Repositories;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryCatalogSchemaTests
 {
     private const string At = "2026-08-01T00:00:00.0000000+00:00";

@@ -18,6 +18,7 @@ using SQLitePCL;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryRuntimeBackupTests
 {
     private const string ColdComposerChild = "CAO_LOCAL_REPOSITORY_BACKUP_COLD_CHILD";

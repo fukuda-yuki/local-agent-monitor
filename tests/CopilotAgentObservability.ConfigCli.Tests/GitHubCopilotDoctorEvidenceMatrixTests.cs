@@ -9,6 +9,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class GitHubCopilotDoctorEvidenceMatrixTests
 {
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-07-17T03:00:00Z");

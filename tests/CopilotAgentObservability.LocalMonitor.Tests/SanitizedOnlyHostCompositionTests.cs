@@ -4,6 +4,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SanitizedOnlyHostCompositionTests
 {
     private const string UnsupportedEndpoint =

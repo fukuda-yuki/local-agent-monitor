@@ -15,6 +15,7 @@ using CopilotAgentObservability.Doctor.Tests.Persistence;
 
 namespace CopilotAgentObservability.Doctor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class DoctorCrossSurfaceContractTests
 {
     [Fact]

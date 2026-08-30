@@ -5,6 +5,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RuntimeBackupCliTests
 {
     [Theory]

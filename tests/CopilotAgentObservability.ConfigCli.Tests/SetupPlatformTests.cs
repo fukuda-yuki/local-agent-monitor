@@ -54,6 +54,7 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public void SystemPlatform_ProcessRunnerExecutesExtensionlessWindowsCommandShim()
     {
         if (!OperatingSystem.IsWindows())
@@ -85,6 +86,7 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public void SystemPlatform_ProcessRunnerPrefersNativeWindowsExecutableOverSameNameCommandShim()
     {
         if (!OperatingSystem.IsWindows())
@@ -117,6 +119,7 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public void SystemPlatform_ProcessRunnerDoesNotFollowWindowsCommandShimReparsePoint()
     {
         if (!OperatingSystem.IsWindows())
@@ -144,6 +147,7 @@ public sealed class SetupPlatformTests
     }
 
     [Theory]
+    [Trait("ValidationLane", "Nightly")]
     [InlineData("%ComSpec%")]
     [InlineData("!ComSpec!")]
     public void SystemPlatform_ProcessRunnerRejectsWindowsCommandShimExpansionTokens(string token)
@@ -171,6 +175,7 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public void SystemPlatform_ProcessRunnerReportsMissingWindowsCommandInterpreterAsFailed()
     {
         if (!OperatingSystem.IsWindows())

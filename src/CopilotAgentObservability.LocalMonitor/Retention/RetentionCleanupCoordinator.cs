@@ -9,6 +9,7 @@ internal sealed class RetentionCleanupCoordinator
     private readonly RetentionAdapterRegistry? adapters;
     private readonly RetentionSqliteMaintenance maintenance;
     private readonly TimeProvider time;
+    private readonly Func<RetentionCatalogMutation, ValueTask>? catalogCheckpoint;
     // Two consumers may finish adapters together. Catalog writes stay serialized
     // because Complete() is an unmapped write transaction; adapter deletes stay parallel.
     private readonly SemaphoreSlim catalogWrites = new(1, 1);
@@ -16,11 +17,18 @@ internal sealed class RetentionCleanupCoordinator
 
     internal RetentionCleanupCoordinator() : this(null, null, TimeProvider.System) { }
     internal RetentionCleanupCoordinator(RetentionCatalogStore? catalog, RetentionAdapterRegistry? adapters, TimeProvider? timeProvider = null)
+        : this(catalog, adapters, timeProvider, null) { }
+    internal RetentionCleanupCoordinator(
+        RetentionCatalogStore? catalog,
+        RetentionAdapterRegistry? adapters,
+        TimeProvider? timeProvider,
+        Func<RetentionCatalogMutation, ValueTask>? catalogCheckpoint)
     {
         this.catalog = catalog;
         this.adapters = adapters;
         time = timeProvider ?? TimeProvider.System;
         maintenance = catalog is null ? new RetentionSqliteMaintenance() : new RetentionSqliteMaintenance(catalog);
+        this.catalogCheckpoint = catalogCheckpoint;
     }
 
     internal ValueTask<RetentionCycleResult> RunOneCycleAsync(CancellationToken stopScanningToken, CancellationToken drainToken) => RunCoreAsync(stopScanningToken, drainToken);
@@ -79,7 +87,7 @@ internal sealed class RetentionCleanupCoordinator
     {
         if (stopScanningToken.IsCancellationRequested) return (0, true, false, false);
         var attemptedAt = time.GetUtcNow();
-        var claim = await CatalogAsync(() => catalog!.TryClaimDeletionAsync(work, Guid.NewGuid().ToString("N"), attemptedAt, stopScanningToken)).ConfigureAwait(false);
+        var claim = await CatalogAsync(RetentionCatalogMutation.ClaimDeletion, () => catalog!.TryClaimDeletionAsync(work, Guid.NewGuid().ToString("N"), attemptedAt, stopScanningToken)).ConfigureAwait(false);
         if (claim.Disposition == RetentionClaimDisposition.Quiescing && claim.QuiescenceRetryAt is { } retryAt)
         {
             var deadline = attemptedAt + RetentionV1Constants.ActiveOperationQuiescenceBound;
@@ -87,18 +95,18 @@ internal sealed class RetentionCleanupCoordinator
             if (waitUntil > time.GetUtcNow())
                 await Task.Delay(waitUntil - time.GetUtcNow(), time, stopScanningToken).ConfigureAwait(false);
             if (!stopScanningToken.IsCancellationRequested && time.GetUtcNow() < deadline)
-                claim = await CatalogAsync(() => catalog!.TryClaimDeletionAsync(work, Guid.NewGuid().ToString("N"), time.GetUtcNow(), stopScanningToken)).ConfigureAwait(false);
+                claim = await CatalogAsync(RetentionCatalogMutation.ClaimDeletion, () => catalog!.TryClaimDeletionAsync(work, Guid.NewGuid().ToString("N"), time.GetUtcNow(), stopScanningToken)).ConfigureAwait(false);
         }
         if (claim.Disposition is RetentionClaimDisposition.Contended or RetentionClaimDisposition.StaleNoOp) return (0, true, false, false);
         if (claim.Disposition == RetentionClaimDisposition.CoverageBlocked) return (0, false, false, true);
         if (claim.Disposition != RetentionClaimDisposition.Claimed || claim.Claim is null) return (0, false, false, false);
         if (drainToken.IsCancellationRequested)
         {
-            await CatalogAsync(() => catalog!.TryCancelBeforeIntentAsync(claim.Claim.Fence, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
+            await CatalogAsync(RetentionCatalogMutation.CancelBeforeIntent, () => catalog!.TryCancelBeforeIntentAsync(claim.Claim.Fence, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
             return (0, false, false, false);
         }
 
-        var intent = await CatalogAsync(() => catalog!.EnsureDeleteIntentAsync(claim.Claim.Fence, claim.Claim.IntentCursor, time.GetUtcNow(), drainToken)).ConfigureAwait(false);
+        var intent = await CatalogAsync(RetentionCatalogMutation.EnsureDeleteIntent, () => catalog!.EnsureDeleteIntentAsync(claim.Claim.Fence, claim.Claim.IntentCursor, time.GetUtcNow(), drainToken)).ConfigureAwait(false);
         if (intent.Disposition is not RetentionIntentDisposition.Committed and not RetentionIntentDisposition.AlreadyCommitted) return (0, false, false, false);
 
         using var leaseLoss = new CancellationTokenSource();
@@ -120,16 +128,16 @@ internal sealed class RetentionCleanupCoordinator
 
         if (result.Disposition == RetentionAdapterDisposition.Deleted)
         {
-            var completed = await CatalogAsync(() => catalog!.TryCompleteDeletionAsync(claim.Claim.Fence, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
+            var completed = await CatalogAsync(RetentionCatalogMutation.CompleteDeletion, () => catalog!.TryCompleteDeletionAsync(claim.Claim.Fence, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
             var final = completed is RetentionMutationDisposition.Applied or RetentionMutationDisposition.NoOpAlreadyFinalized;
             return (final ? 1 : 0, final, final && IsSqlite(claim.Claim.StoreKind), false);
         }
         if (leaseWasLost)
             return (0, false, false, false);
         if (result.Disposition == RetentionAdapterDisposition.TransientFailure)
-            await CatalogAsync(() => catalog!.TryRecordTransientFailureAsync(claim.Claim.Fence, result.ErrorCode!.Value, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
+            await CatalogAsync(RetentionCatalogMutation.RecordTransientFailure, () => catalog!.TryRecordTransientFailureAsync(claim.Claim.Fence, result.ErrorCode!.Value, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
         else if (result.Disposition == RetentionAdapterDisposition.TerminalFailure)
-            await CatalogAsync(() => catalog!.TryRecordTerminalFailureAsync(claim.Claim.Fence, result.ErrorCode!.Value, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
+            await CatalogAsync(RetentionCatalogMutation.RecordTerminalFailure, () => catalog!.TryRecordTerminalFailureAsync(claim.Claim.Fence, result.ErrorCode!.Value, time.GetUtcNow(), CancellationToken.None)).ConfigureAwait(false);
         return (0, false, false, false);
     }
 
@@ -151,7 +159,7 @@ internal sealed class RetentionCleanupCoordinator
                 await Task.Delay(RetentionV1Constants.LeaseRenewalDeadline, time, cancellationToken).ConfigureAwait(false);
                 var notAfter = DrainNotAfter;
                 if (notAfter is { } deadline && time.GetUtcNow() >= deadline) { leaseLoss.Cancel(); return; }
-                var result = await CatalogAsync(() => catalog!.TryRenewDeletionLeaseAsync(fence, time.GetUtcNow(), notAfter, CancellationToken.None)).ConfigureAwait(false);
+                var result = await CatalogAsync(RetentionCatalogMutation.RenewDeletionLease, () => catalog!.TryRenewDeletionLeaseAsync(fence, time.GetUtcNow(), notAfter, CancellationToken.None)).ConfigureAwait(false);
                 if (result != RetentionRenewalResult.Renewed) { leaseLoss.Cancel(); return; }
             }
         }
@@ -160,11 +168,13 @@ internal sealed class RetentionCleanupCoordinator
 
     private static bool IsSqlite(RetentionStoreKind kind) => kind is RetentionStoreKind.SessionEventContent or RetentionStoreKind.RawRecord or RetentionStoreKind.AnalysisRunRaw;
 
-    private async ValueTask<T> CatalogAsync<T>(Func<ValueTask<T>> operation)
+    private async ValueTask<T> CatalogAsync<T>(RetentionCatalogMutation mutation, Func<ValueTask<T>> operation)
     {
         await catalogWrites.WaitAsync().ConfigureAwait(false);
         try
         {
+            if (catalogCheckpoint is not null)
+                await catalogCheckpoint(mutation).ConfigureAwait(false);
             return await operation().ConfigureAwait(false);
         }
         finally
@@ -172,6 +182,17 @@ internal sealed class RetentionCleanupCoordinator
             catalogWrites.Release();
         }
     }
+}
+
+internal enum RetentionCatalogMutation
+{
+    ClaimDeletion,
+    CancelBeforeIntent,
+    EnsureDeleteIntent,
+    CompleteDeletion,
+    RecordTransientFailure,
+    RecordTerminalFailure,
+    RenewDeletionLease,
 }
 
 internal sealed record RetentionCycleResult(int Dispatched, int Completed, bool Clean, bool QualifiedSqliteBatch, DateTimeOffset? NextEligibleAt, bool ContinueImmediately);

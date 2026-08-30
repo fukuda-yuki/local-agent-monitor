@@ -4,6 +4,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public class MonitorProjectionApiTests
 {
     [Fact]

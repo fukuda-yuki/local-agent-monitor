@@ -11,6 +11,7 @@ using SQLitePCL;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SkillInvocationSnapshotReplayValidatorTests
 {
     private const string TimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'+00:00'";

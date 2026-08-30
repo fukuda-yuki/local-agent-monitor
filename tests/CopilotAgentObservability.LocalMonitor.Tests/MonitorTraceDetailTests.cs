@@ -18,6 +18,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// page inlines the raw OTLP payload. It enforces same-origin + no-store.
 /// Under --sanitized-only, the human page is not registered.
 /// </summary>
+[Trait("ValidationLane", "Nightly")]
 public class MonitorTraceDetailTests
 {
     private const string TraceId = "trace-detail";

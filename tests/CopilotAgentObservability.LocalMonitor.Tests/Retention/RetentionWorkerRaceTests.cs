@@ -5,6 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class RetentionWorkerRaceTests
 {
     [Fact]
@@ -468,6 +469,7 @@ public sealed class RetentionWorkerRaceTests
         InsertOperationLease(fixture.Path, fixture.ItemId, expiry);
         var time = new ManualNotificationTimeProvider(fixture.Time.GetUtcNow());
         var attempts = 0;
+        var leaseReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var grant = new RetentionReadGrant(
             new(fixture.Context.StoreInstanceId, RetentionStoreKind.RawRecord, "1"),
             fixture.ItemId,
@@ -487,6 +489,7 @@ public sealed class RetentionWorkerRaceTests
                     fixture.Path,
                     "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
                     ("$item", fixture.ItemId));
+                leaseReleased.TrySetResult();
                 return true;
             },
             beforeWaitingForReleaseForTesting: null);
@@ -498,10 +501,7 @@ public sealed class RetentionWorkerRaceTests
             fixture.ItemId));
         Assert.True(Assert.Single(time.Timers).IsScheduled);
         time.Timers[0].Fire();
-        await WaitUntilAsync(() => Number(
-            fixture.Path,
-            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
-            fixture.ItemId) == 0L);
+        await leaseReleased.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await cleanup.ReleaseOrOwnAsync();
 
         Assert.Equal(0L, Number(
@@ -519,6 +519,7 @@ public sealed class RetentionWorkerRaceTests
         InsertOperationLease(fixture.Path, fixture.ItemId, expiry);
         var time = new ManualNotificationTimeProvider(fixture.Time.GetUtcNow());
         var attempts = 0;
+        var leaseReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var grant = new RetentionReadGrant(
             new(fixture.Context.StoreInstanceId, RetentionStoreKind.RawRecord, "1"),
             fixture.ItemId,
@@ -538,6 +539,7 @@ public sealed class RetentionWorkerRaceTests
                     fixture.Path,
                     "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
                     ("$item", fixture.ItemId));
+                leaseReleased.TrySetResult();
                 return true;
             },
             beforeWaitingForReleaseForTesting: null);
@@ -545,10 +547,7 @@ public sealed class RetentionWorkerRaceTests
         time.Timers[0].ThrowOnChange = true;
 
         await cleanup.ReleaseOrOwnAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
-        await WaitUntilAsync(() => Number(
-            fixture.Path,
-            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
-            fixture.ItemId) == 0L);
+        await leaseReleased.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await cleanup.ReleaseOrOwnAsync();
 
         Assert.Equal(0L, Number(
@@ -1075,7 +1074,7 @@ public sealed class RetentionWorkerRaceTests
 
     private sealed record Fixture(string Path, RetentionCatalogContext Context, MutableTimeProvider Time, RetentionCatalogStore Catalog, string ItemId) : IDisposable
     {
-        public void Dispose() { SqliteConnection.ClearAllPools(); foreach (var file in new[] { Path, Path + "-wal", Path + "-shm" }) if (File.Exists(file)) File.Delete(file); }
+        public void Dispose() { foreach (var file in new[] { Path, Path + "-wal", Path + "-shm" }) TestFileSystemCleanup.DeleteFile(file); }
     }
     private sealed class CountingAdapter(RetentionStoreKind kind) : IRetentionDeletionAdapter
     {

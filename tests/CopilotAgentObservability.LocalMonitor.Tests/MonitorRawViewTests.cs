@@ -2,6 +2,7 @@ using System.Net;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public class MonitorRawViewTests
 {
     [Fact]

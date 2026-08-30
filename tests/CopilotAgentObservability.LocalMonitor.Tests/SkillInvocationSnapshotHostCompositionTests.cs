@@ -16,6 +16,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class SkillInvocationSnapshotHostCompositionTests
 {
     private const string SessionId = "11111111-1111-4111-8111-111111111111";

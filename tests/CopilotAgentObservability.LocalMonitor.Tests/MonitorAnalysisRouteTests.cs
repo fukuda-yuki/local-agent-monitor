@@ -9,6 +9,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public class MonitorAnalysisRouteTests
 {
     private const string TraceId = "trace-analysis-route";

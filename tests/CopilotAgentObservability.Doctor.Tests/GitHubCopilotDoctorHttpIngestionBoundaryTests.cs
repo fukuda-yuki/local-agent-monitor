@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.Doctor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class GitHubCopilotDoctorHttpIngestionBoundaryTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 17, 1, 2, 3, TimeSpan.Zero);

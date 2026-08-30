@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.Alerts;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class AlertCenterEvaluationRouteSecurityTests
 {
     [Fact]

@@ -16,6 +16,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Trait("ValidationLane", "Nightly")]
 public sealed class LocalRepositoryRouteTests
 {
     private const string CreateBody = "{\"schema_version\":\"local-repository-create.v1\",\"display_name\":\"One\",\"github_locator\":null}";
