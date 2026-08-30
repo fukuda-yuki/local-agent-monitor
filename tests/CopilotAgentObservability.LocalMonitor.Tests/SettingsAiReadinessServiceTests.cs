@@ -84,7 +84,7 @@ public sealed class SettingsAiReadinessServiceTests
     }
 
     [Fact]
-    public async Task CheckAsync_ProviderExpiryIsControllableWhenProviderIgnoresCancellationAndDisposesExactlyOnce()
+    public async Task CheckAsync_IsBoundedWhenProviderIgnoresCancellationAndDisposesExactlyOnce()
     {
         var timeProvider = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         var never = new TaskCompletionSource<CopilotRuntimeStatusObservationV1?>(TaskCreationOptions.RunContinuationsAsynchronously);
