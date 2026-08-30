@@ -31,6 +31,27 @@ public sealed class LocalAiAnalysisFoundationTests
     }
 
     [Theory]
+    [InlineData("created_at", "created_ at")]
+    [InlineData("CREATE TABLE", "CRE ATE TABLE")]
+    public void Schema_RejectsSplitWordTokensWithoutMutation(string canonical, string split)
+    {
+        using var database = new Database(); using var connection = database.Open(); LocalAiAnalysisSchemaV1.Ensure(connection);
+        Execute(connection, $"PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql,'{canonical}','{split}') WHERE name='local_ai_results'; PRAGMA writable_schema=OFF;");
+        var before = Text(connection, "SELECT sql FROM sqlite_schema WHERE name='local_ai_results';");
+        Assert.Throws<InvalidOperationException>(() => LocalAiAnalysisSchemaV1.Ensure(connection));
+        Assert.Equal(before, Text(connection, "SELECT sql FROM sqlite_schema WHERE name='local_ai_results';"));
+    }
+
+    [Fact]
+    public void Schema_AcceptsFormattingWhitespaceBetweenExistingTokens()
+    {
+        using var database = new Database(); using var connection = database.Open(); LocalAiAnalysisSchemaV1.Ensure(connection);
+        Execute(connection, "PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(replace(sql,'CREATE TABLE','CREATE  '||char(10)||' TABLE'),'(', ' ( ') WHERE name='local_ai_results'; PRAGMA writable_schema=OFF;");
+        LocalAiAnalysisSchemaV1.Ensure(connection);
+        Assert.Equal(1L, Scalar(connection, "SELECT version FROM schema_version WHERE component='local_ai_analysis';"));
+    }
+
+    [Theory]
     [InlineData("partial")]
     [InlineData("newer")]
     public void Schema_RejectsPartialOrNewerAuthorityWithoutMutation(string shape)
@@ -118,13 +139,17 @@ public sealed class LocalAiAnalysisFoundationTests
     }
 
     [Fact]
-    public void Completion_AcceptsDepth16AndRejectsDepth17ThroughRealStoreBoundary()
+    public void Completion_Depth16ReachesSemanticRejectionAndDepth17WritesNoResult()
     {
         using var database = new Database(); var store = database.Store(); store.InsertSnapshot(Snapshot());
-        var accepted = store.CreateRun(Request()); store.TransitionRun(accepted.RunId, LocalAiRunStateV1.Running, null, StartedAt);
-        Assert.Equal(LocalAiRunStateV1.Succeeded, store.Complete(accepted.RunId, Result(limitations: NestedLimitations(15)), CompletedAt));
-        var rejected = store.CreateRun(Request()); store.TransitionRun(rejected.RunId, LocalAiRunStateV1.Running, null, StartedAt);
-        Assert.Equal(LocalAiRunStateV1.InvalidResult, store.Complete(rejected.RunId, Result(limitations: NestedLimitations(16)), CompletedAt));
+        var depth16 = Result(limitations: NestedLimitations(15));
+        Assert.Equal(LocalAiResultValidationCodeV1.InvalidResult, LocalAiResultValidatorV1.Validate(depth16, ["ev-1"]).Code);
+        var semantic = store.CreateRun(Request()); store.TransitionRun(semantic.RunId, LocalAiRunStateV1.Running, null, StartedAt);
+        Assert.Equal(LocalAiRunStateV1.InvalidResult, store.Complete(semantic.RunId, depth16, CompletedAt));
+        var admission = store.CreateRun(Request()); store.TransitionRun(admission.RunId, LocalAiRunStateV1.Running, null, StartedAt);
+        Assert.Equal(LocalAiRunStateV1.InvalidResult, store.Complete(admission.RunId, Result(limitations: NestedLimitations(16)), CompletedAt));
+        Assert.Equal(0L, database.Scalar("SELECT COUNT(*) FROM local_ai_results;"));
+        Assert.Equal(PayloadHash, database.Text("SELECT payload_sha256 FROM local_ai_snapshots;"));
     }
 
     [Fact]
@@ -164,5 +189,5 @@ public sealed class LocalAiAnalysisFoundationTests
     private static readonly string PayloadHash=Convert.ToHexStringLower(SHA256.HashData("{\"value\":1}"u8));
     private static readonly DateTimeOffset StartedAt=DateTimeOffset.Parse("2026-08-30T01:00:01Z"),CompletedAt=DateTimeOffset.Parse("2026-08-30T01:00:02Z");
     private static long Scalar(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return Convert.ToInt64(q.ExecuteScalar());} private static string Text(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;return(string)q.ExecuteScalar()!;} private static void Execute(SqliteConnection c,string sql){using var q=c.CreateCommand();q.CommandText=sql;q.ExecuteNonQuery();}
-    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
+    private sealed class Database:IDisposable{private readonly string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"local-ai-"+Guid.NewGuid().ToString("N"));internal Database(){Directory.CreateDirectory(directory);Path=System.IO.Path.Combine(directory,"test.sqlite");}internal string Path{get;}internal SqliteConnection Open(){var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Path,Pooling=false}.ToString());c.Open();return c;}internal LocalAiAnalysisStoreV1 Store(){using var c=Open();LocalAiAnalysisSchemaV1.Ensure(c);return new(Path);}internal long Scalar(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Scalar(c,sql);}internal string Text(string sql){using var c=Open();return LocalAiAnalysisFoundationTests.Text(c,sql);}public void Dispose(){SqliteConnection.ClearAllPools();Directory.Delete(directory,true);}}
 }

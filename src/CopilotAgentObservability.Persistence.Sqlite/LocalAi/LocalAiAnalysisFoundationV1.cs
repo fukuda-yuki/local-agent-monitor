@@ -85,13 +85,29 @@ internal static class LocalAiAnalysisSchemaV1
     }
     private static string Normalize(string sql)
     {
-        var normalized=new StringBuilder(sql.Length); var inLiteral=false;
-        for(var index=0;index<sql.Length;index++)
+        var normalized=new StringBuilder(sql.Length); var previousWord=false;
+        for(var index=0;index<sql.Length;)
         {
-            var character=sql[index];
-            if(character=='\'' && inLiteral && index+1<sql.Length && sql[index+1]=='\'') { normalized.Append("''"); index++; continue; }
-            if(character=='\'') { inLiteral=!inLiteral; normalized.Append(character); continue; }
-            if(inLiteral || !char.IsWhiteSpace(character)) normalized.Append(character);
+            if(char.IsWhiteSpace(sql[index])) { index++; continue; }
+            var token=new StringBuilder(); var word=false;
+            if(sql[index]=='\'')
+            {
+                token.Append(sql[index++]);
+                while(index<sql.Length)
+                {
+                    token.Append(sql[index]);
+                    if(sql[index++]!='\'') continue;
+                    if(index<sql.Length && sql[index]=='\'') { token.Append(sql[index++]); continue; }
+                    break;
+                }
+            }
+            else if(char.IsLetterOrDigit(sql[index]) || sql[index]=='_')
+            {
+                word=true; while(index<sql.Length && (char.IsLetterOrDigit(sql[index]) || sql[index]=='_')) token.Append(sql[index++]);
+            }
+            else token.Append(sql[index++]);
+            if(previousWord && word) normalized.Append(' ');
+            normalized.Append(token); previousWord=word;
         }
         return normalized.ToString().TrimEnd(';');
     }
@@ -173,7 +189,7 @@ internal static class LocalAiResultValidatorV1
     private static bool Timestamp(JsonElement value, string name, out DateTimeOffset timestamp) => DateTimeOffset.TryParseExact(value.GetProperty(name).GetString(), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp);
     internal static bool CanonicalUuid7(string value) => value.Length == 36 && value == value.ToLowerInvariant() && Guid.TryParseExact(value, "D", out var id) && id.Version == 7 && (id.ToByteArray()[8] & 0xc0) == 0x80;
     private static bool Hash(string value) => value.Length == 64 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
-    private static bool ValidLimitations(JsonElement value) => value.ValueKind == JsonValueKind.Array && value.EnumerateArray().All(item => item.ValueKind == JsonValueKind.String || ValidLimitations(item));
+    private static bool ValidLimitations(JsonElement value) => value.ValueKind == JsonValueKind.Array && value.EnumerateArray().All(item => item.ValueKind == JsonValueKind.String);
 }
 
 internal static class LocalAiCanonicalJsonV1
