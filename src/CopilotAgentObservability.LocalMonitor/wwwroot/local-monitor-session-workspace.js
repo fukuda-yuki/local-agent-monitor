@@ -692,23 +692,24 @@
     if (open && sessionReports[0]) showSessionReport(sessionReports[0]);
   }
 
-  async function findExactSessionReport(runId) {
+  async function readExactSessionReport(runId) {
     let cursor = null;
     do {
       const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "100"); if (cursor) url.searchParams.set("cursor", cursor);
-      const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return null;
-      const page = await response.json(); const exact = (page.reports ?? []).find(item => item.run_id === runId); if (exact) return exact; cursor = page.next_cursor ?? null;
+      const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return { state: "unavailable", report: null };
+      const page = await response.json(); const exact = (page.reports ?? []).find(item => item.run_id === runId); if (exact) return { state: "found", report: exact }; cursor = page.next_cursor ?? null;
     } while (cursor);
-    return null;
+    return { state: "missing", report: null };
   }
+
+  async function findExactSessionReport(runId) { return (await readExactSessionReport(runId)).report; }
 
   function showSessionDialog(invoker) {
     sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); if (!dialog.open) dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
   }
 
-  async function restoreExactSessionAnalysis(runId) {
-    const response = await fetch(`/api/local-monitor/v1/ai/session-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
-    const run = await response.json(); if (run.scope_kind !== "session" || run.session_id !== root.dataset.sessionId || run.run_id !== runId) return;
+  async function restoreExactSessionAnalysis(run) {
+    const runId = run.run_id;
     showSessionDialog(document.querySelector("[data-session-ai-open]"));
     if (["queued", "running"].includes(run.state)) {
       activeSessionRun = runId; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false;
@@ -716,12 +717,13 @@
       const terminal = await pollAiRun(runId, "session", generation); if (generation !== sessionPollGeneration) return;
       activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
       if (terminal && ["succeeded", "zero_findings"].includes(terminal.state)) {
-        const report = await findExactSessionReport(runId); showSessionReport(report ?? { ...terminal, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
+        const exact = await readExactSessionReport(runId); if (exact.state === "unavailable") return closeExactAnalysisUnavailable(); showSessionReport(exact.report ?? { ...terminal, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
       } else if (terminal) showSessionReport({ ...terminal, content_state: "status_only", snapshot_changed: false }, false, true);
       await readSessionReports(null, false);
     } else if (["succeeded", "zero_findings"].includes(run.state)) {
-      const report = await findExactSessionReport(runId); if (report) showSessionReport(report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
+      const exact = await readExactSessionReport(runId); if (exact.state === "unavailable") return closeExactAnalysisUnavailable(); if (exact.report) showSessionReport(exact.report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
     } else showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
+    return "restored";
   }
 
   async function restoreExactNodeAnalysis(run, route) {
@@ -745,14 +747,21 @@
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
       if (response.status === 404) { location.reload(); return "closed"; }
-      if (!response.ok) { renderRouteRecovery({ status: response.status }); return "closed"; }
+      if (!response.ok) return closeExactAnalysisUnavailable(response.status);
       const run = await response.json();
-      if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) { renderRouteRecovery({ status: 503 }); return "closed"; }
+      if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) return closeExactAnalysisUnavailable();
       if (run.scope_kind === "node" && NODE.test(run.node_id)) await restoreExactNodeAnalysis(run, route);
-      else if (run.scope_kind === "session") await restoreExactSessionAnalysis(runId);
-      else { renderRouteRecovery({ status: 503 }); return "closed"; }
+      else if (run.scope_kind === "session") return await restoreExactSessionAnalysis(run);
+      else return closeExactAnalysisUnavailable();
       return "restored";
-    } catch { renderRouteRecovery({ status: 503 }); return "closed"; }
+    } catch { return closeExactAnalysisUnavailable(); }
+  }
+
+  function closeExactAnalysisUnavailable(status = 503) {
+    nodePollGeneration++; nodeTranscript = []; nodeAiContext = null;
+    const dialog = document.querySelector("[data-session-ai-dialog]"); if (dialog?.open) closeSessionAi(false); else { activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; }
+    document.querySelector("[data-session-ai-report]")?.replaceChildren(); document.querySelector("[data-session-ai-history]")?.replaceChildren();
+    renderRouteRecovery({ status }); return "closed";
   }
 
   async function openSessionAi(invoker) {
