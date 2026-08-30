@@ -114,7 +114,12 @@ internal static class MonitorSpanProjectionBuilder
 
         var toolName = MeasurementSanitizer.SanitizeFreeFormName(
             OtlpSpanReader.ReadFirstString(span.Attributes, OtlpSpanReader.GenAiToolNameKeys));
-        var toolType = OtlpSpanReader.ReadFirstString(span.Attributes, ToolTypeKeys);
+        var toolType = OtlpSpanReader.ReadFirstString(span.Attributes, ToolTypeKeys) switch
+        {
+            "function" => "function",
+            "extension" => "extension",
+            _ => null,
+        };
         var mcpToolName = MeasurementSanitizer.SanitizeFreeFormName(
             OtlpSpanReader.ReadFirstString(span.Attributes, McpToolNameKeys));
         var mcpServerHash = OtlpSpanReader.ReadFirstString(span.Attributes, McpServerHashKeys);
@@ -186,14 +191,13 @@ internal static class MonitorSpanProjectionBuilder
         var opName = OtlpSpanReader.ReadFirstString(span.Attributes, OtlpSpanReader.GenAiOperationKeys);
         if (opName is not null)
         {
-            return opName.ToLowerInvariant() switch
+            return opName switch
             {
                 "invoke_agent" => "invoke_agent",
                 "chat" => "chat",
                 "execute_tool" => "execute_tool",
                 "execute_hook" => "execute_hook",
-                "generate_content" or "text_completion" => "chat",
-                _ => opName,
+                _ => null,
             };
         }
 

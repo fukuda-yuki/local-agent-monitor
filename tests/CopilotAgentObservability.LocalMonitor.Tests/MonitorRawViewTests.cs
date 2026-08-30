@@ -1,4 +1,5 @@
 using System.Net;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -48,6 +49,7 @@ public class MonitorRawViewTests
         var response = await host.Client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
         Assert.Contains("cross_origin_forbidden", await response.Content.ReadAsStringAsync());
     }
 
@@ -64,6 +66,7 @@ public class MonitorRawViewTests
         var response = await host.Client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
     }
 
     [Fact]
@@ -91,7 +94,26 @@ public class MonitorRawViewTests
         var response = await host.Client.GetAsync("/traces/999999/raw");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
         Assert.Contains("raw_record_not_found", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task RawDetail_PersistenceBusyReturns503WithNoStore()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            ProjectionStore = new BusyRawRecordProjectionStore(),
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+
+        var response = await host.Client.GetAsync("/traces/1/raw");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("persistence_busy", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -244,6 +266,15 @@ public class MonitorRawViewTests
             temp,
             sanitizedOnly: sanitizedOnly,
             testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
+
+    private sealed class BusyRawRecordProjectionStore : ProjectionStoreTestDouble
+    {
+        public override ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(
+            long id,
+            RetentionReadKind readKind,
+            CancellationToken cancellationToken) =>
+            throw new PersistenceBusyException();
+    }
 
     private const string ScriptAndPiiPayload = """
         {"resourceSpans":[{"resource":{"attributes":[
