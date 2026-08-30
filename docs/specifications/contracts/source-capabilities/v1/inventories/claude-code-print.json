@@ -52,7 +52,7 @@
   "content_capture_modes": {
     "content_disabled": {
       "execution_status": "executed_structural_telemetry_observed",
-      "execution_note": "2026-07-13 re-run with CLAUDE_CODE_ENABLE_TELEMETRY=1 and CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 both set; the earlier no-telemetry result was caused by the missing beta trace gate, not by the producer. Evidence: docs/sprints/issue-99-claude-live-validation.md.",
+      "execution_note": "A re-run with CLAUDE_CODE_ENABLE_TELEMETRY=1 and CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 both set produced structural telemetry; the earlier no-telemetry result was caused by the missing beta trace gate, not by the producer.",
       "otel_structure_fixture": "claude-code-print.otel.structure.json",
       "hook_structure_fixture": null,
       "verified_fingerprints": [
@@ -78,7 +78,7 @@
   "opaque_trace_reference": {
     "status": "observed",
     "reference": "e3a37e3412059ed7b0c4bb2832baddc8",
-    "evidence": "Structural trace telemetry reached the disposable loopback receiver; additional run references are recorded in docs/sprints/issue-99-claude-live-validation.md."
+    "evidence": "Structural trace telemetry reached the disposable loopback receiver."
   },
   "opaque_session_reference": {
     "status": "attribute_key_observed_value_not_retained",

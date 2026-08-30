@@ -1330,21 +1330,18 @@ Fixed primary errors include:
 
 There is intentionally no remote/non-loopback restore API.
 
-## 12. Validation matrix transition
+## 12. Validation
 
-Issue #88 removes only the `backup-restore` future placeholder from the #91
-future registry and publishes active rows at
-`docs/sprints/issue-88-backup-restore/validation-matrix.json`:
-
-- `91-B-088`: backup/WAL/manifest/checksum/online publication;
-- `91-S-088`: archive attacks, tombstone/confirmation, atomic rollback,
-  no-leak and external-store fail-closed cases; and
-- `91-L-088`: genuine cross-machine restore, restart readiness, and Doctor.
+Automated validation covers backup/WAL/manifest/checksum/online publication,
+archive attacks, tombstone/confirmation, atomic rollback, no-leak and
+external-store fail-closed cases. Genuine cross-machine restore, restart
+readiness, and Doctor remain live validation.
 
 Automated synthetic source/destination-directory testing is not second-machine
-evidence. `91-L-088` remains `blocked_external` until a real second-machine run
-exists. Matrix validation and leak scanning operate on sanitized receipts and
-ledgers only; a raw backup is never copied into repository evidence.
+evidence. Cross-machine coverage remains `blocked_external` until a real
+second-machine run exists. Matrix validation and leak scanning operate on
+sanitized receipts only; a raw backup is never copied into repository-safe
+results. Candidate-specific matrices and ledgers are not committed.
 
 The automated rows include Session v13-to-v14 restore and safety-snapshot
 fixtures with Event content, Retention catalog/receipt children, installed

@@ -441,7 +441,7 @@ Repository patch / diff の生成、file の自動修正、commit / push / PR �
 
 ### Module / Solution Structure
 
-Sprint8 M1 で共有コンポーネントを 2 つの class library に抽出した。依存方向は下層から上層への単方向とする。
+Local Ingestion Monitor 用の共有コンポーネントを 2 つの class library に分離する。依存方向は下層から上層への単方向とする。
 
 ```text
 CopilotAgentObservability.Telemetry           OTLP decode / attribute 変換 / raw ingest / raw record model / measurement normalization / sanitization
@@ -616,7 +616,7 @@ of import.
 
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。
-- Sprint8 の Local Ingestion Monitor（ASP.NET Core host、M2 以降）はこれらの共有 module を再利用する前提とする。ConfigCli の外部動作・CLI 表面は M1 で変更しない。
+- Local Ingestion Monitor（ASP.NET Core host）はこれらの共有 module を再利用する。ConfigCli の外部動作・CLI 表面は変更しない。
 
 ## 3. Data Flows
 

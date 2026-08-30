@@ -2,7 +2,7 @@
 
 This guide owns the detailed workflow for coding agents in this repository. It is repository guidance, not product behavior.
 
-Keep feature-specific contracts, smoke procedures, and Issue history with the owning specification, script README, test project, or sprint record. Do not copy them into this general guide.
+Keep feature-specific contracts and smoke procedures with the owning specification, script README, or test project. Keep work tracking and implementation history in GitHub Issues, Pull Requests, and Git history. Do not copy them into this general guide.
 
 ## Working Order
 
@@ -24,11 +24,9 @@ For implementation, fix, or contract work, also inspect:
 Inspect only when the task affects them:
 
 - `docs/architecture.md` or `docs/decisions.md` for architecture, policy, security, or data-boundary changes;
-- `docs/task.md` for roadmap or status changes;
-- user guides for user-workflow changes;
-- sprint material for historical rationale or evidence, following `docs/agent-guides/sprint-history.md`.
+- user guides for user-workflow changes.
 
-Do not read all canonical documents or all sprint material by default.
+Do not read all canonical documents by default.
 If task authority and a current specification disagree, report the conflict before editing. When the user's latest explicit decision resolves the conflict, update the owning specification before or together with the implementation. Otherwise stop for a product decision.
 
 ## Autonomy And Confirmation
@@ -80,7 +78,7 @@ What remains untouched
 Verification for each changed contract
 ```
 
-For a bounded task, the active work item or a short statement in chat is sufficient. Do not create a separate design, specification, plan, or review Markdown file by default.
+Use the active work item or the conversation for task-specific design, planning, status, and review. Update a current owning specification only when the durable product contract changes. Do not create task-specific design, plan, review, closeout, or status Markdown files in the repository.
 
 ### New-test gate
 
@@ -104,7 +102,7 @@ Return to the smallest design or replan before continuing when:
 
 ### Artifacts, delegation, and worktrees
 
-- Do not create separate design, plan, or review documents for a bounded task.
+- Do not create repository design drafts, implementation plans, review reports, closeout records, status ledgers, or generated agent reports for any task. A Skill's file-output convention does not override this rule.
 - Use a Sub-agent only when the user or active work item explicitly requests delegation and an independent workstream exists. Do not dispatch Sub-agents by repository default.
 - When delegation is requested, give each Sub-agent an independent scope, file ownership, and success criteria. The primary agent remains responsible for shared-file coordination, integration, validation, and final decisions.
 - Do not claim delegation when the active surface does not provide it.
@@ -209,9 +207,9 @@ Update only the document that owns the changed information.
 - Update the relevant current specification when product behavior or a public contract changes.
 - Update `docs/requirements.md` or `docs/spec.md` only when their broader contract actually changes.
 - Update user-facing guides only when their explanation or workflow becomes incorrect.
-- Update `docs/task.md` only for roadmap or status changes.
-- Keep sprint notes historical; do not introduce current product behavior only there.
-- Do not duplicate the same normative rule across requirements, specifications, task records, sprint notes, and handoff files.
+- Put bugs, unresolved work, future implementation, roadmaps, and durable implementation plans in GitHub Issues or Projects.
+- Put review findings and validation closeout in Pull Request reviews, GitHub Issue comments, or the final response.
+- Do not duplicate the same normative rule across requirements, specifications, work tracking, and handoff material.
 
 If a required authoritative update cannot be made, do not claim the work complete. State the missing decision or authority.
 

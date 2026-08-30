@@ -12,7 +12,7 @@ Langfuse、Docker Desktop、外部ネットワークは不要です。
 > を対象にしています。採用済み Local Monitor v1 は Repository → Session Explorer
 > → Session detail / deterministic Compare の構成で、permanent sidebar や汎用 KPI
 > dashboard を持ちません。現行 authority は
-> [製品定義](../superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md) と
+> [製品定義](../specifications/interfaces/local-monitor-v1-product-definition.md) と
 > [IA 仕様](../specifications/interfaces/local-monitor-v1-ia.md) です。統合後の操作手順は
 > #148 で更新します。
 
@@ -851,17 +851,11 @@ repository、cwd、process、transcript path、timestamp の近さは binding �
 
 #### live validation の範囲
 
-2026-07-12 の repository-safe inventory では、Windows 上の `claude` version `2.1.207`
-を確認しました。ただし次の実 producer 証拠は未取得です。
-
-- interactive: 認証済み TTY が無く、標準入出力が redirect されたため実行不可。
-- `claude -p`: 範囲を限った実行は exit `0` でしたが、構造化された OTel / Hook telemetry を出力しませんでした。
-- Agent SDK: 対応 package、runtime reference、認証情報が利用できず実行していません。
-
-この結果は interactive / print / SDK の証拠を相互に代用しません。raw payload、PII、
-credential、local path を記録しない、名前付きの後続確認が必要です。詳細な記録は
-[Sprint22 M5 live-validation](../sprints/sprint22-source-drift-claude/milestones/M5-integration/live-validation.md)
-を参照してください。
+Claude Code の interactive、print、Agent SDK は独立した producer surface として
+扱います。一つの surface の観測結果を別 surface の証拠に代用しません。現在の
+検証済み範囲と blocker は [Claude Code source schema drift contract](../specifications/interfaces/source-schema-drift-claude-code.md)
+および versioned source-capability inventory を正本とします。live validation では
+raw payload、PII、credential、local path を repository-safe 出力へ記録しません。
 
 ## raw body 表示（既定）
 

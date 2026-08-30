@@ -66,7 +66,7 @@ public sealed class LinuxCurrentSkillFileLiveMatrixTests
     public void WrapperUsesArgumentListAndNeverInterpolatesAShellCommand()
     {
         var root = FindRepositoryRoot();
-        var script = File.ReadAllText(Path.Combine(root, "scripts", "validation", "issue-158", "run-linux-current-file-matrix.ps1"));
+        var script = File.ReadAllText(Path.Combine(root, "scripts", "validation", "skill-invocation-snapshot", "run-linux-current-file-matrix.ps1"));
         Assert.Contains("$psi.ArgumentList.Add($argument)", script, StringComparison.Ordinal);
         Assert.Contains("@('--distribution','Ubuntu','--exec','timeout','--signal=TERM','--kill-after=30s','12m','bash',$helper,$CandidateSha,$source,$runId,$marker,$linuxSdkRoot)", script, StringComparison.Ordinal);
         Assert.DoesNotContain("--foreground", script, StringComparison.Ordinal);

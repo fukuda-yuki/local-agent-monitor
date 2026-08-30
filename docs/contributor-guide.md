@@ -13,8 +13,7 @@ contributor 向けの作業ガイドです。
 5. [decisions.md](decisions.md)
 6. 実装と tests
 
-`docs/sprints/` は履歴です。
-新しい product behavior は sprint-local notes だけに置かず、必ず current specification に反映してください。
+BUG、未解決作業、将来の実装、roadmap、implementation plan は GitHub Issue / Project が正本です。review 結果と validation closeout は Pull Request review、Issue comment、または最終報告へ置きます。現在の product behavior が変わる場合だけ current specification を更新してください。
 
 ## Build And Test
 

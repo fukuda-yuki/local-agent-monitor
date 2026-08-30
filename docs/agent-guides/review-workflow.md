@@ -33,17 +33,15 @@ Before completion, block the change unless:
 
 This workflow owns current-specification consistency review. Do not duplicate that responsibility in another Sub-agent.
 
-## Preserved Review Records
+## Finding Placement
 
-Create a preserved review record only when the active work item calls for one or the user asks for one.
-Use the active work item's review location.
-If the active work item or review location is unclear, ask before creating the record.
+Put review findings in the Pull Request review, the active GitHub Issue comment, or the final response. Do not commit `review.md`, `fix-review.md`, traceability packages, validation closeout, or other task-specific review records.
 
-For ordinary changes, a concise final response with the review performed and validation results is enough.
+Only a durable architecture or policy decision that cannot be reconstructed from the current code and specification belongs in the owning current document or `docs/decisions.md`.
 
 ## Self-Review Format
 
-For a recorded self-review, include:
+When reporting a self-review, include:
 
 - scope reviewed;
 - files or behavior checked;
@@ -51,8 +49,7 @@ For a recorded self-review, include:
 - findings, or a clear statement that no blocking issues were found;
 - residual risks or unverified scope.
 
-Keep review notes factual.
-Do not use sprint-local review notes to introduce new product behavior.
+Keep review notes factual. Update the current owning specification when review identifies a product-contract change.
 
 ## Review Execution
 

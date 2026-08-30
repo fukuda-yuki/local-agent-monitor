@@ -15,7 +15,7 @@ public class TraceFidelityRegressionTests
 {
     private const string FixtureName = "github-copilot-vscode-v1";
     private const string FixtureClassification = "repository_safe_conformance";
-    private const string MappingEvidence = "docs/sprints/sprint9-monitor-agent-execution-view/milestones/M6-security-and-live-validation/live-validation.md#part-b--vs-code-github-copilot-chat-pending-user-confirmation";
+    private const string MappingEvidence = "docs/specifications/contracts/source-capabilities/v1/manifests/github-copilot-vscode.json";
     private const string LiveProducerFixtureBlocker = "no_repository_safe_raw_vscode_copilot_export";
     private const string SourceSurface = "github-copilot-vscode";
     private const string SourceAdapter = "otel-http";

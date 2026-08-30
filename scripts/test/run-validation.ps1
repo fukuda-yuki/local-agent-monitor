@@ -21,6 +21,7 @@ if ($Lane -eq 'Completion' -and -not [string]::IsNullOrWhiteSpace($Partition)) {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $solution = Join-Path $repoRoot 'CopilotAgentObservability.slnx'
 $playwrightInstaller = Join-Path $repoRoot 'scripts\test\install-playwright-chromium.ps1'
+$repositoryPolicyGuard = Join-Path $repoRoot 'scripts\test\assert-repository-policy.ps1'
 $partitionToken = if ([string]::IsNullOrWhiteSpace($Partition)) { 'none' } else { $Partition.ToLowerInvariant() }
 $runName = '{0}-{1}-{2}-{3}' -f $Lane.ToLowerInvariant(), $partitionToken, (Get-Date -Format 'yyyyMMddTHHmmssfff'), $PID
 $resultsRoot = Join-Path $repoRoot (Join-Path 'artifacts\validation' $runName)
@@ -108,6 +109,13 @@ function Assert-CriticalSmokeResults {
 }
 
 New-Item -ItemType Directory -Force -Path $resultsRoot | Out-Null
+Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+    '-NoProfile',
+    '-File',
+    $repositoryPolicyGuard,
+    '-RepositoryRoot',
+    $repoRoot
+)
 Invoke-NativeCommand -FilePath 'dotnet' -Arguments @('build', $solution)
 
 if ($Lane -eq 'Completion') {

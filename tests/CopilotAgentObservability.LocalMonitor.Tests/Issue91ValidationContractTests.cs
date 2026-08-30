@@ -9,7 +9,7 @@ public sealed class Issue91ValidationContractTests
     private static readonly string ContractRoot = Path.Combine(
         RepositoryRoot, "docs", "specifications", "contracts", "validation-matrix", "v1");
     private static readonly string ValidationRoot = Path.Combine(
-        RepositoryRoot, "scripts", "validation", "issue-91");
+        RepositoryRoot, "scripts", "validation", "release-matrix");
 
     [Fact]
     public void VersionedContractDeclaresClosedClassificationAndDecisionSets()
@@ -30,151 +30,6 @@ public sealed class Issue91ValidationContractTests
             "not_available",
             definitions.GetProperty("classification").GetProperty("enum")
                 .EnumerateArray().Select(value => value.GetString()));
-    }
-
-    [Fact]
-    public void FutureRegistryPinsRequiredLocalMonitorV1Surfaces()
-    {
-        using var registry = JsonDocument.Parse(File.ReadAllText(
-            Path.Combine(ContractRoot, "future-surface-registry.json")));
-        Assert.True(File.Exists(Path.Combine(ContractRoot, "future-surface-registry.schema.json")));
-        Assert.Equal("future-surface-registry.schema.json", registry.RootElement.GetProperty("$schema").GetString());
-        Assert.Equal("validation-future-surfaces.v1", registry.RootElement.GetProperty("schema_version").GetString());
-
-        var entries = registry.RootElement.GetProperty("entries").EnumerateArray().ToArray();
-        var ownersBySurface = entries.ToDictionary(
-            entry => entry.GetProperty("surface_id").GetString()!,
-            entry => entry.GetProperty("owner_issue").GetInt32(),
-            StringComparer.Ordinal);
-        var requiredSurfaces = new Dictionary<string, int>(StringComparer.Ordinal)
-        {
-            ["local-monitor-v1-shell"] = 135,
-            ["local-monitor-v1-repository-selection"] = 167,
-            ["local-monitor-v1-session-explorer"] = 138,
-            ["local-monitor-v1-session-detail"] = 140,
-            ["local-monitor-v1-compare"] = 166,
-            ["local-monitor-v1-session-ai"] = 163,
-            ["local-monitor-v1-repository-compare-ai"] = 164,
-            ["local-monitor-v1-sanitized-host"] = 168,
-            ["local-monitor-v1-settings-lifecycle"] = 146
-        };
-        Assert.All(requiredSurfaces, expected =>
-            Assert.Equal(expected.Value, ownersBySurface[expected.Key]));
-        Assert.All(entries, entry =>
-        {
-            Assert.Equal("not_available", entry.GetProperty("state").GetString());
-            Assert.False(string.IsNullOrWhiteSpace(entry.GetProperty("entry_condition").GetString()));
-            Assert.NotEmpty(entry.GetProperty("required_profiles").EnumerateArray());
-            Assert.StartsWith("docs/sprints/", entry.GetProperty("expected_evidence_location").GetString(), StringComparison.Ordinal);
-        });
-    }
-
-    [Fact]
-    public void SanitizedImportMatrixPinsFunctionalCandidateAndExternalPortabilityGap()
-    {
-        using var matrix = JsonDocument.Parse(File.ReadAllText(Path.Combine(
-            RepositoryRoot, "docs", "sprints", "issue-86-sanitized-import", "validation-matrix.json")));
-
-        const string functionalSha = "60c635970f5448fabed3bb96478208e37d3dfb95";
-        var root = matrix.RootElement;
-        Assert.Equal("validation-matrix.v1", root.GetProperty("schema_version").GetString());
-        Assert.Equal("c02c10ab18553acef1619ce12ec630f4f6f5aa5f", root.GetProperty("matrix_prep_sha").GetString());
-        Assert.Equal(functionalSha, root.GetProperty("final_validation_sha").GetString());
-        Assert.Equal(
-            "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
-            root.GetProperty("future_registry_ref").GetString());
-
-        var rows = root.GetProperty("active_rows").EnumerateArray().ToArray();
-        Assert.Equal(["91-I-086", "91-S-086", "91-L-086"],
-            rows.Select(row => row.GetProperty("row_id").GetString()));
-        Assert.Equal(["passed", "passed", "blocked_external"],
-            rows.Select(row => row.GetProperty("classification").GetString()));
-        Assert.All(rows, row => Assert.Equal(functionalSha, row.GetProperty("validation_sha").GetString()));
-
-        var liveRow = rows[2];
-        var decision = root.GetProperty("release_decision");
-        Assert.Equal("release_ready_with_external_blockers", decision.GetProperty("decision").GetString());
-        var blocker = Assert.Single(decision.GetProperty("external_blockers").EnumerateArray());
-        Assert.Equal(liveRow.GetProperty("row_id").GetString(), blocker.GetProperty("row_id").GetString());
-        Assert.Equal(liveRow.GetProperty("severity").GetString(), blocker.GetProperty("severity").GetString());
-        Assert.Equal(liveRow.GetProperty("blocker").GetString(), blocker.GetProperty("blocker").GetString());
-        Assert.Equal(liveRow.GetProperty("retry_condition").GetString(), blocker.GetProperty("retry_condition").GetString());
-        Assert.Equal(liveRow.GetProperty("unverified_capability").GetString(), blocker.GetProperty("unverified_capability").GetString());
-        Assert.Contains(liveRow.GetProperty("evidence").EnumerateArray(),
-            evidence => evidence.GetProperty("kind").GetString() == "live");
-    }
-
-    [Fact]
-    public void PreparationInventoryPinsShaWithoutFinalClassifications()
-    {
-        using var inventory = JsonDocument.Parse(File.ReadAllText(Path.Combine(
-            RepositoryRoot, "docs", "sprints", "issue-91-validation-matrix", "preparation-inventory.json")));
-        Assert.Equal("5180a0424ff5488354a3e173c74b7e931d28679d",
-            inventory.RootElement.GetProperty("matrix_prep_sha").GetString());
-        Assert.Equal(JsonValueKind.Null, inventory.RootElement.GetProperty("final_validation_sha").ValueKind);
-        Assert.Equal("candidate_ready_to_freeze", inventory.RootElement.GetProperty("state").GetString());
-
-        var serialized = inventory.RootElement.GetRawText();
-        Assert.DoesNotContain("\"classification\"", serialized, StringComparison.Ordinal);
-        Assert.DoesNotContain("release_ready", serialized, StringComparison.Ordinal);
-        Assert.All(inventory.RootElement.GetProperty("active_surfaces").EnumerateArray(), row =>
-        {
-            Assert.False(string.IsNullOrWhiteSpace(row.GetProperty("owner").GetString()));
-            Assert.Contains(row.GetProperty("requirement_level").GetString(), new[] { "required", "optional" });
-            Assert.Contains(row.GetProperty("applicability").GetString(), new[] { "applicable", "not_applicable" });
-        });
-    }
-
-    [Fact]
-    public void RuntimeBackupIssue91HandoffAndFinalMatrixStayCoherent()
-    {
-        var handoffPath = Path.Combine(RepositoryRoot, "docs", "specifications", "contracts", "runtime-backup", "v1", "issue-91-validation-handoff.json");
-        var matrixPath = Path.Combine(RepositoryRoot, "docs", "sprints", "issue-88-backup-restore", "validation-matrix.json");
-        var ledgerPath = Path.Combine(RepositoryRoot, "docs", "sprints", "issue-88-backup-restore", "README.md");
-        Assert.True(File.Exists(handoffPath));
-        Assert.True(File.Exists(matrixPath));
-        Assert.True(File.Exists(ledgerPath));
-        using var handoff = JsonDocument.Parse(File.ReadAllText(handoffPath));
-        using var matrix = JsonDocument.Parse(File.ReadAllText(matrixPath));
-        using var registry = JsonDocument.Parse(File.ReadAllText(Path.Combine(ContractRoot, "future-surface-registry.json")));
-
-        Assert.Equal("backup-restore", handoff.RootElement.GetProperty("surface_id").GetString());
-        Assert.Equal(88, handoff.RootElement.GetProperty("owner_issue").GetInt32());
-        Assert.Equal(
-            ["91-B-088", "91-S-088", "91-L-088"],
-            handoff.RootElement.GetProperty("active_row_ids").EnumerateArray().Select(item => item.GetString()));
-        var filters = handoff.RootElement.GetProperty("automated_test_filters").EnumerateArray().Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
-        Assert.Contains("FullyQualifiedName~RuntimeBackupManifestValidationTests", filters);
-        Assert.Contains("FullyQualifiedName~RuntimeBackupPlaywrightTests", filters);
-        Assert.Contains("FullyQualifiedName~RuntimeBackupWave3ComponentRoundTripTests", filters);
-        Assert.Contains("FullyQualifiedName~RuntimeRestoreDocumentationUsesPackagedConditionalRestartSequence", filters);
-        Assert.Contains("FullyQualifiedName~PublishedStartWaitReady", filters);
-        Assert.Contains("FullyQualifiedName~LocalMonitorScriptTests", filters);
-        Assert.DoesNotContain(registry.RootElement.GetProperty("entries").EnumerateArray(), entry => entry.GetProperty("owner_issue").GetInt32() == 88);
-
-        const string preparationSha = "c02c10ab18553acef1619ce12ec630f4f6f5aa5f";
-        const string functionalSha = "556811ef0bf96ef1267c4a9d00d9311154fc78e3";
-        Assert.Equal(preparationSha, matrix.RootElement.GetProperty("matrix_prep_sha").GetString());
-        Assert.Equal(functionalSha, matrix.RootElement.GetProperty("final_validation_sha").GetString());
-        var rows = matrix.RootElement.GetProperty("active_rows").EnumerateArray().ToArray();
-        Assert.Equal(["91-B-088", "91-S-088", "91-L-088"], rows.Select(row => row.GetProperty("row_id").GetString()));
-        Assert.Equal(["passed", "passed", "blocked_external"], rows.Select(row => row.GetProperty("classification").GetString()));
-        Assert.All(rows, row =>
-        {
-            Assert.Equal(functionalSha, row.GetProperty("validation_sha").GetString());
-            Assert.Equal(functionalSha, row.GetProperty("versions").GetProperty("candidate").GetString());
-            Assert.NotEmpty(row.GetProperty("evidence").EnumerateArray());
-        });
-        Assert.NotEmpty(rows[2].GetProperty("evidence").EnumerateArray());
-        Assert.Equal("release_ready_with_external_blockers",
-            matrix.RootElement.GetProperty("release_decision").GetProperty("decision").GetString());
-        var blocker = matrix.RootElement.GetProperty("release_decision").GetProperty("external_blockers").EnumerateArray().Single();
-        foreach (var property in new[] { "severity", "blocker", "retry_condition", "unverified_capability" })
-            Assert.Equal(rows[2].GetProperty(property).GetString(), blocker.GetProperty(property).GetString());
-        Assert.Contains(
-            "docs/sprints/issue-88-backup-restore/README.md",
-            matrix.RootElement.GetProperty("evidence_ledger_refs").EnumerateArray().Select(item => item.GetString()));
-        Assert.Contains(functionalSha, File.ReadAllText(ledgerPath), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -224,40 +79,26 @@ public sealed class Issue91ValidationContractTests
     }
 
     [Fact]
-    public void AutomatedMatrixManifestCoversEveryApplicableInventoryFilter()
+    public void AutomatedMatrixManifestDefinesReusableCoverage()
     {
-        using var inventory = JsonDocument.Parse(File.ReadAllText(Path.Combine(
-            RepositoryRoot, "docs", "sprints", "issue-91-validation-matrix", "preparation-inventory.json")));
         using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(ValidationRoot, "automated-matrix.v1.json")));
 
         var rows = manifest.RootElement.GetProperty("rows").EnumerateArray().ToArray();
         Assert.Equal(rows.Length, rows.Select(row => row.GetProperty("row_id").GetString()).Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(rows.Length, rows.Select(row => row.GetProperty("surface_id").GetString()).Distinct(StringComparer.Ordinal).Count());
 
-        foreach (var surface in inventory.RootElement.GetProperty("active_surfaces").EnumerateArray())
+        foreach (var row in rows)
         {
-            var surfaceId = surface.GetProperty("surface_id").GetString();
-            if (surface.GetProperty("applicability").GetString() == "not_applicable")
-            {
-                Assert.DoesNotContain(rows, row => row.GetProperty("surface_id").GetString() == surfaceId);
-                continue;
-            }
-
-            var row = Assert.Single(rows, row => row.GetProperty("surface_id").GetString() == surfaceId);
             Assert.Contains(row.GetProperty("matrix_task").GetString(), new[] { "91-C", "91-D" });
             Assert.Equal("all_operations_x_applicable_profiles", row.GetProperty("coverage_mode").GetString());
             Assert.False(string.IsNullOrWhiteSpace(row.GetProperty("expected_invariant").GetString()));
-            Assert.Equal(
-                surface.GetProperty("operations").EnumerateArray().Select(value => value.GetString()),
-                row.GetProperty("operations").EnumerateArray().Select(value => value.GetString()));
-            Assert.Equal(
-                surface.GetProperty("profiles").EnumerateArray().Select(value => value.GetString()),
-                row.GetProperty("applicable_profiles").EnumerateArray().Select(value => value.GetString()));
-            var expected = surface.GetProperty("automated_test_filters").EnumerateArray().Select(value => value.GetString()).ToHashSet(StringComparer.Ordinal);
-            var actual = row.GetProperty("test_groups").EnumerateArray()
-                .SelectMany(group => group.GetProperty("filters").EnumerateArray())
-                .Select(value => value.GetString()).ToHashSet(StringComparer.Ordinal);
-            Assert.Equal(expected, actual);
+            Assert.NotEmpty(row.GetProperty("operations").EnumerateArray());
+            Assert.NotEmpty(row.GetProperty("applicable_profiles").EnumerateArray());
+            Assert.All(row.GetProperty("test_groups").EnumerateArray(), group =>
+            {
+                Assert.False(string.IsNullOrWhiteSpace(group.GetProperty("project").GetString()));
+                Assert.NotEmpty(group.GetProperty("filters").EnumerateArray());
+            });
         }
 
         Assert.All(rows.Where(row => row.GetProperty("surface_id").GetString() is "source-compatibility" or "exact-binding"),
@@ -313,7 +154,7 @@ internal static class Issue91SecretCorpus
     private static readonly Lazy<string[]> LoadedMarkers = new(() =>
     {
         using var corpus = JsonDocument.Parse(File.ReadAllText(Path.Combine(
-            FindRepositoryRoot(), "scripts", "validation", "issue-91", "fixtures", "secret-corpus.v1.json")));
+            FindRepositoryRoot(), "scripts", "validation", "release-matrix", "fixtures", "secret-corpus.v1.json")));
         return corpus.RootElement.GetProperty("cases").EnumerateArray()
             .Select(item => item.GetProperty("marker").GetString()!)
             .ToArray();

@@ -14,6 +14,12 @@ does not already show.
 | Test code | **What** | The test pins observable behavior under stated conditions. |
 | Commit log | **Why** | The body explains why the change was needed and what was wrong before. |
 | Code comments | **Why not** | The comment keeps a constraint or rejected alternative the code cannot show. |
+| GitHub Issue / Project | **Work to do** | Bugs, unresolved work, future implementation, roadmaps, and durable implementation plans have one active owner. |
+| Pull Request review / Issue comment / final response | **Task findings and closeout** | Review findings, validation results, blockers, and completion state stay with the active work item. |
+| Current specification | **Current observable contract** | Only current product behavior, interfaces, schemas, architecture, and policy remain in repository documentation. |
+| `docs/decisions.md` | **Durable rationale** | It preserves rationale that cannot be reconstructed from current code and specifications, not progress or status. |
+| Gitignored local output | **Scratch and generated output** | Temporary reports and tool-required files remain local and untracked. |
+| Git history | **Implementation history** | Commits preserve what changed and why without a parallel sprint ledger. |
 
 ## Production Code: How
 
