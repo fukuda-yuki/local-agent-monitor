@@ -6,6 +6,8 @@
 
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const REVISION = /^[0-9a-f]{64}$/;
+  const NODE_ID = /^node-[0-9a-f]{32}$/;
+  const AI_STATES = new Set(["queued", "running", "succeeded", "zero_findings", "provider_failed", "provider_partial", "invalid_result", "invalid_evidence", "stale_snapshot", "scope_too_large", "timed_out", "canceled"]);
   const SESSION_CURSOR = /^[A-Za-z0-9_-]{147}$/;
   const REPOSITORY_CURSOR = /^[A-Za-z0-9_-]{135}$/;
   const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})\+00:00$/;
@@ -153,6 +155,62 @@
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const actual = Object.keys(value);
     return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+  }
+
+  function exactKeySet(value, keys) {
+    return value && typeof value === "object" && !Array.isArray(value)
+      && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  }
+
+  function boundedText(value, maximum = 16_384) {
+    return typeof value === "string" && value.length > 0 && value.length <= maximum && !hasUnpairedSurrogate(value);
+  }
+
+  function validEvidenceLocation(value) {
+    if (typeof value !== "string" || value.includes("#") || value.includes("%")) return false;
+    const match = /^\/sessions\/([0-9a-f-]{36})(?:\?execution=([0-9a-f-]{36})(?:&node=(node-[0-9a-f]{32}))?|\?node=(node-[0-9a-f]{32}))?$/.exec(value);
+    return !!match && UUID_V7.test(match[1]) && (!match[2] || UUID_V7.test(match[2])) && (!match[3] || NODE_ID.test(match[3])) && (!match[4] || NODE_ID.test(match[4]));
+  }
+
+  function validateAiResult(result) {
+    const rootKeys = ["scope", "snapshot", "summary", "findings", "improvement_suggestions", "limitations", "provenance"];
+    if (!exactKeySet(result, rootKeys) || !exactKeySet(result.scope, ["kind", "repository_id", "anchor_id"])
+        || result.scope.kind !== "repository_selection" || result.scope.repository_id !== root.dataset.repositoryId
+        || !boundedText(result.scope.anchor_id) || !exactKeySet(result.snapshot, ["snapshot_id", "payload_sha256"])
+        || !UUID_V7.test(result.snapshot.snapshot_id) || !REVISION.test(result.snapshot.payload_sha256)
+        || !boundedText(result.summary, 65_536) || !Array.isArray(result.findings) || result.findings.length > 200
+        || !Array.isArray(result.improvement_suggestions) || result.improvement_suggestions.length > 200
+        || !Array.isArray(result.limitations) || result.limitations.length > 200) return false;
+    const refs = value => Array.isArray(value) && value.length >= 1 && value.length <= 16
+      && new Set(value).size === value.length && value.every(validEvidenceLocation);
+    for (const finding of result.findings) {
+      if (!exactKeySet(finding, ["finding_id", "title", "explanation", "evidence_state", "evidence_refs", "limitation"])
+          || !["finding_id", "title", "explanation", "limitation"].every(key => boundedText(finding[key]))
+          || !["supported", "limited"].includes(finding.evidence_state) || !refs(finding.evidence_refs)) return false;
+    }
+    const targets = new Set(["instructions", "skill", "agent", "subagent_input", "tool_configuration"]);
+    for (const suggestion of result.improvement_suggestions) {
+      if (!exactKeySet(suggestion, ["suggestion_id", "target_kind", "target_label", "concrete_change", "rationale", "expected_effect", "risks_or_limitations", "evidence_refs"])
+          || !targets.has(suggestion.target_kind) || !["suggestion_id", "target_label", "concrete_change", "rationale", "expected_effect", "risks_or_limitations"].every(key => boundedText(suggestion[key]))
+          || !refs(suggestion.evidence_refs)) return false;
+    }
+    if (!result.limitations.every(value => boundedText(value))) return false;
+    const provenanceKeys = ["provider", "model", "configuration_sha256", "prompt_template_version", "requested_at", "started_at", "completed_at", "snapshot_id", "snapshot_sha256", "coverage"];
+    return exactKeySet(result.provenance, provenanceKeys) && ["provider", "model", "prompt_template_version", "requested_at", "started_at", "completed_at"].every(key => boundedText(result.provenance[key]))
+      && REVISION.test(result.provenance.configuration_sha256) && UUID_V7.test(result.provenance.snapshot_id) && REVISION.test(result.provenance.snapshot_sha256)
+      && result.provenance.snapshot_id === result.snapshot.snapshot_id && result.provenance.snapshot_sha256 === result.snapshot.payload_sha256
+      && exactKeySet(result.provenance.coverage, ["included", "excluded", "content_available"])
+      && Number.isSafeInteger(result.provenance.coverage.included) && result.provenance.coverage.included >= 0
+      && Number.isSafeInteger(result.provenance.coverage.excluded) && result.provenance.coverage.excluded >= 0
+      && typeof result.provenance.coverage.content_available === "boolean";
+  }
+
+  function validateRepositoryRun(value, expectedRunId) {
+    if (!exactKeySet(value, ["run_id", "state", "scope_kind", "session_id", "node_id", "repository_id", "error", "result"])
+        || !UUID_V7.test(value.run_id) || value.run_id !== expectedRunId || !AI_STATES.has(value.state)
+        || value.scope_kind !== "repository_selection" || value.session_id !== null || value.node_id !== null
+        || value.repository_id !== root.dataset.repositoryId || !(value.error === null || boundedText(value.error))) return false;
+    return value.result === null || value.state === "succeeded" && validateAiResult(value.result);
   }
 
   function count(value) {
@@ -620,27 +678,63 @@
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${aiState.runId}`, { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw await apiFailure(response); const value = await readJsonResponse(response, 8_388_608);
+      if (!validateRepositoryRun(value, aiState.runId)) throw new TypeError("invalid repository run");
       if (["queued", "running"].includes(value.state)) { setTimeout(pollAiRun, 250); return; }
       aiCancel.hidden = true; aiStatus.textContent = value.state === "succeeded" ? "分析が完了しました。" : `分析は ${value.state} で終了しました。`;
-      aiResult.replaceChildren(); if (value.result) {
-        for (const key of ["scope", "snapshot", "summary", "findings", "improvement_suggestions", "exact_evidence", "limitations", "provider", "model", "prompt_template_version"]) {
-          if (value.result[key] === undefined) continue; const section = element("section"); section.append(element("h3", null, key));
-          section.append(element("pre", null, typeof value.result[key] === "string" ? value.result[key] : stringifyExactJson(value.result[key]))); aiResult.append(section);
-        }
-      }
+      aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result);
     } catch { aiCancel.hidden = true; aiStatus.textContent = "分析結果を取得できませんでした。一覧は引き続き利用できます。"; }
+  }
+
+  function appendAiValue(target, label, value) {
+    const row = element("p"); row.append(element("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
+  }
+
+  function appendEvidence(target, references) {
+    const list = element("ul");
+    for (const reference of references) { const item = element("li");
+      if (validEvidenceLocation(reference)) { const link = element("a", null, "正確な証拠を開く"); link.href = reference; item.append(link); }
+      else item.textContent = "この証拠は利用できません"; list.append(item);
+    }
+    target.append(list);
+  }
+
+  function renderRepositoryAiResult(result) {
+    aiResult.append(element("h3", null, "AI による解釈（Explorer の事実ではありません）"));
+    const scope = element("section"); scope.append(element("h4", null, "対象範囲とスナップショット"));
+    appendAiValue(scope, "scope", result.scope.kind); appendAiValue(scope, "repository", result.scope.repository_id);
+    appendAiValue(scope, "snapshot", result.snapshot.snapshot_id); appendAiValue(scope, "payload SHA-256", result.snapshot.payload_sha256); aiResult.append(scope);
+    aiResult.append(element("h4", null, "要約"), element("p", null, result.summary));
+    const findings = element("section"); findings.append(element("h4", null, "指摘"));
+    for (const finding of result.findings) { const article = element("article"); article.append(element("h5", null, finding.title), element("p", null, finding.explanation)); appendAiValue(article, "evidence state", finding.evidence_state); appendAiValue(article, "limitation", finding.limitation); appendEvidence(article, finding.evidence_refs); findings.append(article); } aiResult.append(findings);
+    const suggestions = element("section"); suggestions.append(element("h4", null, "改善案"));
+    for (const suggestion of result.improvement_suggestions) { const article = element("article"); appendAiValue(article, "target", suggestion.target_label); appendAiValue(article, "change", suggestion.concrete_change); appendAiValue(article, "rationale", suggestion.rationale); appendAiValue(article, "expected effect", suggestion.expected_effect); appendAiValue(article, "risks", suggestion.risks_or_limitations); appendEvidence(article, suggestion.evidence_refs); suggestions.append(article); } aiResult.append(suggestions);
+    const limitations = element("section"); limitations.append(element("h4", null, "制約")); for (const value of result.limitations) limitations.append(element("p", null, value)); aiResult.append(limitations);
+    const provenance = element("section"); provenance.append(element("h4", null, "来歴")); for (const key of ["provider", "model", "prompt_template_version", "requested_at", "started_at", "completed_at"]) appendAiValue(provenance, key, result.provenance[key]); aiResult.append(provenance);
   }
 
   async function startAiRun() {
     if (!aiState.preview) return; aiStart.disabled = true;
     try { const value = await aiJson("/api/local-monitor/v1/ai/repository-runs", { schema_version: "local-ai-repository-run.request.v1", snapshot_id: aiState.preview.snapshot_id, payload_sha256: aiState.preview.payload_sha256, timeout_seconds: 120 });
-      if (!UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。"; pollAiRun();
+      if (!UUID_V7.test(value.run_id)) throw new TypeError("invalid run"); aiState.runId = value.run_id; aiCancel.hidden = false; aiStatus.textContent = "分析しています。"; window.LocalMonitorV1History.push({ analysis: value.run_id }); pollAiRun();
     } catch { aiStatus.textContent = "分析を開始できませんでした。一覧は引き続き利用できます。"; }
   }
 
   async function enableRepositoryAi() {
     if (root.dataset.explorerScope !== "repository" || !UUID_V7.test(root.dataset.repositoryId ?? "")) return;
     try { const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin" }); const value = response.ok ? await response.json() : null; if (value?.readiness_state === "ready") aiOpen.hidden = false; } catch { }
+  }
+
+  async function restoreRepositoryAnalysis(route) {
+    const runId = route?.analysis;
+    if (!UUID_V7.test(runId ?? "") || runId === aiState.runId) return;
+    aiState.runId = runId;
+    try {
+      const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin" });
+      if (!response.ok) throw await apiFailure(response); const value = await readJsonResponse(response, 8_388_608);
+      if (!validateRepositoryRun(value, runId)) throw new TypeError("invalid repository run");
+      aiDialog.showModal(); aiStatus.textContent = value.state === "succeeded" ? "保存された分析を表示しています。" : `分析は ${value.state} です。`;
+      aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(); }
+    } catch { aiState.runId = null; aiStatus.textContent = "保存された分析を復元できませんでした。"; }
   }
 
   async function readCollection(cursor, signal) {
@@ -1829,7 +1923,8 @@
     state.browserTraversal = true;
     if (assignmentDialog.open) closeAssignmentPicker(false);
   });
-  document.addEventListener("cao-route-state", event => applyRoute(event.detail));
+  document.addEventListener("cao-route-state", event => { applyRoute(event.detail); restoreRepositoryAnalysis(event.detail); });
   enableRepositoryAi();
-  applyRoute(window.LocalMonitorV1History.current());
+  const initialRoute = window.LocalMonitorV1History.current();
+  applyRoute(initialRoute); restoreRepositoryAnalysis(initialRoute);
 })();
