@@ -37,12 +37,6 @@ public sealed class HistoricalAnalysisSpecificationTests
             "`selection.sanitized_only=false`",
             "before #72 owner access",
             "After transient rendering, the only long-lived preview binding is exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`",
-            "future-surface-registry.json",
-            "Issue #91",
-            "issue-91-validation-handoff.json",
-            "91-H-075",
-            "91-S-075",
-            "91-L-075",
         ], required => Assert.Contains(required, normalizedSpecification, StringComparison.Ordinal));
     }
 

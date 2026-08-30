@@ -4,7 +4,7 @@ Copilot Agent Observability のクイックスタートガイドです。
 より詳しい説明は [ユーザーガイド (user-guide.md)](user-guide.md) を参照してください。
 
 Local Monitor v1 の採用済み Repository/Session-first IA は
-[製品定義](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md) と
+[製品定義](specifications/interfaces/local-monitor-v1-product-definition.md) と
 [IA 仕様](specifications/interfaces/local-monitor-v1-ia.md) を参照してください。
 このクイックスタートの起動・収集手順は凍結済み ingest contract に基づき、画面の
 統合後説明は #148 が更新します。

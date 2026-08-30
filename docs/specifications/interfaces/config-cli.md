@@ -108,9 +108,9 @@ raw target the generated VS Code environment points at:
 `--target` and `--endpoint` apply only to `raw-local-receiver`; combining them
 with another profile fails with a deterministic error.
 
-`list-collection-profiles` lists all product profile values. Sprint6
+`list-collection-profiles` lists all product profile values. Collection Profiles
 profile-aware output commands returned a deterministic error for
-`raw-local-receiver`; Sprint7 replaces that reserved error with generated
+`raw-local-receiver`; Local Raw Receiver replaces that reserved error with generated
 configuration that points to the local receiver endpoint and does not emit
 Langfuse credentials, Collector headers, or remote endpoints.
 
@@ -344,7 +344,7 @@ store data, and leaves normalized measurement, candidate, and dashboard
 dataset schemas unchanged.
 
 `serve-raw-local-receiver` is retained and runs **side-by-side** with the Local
-Ingestion Monitor (Sprint8). The monitor is a **separate ASP.NET Core process**
+Ingestion Monitor (Local Ingestion Monitor). The monitor is a **separate ASP.NET Core process**
 (`src/CopilotAgentObservability.LocalMonitor`), not a Config CLI subcommand; it
 binds a distinct loopback port (default `http://127.0.0.1:4320`, avoiding the
 Collector `4318` and this receiver's `4319`) while this receiver keeps

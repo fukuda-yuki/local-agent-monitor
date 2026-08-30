@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -99,7 +98,7 @@ public sealed class Issue92CodexAppDiscoveryContractTests
         Assert.False(processDiagnostic.GetProperty("command_line_read").GetBoolean());
         Assert.False(processDiagnostic.GetProperty("merge_authority").GetBoolean());
         Assert.Equal(
-            "scripts/validation/issue-92/observe-desktop-process-tree.ps1",
+            "scripts/validation/codex-app-discovery/observe-desktop-process-tree.ps1",
             String(processDiagnostic, "replay_template"));
 
         var attestation = evidence.GetProperty("live_probe_attestation");
@@ -240,7 +239,7 @@ public sealed class Issue92CodexAppDiscoveryContractTests
     }
 
     [Fact]
-    public void Issue93RemainsBlockedAndFutureRegistryStaysUnavailable()
+    public void Issue93RemainsBlockedWithoutProductionIntegration()
     {
         using var inventory = ReadJson("discovery-inventory.json");
         var gate = inventory.RootElement.GetProperty("production_integration_gate");
@@ -259,22 +258,12 @@ public sealed class Issue92CodexAppDiscoveryContractTests
         Assert.Contains("setup_integration", gate.GetProperty("blocked_until_retry").EnumerateArray().Select(Value));
         Assert.Contains("doctor_integration", gate.GetProperty("blocked_until_retry").EnumerateArray().Select(Value));
         Assert.Contains("ui_integration", gate.GetProperty("blocked_until_retry").EnumerateArray().Select(Value));
-        Assert.Contains("future_registry_activation", gate.GetProperty("blocked_until_retry").EnumerateArray().Select(Value));
+        Assert.Contains("release_validation", gate.GetProperty("blocked_until_retry").EnumerateArray().Select(Value));
         Assert.Contains(
             "separately approved discovery retry",
             String(gate, "promotion_condition"),
             StringComparison.Ordinal);
 
-        using var registry = JsonDocument.Parse(File.ReadAllText(Path.Combine(
-            RepositoryRoot,
-            "docs", "specifications", "contracts", "validation-matrix", "v1",
-            "future-surface-registry.json")));
-        var entry = Assert.Single(
-            registry.RootElement.GetProperty("entries").EnumerateArray(),
-            candidate => String(candidate, "surface_id") == "codex-app");
-        Assert.Equal("codex-app", String(entry, "surface_id"));
-        Assert.Equal(93, entry.GetProperty("owner_issue").GetInt32());
-        Assert.Equal("not_available", String(entry, "state"));
     }
 
     [Fact]
@@ -344,7 +333,6 @@ public sealed class Issue92CodexAppDiscoveryContractTests
         var decisions = ReadRepositoryText("docs", "decisions.md");
         var telemetry = ReadRepositoryText("docs", "specifications", "layers", "telemetry-ingestion.md");
         var security = ReadRepositoryText("docs", "specifications", "security-data-boundaries.md");
-        var task = ReadRepositoryText("docs", "task.md");
 
         Assert.Contains("Issue #92", requirements, StringComparison.Ordinal);
         Assert.Contains("NO-GO", requirements, StringComparison.Ordinal);
@@ -357,7 +345,6 @@ public sealed class Issue92CodexAppDiscoveryContractTests
         Assert.Contains("現行の対応済み source ではない", telemetry, StringComparison.Ordinal);
         Assert.Contains("content-enabled capture", security, StringComparison.Ordinal);
         Assert.Contains("Setup, Doctor, or UI", security, StringComparison.Ordinal);
-        Assert.Contains("Issue #92", task, StringComparison.Ordinal);
         Assert.Contains("現行の対応済み任意機能ではない", requirements, StringComparison.Ordinal);
 
         var architecture = ReadRepositoryText("docs", "architecture.md");
@@ -374,7 +361,7 @@ public sealed class Issue92CodexAppDiscoveryContractTests
     {
         var scriptPath = Path.Combine(
             RepositoryRoot,
-            "scripts", "validation", "issue-92", "observe-desktop-process-tree.ps1");
+            "scripts", "validation", "codex-app-discovery", "observe-desktop-process-tree.ps1");
         var script = File.ReadAllText(scriptPath);
 
         Assert.Contains("ConvertTo-Json -Compress", script, StringComparison.Ordinal);
@@ -456,53 +443,6 @@ public sealed class Issue92CodexAppDiscoveryContractTests
         Assert.False(root.GetProperty("private_state_read").GetBoolean());
         Assert.DoesNotContain(@":\", output, StringComparison.Ordinal);
         Assert.DoesNotContain("/Users/", output, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ArtifactChecksumManifestVerifiesFinalRepositorySafeEvidence()
-    {
-        var manifestPath = Path.Combine(
-            RepositoryRoot,
-            "docs", "sprints", "issue-92-codex-app-inventory", "artifact-checksums.json");
-        using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
-        var root = manifest.RootElement;
-
-        Assert.Equal(
-            ["schema_version", "candidate_base", "algorithm", "verification_date", "artifacts"],
-            root.EnumerateObject().Select(property => property.Name));
-        Assert.Equal("issue-92-artifact-checksums.v1", String(root, "schema_version"));
-        Assert.Equal(
-            "07dc219c4f5c5ef56e7810a23c6466a52e90aa97",
-            String(root, "candidate_base"));
-        Assert.Equal("SHA-256", String(root, "algorithm"));
-        Assert.Equal("2026-07-24", String(root, "verification_date"));
-
-        var artifacts = root.GetProperty("artifacts").EnumerateArray().ToArray();
-        Assert.Equal(
-            [
-                "docs/specifications/contracts/source-capabilities/v1/codex-app/discovery-inventory.json",
-                "docs/specifications/contracts/source-capabilities/v1/codex-app/fixtures/content-disabled-initialize.sanitized.json",
-                "docs/specifications/contracts/source-capabilities/v1/codex-app/fixtures/content-disabled-thread-start.sanitized.json",
-                "docs/specifications/contracts/source-capabilities/v1/codex-app/exact-correlation.md",
-                "scripts/validation/issue-92/observe-desktop-process-tree.ps1",
-                "docs/sprints/issue-92-codex-app-inventory/live-validation.md"
-            ],
-            artifacts.Select(artifact => String(artifact, "path")));
-
-        foreach (var artifact in artifacts)
-        {
-            Assert.Equal(
-                ["path", "sha256"],
-                artifact.EnumerateObject().Select(property => property.Name));
-            var relativePath = String(artifact, "path");
-            Assert.DoesNotContain("artifact-checksums.json", relativePath, StringComparison.Ordinal);
-            var repositoryPath = Path.Combine([RepositoryRoot, .. relativePath.Split('/')]);
-            Assert.True(File.Exists(repositoryPath), $"Missing checksummed artifact: {relativePath}");
-            var actual = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(repositoryPath)))
-                .ToLowerInvariant();
-            Assert.Matches("^[0-9a-f]{64}$", String(artifact, "sha256"));
-            Assert.Equal(String(artifact, "sha256"), actual);
-        }
     }
 
     private static void AssertFixtureEnvelope(

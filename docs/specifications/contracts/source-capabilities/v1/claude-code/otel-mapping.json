@@ -21,8 +21,6 @@
     { "id": "official-monitoring", "kind": "official_documentation", "reference": "https://code.claude.com/docs/en/monitoring-usage", "evidence_status": "documented_not_live_observed" },
     { "id": "inventory-interactive", "kind": "approved_inventory", "reference": "../inventories/claude-code-interactive.json", "evidence_status": "blocked_no_producer_structure_observed" },
     { "id": "inventory-print", "kind": "approved_inventory", "reference": "../inventories/claude-code-print.json", "evidence_status": "live_observed_print_structure" },
-    { "id": "live-print-observation", "kind": "live_observation", "reference": "../../../../../sprints/issue-99-claude-live-validation.md", "evidence_status": "live_observed" },
-    { "id": "live-prompt-capture-observation", "kind": "live_observation", "reference": "../../../../../sprints/issue-106-claude-live-validation-followup.md", "evidence_status": "live_observed" },
     { "id": "inventory-agent-sdk", "kind": "approved_inventory", "reference": "../inventories/claude-agent-sdk.json", "evidence_status": "blocked_no_producer_structure_observed" },
     { "id": "no-producer-evidence", "kind": "absence_record", "reference": "../inventories/claude-code-print.json", "evidence_status": "not_documented_or_live_observed" }
   ],

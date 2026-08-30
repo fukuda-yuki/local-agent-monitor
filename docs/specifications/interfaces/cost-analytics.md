@@ -1902,38 +1902,20 @@ rendered inertly. Public hashes prove integrity, not authenticity.
 
 ## Validation and release
 
-Issue #95 owns direct active rows:
+Automated validation covers pricing persistence, recalculation, API/UI, alert
+v2, lifecycle/Alert Center, migration/export/backup, accessibility,
+Playwright, strict identity, canonical bytes, no-leak behavior, private
+overrides, malformed/tampered/future versions, archive behavior, and scanner
+coverage. Genuine GitHub Copilot and Claude Code source/version-to-estimate and
+budget-receipt readback is live validation. When repository-owned checks pass
+but reviewed positive source mappings remain unavailable, that live capability
+is `blocked_external/high` with an exact retry condition; synthetic execution
+never promotes it.
 
-- `91-A-095`: automated pricing persistence, recalculation, API/UI, alert v2,
-  lifecycle/Alert Center, migration/export/backup, accessibility, and
-  Playwright;
-- `91-S-095`: strict identity, canonical-byte, API, no-leak, private-override,
-  malformed/tamper/future-version, archive, and scanner coverage; and
-- `91-L-095`: genuine GitHub Copilot and Claude Code source/version-to-estimate
-  and budget-receipt readback.
-
-Issue #95 was never a future-registry entry; the canonical future registry
-remains unchanged. `91-A-095` and `91-S-095` must pass. If the repository is
-correct but reviewed positive source mappings remain unavailable,
-`91-L-095` is `blocked_external/high` with exact retry condition and unverified
-capability, yielding `release_ready_with_external_blockers`. Synthetic
-execution never promotes that live row.
-
-The machine-readable
-`contracts/cost-analytics/v1/issue-91-validation-row-contract.json` is the
-exact #95 row template. The evidence verifier compares it with the handoff and
-the materialized owner matrix for every row ID, surface, operation, required
-profile, version, and evidence reference. Automated test filters are exact-set
-compared with the handoff ledger and committed live-validation ledger because
-the owner matrix schema does not carry test filters. Every evidence reference
-must resolve to one unique row anchor in the committed live-validation ledger,
-and the handoff's axis-aware profile ledger is the exact deduplicated union of
-all row profiles. The live row additionally fixes both required providers
-(GitHub Copilot and Claude Code),
-positive estimate persistence, configured budget evaluation, Alert Center
-receipt/lifecycle readback, and the exact blocker, retry condition, and
-unverified capability. A generic or rewritten matrix from another surface is
-not #95 evidence.
+Candidate-specific row templates, matrices, handoffs, checksums, attestations,
+and live-validation ledgers are not committed. Use the reusable validation
+schema and scanner, and publish bounded run results to the Pull Request, active
+Issue, or GitHub Actions artifact.
 
 Required automated proof includes exact v1 alert golden compatibility, v2
 canonical/store/read behavior, disabled/configured budget rules, insufficient
@@ -1943,16 +1925,6 @@ supported-upgrade migrations, exact `completed|failed`/`full`/Session-fact
 admission and completion races, current eligibility loss with immutable
 historical estimates, backup/restore round-trip, sanitized-export v1
 coexistence, API security/status mapping, Playwright/accessibility, full build
-and tests, repository-safe scans, and artifact checksums.
-
-The evidence-chain verifier must resolve `matrix_prep_sha` to an exact commit
-that is an ancestor of the frozen candidate. The committed live-validation
-record binds both SHAs, the required command results, actual RED/failure
-history, and OS-specific security coverage. The running verifier bytes must
-equal the verifier blob at the frozen candidate. Every RED item names an
-executable negative fixture and expected rejection code in the correction
-commit; that commit must be non-empty, must change the self-test, and must be
-bounded between matrix preparation and the candidate. Unsupported-OS tests are explicit
+and tests, and repository-safe scans. Unsupported-OS tests are explicit
 not-applicable skips; failure to create a required symlink/reparse/FIFO
-prerequisite on the applicable OS is an explicit skip and prevents
-`91-S-095=passed`.
+prerequisite on the applicable OS remains visible in the bounded run result.

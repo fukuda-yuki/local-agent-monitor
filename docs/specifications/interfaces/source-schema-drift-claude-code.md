@@ -292,9 +292,9 @@ resume/handoff may produce an exact Claude link.
 
 ## Claude span classification
 
-Live print-mode producer structure was observed on 2026-07-13
-(`docs/sprints/issue-99-claude-live-validation.md`), satisfying the mapping
-contract's promotion condition for `otel.span_name`. Classification is an
+The canonical Claude Code print inventory records live-observed producer
+structure satisfying the mapping contract's promotion condition for
+`otel.span_name`. Classification is an
 exact recognized-name transform; no unrecognized name is ever classified by
 substring, attribute inference, or hierarchy position.
 

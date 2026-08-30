@@ -465,22 +465,14 @@ NOT contain raw prompt/response/tool bodies, lifecycle comments, credentials,
 PII, or machine paths. Repository/workspace labels are display metadata from
 existing sanitized projections and MUST NOT be used to open local paths.
 
-## Validation-matrix transition
+## Validation
 
-Issue #84 activates only the local explicit-evaluation/read/UI surface. The #91 future placeholder
-owned by #84 is removed by the integration owner; it is never relabeled
-`active`. This branch contributes
-`docs/sprints/issue-84-alert-center/validation-matrix.json` with these frozen
-row IDs:
-
-- `91-A-084`: automated DTO, filtering, aggregation, navigation, lifecycle,
-  empty/error/stale, and raw-negative tests;
-- `91-S-084`: sanitized-only, same-origin/no-store, accessibility, inert-text,
-  and repository-safe artifact checks;
-- `91-L-084`: repository-safe live UI evidence, classified honestly when a
-  source adapter or content-capture authorization is unavailable.
-
-No #85 export row or carrier is activated by this transition.
+Focused tests cover DTOs, filtering, aggregation, navigation, lifecycle,
+empty/error/stale states, raw-negative behavior, sanitized-only,
+same-origin/no-store, accessibility, inert text, and repository-safe output.
+Live UI validation is classified honestly when a source adapter or
+content-capture authorization is unavailable. Candidate-specific matrices and
+evidence ledgers are not committed.
 
 ## Additive cost-receipt read compatibility
 

@@ -12,9 +12,8 @@ the Review workspace, and the human-evaluation write path. It builds on the
 Issue #51 contracts in `canvas-session-workspace.md` and changes no #51
 ingest, identity, or completeness rule.
 
-The mandatory pre-UI design gate for this UI was captured and approved on
-2026-07-11; evidence lives in
-`docs/sprints/issue-52-canvas-workspace/design-gate/`.
+The current shell composition and interaction rules below are the durable
+result of the pre-UI design gate.
 
 Issue #52 shipped Evidence, Improve, and Compare as fixed placeholder cards.
 Issue #53 replaces the Evidence placeholder under the separate

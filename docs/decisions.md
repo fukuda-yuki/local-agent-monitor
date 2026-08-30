@@ -39,7 +39,7 @@ Consequences:
 Status: Accepted
 
 Collector は直接送信を置き換えず、直接送信が不安定な場合や組織展開候補として使う。
-Sprint6 以降は Collector routing を collection profile の required support target として扱う。
+Collection Profiles 以降は Collector routing を collection profile の required support target として扱う。
 
 Consequences:
 
@@ -97,7 +97,7 @@ Rejected for current scope:
 
 Note:
 
-- `raw-local-receiver` profile は D017 / D018 により別 Sprint の required support target として扱う。
+- `raw-local-receiver` profile は D017 / D018 により独立した required support target として扱う。
 
 ## D008: Candidate pipeline は deterministic records までに留める
 
@@ -263,7 +263,7 @@ Consequences:
 - Remote managed profiles は本 repository では WARNING と placeholder configuration までを扱う。
 - 利用者同意 workflow は本 repository の対象外とする。
 
-## D018: raw-local-receiver は別 Sprint で実装する
+## D018: raw-local-receiver は独立した work item で実装する
 
 Status: Accepted
 
@@ -277,16 +277,16 @@ Rationale:
 
 Consequences:
 
-- Sprint6 は collection profiles と既存 routing paths を扱う。
-- Sprint7 は `raw-local-receiver` の receiver、host model、raw store integration、VS Code direct telemetry validation を扱う。
+- Collection Profiles は collection profiles と既存 routing paths を扱う。
+- Local Raw Receiver は `raw-local-receiver` の receiver、host model、raw store integration、VS Code direct telemetry validation を扱う。
 - Tray app、packaged exe installer、Windows Service は初期 required path ではない。
-- IIS / IIS Express は practical な常駐候補として Sprint7 で評価する。
+- IIS / IIS Express は practical な常駐候補として Local Raw Receiver で評価する。
 
 ## D019: 共有テレメトリ／永続化コンポーネントを別 project に抽出する
 
 Status: Accepted
 
-Sprint8 (issue #25) の Local Ingestion Monitor を ConfigCli と独立に構築できるよう、Sprint8 M1 で共有コンポーネントを 2 つの class library に抽出する。
+Issue #25 の Local Ingestion Monitor を ConfigCli と独立に構築できるよう、共有コンポーネントを 2 つの class library に抽出する。
 
 - `CopilotAgentObservability.Telemetry`: OTLP decode / attribute 変換 / raw ingest / raw record model / measurement normalization / sanitization。
 - `CopilotAgentObservability.Persistence.Sqlite`: SQLite raw store access。
@@ -295,15 +295,15 @@ Sprint8 (issue #25) の Local Ingestion Monitor を ConfigCli と独立に構築
 Consequences:
 
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で friend assembly にのみ可視とする。M1 では public な共有 API を定義しない（unsafe / 未確定な型を solution 全体の契約にしないため）。
-- NU1903 high-severity 警告を解消する。`MessagePack` を 2.5.302（AppHost）、`SQLitePCLRaw.bundle_e_sqlite3` を 3.0.3（Persistence.Sqlite、`lib.e_sqlite3` 3.50.3 を同梱）に明示 pin する。0 警告を M1 の exit criterion とする。
+- NU1903 high-severity 警告を解消するため、`MessagePack` を 2.5.302（AppHost）、`SQLitePCLRaw.bundle_e_sqlite3` を 3.0.3（Persistence.Sqlite、`lib.e_sqlite3` 3.50.3 を同梱）に明示 pin する。
 - B1 / B2 / B3（receiver host の堅牢性）は HttpListener host では修正せず、ASP.NET Core host（M2/M3）で吸収する既存決定を維持する。
 - `RawTelemetryStore` は挙動を変えずに移設する。T5（schema-once / single writer）と T6（projection query）は behavior change のため M3/M4 で扱う。
 - monitor summary sanitization 用の `Monitoring/` 区分は monitor projection が存在する M4 で作る。
-- ConfigCli の外部動作・CLI 表面・既存テストは M1 で変更しない（291 tests green を維持）。
+- ConfigCli の外部動作・CLI 表面・既存テスト契約は変更しない。
 
 Update (D020):
 
-- M1 時点の「monitor は sanitized 集約のみで raw を surface しない」という前提は、
+- component 抽出時点の「monitor は sanitized 集約のみで raw を surface しない」という前提は、
   D020 の opt-in raw view（`--enable-raw-view`、既定 off、loopback-only）で更新された。
   `Telemetry/Monitoring/` の sanitization は引き続き既定表示の境界として有効である。
 - D020 の `--enable-raw-view` 前提はさらに D023 で superseded された。現在の
@@ -314,16 +314,15 @@ Update (D020):
 
 Status: Accepted
 
-Sprint8 (issue #25) の Local Ingestion Monitor を、Sprint8 replan
-([docs/sprints/sprint8-local-raw-receiver-monitor/requirements-and-replan.md](sprints/sprint8-local-raw-receiver-monitor/requirements-and-replan.md))
-の決定（DR1–DR6 / DD1–DD6）に基づき実装する。`/codex:adversarial-review` を複数
+Issue #25 の Local Ingestion Monitor を、以下の決定（DR1–DR6 / DD1–DD6）に
+基づき実装する。`/codex:adversarial-review` を複数
 ラウンド経て確定した。
 
 Decisions:
 
 - **DR1 並存**: LocalMonitor は別 ASP.NET Core プロセス（loopback-only、別 port、
   既定 `127.0.0.1:4320`。Collector の `4317`/`4318` と CLI receiver の `4319` を
-  回避）として追加し、Sprint7 の `serve-raw-local-receiver`（`127.0.0.1:4319`）は
+  回避）として追加し、Local Raw Receiver の `serve-raw-local-receiver`（`127.0.0.1:4319`）は
   削除・非推奨にせず並存させる。port が既に bind 済みの場合は固定エラーで終了する。
   VS Code を monitor に向ける正規設定面は `profile-vscode-env --profile
   raw-local-receiver --target monitor`（既定 `--target receiver`=`4319`。custom
@@ -344,7 +343,7 @@ Decisions:
   実行されない。その上に重ねる追加機構（CSP / nosniff / payload sanitizer / XSS payload
   テスト群）は設けない（ローカル単一利用者ツールのため。下記 Consequences の受容リスク参照）。
 - **DR5 live gate**: 実 VS Code Copilot Chat の HTTP/protobuf 受信 evidence
-  （日時、環境、profile 値、endpoint、trace id / raw record id）を Sprint8 完了の
+  （日時、環境、profile 値、endpoint、trace id / raw record id）を Local Ingestion Monitor 完了の
   hard gate とする。
 - **DR6 ローカル信頼境界（明示 threat model）**: 単一の信頼するローカル利用者を
   対象とし、本人が自分の prompt / response をローカル UI で見ることは脅威ではない。
@@ -389,7 +388,7 @@ Consequences:
 
 Update (D023):
 
-- Sprint9 で raw 表示の既定を反転する。`--enable-raw-view`（既定 off）は廃止し、
+- Monitor Agent Execution View で raw 表示の既定を反転する。`--enable-raw-view`（既定 off）は廃止し、
   raw body と PII は **既定で表示する**（server-rendered、inert text）。
   `--sanitized-only` フラグを新設し、metadata-only モードを復元する
   （raw-bearing route は `404`、PII は除外）。DR6 の cross-machine 防御（loopback
@@ -494,7 +493,7 @@ assets or `/api/local-monitor/v1/*`.
 
 Status: Accepted
 
-Sprint8 の姿勢（raw は `--enable-raw-view` opt-in）を反転する。単一ローカル利用者ツール
+Local Ingestion Monitor の姿勢（raw は `--enable-raw-view` opt-in）を反転する。単一ローカル利用者ツール
 として、raw body と PII を **既定で表示する**（server-rendered、inert text、inline
 rendering）。
 
@@ -532,13 +531,13 @@ Update (Issue #35):
 - `--sanitized-only` は引き続き利用者が必要に応じて選ぶ metadata-only opt-out であり、
   Canvas 専用の安全姿勢ではない。
 
-## D024: 設計ビュー deferred non-goal を Sprint10 でナローイング
+## D024: 設計ビュー deferred non-goal を Monitor Design Views でナローイング
 
 Status: Accepted
 
-Sprint9 の README と `docs/requirements.md` §4 は、グラフィカル Flow Chart、
+Monitor Agent Execution View の README と `docs/requirements.md` §4 は、グラフィカル Flow Chart、
 Cache Explorer、ビジュアルポリッシュを「後続の設計スプリント」に延期していた。
-Sprint10 がそのスプリントであり、non-goal を以下の範囲に絞る：
+Monitor Design Views がそのスプリントであり、non-goal を以下の範囲に絞る：
 
 - Local Monitor は sanitized なクライアントサイドプレゼンテーションとして
   Flow Chart、Cache Explorer、ポリッシュされたテーマ、タイムラインフィルター/ソート UI
@@ -602,11 +601,11 @@ Noto Sans Mono を採用する。
 - ライセンス: OFL。
 - システムフォントスタックは使用しない（vendored フォントに固定）。
 
-## D029: Sprint11 M5 UI トリガーは拡張所有ヘルパーページ + `session.send` + token 保護付き monitor proxy で実装する
+## D029: Canvas Adapter M5 UI トリガーは拡張所有ヘルパーページ + `session.send` + token 保護付き monitor proxy で実装する
 
 Status: Accepted
 
-Sprint11 M5 の「Analyze selected trace with Copilot」UI トリガーは、
+Canvas Adapter M5 の「Analyze selected trace with Copilot」UI トリガーは、
 Canvas SDK の `session.send()` を公式の UI→Copilot トリガー経路として使い、
 `open()` が返す URL を拡張所有の loopback ヘルパーページに置き換える。
 
@@ -630,7 +629,7 @@ Canvas SDK の `session.send()` を公式の UI→Copilot トリガー経路と�
   だけを含む。raw details は Local Monitor UI 境界内のデータとして扱い、Canvas
   action responses、logs、committed files、static artifacts へコピーしない。monitor
   payload は指示に埋め込まない。
-- **境界維持**: D020 / D023 / D030 と Sprint9/Sprint10 の sanitized JSON/SSE 不変条件
+- **境界維持**: D020 / D023 / D030 と Monitor Agent Execution View/Monitor Design Views の sanitized JSON/SSE 不変条件
   は変更なし。拡張所有サーバは `127.0.0.1` のみ、`onClose()` で close、
   診断は `session.log()`（`console.log` 不使用）、CDN / remote fetch / 依存追加なし。
   新たな telemetry input / schema / endpoint / raw route は追加しない。
@@ -643,7 +642,7 @@ Canvas SDK の `session.send()` を公式の UI→Copilot トリガー経路と�
 
 Status: Accepted
 
-Sprint11 の Canvas adapter は Local Monitor の任意表示統合であり、Local Monitor の
+Canvas Adapter の Canvas adapter は Local Monitor の任意表示統合であり、Local Monitor の
 起動姿勢を Canvas 専用に変えない。Canvas adapter は通常の raw-default Local Monitor
 と併用でき、`--sanitized-only` は Canvas 利用時の必須条件ではなく、利用者が必要に応じて
 選ぶ metadata-only opt-out として残す。
@@ -654,9 +653,9 @@ Sprint11 の Canvas adapter は Local Monitor の任意表示統合であり、L
 - Canvas action responses、logs、committed outputs、static artifacts には raw prompt /
   response body、tool arguments / results、PII、credential、token、local sensitive path、
   raw OTLP payload を返さない。
-- Sprint11 Canvas adapter 自体は新たな telemetry input / schema / API field /
+- Canvas Adapter Canvas adapter 自体は新たな telemetry input / schema / API field /
   raw endpoint を追加しない。D051 は別 Session subsystem に限る後続 exception。
-- Sprint16 で追加する sanitized repository metadata（D040）は、この禁止の
+- Canvas Repository Metadata で追加する sanitized repository metadata（D040）は、この禁止の
   scoped exception として扱う。raw endpoint や新規 telemetry input は追加しない。
 - Local Monitor の raw-bearing server-rendered route は引き続き D020 / D023 の
   loopback、same-origin、`Cache-Control: no-store`、inert text rendering 境界に従う。
@@ -729,7 +728,7 @@ server-rendered で表示する。これにより両ページは trace-detail pa
 
 - loopback-only bind、`Host` header 検証、CORS 無効、state-changing action の CSRF + same-origin。
 - `/api/monitor/*` と SSE は sanitized metadata のみ。projection schema / API field は追加しない。
-- Sprint16 の sanitized repository metadata（D040）は、この不変条件を
+- Canvas Repository Metadata の sanitized repository metadata（D040）は、この不変条件を
   raw / PII 非送出のまま保つ scoped exception として扱う。
 - raw / PII を log、repository-safe outputs、static dashboard、CI artifact に書かない。
 - captured content は escaped inert text で描画。追加の CSP / sanitizer / XSS payload-matrix
@@ -828,7 +827,7 @@ raw を Copilot SDK analysis に渡すこと自体は禁止しない。
 
 Status: Accepted
 
-Sprint11 の Canvas adapter は「Local Monitor UI を再実装しない薄い adapter」
+Canvas Adapter の Canvas adapter は「Local Monitor UI を再実装しない薄い adapter」
 （D029 / D030）として実装したが、ヘルパー UI は trace を英語の最小1行
 （`trace_id — status — spans:N`）でしか出さず、focus / ボタン文言が内部語のまま、
 接続エラー時の次操作も曖昧で、利用者が「どこを見て何を選び次に何をするか」を
@@ -836,12 +835,11 @@ Sprint11 の Canvas adapter は「Local Monitor UI を再実装しない薄い a
 view model / projection を再利用した診断 surface へ引き上げる。second monitor の
 二重実装はしない。
 
-スプリント枠:
+Initiative identity:
 
-- 本 Epic は「Sprint12 親 Issue」として起票されたが、リポジトリの Sprint12
-  （Monitor UX Redesign、D032 / D033）は完了済みであり、Sprint13 完了・Sprint14
-  実装中である。番号衝突を避けるため、本 Epic は **Sprint15**
-  （Canvas Diagnostic Surface）として新設する。
+- Numbered iteration labels had already collided with Monitor UX Redesign
+  (D032 / D033), so this capability is identified by the stable name
+  **Canvas Diagnostic Surface** rather than by an iteration number.
 
 決定:
 
@@ -866,8 +864,8 @@ view model / projection を再利用した診断 surface へ引き上げる。se
 - 子 D（Canvas raw preview boundary）と子 E（session-to-trace correlation）は
   設計先行の独立した子 Issue とし、本スプリントでは実装しない。子 D は表示境界の
   設計判断を伴うため、子 A の UX / bounded detail を整えてから判断する。
-- 子 A 着手前に、`docs/task.md` 技術負債 F8（Canvas 契約テストが文字列部分一致
-  中心で構文エラーや helper-server 回帰を検出できない）へ対応する。`extension.mjs`
+- 子 A 着手前に、Canvas 契約テストが文字列部分一致中心で構文エラーや
+  helper-server 回帰を検出できない問題へ対応する。`extension.mjs`
   から副作用のない純関数を `canvas-helpers.mjs` に抽出し、`node --check` と
   `node --test` による実行可能 smoke coverage を追加する。
 
@@ -882,7 +880,7 @@ view model / projection を再利用した診断 surface へ引き上げる。se
   判断に委ね、子 A では有効化しない。
 - `--sanitized-only` を Canvas 利用の前提に戻さない（D030 を維持）。
 
-## D037: Sprint15 子 B〜E の設計を確定する（D036 更新）
+## D037: Canvas Diagnostic Surface 子 B〜E の設計を確定する（D036 更新）
 
 Status: Accepted
 
@@ -1023,7 +1021,7 @@ heuristic correlation は D051 後も禁止する。
 
 Status: Accepted
 
-利用者確認の結果、今後 Sprint15 の作業分担を次のとおり再整理する:
+利用者確認の結果、今後 Canvas Diagnostic Surface の作業分担を次のとおり再整理する:
 
 - **実装（コード作成・単体/契約テスト・`node --check`/`node --test`/`dotnet
   build`/`dotnet test` による検証）はすべて Claude（このリポジトリで作業する
@@ -1037,7 +1035,7 @@ Status: Accepted
   （`invoke_canvas_action`）を目視・実行確認することを指す。これは特定の
   子 Issue に固有の制約ではなく、Canvas に触れるすべての子 Issue（A〜D）に
   共通する、実装後の最終検証工程である。子 Issue ごとに個別のライブ検証
-  pending 注記を書く代わりに、本決定以降は Sprint15 全体で 1 回の統合ライブ
+  pending 注記を書く代わりに、本決定以降は Canvas Diagnostic Surface 全体で 1 回の統合ライブ
   検証ハンドオフとして扱う（README の "Live validation handoff" 参照）。
 
 この前提のもと、子 D と子 B 残作業（Canvas 側 consumer）を実装対象として
@@ -1120,7 +1118,7 @@ Status: Accepted
 
 ### 背景（利用者との議論）
 
-Sprint15 M1（child A）のトレース選択ドロップダウンは、`compactTrace` 由来の
+Canvas Diagnostic Surface M1（child A）のトレース選択ドロップダウンは、`compactTrace` 由来の
 sanitized な決定支援ラインのみ（状態 / モデル / span 数 / tool 数 / token 数 /
 時刻 / 所要時間 / 短縮 trace id）を表示する。利用者から、どのプロンプトの
 トレースかをドロップダウン上で識別できないか（＝プロンプト自体を選択肢に
@@ -1216,7 +1214,7 @@ sanitized な決定支援ラインのみ（状態 / モデル / span 数 / tool 
 
 Update (D042 / D050):
 
-- Sprint18 の Local Monitor overview / trace-list と Canvas helper は、同じ
+- Local Monitor UI Redesign の Local Monitor overview / trace-list と Canvas helper は、同じ
   `GET /traces/{traceId}/prompt-label` を same-origin / token-gated local
   screen で `fetch` し、prompt label を `textContent` 相当で表示してよい。
   これは D032 の「JS は raw を取得しない」を full raw payload に限定して
@@ -1244,10 +1242,10 @@ Update (D042 / D050):
 
 ## D040: Canvas cross-repo adapter の配布単位と sanitized repository metadata contract を固定する
 
-Sprint16 では GitHub Copilot app Canvas adapter を他 repository へコピー可能な
+Canvas Repository Metadata では GitHub Copilot app Canvas adapter を他 repository へコピー可能な
 extension distribution unit として整理する。配布の source of truth は
 `.github/extensions/otel-monitor-canvas/` のみとし、mirror folder は作らない。
-この sprint では runtime / development dependency、`package.json`、lockfile、
+この decision scope では runtime / development dependency、`package.json`、lockfile、
 `node_modules` を追加しない。
 
 Local Monitor projection と Canvas helper が repository / workspace を識別する
@@ -1270,7 +1268,7 @@ output へ返す禁止は維持する。
 既存 projected rows は自動 backfill しない。新しい nullable projection columns は
 新規 ingestion または明示的な DB 再生成で埋まる。Canvas helper は metadata 欠落時
 `unknown repository` を表示する。`repository_full_name`、`workspace_hash`、
-`git_branch`、`git_commit_sha`、`source_kind` は、この sprint では追加しない。
+`git_branch`、`git_commit_sha`、`source_kind` は、この decision scope では追加しない。
 CM-1 では repository label source を OpenTelemetry VCS semantic convention
 に合わせて `vcs.repository.name` へ置き換える。`repo.name` 互換 fallback は
 持たず、`vcs.repository.url.full` は Canvas helper / bounded action DTO へ
@@ -1287,7 +1285,7 @@ credential、path は表示・永続化しない。既存 API / SSE / Canvas DTO
 
 Status: Accepted
 
-Sprint17 では Canvas helper の既存 `POST /analyze` → `session.send({ prompt })`
+Canvas Analysis UX では Canvas helper の既存 `POST /analyze` → `session.send({ prompt })`
 経路を維持する。Canvas helper は Local Monitor Copilot raw analysis runner を
 起動せず、`/traces/{traceId}/analysis` も呼ばない。
 
@@ -1300,7 +1298,7 @@ Sprint17 では Canvas helper の既存 `POST /analyze` → `session.send({ prom
 - `model`、`reasoning effort`、`timeout` は per-message execution control ではなく
   requested values とする。`session.send()` が実行モデル・reasoning・実行 timeout
   を強制したとは UI / response / docs で主張しない。
-- `sendAndWait` は Sprint17 では採用しない。idle 待機 timeout は in-flight agent
+- `sendAndWait` は Canvas Analysis UX では採用しない。idle 待機 timeout は in-flight agent
   work を abort しないため、analysis execution timeout と誤解されやすい。
 - 最終分析結果 metadata は、後続 OTel telemetry から安全に相関できる設計ができる
   まで scope 外とする。
@@ -1313,7 +1311,7 @@ Sprint17 では Canvas helper の既存 `POST /analyze` → `session.send({ prom
 - Local Monitor raw analysis runner は引き続き Local Monitor 本体の raw-default
   local surface であり、Canvas helper analysis UX とは別経路である。
 
-## D042: Local Monitor UI は Sprint18 デザインハンドオフの Console 型 IA / hex トークン / 7 画面へ再設計する
+## D042: Local Monitor UI は Local Monitor UI Redesign デザインハンドオフの Console 型 IA / hex トークン / 7 画面へ再設計する
 
 **Status: superseded for current product IA by D075.** This section is retained
 as implementation history. Its permanent sidebar, Overview/KPI surface,
@@ -1322,7 +1320,7 @@ current Local Monitor v1 authority.
 
 Status: Accepted
 
-Sprint18 では Local Ingestion Monitor の UI を
+Local Monitor UI Redesign では Local Ingestion Monitor の UI を
 `.claude/design_handoff_local_monitor/README.md`（2026-07-03 確定版）に従い
 全面再設計する。開発者を最優先ユーザー、token コストの把握・削減を最重要
 シナリオとし、Console 型 IA（208px 左サイドバー + master-detail）を採用する。
@@ -1357,7 +1355,7 @@ Sprint18 では Local Ingestion Monitor の UI を
   CSS 上 700 へマップする（記録済みの accepted deviation。C7）。
 - プロンプト検索は server 側 TraceId 部分一致 + client 側での読み込み済み行の
   prompt label フィルタに限定する。全コーパスの prompt 全文検索は scope 外
-  （documented limitation、`docs/task.md` の follow-up。C8）。
+  （documented limitation。C8）。
 
 不変:
 
@@ -1372,7 +1370,7 @@ Sprint18 では Local Ingestion Monitor の UI を
 
 Status: Accepted
 
-Sprint18 のスパンインスペクタ（整形 / raw タブ）は span 単位の raw 由来
+Local Monitor UI Redesign のスパンインスペクタ（整形 / raw タブ）は span 単位の raw 由来
 詳細（tool 呼出引数・結果末尾、llm メッセージ構成・プレビュー、OTLP span
 JSON 全文）を必要とする。既存の `/api/monitor/*` は sanitized-only を維持
 するため、D032 / D035 / D039 と同じ route-boundary パターンで **新規
@@ -1395,7 +1393,7 @@ raw-bearing JSON route** を追加する。
 
 Status: Accepted
 
-Sprint18 の概要 KPI（実効入力換算、キャッシュ読取率）とトレース一覧
+Local Monitor UI Redesign の概要 KPI（実効入力換算、キャッシュ読取率）とトレース一覧
 （cache% 列、状態フィルタ）は trace 単位の cache token 集計と回復状態を
 必要とする。`monitor_traces` に additive migration（v3 → v4）で以下を追加
 する。
@@ -1421,7 +1419,7 @@ Repository/Compare results and follow-up chat are non-permanent under #162.
 
 Status: Accepted
 
-Sprint18 の Copilot 解析ドロワーはチャット形式の追い質問を提供するが、
+Local Monitor UI Redesign の Copilot 解析ドロワーはチャット形式の追い質問を提供するが、
 server 側に会話 session 状態を持たない。
 
 - 各追い質問は**新規 analysis run** を作成し、その prompt に過去の Q&A
@@ -1440,7 +1438,7 @@ server 側に会話 session 状態を持たない。
 
 Status: Accepted
 
-Issue #46 Phase 1（Sprint19）として、既存 Local Monitor Copilot raw
+Issue #46 Phase 1（Instruction Diagnosis Phase 1）として、既存 Local Monitor Copilot raw
 analysis に、利用者が agent へ与えた実装指示を trace 証拠に基づいて
 診断する analysis focus を 1 つ追加する。目的は「trace 由来の指示
 フィードバックは一般的な prompt アドバイスに勝る」という Phase 1 の
@@ -1480,10 +1478,10 @@ analysis に、利用者が agent へ与えた実装指示を trace 証拠に基
 
 Status: Accepted
 
-Issue #46 Phase 2 step 1（Sprint20）として、`instruction-diagnosis`
+Issue #46 Phase 2 step 1（Instruction Diagnosis Phase 2）として、`instruction-diagnosis`
 focus に、解析開始時にコードで決定的（deterministic）に証拠を事前
 抽出し、構造化された検証可能な証拠を LLM に渡す仕組みを追加する。
-動機は Sprint19 M5 の GO 判定と 2 つの設計インプット、すなわち
+動機は Instruction Diagnosis Phase 1 M5 の GO 判定と 2 つの設計インプット、すなわち
 「分類=証拠結合が最弱の契約要素だった（9 finding 中 2 件が実在証拠を
 引用しつつ分類定義を拡大解釈した）」および「解析は trace 単位である
 一方、Copilot CLI は起動ごとに 1 trace を発行し conversation id が
@@ -1508,11 +1506,11 @@ focus に、解析開始時にコードで決定的（deterministic）に証拠�
   根拠を持つ finding は、raw tool で明示検証した span id 引用が
   あり、その旨を finding 内に明記した場合のみ許可する
   （escape hatch。extractor が見えない証拠の発見可能性は維持する）。
-- M5 A/B gate: Sprint19 の 3 基準（引用実在・trace 固有性・
+- M5 A/B gate: Instruction Diagnosis Phase 1 の 3 基準（引用実在・trace 固有性・
   no-evidence-no-finding）に「全 finding が extractor field または
   明示 raw 検証済み span 引用に接地している」を加えた 4 基準とする。
-  Sprint19 B1 finding 3 / 4 と等価形の再発は gate 失敗とする。有効
-  finding 数が同一 trace 群で Sprint19 より実質的に減る場合は結合
+  Instruction Diagnosis Phase 1 B1 finding 3 / 4 と等価形の再発は gate 失敗とする。有効
+  finding 数が同一 trace 群で Instruction Diagnosis Phase 1 より実質的に減る場合は結合
   規則が強すぎるシグナルとして記録し、緩和を反復する。
 - 不変: `--sanitized-only` は raw analysis 面全体を無効化したまま
   とする。D045 履歴ブロック、固定 4 点形式、no-evidence-no-finding
@@ -1526,10 +1524,10 @@ focus に、解析開始時にコードで決定的（deterministic）に証拠�
 
 Status: Accepted
 
-Issue #46 Phase 2 step 2（Sprint21）として、`instruction-diagnosis`
+Issue #46 Phase 2 step 2（Conversation Scope）として、`instruction-diagnosis`
 focus の deterministic extractor を拡張し、選択 trace を anchor にした
 bounded same-conversation context を `get_instruction_evidence` の出力に
-追加する。動機は Sprint20 の `conversation` field が sibling trace id・
+追加する。動機は Instruction Diagnosis Phase 2 の `conversation` field が sibling trace id・
 順序・件数に留まり、Copilot CLI のように 1 起動 1 trace で
 `conversation_id` が兄弟 trace を繋ぐ場合でも、LLM が前後 trace の
 短い診断材料を参照できなかったことである。
@@ -1550,7 +1548,7 @@ bounded same-conversation context を `get_instruction_evidence` の出力に
   面だけの local runtime data であり、長い raw prompt / response /
   tool body、PII、credential、provider URL、local sensitive path を
   extractor output、repository-safe summary、Issue / docs / dashboard /
-  static artifact に出してはならない。descriptor は Sprint20 と同じ
+  static artifact に出してはならない。descriptor は Instruction Diagnosis Phase 2 と同じ
   first-line 160 characters + `...` truncation posture を使う。
 - 新規 public route、`/api/monitor/*` field、SSE change、projection
   migration、Canvas focus change、memory candidate、adoption workflow、
@@ -1565,7 +1563,7 @@ bounded same-conversation context を `get_instruction_evidence` の出力に
   `conversation_context.traces[]` 外の trace は引用禁止であり、必要な
   証拠が bounded window 外にある場合は、推測せず bounded evidence が
   insufficient であると述べる。
-- M5 live validation gate は Sprint20 の citation existence、trace
+- M5 live validation gate は Instruction Diagnosis Phase 2 の citation existence、trace
   specificity、no-evidence-no-finding、extractor/raw grounding に加え、
   bounded-window compliance と sibling relationship clarity を確認する。
   repository evidence は sanitized observation だけを記録し、full
@@ -4157,11 +4155,8 @@ retracted, not merely left unproven.
 For this already-implemented current release, acceptance uses exact post-
 implementation bundled `1.0.75` / protocol `3` same-client live proof together
 with deterministic r0002/identity/admission coverage, candidate-bound platform
-evidence, pinned full validation, and fresh independent review. The earlier
-accepted proof resolves the historical sequencing conflict. Production changed
-after that proof, however, so an exact-final-candidate Windows/Linux live refresh,
-final validation, independent review, release, merge, and Issue closure remain
-pending and must not be inferred from the historical anchor.
+evidence, pinned full validation, and fresh independent review. Historical
+evidence never authorizes inference that a later candidate passed those gates.
 
 Every future registry revision or producer/startup implementation retains a
 mandatory pre-implementation T0b. D090 changes chronology and acceptance

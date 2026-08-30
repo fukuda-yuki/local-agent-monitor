@@ -3,7 +3,7 @@
   "fixture_provenance": {
     "classification": "repository_safe_conformance",
     "producer_envelope": "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest JSON",
-    "mapping_evidence": "docs/sprints/sprint9-monitor-agent-execution-view/milestones/M6-security-and-live-validation/live-validation.md#part-b--vs-code-github-copilot-chat-pending-user-confirmation",
+    "mapping_evidence": "docs/specifications/contracts/source-capabilities/v1/manifests/github-copilot-vscode.json",
     "mapping_evidence_status": "candidate_not_closure",
     "live_producer_fixture_status": "blocked",
     "live_producer_fixture_blocker": "no_repository_safe_raw_vscode_copilot_export"

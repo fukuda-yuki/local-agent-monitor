@@ -400,21 +400,13 @@ focuses the result heading; failure/cancel returns focus to its initiator. A
 concise `aria-live="polite"` region announces state changes; validation moves
 focus to its summary. Color is never the only indication of verdict or state.
 
-## Validation and Issue #91 ownership
+## Validation
 
 `HistoricalAnalysisSpecificationTests` is the focused executable contract.
-The installed surface removes `historical-analysis` from
-`docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json`
-and publishes
-`docs/specifications/contracts/historical-analysis/v1/issue-91-validation-handoff.json`.
-Issue #75 owns active rows `91-H-075` for functional/UI coverage, `91-S-075`
-for security/accessibility/no-leak coverage, and `91-L-075` for real
-multi-Session/provider execution. Required profiles are raw-default,
-sanitized-only, content-available, content-unavailable, and expired-evidence.
-Matrix coverage includes zero eligible Sessions, mixed source/completeness,
+Coverage includes zero eligible Sessions, mixed source/completeness,
 truncation, supported/weak/zero findings, supported/incomplete/zero drivers,
 provider unavailable/failed/partial, timeout, cancel, stale/invalid citation,
 sanitized-only, expiry, exact drill-down, and keyboard/live-region behavior.
 Provider-free normal composition is `provider_unavailable`; live provider
-execution remains `blocked_external` until safe evidence exists. The active
-matrix owns its classifications and inherits no pass from the future registry.
+execution remains `blocked_external` until safe evidence exists. Run-specific
+results belong in the Pull Request, active Issue, or GitHub Actions artifact.

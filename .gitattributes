@@ -1,6 +1,5 @@
 # Normalize text files to LF in the repository and on checkout.
-# This prevents CRLF injection into Markdown/source files (see
-# docs/BUG_ISSUE/doc-ux-readability-review-15fe4cbf.md, DOC-6A).
+# This prevents CRLF injection into Markdown and source files.
 * text=auto eol=lf
 
 # Explicit binary declarations (safety net in addition to git's text=auto

@@ -5,7 +5,7 @@
   "observed_date": "2026-07-13",
   "source_version": "2.1.207",
   "capture_policy": "Structural names, kinds, counts, and status codes only; no attribute values, prompt/response text, tool arguments/results, credentials, or local paths.",
-  "evidence_reference": "../../../../../sprints/issue-99-claude-live-validation.md",
+  "evidence_reference": "claude-code-print.json",
   "runs_summarized": 4,
   "ingest_batches_observed": 6,
   "schema_fingerprints_observed": [

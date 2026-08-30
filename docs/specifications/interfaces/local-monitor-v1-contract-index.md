@@ -6,7 +6,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 
 | Area | Product/contract authority | Implementation owner |
 |---|---|---|
-| Product definition | `docs/superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md` | — |
+| Product definition | `docs/specifications/interfaces/local-monitor-v1-product-definition.md` | — |
 | IA/page hierarchy/layout/states | [`local-monitor-v1-ia.md`](local-monitor-v1-ia.md), #132 | #135–#140, #145–#146, #167 |
 | Human route/URL/Session collection request transport | [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md), PO136-A2b | #136 pure parsers |
 | Source claims/missing semantics | #129 | #137 and feature owners |
