@@ -142,6 +142,30 @@ public class MonitorSpanProjectionBuilderTests
         Assert.Equal("unknown", span.Category);
     }
 
+    [Theory]
+    [InlineData("generate_content")]
+    [InlineData("text_completion")]
+    [InlineData("/workspace/private/id_rsa")]
+    public void Build_UnrecognizedOperation_DropsValueFromProjection(string operation)
+    {
+        var payload = $$$"""
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"operation-guard","spanId":"operation-guard-span","name":"custom.operation",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000000100000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"{{{operation}}}"}}
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("operation-guard", payload);
+
+        var span = Assert.Single(MonitorSpanProjectionBuilder.Build(record));
+        var serialized = JsonSerializer.Serialize(span);
+
+        Assert.Null(span.Operation);
+        Assert.DoesNotContain(operation, serialized);
+    }
+
     // --- MCP tool attributes ---
 
     [Fact]
@@ -168,6 +192,31 @@ public class MonitorSpanProjectionBuilderTests
         Assert.Equal("extension", span.ToolType);
         Assert.Equal("read_resource", span.McpToolName);
         Assert.Equal("a1b2c3d4e5f6", span.McpServerHash);
+    }
+
+    [Fact]
+    public void Build_UnrecognizedToolType_DropsValueFromProjection()
+    {
+        const string hostileToolType = "client_secret=synthetic-value";
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"tool-type-guard","spanId":"tool-type-guard-span","name":"execute_tool",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000000500000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+             {"key":"github.copilot.tool.parameters.tool_type","value":{"stringValue":"client_secret=synthetic-value"}}
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("tool-type-guard", payload);
+
+        var span = Assert.Single(MonitorSpanProjectionBuilder.Build(record));
+        var serialized = JsonSerializer.Serialize(span);
+
+        Assert.Equal("execute_tool", span.Operation);
+        Assert.Equal("tool_call", span.Category);
+        Assert.Null(span.ToolType);
+        Assert.DoesNotContain(hostileToolType, serialized);
     }
 
     // --- Error classification ---
