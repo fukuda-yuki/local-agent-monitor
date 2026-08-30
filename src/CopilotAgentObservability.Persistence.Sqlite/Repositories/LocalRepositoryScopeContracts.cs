@@ -81,7 +81,6 @@ internal enum LocalRepositorySessionDetailRequestKind
     Node,
     Content,
     Compare,
-    AiProjection,
 }
 
 internal sealed record LocalRepositoryTimelinePosition(

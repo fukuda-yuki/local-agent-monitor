@@ -62,7 +62,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
-    private readonly Dictionary<string, (CancellationTokenSource Cancellation, Task Task)> active = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Admission> active = new(StringComparer.Ordinal);
     private bool accepting = true;
     public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) =>
         StartAsync(request.SessionId, null, request.TimeoutSeconds, null, [], token);
@@ -77,39 +77,53 @@ internal sealed class LocalAiAnalysisApplicationV1(
         string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns, CancellationToken token)
     {
         if (timeout is < 1 or > 600) return new(null, "invalid_request");
-        lock (lifecycleGate) if (!accepting) return new(null, "provider_unavailable");
-        if (!await providerReady(token).ConfigureAwait(false)) return new(null, "provider_unavailable");
+        var admissionId = Guid.CreateVersion7().ToString();
+        var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token));
+        lock (lifecycleGate)
+        {
+            if (!accepting) { admission.Cancellation.Dispose(); return new(null, "provider_unavailable"); }
+            active.Add(admissionId, admission);
+        }
+        try
+        {
+            if (!await providerReady(admission.Cancellation.Token).ConfigureAwait(false))
+            { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
+        }
+        catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
+        { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
         LocalAiSnapshotProjectionV1 snapshot;
         try
         {
             snapshot = nodeId is null
-                ? await snapshots.ReadSessionAsync(sessionId, token).ConfigureAwait(false)
-                : await snapshots.ReadNodeAsync(sessionId, nodeId, token).ConfigureAwait(false);
+                ? await snapshots.ReadSessionAsync(sessionId, admission.Cancellation.Token).ConfigureAwait(false)
+                : await snapshots.ReadNodeAsync(sessionId, nodeId, admission.Cancellation.Token).ConfigureAwait(false);
         }
-        catch (LocalAiScopeTooLargeException) { return new(null, "scope_too_large"); }
-        var run = runs.Create(snapshot, timeout);
-        runs.Start(run.RunId);
-        var execution = new CancellationTokenSource(); execution.CancelAfter(TimeSpan.FromSeconds(timeout));
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (lifecycleGate)
+        catch (LocalAiScopeTooLargeException) { CompleteAdmission(admissionId, admission); return new(null, "scope_too_large"); }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_too_large")
+        { CompleteAdmission(admissionId, admission); return new(null, "scope_too_large"); }
+        catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
+        { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
+        catch { CompleteAdmission(admissionId, admission); throw; }
+        LocalAiRunStatusV1 run;
+        try
         {
-            if (!accepting) { runs.Cancel(run.RunId); execution.Dispose(); return new(null, "provider_unavailable"); }
-            active.Add(run.RunId, (execution, completion.Task));
+            lock (lifecycleGate)
+            {
+                if (!accepting || admission.Cancellation.IsCancellationRequested)
+                { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
+                run = runs.Create(snapshot, timeout);
+                runs.Start(run.RunId);
+                admission.RunId = run.RunId;
+            }
         }
-        _ = ExecuteAndSignalAsync(run.RunId, snapshot, question, priorTurns, execution, completion);
+        catch { CompleteAdmission(admissionId, admission); throw; }
+        admission.Cancellation.CancelAfter(TimeSpan.FromSeconds(timeout));
+        _ = ExecuteAsync(admissionId, admission, run.RunId, snapshot, question, priorTurns);
         return new(run.RunId, null);
     }
 
-    private async Task ExecuteAndSignalAsync(string runId, LocalAiSnapshotProjectionV1 snapshot,
-        string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns, CancellationTokenSource execution,
-        TaskCompletionSource completion)
-    {
-        try { await ExecuteAsync(runId, snapshot, question, priorTurns, execution).ConfigureAwait(false); }
-        finally { completion.TrySetResult(); }
-    }
-
-    private async Task ExecuteAsync(string runId, LocalAiSnapshotProjectionV1 snapshot,
-        string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns, CancellationTokenSource execution)
+    private async Task ExecuteAsync(string admissionId, Admission admission, string runId, LocalAiSnapshotProjectionV1 snapshot,
+        string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns)
     {
         try
         {
@@ -118,7 +132,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
                     ? rawReader(snapshot.SessionId, evidence, cancellationToken)
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));
             var startedRun = runs.Read(runId);
-            var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), execution.Token).ConfigureAwait(false);
+            var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), admission.Cancellation.Token).ConfigureAwait(false);
             if (!await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false))
                 runs.Fail(runId, "stale_snapshot");
             else
@@ -130,11 +144,11 @@ internal sealed class LocalAiAnalysisApplicationV1(
                 runs.Complete(runId, normalized, completedAt);
             }
         }
-        catch (OperationCanceledException) when (execution.IsCancellationRequested)
+        catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
         { if (runs.Read(runId).State == "canceled") return; runs.Fail(runId, "timed_out"); }
         catch (OperationCanceledException) { runs.Cancel(runId); }
         catch { runs.Fail(runId, "provider_failed"); }
-        finally { lock (lifecycleGate) active.Remove(runId); execution.Dispose(); }
+        finally { CompleteAdmission(admissionId, admission); }
     }
 
     public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token)
@@ -147,7 +161,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         var canceled = runs.Cancel(runId);
         CancellationTokenSource? execution = null;
-        lock (lifecycleGate) if (canceled && active.TryGetValue(runId, out var item)) execution = item.Cancellation;
+        lock (lifecycleGate) if (canceled) execution = active.Values.FirstOrDefault(item => item.RunId == runId)?.Cancellation;
         execution?.Cancel();
         return ValueTask.FromResult(canceled);
     }
@@ -171,14 +185,27 @@ internal sealed class LocalAiAnalysisApplicationV1(
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        KeyValuePair<string, (CancellationTokenSource Cancellation, Task Task)>[] pending;
+        KeyValuePair<string, Admission>[] pending;
         lock (lifecycleGate) { accepting = false; pending = active.ToArray(); }
         foreach (var item in pending)
         {
-            runs.Cancel(item.Key);
-            item.Value.Cancellation.Cancel();
+            if (item.Value.RunId is { } runId) runs.Cancel(runId);
+            try { item.Value.Cancellation.Cancel(); } catch (ObjectDisposedException) { }
         }
-        await Task.WhenAll(pending.Select(static item => item.Value.Task)).ConfigureAwait(false);
+        await Task.WhenAll(pending.Select(static item => item.Value.Completion.Task)).ConfigureAwait(false);
+    }
+
+    private void CompleteAdmission(string admissionId, Admission admission)
+    {
+        lock (lifecycleGate) active.Remove(admissionId);
+        admission.Cancellation.Dispose(); admission.Completion.TrySetResult();
+    }
+
+    private sealed class Admission(CancellationTokenSource cancellation)
+    {
+        internal CancellationTokenSource Cancellation { get; } = cancellation;
+        internal TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal string? RunId { get; set; }
     }
 }
 
@@ -189,10 +216,18 @@ internal static class LocalAiResultEnvelopeV1
     {
         try
         {
-            using var document = JsonDocument.Parse(providerJson ?? [], new JsonDocumentOptions { MaxDepth = 16 });
+            if (providerJson is null || providerJson.Length > 1_048_576) return [];
+            using var document = JsonDocument.Parse(providerJson, new JsonDocumentOptions { MaxDepth = 16 });
             var root = document.RootElement;
-            var content = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("summary", out _) ? root : default;
-            if (content.ValueKind == JsonValueKind.Undefined) return [];
+            var names = root.ValueKind == JsonValueKind.Object ? root.EnumerateObject().Select(static property => property.Name).ToArray() : [];
+            string[] expected = ["summary", "findings", "improvement_suggestions", "limitations"];
+            if (names.Length != expected.Length || names.Distinct(StringComparer.Ordinal).Count() != names.Length
+                || !names.Order(StringComparer.Ordinal).SequenceEqual(expected.Order(StringComparer.Ordinal), StringComparer.Ordinal)) return [];
+            var content = root;
+            if (content.GetProperty("summary").ValueKind != JsonValueKind.String
+                || content.GetProperty("findings").ValueKind != JsonValueKind.Array
+                || content.GetProperty("improvement_suggestions").ValueKind != JsonValueKind.Array
+                || content.GetProperty("limitations").ValueKind != JsonValueKind.Array) return [];
             var entity = new
             {
                 scope = new { kind=snapshot.ScopeKind, session_id=snapshot.SessionId, node_id=snapshot.NodeId, anchor_id=snapshot.AnchorId },

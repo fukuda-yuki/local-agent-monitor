@@ -16,7 +16,10 @@ internal sealed record LocalAiProjectionInputV1(
     IReadOnlyList<LocalAiProjectionNodeV1> Nodes,
     IReadOnlyList<string> SanitizedSpanObservations,
     string? AnchorNodeId = null,
-    IReadOnlyList<LocalAiRawEvidenceV1>? RawEvidence = null);
+    IReadOnlyList<LocalAiRawEvidenceV1>? RawEvidence = null,
+    int? SourceEventCount = null);
+
+internal sealed record LocalAiProjectionContributionV1(LocalAiProjectionInputV1 Input, string SkillRegistryGenerationIdentity);
 
 internal sealed record LocalAiSnapshotProjectionV1(
     string SnapshotId,
@@ -80,7 +83,7 @@ internal static class LocalAiSnapshotProjectionBuilderV1
     private static void Validate(LocalAiProjectionInputV1 input)
     {
         ArgumentNullException.ThrowIfNull(input);
-        if (input.Executions.Count > MaximumExecutions || input.Nodes.Count > MaximumEvents
+        if (input.Executions.Count > MaximumExecutions || (input.SourceEventCount ?? input.Nodes.Count) > MaximumEvents
             || input.SanitizedSpanObservations.Count > MaximumSanitizedSpanObservations)
             throw new LocalAiScopeTooLargeException();
         if (string.IsNullOrWhiteSpace(input.SessionId) || string.IsNullOrWhiteSpace(input.Revision))

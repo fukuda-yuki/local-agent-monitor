@@ -1575,6 +1575,45 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task AiSourceContributionAdmitsIndependentRunAndEventLimitsBeyondCombinedNodeLimit()
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        var existing=Convert.ToInt32(LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT CAST(COUNT(*) AS TEXT) FROM session_events;").Single());
+        for (var index = existing; index < 4095; index++)
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"INSERT INTO session_events(event_id,session_id,run_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('ai-event-{index:D4}','{SessionId}','{runA}','synthetic','ai-source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured');");
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction = connection.BeginTransaction();
+        var authority = FixedSkillRegistryGenerationAuthority.Load(); using var pinned = LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority);
+
+        var result = await contributor.ReadAiProjectionPinnedAsync(new DirectReadTransaction(connection, transaction), SessionId, null,
+            DateTimeOffset.UnixEpoch, pinned, CancellationToken.None);
+
+        Assert.Equal(2, result.Input.Executions.Count);
+        Assert.Equal(4095, result.Input.SourceEventCount);
+        Assert.True(result.Input.Nodes.Count > 4096);
+    }
+
+    [Theory]
+    [InlineData(257, 0)]
+    [InlineData(1, 4097)]
+    public async Task AiSourceContributionRejectsEachIndependentOneOver(int runCount, int eventCount)
+    {
+        using var temp=new MonitorTempDirectory();const string runA="018f0000-0000-7000-8000-000000000010";const string runB="018f0000-0000-7000-8000-000000000020";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,runA,runB);using var connection=OpenFile(temp.DatabasePath);
+        var existingRuns=Convert.ToInt32(LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT CAST(COUNT(*) AS TEXT) FROM session_runs;").Single());
+        var existingEvents=Convert.ToInt32(LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT CAST(COUNT(*) AS TEXT) FROM session_events;").Single());
+        for(var index=existingRuns;index<runCount;index++)LocalWorkspaceProjectionSchemaTests.Execute(connection,$"INSERT INTO session_runs VALUES('ai-run-{index:D4}','{SessionId}','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        for (var index=existingEvents;index<eventCount;index++) LocalWorkspaceProjectionSchemaTests.Execute(connection,$"INSERT INTO session_events(event_id,session_id,run_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES('ai-event-{index:D4}','{SessionId}','{runA}','synthetic','ai-source-{index:D4}','event','2026-08-26T00:00:00.0000000+00:00','not_captured');");
+        LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);using var transaction=connection.BeginTransaction();
+        var authority=FixedSkillRegistryGenerationAuthority.Load();using var pinned=LocalWorkspaceSessionDetailSnapshotContributor.PinnedRegistryAuthority.TryCreate(authority)!;
+        var contributor=new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority);
+        var error=await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(()=>contributor.ReadAiProjectionPinnedAsync(
+            new DirectReadTransaction(connection,transaction),SessionId,null,DateTimeOffset.UnixEpoch,pinned,CancellationToken.None).AsTask());
+        Assert.Equal("workspace_too_large",error.Error);
+    }
+
+    [Fact]
     public async Task DurableNodeOverflowMarkerRejectsEveryDetailReadAndClearsAfterSourceShrink()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

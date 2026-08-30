@@ -59,6 +59,96 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         transaction.ReadAsync((connection, sqliteTransaction, token) =>
             ReadAsync(connection, sqliteTransaction, request, acceptedAt, pinnedRegistry, revisionSession, token), cancellationToken);
 
+    internal ValueTask<LocalAiProjectionContributionV1> ReadAiProjectionPinnedAsync(
+        ILocalRepositoryReadTransaction transaction, string sessionId, string? nodeId, DateTimeOffset acceptedAt,
+        PinnedRegistryAuthority pinnedRegistry, CancellationToken cancellationToken) =>
+        transaction.ReadAsync((connection, sqliteTransaction, token) =>
+            ReadAiProjectionAsync(connection, sqliteTransaction, sessionId, nodeId, acceptedAt, pinnedRegistry, token), cancellationToken);
+
+    private static async ValueTask<LocalAiProjectionContributionV1> ReadAiProjectionAsync(
+        SqliteConnection connection, SqliteTransaction transaction, string sessionId, string? nodeId,
+        DateTimeOffset acceptedAt, PinnedRegistryAuthority pinnedRegistry, CancellationToken token)
+    {
+        using (var bounds = Command(connection, transaction, """
+            SELECT EXISTS(SELECT 1 FROM session_runs WHERE session_id=$session_id LIMIT 1 OFFSET 256),
+              EXISTS(SELECT 1 FROM session_events WHERE session_id=$session_id LIMIT 1 OFFSET 4096);
+            """, sessionId))
+        using (var reader = await bounds.ExecuteReaderAsync(token))
+        {
+            if (!await reader.ReadAsync(token) || reader.GetInt64(0) != 0 || reader.GetInt64(1) != 0)
+                throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+        }
+        var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, [sessionId], acceptedAt, pinnedRegistry);
+        currentSkills.TryGetValue(sessionId, out var skillProjection);
+        if (skillProjection?.State == "unavailable") throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        var revision = await ReadCanonicalRevisionInput(connection, transaction, sessionId, acceptedAt,
+            skillProjection, pinnedRegistry.CanonicalIdentity, token);
+        var executions = new List<string>(); var nodes = new List<LocalAiProjectionNodeV1>();
+        using (var runs = Command(connection, transaction,
+            "SELECT run_id FROM session_runs WHERE session_id=$session_id ORDER BY run_id LIMIT 257;", sessionId))
+        using (var reader = await runs.ExecuteReaderAsync(token))
+            while (await reader.ReadAsync(token))
+            {
+                var runId=reader.GetString(0);var executionId=LocalWorkspaceProjectionStore.StableExecutionId(sessionId,"session_run",runId);
+                executions.Add(executionId);nodes.Add(new(LocalWorkspaceProjectionStore.StableNodeId("execution_root",runId),executionId,null,[],
+                    System.Text.Json.JsonSerializer.SerializeToElement(new{kind="execution",source_kind="session_run"})));
+            }
+        var events = new List<(string EventId,string? RunId,string? ParentId,string? TraceId,string SourceEventId,string Type,string OccurredAt,string ContentState)>();
+        using (var command = Command(connection, transaction, """
+            SELECT event_id,run_id,parent_event_id,trace_id,source_event_id,type,occurred_at,content_state
+            FROM session_events WHERE session_id=$session_id ORDER BY event_id LIMIT 4097;
+            """, sessionId))
+        using (var reader = await command.ExecuteReaderAsync(token))
+            while (await reader.ReadAsync(token)) events.Add((reader.GetString(0),reader.IsDBNull(1)?null:reader.GetString(1),
+                reader.IsDBNull(2)?null:reader.GetString(2),reader.IsDBNull(3)?null:reader.GetString(3),reader.GetString(4),reader.GetString(5),reader.GetString(6),reader.GetString(7)));
+        var spans=new List<string>();
+        foreach(var item in events)
+        {
+            var executionId=item.RunId is null?"unassigned":LocalWorkspaceProjectionStore.StableExecutionId(sessionId,"session_run",item.RunId);
+            var parent=item.ParentId is not null?LocalWorkspaceProjectionStore.StableNodeId("session_event",item.ParentId):item.RunId is null?null:LocalWorkspaceProjectionStore.StableNodeId("execution_root",item.RunId);
+            string? span=null;if(item.TraceId is not null){span=$"{item.TraceId}:{item.SourceEventId}";spans.Add(span);}
+            nodes.Add(new(LocalWorkspaceProjectionStore.StableNodeId("session_event",item.EventId),executionId,parent,[],
+                System.Text.Json.JsonSerializer.SerializeToElement(new{kind="event",type=item.Type,occurred_at=item.OccurredAt,content_state=item.ContentState}),span));
+        }
+        var references=new Dictionary<string,List<string>>(StringComparer.Ordinal);
+        using(var edgeCommand=Command(connection,transaction,"""
+            SELECT e.node_id,e.related_node_id FROM local_workspace_node_edges e JOIN local_workspace_nodes n ON n.node_id=e.node_id
+            WHERE n.session_id=$session_id ORDER BY e.node_id,e.source_ordinal,e.related_node_id;
+            """,sessionId))using(var reader=await edgeCommand.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {var owner=reader.GetString(0);if(!references.TryGetValue(owner,out var values))references.Add(owner,values=[]);values.Add(reader.GetString(1));}
+        using(var projected=Command(connection,transaction,"""
+            SELECT node_id,execution_id,parent_node_id,kind,trace_id,span_id FROM local_workspace_nodes
+            WHERE session_id=$session_id AND source_kind NOT IN ('execution_root','session_event') ORDER BY node_id LIMIT 4097;
+            """,sessionId))using(var reader=await projected.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {
+            var owner=reader.GetString(0);string? span=null;if(!reader.IsDBNull(4)&&!reader.IsDBNull(5)){span=$"{reader.GetString(4)}:{reader.GetString(5)}";spans.Add(span);}
+            nodes.Add(new(owner,reader.GetString(1),reader.IsDBNull(2)?null:reader.GetString(2),
+                references.TryGetValue(owner,out var values)?values:[],System.Text.Json.JsonSerializer.SerializeToElement(new{kind=reader.GetString(3)}),span));
+        }
+        if(spans.Distinct(StringComparer.Ordinal).Take(4097).Count()>4096)
+            throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+        var rawEvidence=new List<LocalAiRawEvidenceV1>();
+        using (var content=Command(connection,transaction,"""
+            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,
+              c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,
+              c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
+            FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
+            WHERE n.session_id=$session_id ORDER BY c.node_id,c.part;
+            """,sessionId))
+        using(var reader=await content.ExecuteReaderAsync(token))while(await reader.ReadAsync(token))
+        {
+            var owner=reader.GetString(0);var part=reader.GetString(1);
+            rawEvidence.Add(new($"raw:{owner}:{part}",owner,new(owner,part,reader.GetString(2),
+                reader.IsDBNull(3)?null:reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetString(5),
+                reader.IsDBNull(6)?null:reader.GetString(6),reader.IsDBNull(7)?null:reader.GetString(7),reader.IsDBNull(8)?null:reader.GetInt64(8),
+                reader.IsDBNull(9)?null:reader.GetString(9),reader.IsDBNull(10)?null:reader.GetString(10),reader.IsDBNull(11)?null:reader.GetString(11),
+                reader.IsDBNull(12)?null:reader.GetString(12),reader.IsDBNull(13)?null:reader.GetInt64(13),reader.IsDBNull(14)?null:(byte[])reader[14],reader.IsDBNull(15)?null:(byte[])reader[15])));
+        }
+        var input=new LocalAiProjectionInputV1(sessionId,revision,executions,nodes,[],nodeId,rawEvidence,events.Count);
+        return new(input,pinnedRegistry.CanonicalIdentity);
+    }
+
     public ValueTask<LocalWorkspaceComparisonDetailContribution> ReadComparisonPinnedAsync(
         ILocalRepositoryReadTransaction transaction, string sessionId, DateTimeOffset acceptedAt,
         PinnedRegistryAuthority pinnedRegistry, CancellationToken cancellationToken) =>
@@ -128,8 +218,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         nodes = await ReadV5NodeFacts(connection, transaction, request, nodes, skillProjection, token);
         nodes = ApplyCurrentSkillMetadata(nodes, skillProjection);
-        var edges = request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.AiProjection
-            ? await ReadEdges(connection, transaction, request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [request.NodeId!] : nodeIds, token)
+        var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
+            ? await ReadEdges(connection, transaction, [request.NodeId!], token)
             : [];
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Node && syntheticSkillTarget)
         {
@@ -137,7 +227,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             if (selected.ParentNodeId is not null)
                 edges = [.. edges, new(selected.NodeId, selected.ParentNodeId, "parent", "exact", selected.SourceOrdinal)];
         }
-        var metadata = request.Kind is LocalRepositorySessionDetailRequestKind.Summary or LocalRepositorySessionDetailRequestKind.Compare or LocalRepositorySessionDetailRequestKind.AiProjection
+        var metadata = request.Kind is LocalRepositorySessionDetailRequestKind.Summary or LocalRepositorySessionDetailRequestKind.Compare
             ? await ReadMetadata(connection, transaction, sessionId, token)
             : new Metadata([], [], null, null);
         var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
@@ -2472,7 +2562,6 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         {
             LocalRepositorySessionDetailRequestKind.Summary => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Compare => "session_id=$session_id AND kind IN ('skill','tool','subagent')",
-            LocalRepositorySessionDetailRequestKind.AiProjection => "session_id=$session_id",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ExecutionId is null => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
             LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND parent_node_id=$parent_node_id",
@@ -2508,7 +2597,6 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LocalRepositorySessionDetailRequestKind.Summary => 257,
             LocalRepositorySessionDetailRequestKind.Node => 4097,
             LocalRepositorySessionDetailRequestKind.Compare => 4097,
-            LocalRepositorySessionDetailRequestKind.AiProjection => 4097,
             _ => request.Limit + 1
         };
         var orderPrefix = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ExecutionId is null

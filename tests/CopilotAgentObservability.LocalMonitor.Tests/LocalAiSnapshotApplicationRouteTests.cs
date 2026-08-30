@@ -67,13 +67,32 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null,
             RequestedAt: "2026-01-01T00:00:00.0000000+00:00", StartedAt: "2026-01-01T00:00:01.0000000+00:00",
             Model: "model-a", ConfigurationSha256: new string('a',64), PromptTemplateVersion: "template-a");
-        var provider = Encoding.UTF8.GetBytes("""{"summary":"ok","findings":[],"improvement_suggestions":[],"limitations":[],"provenance":{"completed_at":"2099-01-01T00:00:00.0000000+00:00"}}""");
+        var provider = Encoding.UTF8.GetBytes("""{"summary":"ok","findings":[],"improvement_suggestions":[],"limitations":[]}""");
         var bytes = LocalAiResultEnvelopeV1.Compose(provider, snapshot, run, new DateTimeOffset(2026,1,1,0,0,2,TimeSpan.Zero));
         using var document = JsonDocument.Parse(bytes);
         var provenance = document.RootElement.GetProperty("provenance");
         Assert.Equal("2026-01-01T00:00:02.0000000+00:00", provenance.GetProperty("completed_at").GetString());
         Assert.Equal("model-a", provenance.GetProperty("model").GetString());
         Assert.Equal(snapshot.SnapshotId, provenance.GetProperty("snapshot_id").GetString());
+    }
+
+    [Theory]
+    [InlineData("{\"summary\":\"ok\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[],\"extra\":true}")]
+    [InlineData("{\"summary\":\"ok\",\"summary\":\"again\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}")]
+    [InlineData("{\"summary\":1,\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}")]
+    public void ResultEnvelopeRejectsNonClosedProviderContent(string json)
+    {
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null);
+        Assert.Empty(LocalAiResultEnvelopeV1.Compose(Encoding.UTF8.GetBytes(json), snapshot, run, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public void ResultEnvelopeRejectsOversizedProviderContent()
+    {
+        var snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
+        var run = new LocalAiRunStatusV1("018f0000-0000-7000-8000-000000000010", "running", "session", SessionId, null, null);
+        Assert.Empty(LocalAiResultEnvelopeV1.Compose(new byte[1_048_577], snapshot, run, DateTimeOffset.UtcNow));
     }
 
     [Fact]
@@ -158,6 +177,41 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
 
     [Fact]
+    public async Task HostStopDrainsReadinessReservationBeforeAnyPersistence()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshots = new RecordingSnapshots(); var runs = new RecordingRuns();
+        var application = new LocalAiAnalysisApplicationV1(async token =>
+        { entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return true; }, snapshots, runs,
+            new Provider(LocalAiProviderOutcomeV1.Failed()));
+        var start = application.StartSessionAsync(new(SessionId, 60), CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await application.StopAsync(CancellationToken.None);
+        var response = await start;
+
+        Assert.Equal("provider_unavailable", response.ErrorCode);
+        Assert.Equal(0, snapshots.Reads);
+        Assert.Equal(0, runs.Creates);
+    }
+
+    [Fact]
+    public async Task HostStopDrainsSnapshotReservationBeforeRunPersistence()
+    {
+        var snapshots = new BlockingSnapshots(); var runs = new RecordingRuns();
+        var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), snapshots, runs,
+            new Provider(LocalAiProviderOutcomeV1.Failed()));
+        var start = application.StartSessionAsync(new(SessionId, 60), CancellationToken.None).AsTask();
+        await snapshots.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await application.StopAsync(CancellationToken.None);
+        var response = await start;
+
+        Assert.Equal("provider_unavailable", response.ErrorCode);
+        Assert.Equal(0, runs.Creates);
+    }
+
+    [Fact]
     public async Task RoutesAreClosedStrictNoStoreAndEnforceMethodCsrfAndCanonicalUuid()
     {
         var application = new StubApplication();
@@ -232,6 +286,15 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task UppercaseUuidVariableIsInvalidRequestNotAliasNotFound()
+    {
+        await using var host = await Host(new StubApplication());
+        using var response = await host.GetAsync("/api/local-monitor/v1/ai/runs/018F0000-0000-7000-8000-000000000001");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_request\"}", await response.Content.ReadAsStringAsync());
+    }
+
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
     private static LocalAiProjectionInputV1 ProjectionInput(int executions, int events, int spans) => new(
         SessionId, "revision-a", Enumerable.Range(0, executions).Select(i => $"execution-{i}").ToArray(),
@@ -278,6 +341,14 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public LocalAiRunStatusV1 Read(string runId) => throw new NotSupportedException();
         public bool Cancel(string runId) => throw new NotSupportedException();
         public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentRevision) => throw new NotSupportedException();
+    }
+    private sealed class BlockingSnapshots : ILocalAiSnapshotProjectionServiceV1
+    {
+        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token)
+        { Entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); throw new InvalidOperationException(); }
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token) => ValueTask.FromResult(true);
     }
     private sealed class Provider(LocalAiProviderOutcomeV1 outcome) : ILocalAiProviderAdapterV1
     { public ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token) => ValueTask.FromResult(outcome); }

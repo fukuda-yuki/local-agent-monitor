@@ -13,9 +13,9 @@ internal static class LocalAiRoutesV1
     {
         endpoints.Map("/api/local-monitor/v1/ai/session-runs", context => StartSession(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/node-runs", context => StartNode(context, application));
-        endpoints.Map("/api/local-monitor/v1/ai/session-runs/{runId}", context => ReadRun(context, application));
-        endpoints.Map("/api/local-monitor/v1/ai/node-runs/{runId}", context => ReadRun(context, application));
-        endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}", context => ReadRun(context, application));
+        endpoints.Map("/api/local-monitor/v1/ai/session-runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/session-runs/"));
+        endpoints.Map("/api/local-monitor/v1/ai/node-runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/node-runs/"));
+        endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/runs/"));
         endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}/cancel", context => Cancel(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/sessions/{sessionId}/reports", context => Reports(context, application));
     }
@@ -44,15 +44,12 @@ internal static class LocalAiRoutesV1
         await StartResponse(context, result).ConfigureAwait(false);
     }
 
-    private static async Task ReadRun(HttpContext context, ILocalAiAnalysisApplicationV1 application)
+    private static async Task ReadRun(HttpContext context, ILocalAiAnalysisApplicationV1 application, string literalPrefix)
     {
-        if (!LowercasePath(context)) { await NotFound(context); return; }
-        if (!RouteUuid(context, "runId", out var runId)) { await Error(context, 400, "invalid_request"); return; }
-        var expected = context.Request.Path.Value!.Contains("/session-runs/", StringComparison.OrdinalIgnoreCase)
-            ? $"/api/local-monitor/v1/ai/session-runs/{runId}"
-            : context.Request.Path.Value.Contains("/node-runs/", StringComparison.OrdinalIgnoreCase)
-                ? $"/api/local-monitor/v1/ai/node-runs/{runId}" : $"/api/local-monitor/v1/ai/runs/{runId}";
-        if (!ExactPath(context, expected)) { await NotFound(context); return; }
+        var rawRunId=context.Request.RouteValues["runId"]?.ToString();
+        if (!ExactPath(context, literalPrefix+rawRunId)) { await NotFound(context); return; }
+        if (!CanonicalUuid(rawRunId)) { await Error(context, 400, "invalid_request"); return; }
+        var runId=rawRunId;
         if (!await ReadMethod(context)) return;
         if (MonitorHost.IsCrossSiteRequest(context)) { await Error(context, 403, "csrf_rejected"); return; }
         if (context.Request.QueryString.HasValue) { await Error(context, 400, "invalid_request"); return; }
@@ -65,9 +62,10 @@ internal static class LocalAiRoutesV1
 
     private static async Task Cancel(HttpContext context, ILocalAiAnalysisApplicationV1 application)
     {
-        if (!LowercasePath(context)) { await NotFound(context); return; }
-        if (!RouteUuid(context, "runId", out var runId)) { await Error(context, 400, "invalid_request"); return; }
-        if (!ExactPath(context, $"/api/local-monitor/v1/ai/runs/{runId}/cancel")) { await NotFound(context); return; }
+        var rawRunId=context.Request.RouteValues["runId"]?.ToString();
+        if (!ExactPath(context, $"/api/local-monitor/v1/ai/runs/{rawRunId}/cancel")) { await NotFound(context); return; }
+        if (!CanonicalUuid(rawRunId)) { await Error(context, 400, "invalid_request"); return; }
+        var runId=rawRunId;
         if (!await PreparePost(context, 2).ConfigureAwait(false)) return;
         var body = await Body(context, 2).ConfigureAwait(false);
         if (body is null) { await Error(context, 413, "request_too_large"); return; }
@@ -80,9 +78,10 @@ internal static class LocalAiRoutesV1
 
     private static async Task Reports(HttpContext context, ILocalAiAnalysisApplicationV1 application)
     {
-        if (!LowercasePath(context)) { await NotFound(context); return; }
-        if (!RouteUuid(context, "sessionId", out var sessionId)) { await Error(context, 400, "invalid_request"); return; }
-        if (!ExactPath(context, $"/api/local-monitor/v1/ai/sessions/{sessionId}/reports")) { await NotFound(context); return; }
+        var rawSessionId=context.Request.RouteValues["sessionId"]?.ToString();
+        if (!ExactPath(context, $"/api/local-monitor/v1/ai/sessions/{rawSessionId}/reports")) { await NotFound(context); return; }
+        if (!CanonicalUuid(rawSessionId)) { await Error(context, 400, "invalid_request"); return; }
+        var sessionId=rawSessionId;
         if (!await ReadMethod(context)) return;
         if (MonitorHost.IsCrossSiteRequest(context)) { await Error(context, 403, "csrf_rejected"); return; }
         if (!TryReportsQuery(context, out var limit, out var cursor))
@@ -170,7 +169,6 @@ internal static class LocalAiRoutesV1
             System.Globalization.DateTimeStyles.None,out _)&&CanonicalUuid(decoded[(separator+1)..]);
     }
     private static bool ExactPath(HttpContext context,string expected)=>string.Equals(context.Request.Path.Value,expected,StringComparison.Ordinal);
-    private static bool LowercasePath(HttpContext context)=>context.Request.Path.Value is { } path&&path==path.ToLowerInvariant();
     private static Task NotFound(HttpContext context)
     { context.Response.StatusCode=404;context.Response.Headers.CacheControl="no-store";context.Response.ContentLength=0;return Task.CompletedTask; }
 

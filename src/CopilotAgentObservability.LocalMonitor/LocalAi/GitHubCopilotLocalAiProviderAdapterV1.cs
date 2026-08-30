@@ -37,7 +37,7 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
                 SystemMessage = new SystemMessageConfig
                 {
                     Mode = SystemMessageMode.Append,
-                    Content = "Return only one complete local_ai_result:1 JSON object. Never include credentials, paths, prompts, tool payloads, or provider metadata outside the required closed result."
+                    Content = "Return only one closed JSON object with exactly summary, findings, improvement_suggestions, and limitations. Never include credentials, paths, prompts, tool payloads, scope, snapshot, or provider metadata."
                 },
             };
             await using var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
@@ -54,15 +54,6 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
         builder.AppendLine("Analyze only this immutable bounded snapshot projection and its exact evidence identifiers.");
         builder.AppendLine(Encoding.UTF8.GetString(request.Snapshot.PayloadCanonicalJson));
         builder.AppendLine(Encoding.UTF8.GetString(request.Snapshot.EvidenceIndexCanonicalJson));
-        builder.AppendLine("Use this exact provenance except completed_at, which must be your current canonical UTC timestamp:");
-        builder.AppendLine(System.Text.Json.JsonSerializer.Serialize(new
-        {
-            provider = "github_copilot_sdk", model = request.Run.Model,
-            configuration_sha256 = request.Run.ConfigurationSha256,
-            prompt_template_version = request.Run.PromptTemplateVersion,
-            requested_at = request.Run.RequestedAt, started_at = request.Run.StartedAt,
-            snapshot_id = request.Snapshot.SnapshotId, snapshot_sha256 = request.Snapshot.PayloadSha256,
-        }));
         if (request.Question is not null)
         {
             builder.AppendLine("Transient follow-up question:"); builder.AppendLine(request.Question);

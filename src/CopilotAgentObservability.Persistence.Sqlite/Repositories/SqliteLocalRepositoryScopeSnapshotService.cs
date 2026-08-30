@@ -76,7 +76,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken) =>
-        (await ReadCoreAsync(request, detailRequest: null, comparisonBatch: false, cancellationToken).ConfigureAwait(false)).Scope;
+        (await ReadCoreAsync(request, detailRequest: null, comparisonBatch: false, aiProjection: false, aiNodeId: null, cancellationToken).ConfigureAwait(false)).Scope;
 
     public async ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(
         LocalRepositoryScopeRequest request,
@@ -84,7 +84,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     {
         if (request.ExactTargetSessionIds is null)
             throw new ArgumentException("invalid_local_repository_scope", nameof(request));
-        var result = await ReadCoreAsync(request, detailRequest: null, comparisonBatch: true, cancellationToken).ConfigureAwait(false);
+        var result = await ReadCoreAsync(request, detailRequest: null, comparisonBatch: true, aiProjection: false, aiNodeId: null, cancellationToken).ConfigureAwait(false);
         return new(result.Scope, result.ComparisonSessions!);
     }
 
@@ -97,7 +97,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId))
             throw new ArgumentException("invalid_session_id", nameof(sessionId));
         ValidateDetailRequest(detailRequest);
-        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, comparisonBatch: false, cancellationToken).ConfigureAwait(false);
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, comparisonBatch: false, aiProjection: false, aiNodeId: null, cancellationToken).ConfigureAwait(false);
         if (result.Scope.Sessions.Count == 0 || result.Detail is null)
             throw new LocalWorkspaceSessionDetailException("session_not_found");
         var session = result.Scope.Sessions[0];
@@ -129,25 +129,17 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     {
         if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId) || nodeId is not null && string.IsNullOrWhiteSpace(nodeId))
             throw new ArgumentException("invalid_local_ai_scope");
-        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId),
-            new(LocalRepositorySessionDetailRequestKind.AiProjection, sessionId, NodeId: nodeId), false, token).ConfigureAwait(false);
-        if (result.Scope.Sessions.Count == 0 || result.Detail is null) throw new LocalWorkspaceSessionDetailException("session_not_found");
-        var session = result.Scope.Sessions[0]; var detail = result.Detail;
-        var edges = detail.Edges.GroupBy(static edge => edge.NodeId, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => (IReadOnlyList<string>)group.Select(static edge => edge.RelatedNodeId).Distinct(StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
-        var nodes = detail.Nodes.Select(item => new LocalAiProjectionNodeV1(item.NodeId, item.ExecutionId, item.ParentNodeId,
-            edges.TryGetValue(item.NodeId, out var references) ? references : [], JsonSerializer.SerializeToElement(item),
-            item.TraceId is not null && item.SpanId is not null ? $"{item.TraceId}:{item.SpanId}" : null)).ToArray();
-        var rawEvidence = detail.Content.Select(item => new LocalAiRawEvidenceV1($"raw:{item.NodeId}:{item.Part}", item.NodeId, item)).ToArray();
-        var revision = ComputeRevision(session, detail);
-        var input = new LocalAiProjectionInputV1(sessionId, revision, detail.Executions.Select(static item => item.ExecutionId).ToArray(), nodes, [], nodeId, rawEvidence);
-        return nodeId is null ? LocalAiSnapshotProjectionBuilderV1.BuildSession(input) : LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest: null,
+            comparisonBatch: false, aiProjection: true, aiNodeId: nodeId, token).ConfigureAwait(false);
+        return result.AiProjection ?? throw new LocalWorkspaceSessionDetailException("session_not_found");
     }
 
-    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail, IReadOnlyList<LocalRepositoryComparisonSessionInput>? ComparisonSessions)> ReadCoreAsync(
+    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail, IReadOnlyList<LocalRepositoryComparisonSessionInput>? ComparisonSessions, LocalAiSnapshotProjectionV1? AiProjection)> ReadCoreAsync(
         LocalRepositoryScopeRequest request,
         LocalRepositorySessionDetailRequest? detailRequest,
         bool comparisonBatch,
+        bool aiProjection,
+        string? aiNodeId,
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
@@ -223,6 +215,20 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     ValidateDetail(request.TargetSessionId!, detailRequest, detail);
                 }
 
+                LocalAiSnapshotProjectionV1? aiSnapshot = null;
+                if (aiProjection && sessionRows.Length != 0)
+                {
+                    if (detailContributor is not LocalWorkspaceSessionDetailSnapshotContributor workspaceDetail || pinnedRegistry is null)
+                        throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+                    var contribution = await capability.RunContributorAsync(ReadPhase.Archive,
+                        token => workspaceDetail.ReadAiProjectionPinnedAsync(capability, request.TargetSessionId!, aiNodeId,
+                            acceptedAt, pinnedRegistry, token), cancellationToken).ConfigureAwait(false);
+                    var currentSession=snapshot.Sessions.Single(item=>item.SessionId==request.TargetSessionId);
+                    var input=contribution.Input with { Revision=ComputeRevisionForTest(currentSession,
+                        contribution.Input.Revision,contribution.SkillRegistryGenerationIdentity) };
+                    aiSnapshot=aiNodeId is null?LocalAiSnapshotProjectionBuilderV1.BuildSession(input):LocalAiSnapshotProjectionBuilderV1.BuildNode(input);
+                }
+
                 IReadOnlyList<LocalRepositoryComparisonSessionInput>? comparisonSessions = null;
                 if (comparisonBatch)
                 {
@@ -266,7 +272,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
 
                 finalReturnObserver?.Invoke();
                 cancellationToken.ThrowIfCancellationRequested();
-                return (snapshot, detail, comparisonSessions);
+                return (snapshot, detail, comparisonSessions, aiSnapshot);
             }
             finally
             {
