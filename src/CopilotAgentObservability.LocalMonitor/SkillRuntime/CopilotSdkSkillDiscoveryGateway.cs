@@ -11,7 +11,11 @@ internal interface ICopilotSkillRuntimeClient : IAsyncDisposable
         CancellationToken cancellationToken);
 }
 
-internal sealed record CopilotRuntimeStatusObservationV1(string? Version, int? ProtocolVersion, string? SessionStartCopilotVersion);
+internal sealed record CopilotRuntimeStatusObservationV1(
+    string? Version,
+    int? ProtocolVersion,
+    string? SessionStartCopilotVersion,
+    bool IsAuthenticated = true);
 
 internal sealed record CopilotDiscoveredSkillFactV1(
     string Name, string Source, string Path, string? ProjectPath, string? Description,

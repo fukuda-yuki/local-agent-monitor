@@ -379,15 +379,18 @@ internal static class MonitorHost
         if (!options.SanitizedOnly)
         {
             var aiOptions = CopilotAnalysisOptions.From(builder.Configuration);
+            var analysisSettings = CopilotAnalysisSettings.From(builder.Configuration);
             settingsAiReadiness = testOptions?.SettingsAiReadiness ?? new SettingsAiReadinessService(
                 "github_copilot", aiOptions.DefaultModel, aiOptions.DefaultProfile,
+                analysisSettings.Enabled,
                 () => OwnedCopilotSdkClientV1.TryCreate(
                     Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
                     static sdkOptions => new CopilotClient(sdkOptions),
                     static name => Environment.GetEnvironmentVariable(name) is not null,
                     out var client) ? client : null,
-                skillHostShutdownGate!, TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10));
             builder.Services.AddSingleton(settingsAiReadiness);
+            builder.Services.AddHostedService(_ => settingsAiReadiness);
         }
 
         Func<IAnalysisSdkDirectoryScope, CopilotAnalysisRootsExecutionContext>? CreateRootsExecutionContextFactory()
@@ -632,20 +635,41 @@ internal static class MonitorHost
         if (settingsAiReadiness is not null)
         {
             const string path = "/api/local-monitor/v1/settings/ai-readiness";
-            app.MapGet(path, context => WriteSettingsAiReadinessAsync(context, settingsAiReadiness.GetSnapshot()));
-            app.MapPost(path, async context =>
+            app.MapMethods(path, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"], async context =>
             {
+                context.Response.Headers.CacheControl = "no-store";
+                if (!IsValidHostHeader(context.Request.Host.Host))
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                    return;
+                }
                 if (IsCrossSiteRequest(context))
                 {
                     await WriteSettingsAiErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden");
                     return;
                 }
-                if (!HasMonitorCsrfHeader(context))
+                if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsPost(context.Request.Method))
+                {
+                    context.Response.Headers.Allow = "GET, POST";
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed");
+                    return;
+                }
+                if (context.Request.QueryString.HasValue
+                    || context.Request.ContentLength is > 0
+                    || context.Request.Headers.TransferEncoding.Count > 0)
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_request");
+                    return;
+                }
+                if (HttpMethods.IsPost(context.Request.Method) && !HasMonitorCsrfHeader(context))
                 {
                     await WriteSettingsAiErrorAsync(context, StatusCodes.Status403Forbidden, "csrf_required");
                     return;
                 }
-                await WriteSettingsAiReadinessAsync(context, await settingsAiReadiness.CheckAsync(context.RequestAborted));
+                var value = HttpMethods.IsGet(context.Request.Method)
+                    ? settingsAiReadiness.GetSnapshot()
+                    : await settingsAiReadiness.CheckAsync(context.RequestAborted);
+                await WriteSettingsAiReadinessAsync(context, value);
             });
         }
         if (testOptions?.PrimaryAssetFileProvider is not null)
@@ -827,10 +851,12 @@ internal static class MonitorHost
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
+            var settingsAiReadinessPath = !options.SanitizedOnly
+                && context.Request.Path == "/api/local-monitor/v1/settings/ai-readiness";
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
                 || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath || localMonitorV1ComparisonPath
-                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath)
+                || localMonitorV1HumanPath || localMonitorV1HumanAsset || retiredTraceListPath || settingsAiReadinessPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -863,6 +889,10 @@ internal static class MonitorHost
                 else if (runtimeBackupPath)
                 {
                     await RuntimeBackupRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (settingsAiReadinessPath)
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (!options.SanitizedOnly && localArchivePath)
                 {

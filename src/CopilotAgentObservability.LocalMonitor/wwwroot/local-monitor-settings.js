@@ -18,6 +18,7 @@
   const owned = new Map();
   let requestGeneration = 0;
   let selectedSettings = null;
+  let aiCheckController = null;
   const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const DIGEST = /^[0-9a-f]{64}$/;
   const READINESS_REASONS = Object.freeze({
@@ -310,6 +311,8 @@
       if (!response.ok) throw new Error();
       const value = await response.json();
       renderAi(value, generation, target, stateTarget);
+      if (generation === requestGeneration && selectedSettings === "ai")
+        owned.get("ai").querySelector("[data-settings-ai-check]").disabled = false;
     } catch { if (generation === requestGeneration) { target.textContent = "AI設定を読み込めませんでした。"; stateTarget.textContent = "AI設定を読み込めませんでした。"; } }
   }
 
@@ -330,17 +333,26 @@
   async function checkAi() {
     const button = owned.get("ai").querySelector("[data-settings-ai-check]");
     const target = owned.get("ai").querySelector("[data-settings-ai] p");
+    const generation = requestGeneration;
+    aiCheckController?.abort();
+    const controller = aiCheckController = new AbortController();
     button.disabled = true;
     target.textContent = "接続を確認しています。";
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", {
         method: "POST", cache: "no-store", credentials: "same-origin",
         headers: { "x-monitor-csrf": "local-monitor" },
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error();
-      renderAi(await response.json(), requestGeneration, target, owned.get("state").querySelector("[data-settings-state-ai] p"));
-    } catch { target.textContent = "接続確認に失敗しました。"; }
-    finally { button.disabled = false; }
+      renderAi(await response.json(), generation, target, owned.get("state").querySelector("[data-settings-state-ai] p"));
+    } catch {
+      if (!controller.signal.aborted && generation === requestGeneration && selectedSettings === "ai")
+        target.textContent = "接続確認に失敗しました。";
+    } finally {
+      if (generation === requestGeneration && selectedSettings === "ai") button.disabled = false;
+      if (aiCheckController === controller) aiCheckController = null;
+    }
   }
 
   async function loadSourceSummary(generation) {
@@ -498,6 +510,7 @@
   function select(section) {
     const selected = sections.some(([token]) => token === section) ? section : "state";
     if (selectedSettings === "archive" && selected !== "archive") invalidateArchiveLoad();
+    if (selectedSettings === "ai" && selected !== "ai") { aiCheckController?.abort(); aiCheckController = null; }
     selectedSettings = selected;
     for (const [token] of sections) {
       const nav = navigation.querySelector(`[data-settings-navigation='${token}']`);
@@ -513,6 +526,8 @@
     else {
       requestGeneration++;
       selectedSettings = null;
+      aiCheckController?.abort();
+      aiCheckController = null;
       invalidateArchiveLoad();
     }
   });
@@ -528,6 +543,8 @@
   modal.addEventListener("close", () => {
     requestGeneration++;
     selectedSettings = null;
+    aiCheckController?.abort();
+    aiCheckController = null;
     invalidateArchiveLoad();
   });
   const initial = window.LocalMonitorV1History.current();

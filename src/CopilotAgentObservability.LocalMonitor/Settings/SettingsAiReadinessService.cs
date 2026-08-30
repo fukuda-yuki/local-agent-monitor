@@ -1,4 +1,5 @@
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Settings;
 
@@ -14,49 +15,79 @@ internal sealed class SettingsAiReadinessService(
     string provider,
     string selectedModel,
     string selectedConfiguration,
+    bool configured,
     Func<IOwnedCopilotClientV1?> clientFactory,
-    SkillHostShutdownGateV1 shutdownGate,
-    TimeSpan timeout)
+    TimeSpan timeout) : IHostedLifecycleService, IAsyncDisposable
 {
     private const string EgressNotice = "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action";
     private readonly object sync = new();
+    private readonly CancellationTokenSource stopping = new();
     private SettingsAiReadinessSnapshot snapshot = new(
-        provider, selectedModel, selectedConfiguration, "configured_not_checked", "not_checked", EgressNotice);
+        provider, selectedModel, selectedConfiguration,
+        configured ? "configured_not_checked" : "unconfigured", "not_checked", EgressNotice);
     private Task<SettingsAiReadinessSnapshot>? activeCheck;
+    private bool closed;
 
     internal SettingsAiReadinessSnapshot GetSnapshot() => Volatile.Read(ref snapshot);
 
     internal async Task<SettingsAiReadinessSnapshot> CheckAsync(CancellationToken cancellationToken)
     {
+        if (!configured) return GetSnapshot();
         Task<SettingsAiReadinessSnapshot> check;
         lock (sync)
         {
-            if (shutdownGate.IsNormalShutdownStarted)
-                return Set("unavailable", "unavailable");
-            check = activeCheck ??= Task.Run(RunCheckAsync);
+            if (closed) return Set("unavailable", "unavailable");
+            if (activeCheck is null)
+            {
+                var completion = new TaskCompletionSource<SettingsAiReadinessSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+                check = activeCheck = completion.Task;
+                _ = CompleteCheckAsync(completion);
+            }
+            else check = activeCheck;
         }
         return await check.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    internal async Task CloseAdmissionAndDrainAsync(CancellationToken cancellationToken)
+    {
+        Task? drain;
+        lock (sync)
+        {
+            closed = true;
+            stopping.Cancel();
+            drain = activeCheck;
+        }
+        if (drain is not null) await drain.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CompleteCheckAsync(TaskCompletionSource<SettingsAiReadinessSnapshot> completion)
+    {
+        var result = await RunCheckAsync().ConfigureAwait(false);
+        completion.TrySetResult(result);
+        lock (sync)
+        {
+            if (ReferenceEquals(activeCheck, completion.Task)) activeCheck = null;
+        }
+    }
+
     private async Task<SettingsAiReadinessSnapshot> RunCheckAsync()
     {
+        IOwnedCopilotClientV1? client = null;
         try
         {
-            var client = clientFactory();
-            if (client is null) return Set("unconfigured", "unconfigured");
-            await using (client.ConfigureAwait(false))
-            using (var bounded = CancellationTokenSource.CreateLinkedTokenSource(shutdownGate.StoppingToken))
-            {
-                bounded.CancelAfter(timeout);
-                await client.StartAsync(bounded.Token).ConfigureAwait(false);
-                var status = await client.GetStatusAsync(bounded.Token).ConfigureAwait(false);
-                if (status is null) return Set("authentication_required", "authentication_required");
-                return CopilotRuntimeIdentityCertifierV1.TryCertify(status, out _)
-                    ? Set("ready", "ready")
-                    : Set("unavailable", "unavailable");
-            }
+            client = clientFactory();
+            if (client is null) return Set("unavailable", "unavailable");
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
+            bounded.CancelAfter(timeout);
+            await client.StartAsync(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
+            var status = await client.GetStatusAsync(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
+            if (status is null) return Set("unavailable", "unavailable");
+            if (!status.IsAuthenticated) return Set("authentication_required", "authentication_required");
+            return CopilotRuntimeIdentityCertifierV1.TryCertify(status, out _)
+                ? Set("ready", "ready")
+                : Set("unavailable", "unavailable");
         }
-        catch (OperationCanceledException) when (shutdownGate.IsNormalShutdownStarted)
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
             return Set("unavailable", "unavailable");
         }
@@ -66,17 +97,26 @@ internal sealed class SettingsAiReadinessService(
         }
         finally
         {
-            lock (sync) activeCheck = null;
+            if (client is not null)
+            {
+                try { await client.DisposeAsync().AsTask().WaitAsync(timeout).ConfigureAwait(false); }
+                catch { }
+            }
         }
     }
 
     private SettingsAiReadinessSnapshot Set(string readiness, string result)
     {
-        var value = Snapshot(readiness, result);
+        var value = new SettingsAiReadinessSnapshot(provider, selectedModel, selectedConfiguration, readiness, result, EgressNotice);
         Volatile.Write(ref snapshot, value);
         return value;
     }
 
-    private SettingsAiReadinessSnapshot Snapshot(string readiness, string result) =>
-        new(provider, selectedModel, selectedConfiguration, readiness, result, EgressNotice);
+    public Task StartingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StoppingAsync(CancellationToken cancellationToken) => CloseAdmissionAndDrainAsync(cancellationToken);
+    public Task StopAsync(CancellationToken cancellationToken) => CloseAdmissionAndDrainAsync(cancellationToken);
+    public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public ValueTask DisposeAsync() => new(CloseAdmissionAndDrainAsync(CancellationToken.None));
 }

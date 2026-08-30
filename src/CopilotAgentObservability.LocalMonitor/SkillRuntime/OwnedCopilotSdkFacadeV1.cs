@@ -106,7 +106,9 @@ internal sealed class OwnedCopilotSdkClientV1 : IOwnedCopilotClientV1, ICopilotS
     public async Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken)
     {
         var status = await client.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-        return status is null ? null : new(status.Version, status.ProtocolVersion, null);
+        if (status is null) return null;
+        var authentication = await client.GetAuthStatusAsync(cancellationToken).ConfigureAwait(false);
+        return new(status.Version, status.ProtocolVersion, null, authentication?.IsAuthenticated == true);
     }
 
     public async Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
