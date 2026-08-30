@@ -53,7 +53,7 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
         var builder = new StringBuilder();
         builder.AppendLine("Analyze only this immutable bounded snapshot projection and its exact evidence identifiers.");
         if (request.Snapshot.ScopeKind == "repository_selection")
-            builder.AppendLine("Summarize only the supplied frozen repository facts and evidence. Do not explore, infer, or request any session outside this snapshot. Do not recalculate deterministic facts, claim effects or causality, score quality, rank or prioritize, classify improvement or regression, or invent facts.");
+            builder.AppendLine("Summarize only the supplied frozen repository facts and evidence. Cite only the exact supplied canonical Session/node evidence locations; never cite a bare node ID. Do not explore, infer, or request any session outside this snapshot. Do not recalculate deterministic facts, claim effects or causality, score quality, rank or prioritize, classify improvement or regression, or invent facts. Do not state or promote AI output as a deterministic fact.");
         else if (request.Snapshot.ScopeKind == "comparison")
             builder.AppendLine("Interpret only the stored observed differences and offer concrete improvement suggestions. Do not state an effect verdict, quality evidence, priority score, improvement or regression classification, deterministic fact, or any recalculation.");
         builder.AppendLine("Result evidence_refs may contain only canonical node IDs listed in the evidence index. raw_content.evidence_id is only a tool handle; after reading raw bytes cite its raw_content.citation_ref node. Sanitized span facts likewise cite their citation_ref node.");

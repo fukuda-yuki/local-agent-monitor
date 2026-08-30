@@ -12,6 +12,22 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class RuntimeBackupLocalAiComponentTests
 {
     [Fact]
+    public void BackupValidation_AllowsEarlierBoundedRepositoryExpiryAndRejectsLaterExpiry()
+    {
+        var root=Path.Combine(Path.GetTempPath(),$"runtime-backup-local-ai-repository-expiry-{Guid.NewGuid():N}");Directory.CreateDirectory(root);
+        try
+        {
+            var source=Path.Combine(root,"source.db");var time=Time();var catalog=Initialize(source,time);var store=new LocalAiAnalysisStoreV1(source,catalog,time);
+            const string repository="0198f5c0-1b89-7d41-8c2f-4ecba0b54431";
+            store.InsertSnapshot(new(Guid.CreateVersion7().ToString(),"repository_selection",null,null,repository,"{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),repository,null,time.GetUtcNow().AddHours(4)));
+            using var connection=Open(source);using(var transaction=connection.BeginTransaction()){Assert.True(SqliteRuntimeBackupService.ValidateLocalAiRows(connection,transaction,time.GetUtcNow()));transaction.Commit();}
+            Execute(connection,$"DROP TRIGGER local_ai_snapshots_update_rejected; UPDATE local_ai_snapshots SET expires_at='{time.GetUtcNow().AddHours(25):O}';");
+            using var invalid=connection.BeginTransaction();Assert.False(SqliteRuntimeBackupService.ValidateLocalAiRows(connection,invalid,time.GetUtcNow()));invalid.Commit();
+        }
+        finally{SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
+    }
+
+    [Fact]
     public void Backup_AcceptsWriterMaximumSnapshotDocuments()
     {
         var root=Path.Combine(Path.GetTempPath(),$"runtime-backup-local-ai-max-{Guid.NewGuid():N}");Directory.CreateDirectory(root);

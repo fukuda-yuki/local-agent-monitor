@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Archive;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
@@ -73,8 +74,9 @@ internal static class LocalAiRoutesV1
     }
     private static async Task StartRepository(HttpContext context,ILocalAiAnalysisApplicationV1 application)
     {
-        if(!ExactPath(context,"/api/local-monitor/v1/ai/repository-runs")){await NotFound(context);return;}if(!await PreparePost(context,MaximumSessionBody))return;var body=await Body(context,MaximumSessionBody);if(body is null){await Error(context,413,"request_too_large");return;}if(!SupportedMedia(context)){await Error(context,415,"unsupported_media_type");return;}if(context.Request.QueryString.HasValue||!LocalAiExtendedScopeRequestParser.TryRepositoryRun(body,out var request)){await Error(context,400,"invalid_request");return;}await StartResponse(context,await application.StartRepositoryAsync(request!,context.RequestAborted));
+        if(!ExactPath(context,"/api/local-monitor/v1/ai/repository-runs")){await NotFound(context);return;}if(!await PreparePost(context,MaximumSessionBody))return;var body=await Body(context,MaximumSessionBody);if(body is null){await Error(context,413,"request_too_large");return;}if(!SupportedMedia(context)){await Error(context,415,"unsupported_media_type");return;}if(context.Request.QueryString.HasValue||!LocalAiExtendedScopeRequestParser.TryRepositoryRun(body,out var request)){await Error(context,400,"invalid_request");return;}try{await StartResponse(context,await application.StartRepositoryAsync(request!,context.RequestAborted));}catch(Exception exception) when(IsPersistenceBusy(exception)){await Error(context,503,"persistence_busy");}
     }
+    private static bool IsPersistenceBusy(Exception exception)=>exception is SqliteException sqlite&&sqlite.SqliteErrorCode is 5 or 6||exception.InnerException is not null&&IsPersistenceBusy(exception.InnerException);
 
     private static async Task ReadRun(HttpContext context, ILocalAiAnalysisApplicationV1 application, string literalPrefix, string? requiredScope)
     {

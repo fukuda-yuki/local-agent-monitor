@@ -61,6 +61,8 @@ public sealed class LocalAiExtendedScopeTests
         Assert.Contains("Do not state an effect verdict",comparisonPrompt,StringComparison.Ordinal);
         var repositoryPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("repository_selection"));
         Assert.Contains("Do not explore",repositoryPrompt,StringComparison.Ordinal);
+        Assert.Contains("never cite a bare node ID",repositoryPrompt,StringComparison.Ordinal);
+        Assert.Contains("Do not state or promote AI output as a deterministic fact",repositoryPrompt,StringComparison.Ordinal);
     }
 
     private static LocalAiProviderRequestV1 ProviderRequest(string scope)
@@ -76,12 +78,14 @@ public sealed class LocalAiExtendedScopeTests
     public void RepositoryProjection_ComposesActualSelectedPayloadAndSessionOwnedLocations()
     {
         var projection=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,"session",RepositoryId,null,RepositoryId,"revision",
-            "{\"session_facts\":{\"status\":\"completed\"},\"nodes\":[{\"node_id\":\"node-11111111111111111111111111111111\"}]}"u8.ToArray(),
+            "{\"session_facts\":{\"status\":\"completed\",\"citation_ref\":\"node-11111111111111111111111111111111\"},\"raw_content\":[{\"evidence_id\":\"raw-1\",\"citation_ref\":\"node-11111111111111111111111111111111\",\"state\":\"available\"}]}"u8.ToArray(),
             "{\"evidence_refs\":[\"node-11111111111111111111111111111111\"]}"u8.ToArray(),new string('a',64),new HashSet<string>{"node-11111111111111111111111111111111"});
         var payload=LocalAiRepositorySnapshotAdapterV1.ComposeSelectedPayload(RepositoryId,[projection],"{\"distribution\":{\"source_kinds\":[]}}"u8.ToArray());
         var text=Encoding.UTF8.GetString(payload);
         Assert.Contains("completed",text,StringComparison.Ordinal);
         Assert.Contains($"/sessions/{RepositoryId}?node=node-11111111111111111111111111111111",text,StringComparison.Ordinal);
+        Assert.Contains($"\"evidence_id\":\"{RepositoryId}:raw-1\"",text,StringComparison.Ordinal);
+        Assert.DoesNotContain("\"citation_ref\":\"node-11111111111111111111111111111111\"",text,StringComparison.Ordinal);
         Assert.Contains("source_kinds",text,StringComparison.Ordinal);
     }
 
@@ -103,6 +107,14 @@ public sealed class LocalAiExtendedScopeTests
         var runs=new AcceptedRuns(snapshot);var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(false),new NoSnapshots(),runs,new NoProvider(),timeProvider:TimeProvider.System,repositories:new CurrentRepository(snapshot));
         var result=await application.StartRepositoryAsync(new(SnapshotId,new string('a',64),60),CancellationToken.None);
         Assert.Equal("provider_unavailable",result.ErrorCode);Assert.Equal(0,runs.CreateCount);
+    }
+    [Fact]
+    public async Task RepositoryRun_PreservesPersistenceBusyFromRehydration()
+    {
+        var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,"repository_selection",null,null,RepositoryId,"revision","{\"members\":[]}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),RepositoryId:RepositoryId,ExpiresAt:DateTimeOffset.MaxValue);
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new NoSnapshots(),new AcceptedRuns(snapshot),new NoProvider(),repositories:new BusyRepository());
+        var result=await application.StartRepositoryAsync(new(SnapshotId,new string('a',64),60),CancellationToken.None);
+        Assert.Equal("persistence_busy",result.ErrorCode);
     }
     [Fact]
     public void ComparisonAdapter_ReadsFrozenStoreExactlyOnce()
@@ -146,6 +158,8 @@ public sealed class LocalAiExtendedScopeTests
 
     private sealed class CurrentRepository(LocalAiSnapshotProjectionV1 snapshot):ILocalAiRepositorySnapshotAdapterV1
     {public ValueTask<LocalAiRepositoryPreviewResultV1> PreviewAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)=>throw new NotSupportedException();public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromResult(true);public ValueTask<LocalAiSnapshotProjectionV1?> RehydrateCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromResult<LocalAiSnapshotProjectionV1?>(snapshot);}
+    private sealed class BusyRepository:ILocalAiRepositorySnapshotAdapterV1
+    {public ValueTask<LocalAiRepositoryPreviewResultV1> PreviewAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)=>throw new NotSupportedException();public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>throw new NotSupportedException();public ValueTask<LocalAiSnapshotProjectionV1?> RehydrateCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromException<LocalAiSnapshotProjectionV1?>(new CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotException(CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",new Exception()));}
     private sealed class AcceptedRuns(LocalAiSnapshotProjectionV1 snapshot):ILocalAiRunRepositoryV1,ILocalAiAcceptedSnapshotRepositoryV1
     {public int CreateCount{get;private set;}public void StoreAccepted(LocalAiSnapshotProjectionV1 value){}public LocalAiSnapshotProjectionV1? ReadAccepted(string id)=>snapshot;public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 value,int timeout){CreateCount++;throw new InvalidOperationException();}public void Start(string id){}public LocalAiRunStatusV1 Complete(string id,LocalAiProviderOutcomeV1 o,DateTimeOffset at)=>throw new NotSupportedException();public LocalAiRunStatusV1 Fail(string id,string code)=>throw new NotSupportedException();public LocalAiRunStatusV1 Read(string id)=>throw new NotSupportedException();public bool Cancel(string id)=>false;public LocalAiReportPageResponseV1 Reports(string id,int? limit,string? cursor,string hash)=>throw new NotSupportedException();}
     private sealed class NoSnapshots:CopilotAgentObservability.Persistence.Sqlite.ILocalAiSnapshotProjectionServiceV1

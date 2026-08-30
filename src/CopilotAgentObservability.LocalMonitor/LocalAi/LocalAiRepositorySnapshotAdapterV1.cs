@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.Persistence.Sqlite;
@@ -47,7 +48,7 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
             :(await HistoricalEvidenceExtractorV1.ExtractAsync(HistoricalEvidenceSelectionV1.Create(explicitSessionIds:selected.Select(x=>Guid.Parse(x.SessionId!)).ToArray(),maximumSessionCount:selected.Count),historicalEvidence,token).ConfigureAwait(false)).RepositorySafeBytes;
         var selectedPayload=ComposeSelectedPayload(request.RepositoryId,selected,repositorySafeEvidence);
         using var selectedDocument=JsonDocument.Parse(selectedPayload);
-        var payload=LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new{schema_version="local_ai_repository_snapshot:1",repository_id=request.RepositoryId,selection_kind=request.Kind,expires_at=expires.ToUniversalTime().ToString("O"),members=frozen,selected_projection=selectedDocument.RootElement.Clone(),raw_content=raw.Select(x=>new{evidence_id=x.Key,session_id=x.Value.SessionId,citation_ref=LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(x.Value.SessionId!,null,x.Value.NodeId),state=x.Value.Locator.State,selected_utf8_bytes=x.Value.Locator.SelectedUtf8Bytes}).ToArray()}));
+        var payload=LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new{schema_version="local_ai_repository_snapshot:1",repository_id=request.RepositoryId,selection_kind=request.Kind,expires_at=expires.ToUniversalTime().ToString("O"),members=frozen,repository_safe_sha256=Convert.ToHexStringLower(SHA256.HashData(repositorySafeEvidence)),selected_projection=selectedDocument.RootElement.Clone(),raw_content=raw.Select(x=>new{evidence_id=x.Key,session_id=x.Value.SessionId,citation_ref=LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(x.Value.SessionId!,null,x.Value.NodeId),state=x.Value.Locator.State,selected_utf8_bytes=x.Value.Locator.SelectedUtf8Bytes}).ToArray()}));
         var index=LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new{evidence_refs=evidence.Order(StringComparer.Ordinal).ToArray()}));var hash=Convert.ToHexStringLower(SHA256.HashData(payload));
         if(payload.Length>LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes||index.Length>LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes)throw new LocalAiScopeTooLargeException();
         var snapshot=new LocalAiSnapshotProjectionV1(snapshotId,"repository_selection",null,null,request.RepositoryId,hash,payload,index,hash,evidence,raw,RepositoryId:request.RepositoryId,ExpiresAt:expires);
@@ -66,7 +67,10 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
             using var document=JsonDocument.Parse(snapshot.PayloadCanonicalJson);var members=document.RootElement.GetProperty("members");var ids=members.EnumerateArray().Select(x=>x.GetProperty("session_id").GetString()!).ToArray();
             var scope=await scopes.ReadAsync(new(LocalRepositoryScopeKind.Repository,snapshot.RepositoryId,ExactTargetSessionIds:ids),token).ConfigureAwait(false);
             var raw=new Dictionary<string,LocalAiRawEvidenceV1>(StringComparer.Ordinal);
-            foreach(var member in members.EnumerateArray()){var id=member.GetProperty("session_id").GetString()!;var row=scope.Sessions.SingleOrDefault(x=>x.SessionId==id);if(row is null||!MatchesFrozenMembership(row,RepositoryRevision(scope,snapshot.RepositoryId!),member))return null;var current=await projections.ReadSessionAsync(id,token).ConfigureAwait(false);if(current.Revision!=member.GetProperty("workspace_revision").GetString()||current.PayloadSha256!=member.GetProperty("payload_sha256").GetString())return null;foreach(var item in current.RawEvidence??new Dictionary<string,LocalAiRawEvidenceV1>()){var handle=id+":"+item.Key;raw.Add(handle,item.Value with{EvidenceId=handle,SessionId=id});}}return snapshot with{RawEvidence=raw};
+            foreach(var member in members.EnumerateArray()){var id=member.GetProperty("session_id").GetString()!;var row=scope.Sessions.SingleOrDefault(x=>x.SessionId==id);if(row is null||!MatchesFrozenMembership(row,RepositoryRevision(scope,snapshot.RepositoryId!),member))return null;var current=await projections.ReadSessionAsync(id,token).ConfigureAwait(false);if(current.Revision!=member.GetProperty("workspace_revision").GetString()||current.PayloadSha256!=member.GetProperty("payload_sha256").GetString())return null;foreach(var item in current.RawEvidence??new Dictionary<string,LocalAiRawEvidenceV1>()){var handle=id+":"+item.Key;raw.Add(handle,item.Value with{EvidenceId=handle,SessionId=id});}}
+            var currentEvidence=ids.Length==0?JsonSerializer.SerializeToUtf8Bytes(new{schema_version=HistoricalEvidenceContractsV1.RepositorySafeSchemaVersion,sessions=Array.Empty<object>(),evidence_groups=Array.Empty<object>(),distribution=new{completeness=Array.Empty<object>(),source_kinds=Array.Empty<object>(),capabilities=Array.Empty<object>()}}):(await HistoricalEvidenceExtractorV1.ExtractAsync(HistoricalEvidenceSelectionV1.Create(explicitSessionIds:ids.Select(Guid.Parse).ToArray(),maximumSessionCount:ids.Length),historicalEvidence,token).ConfigureAwait(false)).RepositorySafeBytes;
+            if(Convert.ToHexStringLower(SHA256.HashData(currentEvidence))!=document.RootElement.GetProperty("repository_safe_sha256").GetString())return null;
+            return snapshot with{RawEvidence=raw};
         }
         catch(Exception exception) when(exception is LocalWorkspaceSessionDetailException or InvalidOperationException or JsonException){return null;}
     }
@@ -76,9 +80,18 @@ internal sealed class LocalAiRepositorySnapshotAdapterV1(ILocalRepositoryScopeSn
 
     internal static byte[] ComposeSelectedPayload(string repositoryId,IReadOnlyList<LocalAiSnapshotProjectionV1> projections,byte[] repositorySafeEvidence)
     {
-        var rows=projections.Select(projection=>{using var document=JsonDocument.Parse(projection.PayloadCanonicalJson);return new{session_id=projection.SessionId,workspace_revision=projection.Revision,payload=document.RootElement.Clone(),evidence_locations=projection.EvidenceIdentifiers.Select(node=>LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(projection.SessionId!,null,node)).Order(StringComparer.Ordinal).ToArray()};}).ToArray();
+        var rows=projections.Select(projection=>new{session_id=projection.SessionId,workspace_revision=projection.Revision,payload=NormalizeProjection(projection),evidence_locations=projection.EvidenceIdentifiers.Select(node=>LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(projection.SessionId!,null,node)).Order(StringComparer.Ordinal).ToArray()}).ToArray();
         using var evidence=JsonDocument.Parse(repositorySafeEvidence);var bytes=LocalAiCanonicalJsonV1.Serialize(JsonSerializer.SerializeToElement(new{repository_id=repositoryId,sessions=rows,repository_safe_evidence=evidence.RootElement.Clone()}));
         if(bytes.Length>LocalAiAnalysisStoreV1.MaximumSnapshotDocumentBytes)throw new LocalAiScopeTooLargeException();return bytes;
+    }
+    private static JsonNode NormalizeProjection(LocalAiSnapshotProjectionV1 projection)
+    {
+        var root=JsonNode.Parse(projection.PayloadCanonicalJson)!;Rewrite(root,null);return root;
+        void Rewrite(JsonNode node,string? property)
+        {
+            if(node is JsonObject obj){foreach(var item in obj.ToArray()){if(item.Value is null)continue;if(item.Value is JsonValue value&&value.TryGetValue<string>(out var text)){if(item.Key=="evidence_id")obj[item.Key]=projection.SessionId+":"+text;else if(item.Key=="citation_ref")obj[item.Key]=LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(projection.SessionId!,null,text);}else Rewrite(item.Value,item.Key);}}
+            else if(node is JsonArray array)foreach(var item in array)if(item is not null)Rewrite(item,property);
+        }
     }
     internal static bool MatchesFrozenMembership(LocalRepositoryScopeSessionSnapshot row,long repositoryArchiveRevision,JsonElement member)=>row.IsRequestedScopeMember&&row.AssignmentRevision==member.GetProperty("assignment_revision").GetInt64()&&row.ArchiveRevision==member.GetProperty("session_archive_revision").GetInt64()&&repositoryArchiveRevision==member.GetProperty("repository_archive_revision").GetInt64();
     internal static string? PreviewExclusion(LocalRepositoryScopeSessionSnapshot row,string archiveScope)=>!row.IsRequestedScopeMember?"repository_mismatch":archiveScope=="active_only"&&!row.IsEffectivelyEligible?(row.ArchiveExclusionReason=="repository_archived"?"repository_archived":"session_archived"):null;

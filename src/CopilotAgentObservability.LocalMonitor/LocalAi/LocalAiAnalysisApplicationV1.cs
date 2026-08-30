@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
@@ -99,8 +100,11 @@ internal sealed class LocalAiAnalysisApplicationV1(
     public async ValueTask<LocalAiStartResponseV1> StartRepositoryAsync(LocalAiRepositoryRunRequestV1 request,CancellationToken token)
     {
         if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)return new(null,"provider_unavailable");
-        var snapshot=accepted.ReadAccepted(request.SnapshotId);if(snapshot is null)return new(null,"snapshot_not_found");if(snapshot.ExpiresAt<=clock.GetUtcNow())return new(null,"snapshot_expired");if(snapshot.PayloadSha256!=request.PayloadSha256)return new(null,"stale_snapshot");
-        var current=await repositories.RehydrateCurrentAsync(snapshot,token).ConfigureAwait(false);if(current is null)return new(null,"stale_snapshot");
+        LocalAiSnapshotProjectionV1? snapshot;try{snapshot=accepted.ReadAccepted(request.SnapshotId);}catch(SqliteException exception) when(exception.SqliteErrorCode is 5 or 6){return new(null,"persistence_busy");}catch(LocalRepositoryScopeSnapshotException exception){return new(null,exception.ErrorCode);}if(snapshot is null)return new(null,"snapshot_not_found");if(snapshot.ExpiresAt<=clock.GetUtcNow())return new(null,"snapshot_expired");if(snapshot.PayloadSha256!=request.PayloadSha256)return new(null,"stale_snapshot");
+        LocalAiSnapshotProjectionV1? current;
+        try{current=await repositories.RehydrateCurrentAsync(snapshot,token).ConfigureAwait(false);}
+        catch(LocalRepositoryScopeSnapshotException exception){return new(null,exception.ErrorCode);}
+        if(current is null)return new(null,"stale_snapshot");
         return await StartProjectedAsync(request.TimeoutSeconds,_=>ValueTask.FromResult(current),token).ConfigureAwait(false);
     }
 

@@ -28,11 +28,15 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
 
     public LocalAiSnapshotProjectionV1? ReadAccepted(string snapshotId)
     {
-        var value=store.ReadTransientSnapshot(snapshotId); if(value is null)return null;
-        var hash=Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(value.PayloadCanonicalJson));
-        using var document=JsonDocument.Parse(value.EvidenceIndexCanonicalJson);var refs=document.RootElement.GetProperty("evidence_refs").EnumerateArray().Select(static item=>item.GetString()!).ToHashSet(StringComparer.Ordinal);
-        return new(value.SnapshotId,value.ScopeKind,value.SessionId,value.NodeId,value.AnchorId,hash,value.PayloadCanonicalJson,value.EvidenceIndexCanonicalJson,hash,refs,
-            RepositoryId:value.RepositoryId,ComparisonId:value.ComparisonId,ExpiresAt:value.ExpiresAt);
+        try
+        {
+            var value=store.ReadTransientSnapshot(snapshotId); if(value is null)return null;
+            var hash=Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(value.PayloadCanonicalJson));
+            using var document=JsonDocument.Parse(value.EvidenceIndexCanonicalJson);var refs=document.RootElement.GetProperty("evidence_refs").EnumerateArray().Select(static item=>item.GetString()!).ToHashSet(StringComparer.Ordinal);
+            return new(value.SnapshotId,value.ScopeKind,value.SessionId,value.NodeId,value.AnchorId,hash,value.PayloadCanonicalJson,value.EvidenceIndexCanonicalJson,hash,refs,
+                RepositoryId:value.RepositoryId,ComparisonId:value.ComparisonId,ExpiresAt:value.ExpiresAt);
+        }
+        catch(SqliteException exception) when(exception.SqliteErrorCode is 5 or 6){throw new LocalRepositoryScopeSnapshotException(LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",exception);}
     }
 
     public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout)
