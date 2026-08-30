@@ -565,11 +565,16 @@ public class MonitorShellPlaywrightTests
             Status = 200, ContentType = "application/json",
             Body = "{\"schema_version\":1,\"normalizer_status\":\"degraded\",\"unsupported_event_version_count\":0,\"projection_cursor\":null,\"projection_backlog\":7}",
         }));
-        await page.RouteAsync("**/api/analysis/options", route => route.FulfillAsync(new()
+        IRequest? aiCheckRequest = null;
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", async route =>
         {
-            Status = 200, ContentType = "application/json",
-            Body = "{\"default_profile\":\"standard\",\"default_model\":\"gpt-5\",\"reasoning_efforts\":[\"low\"],\"profiles\":[{\"id\":\"standard\",\"display_name\":\"Standard\",\"timeout_seconds\":60,\"default_reasoning_effort\":\"low\"}],\"models\":[{\"id\":\"gpt-5\",\"display_name\":\"GPT-5\",\"provider\":\"copilot\",\"supports_reasoning_effort\":true,\"is_default\":true}]}",
-        }));
+            if (route.Request.Method == "POST") aiCheckRequest = route.Request;
+            await route.FulfillAsync(new()
+            {
+                Status = 200, ContentType = "application/json",
+                Body = $"{{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"{(route.Request.Method == "POST" ? "ready" : "configured_not_checked")}\",\"last_check_result\":\"{(route.Request.Method == "POST" ? "ready" : "not_checked")}\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action\"}}",
+            });
+        });
         await page.RouteAsync("**/api/monitor/source-diagnostics?limit=1", route => route.FulfillAsync(new()
         {
             Status = 200, ContentType = "application/json",
@@ -637,13 +642,16 @@ public class MonitorShellPlaywrightTests
         await page.Locator("[data-settings-navigation='state']").ClickAsync();
         await Expect(page.Locator("[data-settings-state-receiver]")).Not.ToContainTextAsync("確認しています");
         await Expect(page.Locator("[data-settings-state-projection]")).ToContainTextAsync("投影待ち 7件");
-        await Expect(page.Locator("[data-settings-state-ai]")).ToContainTextAsync("利用可否・認証・接続状態は現在の情報では確認できません");
-        await Expect(page.Locator("[data-settings-state-ai]")).Not.ToContainTextAsync("GPT-5");
+        await Expect(page.Locator("[data-settings-state-ai]")).ToContainTextAsync("未確認");
+        await Expect(page.Locator("[data-settings-state-ai]")).Not.ToContainTextAsync("gpt-5");
         await Expect(page.Locator("[data-settings-state-data]")).ToContainTextAsync("保留 2件");
         await page.Locator("[data-settings-navigation='ai']").ClickAsync();
-        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("GPT-5");
-        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("利用可否・認証・接続状態: 現在の情報では確認できません。");
-        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("テンプレート情報: 現在の情報では確認できません。");
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("gpt-5");
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("未確認");
+        await page.Locator("[data-settings-ai-check]").ClickAsync();
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("接続できます");
+        Assert.NotNull(aiCheckRequest);
+        Assert.Equal("local-monitor", aiCheckRequest.Headers["x-monitor-csrf"]);
         await page.Locator("[data-settings-navigation='archive']").ClickAsync();
         await Expect(page.Locator("[data-archived-session-id]")).ToHaveTextAsync(archivedSession);
         await Expect(page.Locator("[data-archived-session-id]")).ToHaveAttributeAsync("href", $"/sessions/{archivedSession}");

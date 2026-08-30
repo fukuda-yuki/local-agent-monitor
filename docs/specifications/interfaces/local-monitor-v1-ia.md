@@ -459,6 +459,14 @@ Sections:
 
 Each section shows current state and primary supported action together. Complex or destructive workflows open a focused detail or confirmation dialog. There is no separate Settings dashboard or nested permanent navigation.
 
+The raw-default `AI設定` section reads and explicitly checks one closed
+Settings-owned readiness resource at
+`/api/local-monitor/v1/settings/ai-readiness`. Its GET and POST expose only the
+provider, selected model, selected configuration, closed readiness and
+last-check states, and the fixed provider-egress notice. The POST action
+`接続を確認` uses the owned Copilot SDK status and runtime identity certifier;
+it creates no analysis run, SDK session, snapshot, result or retained item.
+
 ## 13. Archive behavior
 
 - archive is reversible local metadata;

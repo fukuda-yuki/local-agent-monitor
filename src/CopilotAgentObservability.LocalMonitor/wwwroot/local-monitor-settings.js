@@ -104,10 +104,12 @@
     } else if (token === "ai") {
       const ai = card("GitHub Copilot", "AI設定を確認しています。");
       ai.dataset.settingsAi = "";
+      const check = element("button", null, "接続を確認");
+      check.type = "button";
+      check.dataset.settingsAiCheck = "";
       section.append(ai,
-        element("p", "local-monitor-settings-note", "利用可否・認証・接続状態: 現在の情報では確認できません。"),
-        element("p", "local-monitor-settings-note", "選択した内容は、明示的にAI操作を開始した場合に限りGitHub Copilotへ送信されます。資格情報は表示されません。"),
-        element("p", "local-monitor-settings-note", "テンプレート情報: 現在の情報では確認できません。"));
+        check,
+        element("p", "local-monitor-settings-note", "選択した内容は、明示的にAI操作を開始した場合に限りGitHub Copilotへ送信されます。資格情報は表示されません。"));
     } else if (token === "storage") {
       section.append(card("保存状態", "保存状態を確認しています。"));
       const actions = element("div", "local-monitor-settings-actions");
@@ -301,24 +303,44 @@
   }
 
   async function loadAi(generation) {
-    if (!owned.get("state").hidden) {
-      owned.get("state").querySelector("[data-settings-state-ai] p").textContent =
-        "利用可否・認証・接続状態は現在の情報では確認できません。";
-      return;
-    }
+    const stateTarget = owned.get("state").querySelector("[data-settings-state-ai] p");
     const target = owned.get("ai").querySelector("[data-settings-ai] p");
     try {
-      const response = await fetch("/api/analysis/options", { cache: "no-store", credentials: "same-origin" });
+      const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error();
       const value = await response.json();
-      if (!exact(value, ["default_profile", "default_model", "reasoning_efforts", "profiles", "models"])
-          || typeof value.default_profile !== "string" || typeof value.default_model !== "string"
-          || !Array.isArray(value.profiles) || !Array.isArray(value.models) || value.models.length > 100) throw new Error();
-      const selected = value.models.find(model => exact(model, ["id", "display_name", "provider", "supports_reasoning_effort", "is_default"])
-        && model.id === value.default_model && typeof model.display_name === "string" && model.is_default === true);
-      if (!selected) throw new Error();
-      if (generation === requestGeneration) target.textContent = `既定: ${selected.display_name} · プロファイル ${value.default_profile}。認証と接続はAI実行時に確認します。`;
-    } catch { if (generation === requestGeneration) target.textContent = "AI設定を読み込めませんでした。認証と接続はAI実行時に確認します。"; }
+      renderAi(value, generation, target, stateTarget);
+    } catch { if (generation === requestGeneration) { target.textContent = "AI設定を読み込めませんでした。"; stateTarget.textContent = "AI設定を読み込めませんでした。"; } }
+  }
+
+  function renderAi(value, generation, target, stateTarget) {
+    const states = Object.freeze({ unconfigured: "未設定", configured_not_checked: "未確認", ready: "接続できます",
+      authentication_required: "認証が必要です", unavailable: "利用できません", check_failed: "接続確認に失敗しました" });
+    if (!exact(value, ["provider", "selected_model", "selected_configuration", "readiness_state", "last_check_result", "provider_egress_notice"])
+        || value.provider !== "github_copilot" || typeof value.selected_model !== "string" || typeof value.selected_configuration !== "string"
+        || !Object.hasOwn(states, value.readiness_state)
+        || !["not_checked", "unconfigured", "ready", "authentication_required", "unavailable", "check_failed"].includes(value.last_check_result)
+        || value.provider_egress_notice !== "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action") throw new Error();
+    if (generation !== requestGeneration) return;
+    const text = `${states[value.readiness_state]} · GitHub Copilot · モデル ${value.selected_model} · 設定 ${value.selected_configuration}`;
+    target.textContent = text;
+    stateTarget.textContent = states[value.readiness_state];
+  }
+
+  async function checkAi() {
+    const button = owned.get("ai").querySelector("[data-settings-ai-check]");
+    const target = owned.get("ai").querySelector("[data-settings-ai] p");
+    button.disabled = true;
+    target.textContent = "接続を確認しています。";
+    try {
+      const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", {
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "x-monitor-csrf": "local-monitor" },
+      });
+      if (!response.ok) throw new Error();
+      renderAi(await response.json(), requestGeneration, target, owned.get("state").querySelector("[data-settings-state-ai] p"));
+    } catch { target.textContent = "接続確認に失敗しました。"; }
+    finally { button.disabled = false; }
   }
 
   async function loadSourceSummary(generation) {
@@ -395,6 +417,7 @@
     finally { button.disabled = false; }
   }
   owned.get("storage").querySelector("[data-settings-backup-now]").addEventListener("click", createBackup);
+  owned.get("ai").querySelector("[data-settings-ai-check]").addEventListener("click", checkAi);
 
   async function loadSafeState(section) {
     const generation = ++requestGeneration;

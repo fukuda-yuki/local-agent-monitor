@@ -276,6 +276,10 @@ AI execution crosses the local-only boundary.
 - actions are visible only when provider-ready;
 - the user starts every run explicitly;
 - Settings permanently explains that selected content may be sent to GitHub Copilot;
+- raw-default GET and POST `/api/local-monitor/v1/settings/ai-readiness` are
+  no-store; POST requires same-origin and CSRF, and both return only the closed
+  Settings readiness facts without credentials, paths, provider responses,
+  exception text or runtime versions;
 - Repository selection requires a scope preview;
 - the provider receives only one bounded immutable snapshot and process-internal tools constrained to its evidence index;
 - the SQLite file and arbitrary SQL are never exposed;

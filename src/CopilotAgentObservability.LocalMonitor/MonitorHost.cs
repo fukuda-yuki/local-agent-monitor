@@ -20,6 +20,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.LocalMonitor.SkillNative;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using CopilotAgentObservability.LocalMonitor.Settings;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
@@ -374,6 +375,20 @@ internal static class MonitorHost
                 skillRuntimeAdmission,
                 rootsExecutionContextFactory);
         builder.Services.AddSingleton(analysisRunner);
+        SettingsAiReadinessService? settingsAiReadiness = null;
+        if (!options.SanitizedOnly)
+        {
+            var aiOptions = CopilotAnalysisOptions.From(builder.Configuration);
+            settingsAiReadiness = testOptions?.SettingsAiReadiness ?? new SettingsAiReadinessService(
+                "github_copilot", aiOptions.DefaultModel, aiOptions.DefaultProfile,
+                () => OwnedCopilotSdkClientV1.TryCreate(
+                    Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!,
+                    static sdkOptions => new CopilotClient(sdkOptions),
+                    static name => Environment.GetEnvironmentVariable(name) is not null,
+                    out var client) ? client : null,
+                skillHostShutdownGate!, TimeSpan.FromSeconds(10));
+            builder.Services.AddSingleton(settingsAiReadiness);
+        }
 
         Func<IAnalysisSdkDirectoryScope, CopilotAnalysisRootsExecutionContext>? CreateRootsExecutionContextFactory()
         {
@@ -614,6 +629,25 @@ internal static class MonitorHost
         testOptions?.AdditionalServices?.Invoke(builder.Services);
 
         var app = builder.Build();
+        if (settingsAiReadiness is not null)
+        {
+            const string path = "/api/local-monitor/v1/settings/ai-readiness";
+            app.MapGet(path, context => WriteSettingsAiReadinessAsync(context, settingsAiReadiness.GetSnapshot()));
+            app.MapPost(path, async context =>
+            {
+                if (IsCrossSiteRequest(context))
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden");
+                    return;
+                }
+                if (!HasMonitorCsrfHeader(context))
+                {
+                    await WriteSettingsAiErrorAsync(context, StatusCodes.Status403Forbidden, "csrf_required");
+                    return;
+                }
+                await WriteSettingsAiReadinessAsync(context, await settingsAiReadiness.CheckAsync(context.RequestAborted));
+            });
+        }
         if (testOptions?.PrimaryAssetFileProvider is not null)
         {
             app.Environment.WebRootFileProvider = testOptions.PrimaryAssetFileProvider;
@@ -2308,6 +2342,27 @@ internal static class MonitorHost
     internal static bool HasMonitorCsrfHeader(HttpContext context) =>
         string.Equals(context.Request.Headers["x-monitor-csrf"].ToString(), "local-monitor", StringComparison.Ordinal);
 
+    private static Task WriteSettingsAiReadinessAsync(HttpContext context, SettingsAiReadinessSnapshot value)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        return context.Response.WriteAsJsonAsync(new
+        {
+            provider = value.Provider,
+            selected_model = value.SelectedModel,
+            selected_configuration = value.SelectedConfiguration,
+            readiness_state = value.ReadinessState,
+            last_check_result = value.LastCheckResult,
+            provider_egress_notice = value.ProviderEgressNotice,
+        }, context.RequestAborted);
+    }
+
+    private static async Task WriteSettingsAiErrorAsync(HttpContext context, int status, string error)
+    {
+        context.Response.StatusCode = status;
+        context.Response.Headers.CacheControl = "no-store";
+        await context.Response.WriteAsJsonAsync(new { error }, context.RequestAborted);
+    }
+
     /// <summary>The same <c>compactTrace</c>-shaped projection <c>/api/monitor/traces</c> emits per item, reused for the summary's embedded highlight traces.</summary>
     private static object? ToTraceDto(MonitorTraceRow? row, SourceProjectionState? state = null) => row is null ? null : new
     {
@@ -2757,6 +2812,8 @@ internal sealed class MonitorHostTestOptions
     public IMonitorAnalysisRunner? AnalysisRunner { get; init; }
 
     public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
+
+    public SettingsAiReadinessService? SettingsAiReadiness { get; init; }
 
     public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
 
