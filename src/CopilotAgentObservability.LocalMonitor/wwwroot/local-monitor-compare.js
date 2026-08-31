@@ -21,8 +21,8 @@
     ["maximum", "最大値"], ["total", "合計"], ["absolute_difference", "絶対差"],
     ["relative_difference_percent", "相対差"], ["condition", "条件"], ["count", "件数"],
     ["duration_ms", "所要時間"], ["input_tokens", "入力トークン"], ["output_tokens", "出力トークン"],
-    ["total_tokens", "合計トークン"], ["cache_read", "キャッシュ読み取り"],
-    ["cache_creation", "キャッシュ作成"], ["new_input", "新規入力"],
+    ["total_tokens", "トークン合計"], ["cache_read", "キャッシュから読み込み"],
+    ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"],
     ["error_count", "エラー件数"], ["retry_count", "再試行件数"],
   ]);
   const state = { generation: 0, controller: null, evidenceGeneration: 0, evidenceController: null, evidenceCursor: null, evidenceResultOrdinal: null, evidenceField: null, invoker: null };
@@ -171,7 +171,7 @@
       return;
     }
     if (pair.key.endsWith("_unavailable_states")) {
-      if (pair.value === "none") { target.textContent = "なし"; return; }
+      if (pair.value === "none") { target.textContent = "今回の記録にはありません"; return; }
       const entries = pair.value.split(";");
       for (const [index, entry] of entries.entries()) {
         const match = /^([a-z_]+)=([1-9][0-9]*)$/.exec(entry);
@@ -383,7 +383,7 @@
   const AI_STATES = Object.freeze({
     queued: "AI解釈を待っています。", running: "AIが比較を解釈しています。",
     succeeded: "AI解釈が完了しました。", zero_findings: "AIからの指摘はありませんでした。",
-    provider_failed: "AI provider で解釈できませんでした。", provider_partial: "不完全なAI結果のため表示できません。",
+    provider_failed: "AIで解釈できませんでした。", provider_partial: "不完全なAI結果のため表示できません。",
     timed_out: "AI解釈がタイムアウトしました。", canceled: "AI解釈をキャンセルしました。",
     stale_snapshot: "比較の保存期間またはスナップショットが更新されたため表示できません。",
     invalid_result: "AI結果を安全に表示できません。", invalid_evidence: "AIの根拠を確認できないため表示できません。",
@@ -470,25 +470,25 @@
     }
     aiResult.append(element("h3", null, "AIによる解釈"));
     if (result.scope && typeof result.scope === "object") {
-      const scope = element("section"); scope.append(element("h4", null, "対象範囲"));
-      for (const [key, label] of [["kind", "scope"], ["repository_id", "Repository"], ["comparison_id", "comparison"], ["anchor_id", "anchor"]]) appendAiField(scope, label, result.scope[key]);
+      const scope = element("section"); scope.append(element("h4", null, "分析対象の技術情報"));
+      for (const [key, label] of [["kind", "種類"], ["repository_id", "リポジトリID"], ["comparison_id", "比較ID"], ["anchor_id", "基準ID"]]) appendAiField(scope, label, key === "kind" && result.scope[key] === "comparison" ? "セッション比較" : result.scope[key]);
       aiResult.append(scope);
     }
     if (result.snapshot && typeof result.snapshot === "object") {
-      const snapshot = element("section"); snapshot.append(element("h4", null, "スナップショット"));
-      appendAiField(snapshot, "snapshot", result.snapshot.snapshot_id); appendAiField(snapshot, "payload SHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
+      const snapshot = element("section"); snapshot.append(element("h4", null, "記録時点の技術情報"));
+      appendAiField(snapshot, "スナップショットID", result.snapshot.snapshot_id); appendAiField(snapshot, "内容のSHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
     }
     aiResult.append(element("h4", null, "要約"), element("p", null, result.summary));
     if (result.findings.length) aiResult.append(element("h4", null, "指摘（AIによる解釈）"));
     for (const finding of result.findings) {
       const article = element("article"); article.append(element("h5", null, String(finding.title ?? "指摘")));
-      for (const [key, label] of [["explanation", "解釈"], ["evidence_state", "根拠の状態"], ["limitation", "制約"]]) appendAiField(article, label, finding[key]);
+      appendAiField(article, "解釈", finding.explanation); appendAiField(article, "根拠の状態", ({ supported: "根拠あり", limited: "根拠に制約あり" })[finding.evidence_state] ?? finding.evidence_state); appendAiField(article, "制約", finding.limitation);
       appendAiEvidence(article, finding.evidence_refs); aiResult.append(article);
     }
     if (result.improvement_suggestions.length) aiResult.append(element("h4", null, "改善案（AIによる提案）"));
     for (const suggestion of result.improvement_suggestions) {
       const article = element("article");
-      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "予想（決定的事実ではありません）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
+      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "期待される効果（AIによる提案）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
       appendAiEvidence(article, suggestion.evidence_refs); aiResult.append(article);
     }
     if (result.limitations.length) { aiResult.append(element("h4", null, "制約")); for (const limitation of result.limitations) aiResult.append(element("p", null, String(limitation))); }
@@ -496,8 +496,8 @@
     const evidenceList = element("ul"); for (const href of acceptedEvidence) { const item = element("li"); const link = element("a", null, href); link.href = href; item.append(link); evidenceList.append(item); }
     evidence.append(evidenceList); aiResult.append(evidence);
     if (result.provenance && typeof result.provenance === "object") {
-      const provenance = element("section"); provenance.append(element("h4", null, "来歴"));
-      for (const [key, label] of [["provider", "provider"], ["model", "model"], ["configuration_sha256", "configuration"], ["prompt_template_version", "template"], ["snapshot_id", "snapshot"], ["snapshot_sha256", "snapshot SHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      const provenance = element("section"); provenance.append(element("h4", null, "分析の技術情報"));
+      for (const [key, label] of [["provider", "プロバイダー"], ["model", "モデル"], ["configuration_sha256", "設定のSHA-256"], ["prompt_template_version", "テンプレート"], ["snapshot_id", "スナップショットID"], ["snapshot_sha256", "内容のSHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
       aiResult.append(provenance);
     }
     return true;
@@ -551,7 +551,7 @@
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
       });
-      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
+      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AIを利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
       const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
       activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
       try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }

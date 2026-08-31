@@ -45,7 +45,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions?source=vscode", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#session-ai-open")).ToBeVisibleAsync();
+        await Expect(page.Locator("#session-ai-open")).ToHaveTextAsync("現在の絞り込みをAIで分析");
         await page.Locator("#session-ai-open").ClickAsync();
+        await Expect(page.Locator("#session-ai-title")).ToHaveTextAsync("リポジトリ選択のAI分析");
         await page.Locator("#session-ai-preview").ClickAsync();
 
         using var request = JsonDocument.Parse(previewBody!);
@@ -124,9 +126,18 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{runId}", route => route.FulfillAsync(Json(resultBody)));
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.Locator("#session-ai-open").ClickAsync(); await page.Locator("#session-ai-preview").ClickAsync();
-        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("vscode / model-a / complete / content not_captured");
-        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("session_archived");
-        await page.Locator("#session-ai-start").ClickAsync(); await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AI による解釈");
+        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("vscode / model-a / 記録済み / 内容は記録されていません");
+        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("セッションがアーカイブ済みのため除外されました");
+        await page.Locator("#session-ai-start").ClickAsync();
+        var renderedResult = page.Locator("#session-ai-result");
+        await Expect(renderedResult).ToContainTextAsync("AIによる解釈（セッション一覧の記録ではありません）");
+        await Expect(renderedResult).ToContainTextAsync("分析対象の技術情報");
+        await Expect(renderedResult).ToContainTextAsync("分析の技術情報");
+        await Expect(renderedResult).ToContainTextAsync("種類:");
+        await Expect(renderedResult).ToContainTextAsync("種類: リポジトリ選択");
+        await Expect(renderedResult).ToContainTextAsync("リポジトリID:");
+        await Expect(renderedResult).ToContainTextAsync("内容のSHA-256:");
+        await Expect(renderedResult).ToContainTextAsync("プロバイダー:");
         await Expect(page.Locator("#session-ai-result a")).ToHaveAttributeAsync("href", evidence);
         Assert.Equal(0, await page.Locator("#session-ai-result img").CountAsync());
         using var start = JsonDocument.Parse(startBody!); Assert.Equal(new[] { "schema_version", "snapshot_id", "payload_sha256", "timeout_seconds" }, start.RootElement.EnumerateObject().Select(x => x.Name));
@@ -155,7 +166,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.EvaluateAsync($"window.LocalMonitorV1History.push({{ analysis: '{runId}' }})");
 
-        await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AI による解釈");
+        await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AIによる解釈（セッション一覧の記録ではありません）");
         await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("\\\"result\\\":");
     }
 

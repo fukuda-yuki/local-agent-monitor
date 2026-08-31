@@ -328,6 +328,13 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal($$"""{"schema_version":"local-ai-comparison-run.request.v1","repository_id":"{{RepositoryId}}","comparison_id":"{{ComparisonId}}","timeout_seconds":60}""", startBody);
         var result = page.Locator("[data-compare-ai-result]");
         await Expect(result).ToContainTextAsync("AIによる解釈");
+        await Expect(result).ToContainTextAsync("分析対象の技術情報");
+        await Expect(result).ToContainTextAsync("記録時点の技術情報");
+        await Expect(result).ToContainTextAsync("分析の技術情報");
+        await Expect(result).ToContainTextAsync("比較ID:");
+        await Expect(result).ToContainTextAsync("種類: セッション比較");
+        await Expect(result).ToContainTextAsync("内容のSHA-256:");
+        await Expect(result).ToContainTextAsync("期待される効果（AIによる提案）:");
         await Expect(result).ToContainTextAsync("<img src=x onerror=alert(1)>");
         Assert.Equal(0, await result.Locator("img").CountAsync());
         var evidence = result.Locator("section").Filter(new() { Has = page.GetByRole(AriaRole.Heading, new() { Name = "正確な根拠", Exact = true }) });
@@ -613,7 +620,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
                  {
                      ("スキル", "スキルを読み込む", "件数の根拠を表示"),
                      ("ツール", "ツールを読み込む", "エラー件数の根拠を表示"),
-                     ("サブエージェント", "サブエージェントを読み込む", "合計トークンの根拠を表示"),
+                     ("サブエージェント", "サブエージェントを読み込む", "トークン合計の根拠を表示"),
                  })
         {
             var section = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = label }) });
