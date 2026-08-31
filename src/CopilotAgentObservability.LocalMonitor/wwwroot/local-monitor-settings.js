@@ -132,7 +132,7 @@
       operationResult.dataset.settingsStorageOperations = "";
       operationResult.setAttribute("aria-live", "polite");
       section.append(actions, backupResult, operationResult,
-        element("p", "local-monitor-settings-note", "自動バックアップ: 対応していません。"),
+        element("p", "local-monitor-settings-note", "自動バックアップ: 今回の設定にはありません。"),
         element("p", "local-monitor-settings-note",
           "アーカイブは元に戻せる管理情報です。削除・保持・固定とは異なります。復元や削除など影響のある操作は、移動先で確認してから実行します。"));
     } else if (token === "diagnostics") {
@@ -472,7 +472,7 @@
       const value = await response.json();
       if (!exact(value, ["items", "next_cursor"]) || !Array.isArray(value.items) || value.items.length > 1
           || value.next_cursor !== null && !count(value.next_cursor)) throw new Error();
-      let text = "取得元の観測はまだありません。";
+      let text = "今回の記録にはありません。";
       if (value.items.length === 1) {
         const item = value.items[0];
         const keys = ["observation_id", "ingest_batch_id", "source_surface", "source_application_version", "source_adapter", "adapter_version",
@@ -511,7 +511,7 @@
           || !["not_run", "queued", "running", "succeeded", "failed", "rejected", "unknown"].includes(value.historical_import.state)
           || !["not_required", "unknown"].includes(value.restart_requirement)) throw new Error();
       if (controller.signal.aborted || generation !== requestGeneration || selectedSettings !== "storage") return;
-      const bytes = value.database_file_size_bytes === null ? "確認できません" : `${value.database_file_size_bytes} bytes`;
+      const bytes = value.database_file_size_bytes === null ? "確認できません" : `${value.database_file_size_bytes}バイト`;
       const retention = value.retention.state === "unknown" ? "保持状態は確認できません" : `保持 ${RETENTION_WORKER_STATES[value.retention.state]}`;
       summary.textContent = `データベース ${bytes} · ${retention} · 再起動 ${value.restart_requirement === "not_required" ? "不要" : "確認できません"}`;
       const backup = value.backup.state === "idle" ? "バックアップ操作なし"
@@ -633,7 +633,7 @@
           : owned.get("storage").querySelector(".local-monitor-settings-card p");
         if (generation === requestGeneration) retentionTarget.textContent = value.pending_count === null
           ? "保持状態は利用できません。"
-          : `保留 ${value.pending_count}件 · 待機 ${value.queued_count}件 · 削除中 ${value.deleting_count}件 · 失敗 ${value.failed_count}件 · 再試行終了 ${value.retry_exhausted_count}件 · 所在不明 ${value.orphan_or_unexpected_missing_count}件 · 期限切れ閲覧可能 ${value.expired_but_readable_violation_count}件 · 最古の保留 ${value.oldest_pending_age_seconds}秒 · cleanup ${RETENTION_WORKER_STATES[value.worker_state]} · 最終成功 ${value.last_successful_run_at ?? "記録なし"}`;
+          : `保留 ${value.pending_count}件 · 待機 ${value.queued_count}件 · 削除中 ${value.deleting_count}件 · 失敗 ${value.failed_count}件 · 再試行終了 ${value.retry_exhausted_count}件 · 所在不明 ${value.orphan_or_unexpected_missing_count}件 · 期限切れ閲覧可能 ${value.expired_but_readable_violation_count}件 · 最古の保留 ${value.oldest_pending_age_seconds}秒 · 保持処理 ${RETENTION_WORKER_STATES[value.worker_state]} · 最終成功 ${value.last_successful_run_at ?? "記録なし"}`;
       } catch {
         if (generation === requestGeneration) {
           const target = section === "state" ? owned.get("state").querySelector("[data-settings-state-data] p") : null;
@@ -723,7 +723,7 @@
     if (!target || owned.get("diagnostics").hidden) return;
     target.textContent = value && count(value.repositoryCount) && count(value.archivedRepositoryCount)
       && count(value.unassignedActiveSessionCount)
-      ? `先頭ページ ${value.repositoryCount}件 · アーカイブ ${value.archivedRepositoryCount}件 · 未設定セッション ${value.unassignedActiveSessionCount}件`
+      ? `先頭ページ ${value.repositoryCount}件 · アーカイブ ${value.archivedRepositoryCount}件 · リポジトリ未設定のセッション ${value.unassignedActiveSessionCount}件`
       : "リポジトリ状態を読み込めませんでした。";
   });
   modal.addEventListener("close", () => {

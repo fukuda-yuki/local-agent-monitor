@@ -335,9 +335,13 @@
 
   const requestUrl = (path, parameters) => `${path}?${new URLSearchParams(parameters)}`;
 
-  const CONTENT_LABELS = { instruction: "Instruction", tool_input: "Tool input", tool_result: "Tool result", error_message: "Error message", subagent_input: "Sub-agent input", event_content: "Event content" };
-  const CONTENT_STATE_LABELS = { not_captured: "Raw content was not captured", expired: "Raw content has expired", deleted: "Raw content was deleted", read_denied: "Raw content read was denied", oversized: "Raw content is too large", invalid: "Raw content is invalid" };
-  const HTTP_CONTENT_LABELS = { 403: "Raw content read was denied", 404: "Raw content was not captured", 410: "Raw content is no longer retained", 413: "Raw content is too large", 409: "Raw content changed while it was being read", 503: "Raw content is temporarily unavailable" };
+  const CONTENT_LABELS = { instruction: "指示", tool_input: "ツール入力", tool_result: "ツール結果", error_message: "エラーメッセージ", subagent_input: "サブエージェント入力", event_content: "イベント内容" };
+  const CONTENT_STATE_LABELS = { not_captured: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", deleted: "内容は保存されていません", read_denied: "内容を読み取れません", oversized: "内容が大きすぎるため表示できません", invalid: "記録が一部欠けています" };
+  const HTTP_CONTENT_LABELS = { 403: "内容を読み取れません", 404: "内容は記録されていません", 410: "保存期間を過ぎたため表示できません", 413: "内容が大きすぎるため表示できません", 409: "記録内容が更新されました", 503: "記録内容を一時的に表示できません" };
+  const KIND_LABELS = Object.freeze({ execution: "実行", agent: "エージェント", skill: "スキル", tool: "ツール", subagent: "サブエージェント", event: "イベント", error: "エラー", retry: "再試行", permission: "権限", unknown_relation_group: "親子関係不明" });
+  const STATUS_LABELS = Object.freeze({ active: "実行中", completed: "完了", failed: "失敗", unknown: "確認できません", selected: "選択", started: "開始", deselected: "選択解除", current: "有効", stale: "更新あり", invalid: "無効", certification_pending: "安定して取得できるか未確認です", unavailable: "利用できません", allowed: "許可", denied: "拒否", asked: "確認待ち" });
+  const SIGNAL_LABELS = Object.freeze({ instruction: "指示", source: "取得元", model: "モデル", version: "バージョン", timing: "時刻", tokens: "トークン", cache: "キャッシュ", skill: "スキル", tool: "ツール", subagent: "サブエージェント", error: "エラー", retry: "再試行" });
+  const stateLabel = value => ({ recorded: "記録あり", complete_zero: "今回の記録にはありません", not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", inconsistent: "内訳を表示できません", projection_invalid: "記録が一部欠けています" })[value] ?? value;
 
   function closeRawDialog() {
     if (!rawDialog?.open) return;
@@ -376,12 +380,12 @@
   }
 
   async function readGenericContent(trigger, nodeId, part) {
-    showRawDialog(trigger, `${CONTENT_LABELS[part]} raw content`);
+    showRawDialog(trigger, CONTENT_LABELS[part]);
     try {
       const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part });
       const document = validateContent(await requestJson(urlFactory, false, () => selectNode(state.selectedExecutionId, nodeId, false, true)), nodeId, part);
-      publishRawText(document.text, `${format(document.utf8_byte_length)} bytes · ${format(document.unicode_scalar_length)} scalars · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · revision ${format(document.source_reference.revision)}`);
-    } catch (error) { publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "Raw content could not be read"); }
+      publishRawText(document.text, `${format(document.utf8_byte_length)}バイト · ${format(document.unicode_scalar_length)}文字 · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · リビジョン ${format(document.source_reference.revision)}`);
+    } catch (error) { publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "記録内容を読み取れませんでした"); }
   }
 
   async function readSkillContent(trigger, snapshotId, current) {
@@ -390,13 +394,13 @@
     const path = `/api/local-monitor/v1/sessions/${root.dataset.sessionId}/skill-invocations/${snapshotId}/${current ? "current-file-read" : "content"}`;
     try {
       const response = await fetch(path, current ? { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: '{"schema_version":"local-skill-current-file-read.request.v1"}' } : { headers: { Accept: "application/json" } });
-      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "Skill content could not be read"); return; }
+      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "スキルの内容を読み取れませんでした"); return; }
       const document = JSON.parse(await response.text());
       const validHistorical = !current && exact(document, ["schema_version", "snapshot_id", "content_kind", "body", "definition_path", "body_sha256", "definition_path_sha256", "captured_at"]) && document.schema_version === "local-skill-invocation-snapshot.content.v1" && document.content_kind === "historical_snapshot";
       const validCurrent = current && exact(document, ["schema_version", "snapshot_id", "content_kind", "comparison", "historical_body_sha256", "current_body_sha256", "current_body_utf8_bytes", "body", "read_at"]) && document.schema_version === "local-skill-current-file-read.response.v1" && document.content_kind === "current_file" && ["same", "changed"].includes(document.comparison);
       if ((!validHistorical && !validCurrent) || document.snapshot_id !== snapshotId || typeof document.body !== "string") throw new TypeError("invalid Skill document");
-      publishRawText(document.body, current ? `${title} · ${document.comparison}` : `${title} · ${document.captured_at} · Definition path: ${document.definition_path}`);
-    } catch { publishRawText("", "Skill content could not be read"); }
+      publishRawText(document.body, current ? `${title} · ${document.comparison}` : `${title} · ${document.captured_at} · 定義パス: ${document.definition_path}`);
+    } catch { publishRawText("", "スキルの内容を読み取れませんでした"); }
   }
 
   async function requestJson(urlFactory, attempted = false, reestablish = null) {
@@ -466,7 +470,7 @@
       row.setAttribute("aria-selected", String(state.selectedNodeId === node.node_id)); row.tabIndex = -1;
       if (node.child_count > 0) row.setAttribute("aria-expanded", String(memory.expanded.has(node.node_id)));
       const label = node.name?.state === "recorded" ? node.name.text : node.kind;
-      row.append(el("strong", null, label), el("span", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+      row.append(el("strong", null, label), el("span", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
       if (node.timing.state === "recorded" && node.timing.started_at && node.timing.duration_ms !== null
           && execution.timing.state === "recorded" && execution.timing.started_at && execution.timing.duration_ms !== null) {
         const start = Date.parse(node.timing.started_at) - Date.parse(execution.timing.started_at);
@@ -522,9 +526,9 @@
       const section = el("section", "local-monitor-session-execution"); section.dataset.executionId = execution.execution_id;
       const toggle = el("button", "local-monitor-session-execution-toggle"); toggle.type = "button"; toggle.dataset.executionToggle = "";
       toggle.setAttribute("aria-expanded", String(memory.open));
-      const summaryFacts = [`${format(execution.child_count)} activity`, timingLabel(execution), `Token ${execution.tokens.total.state === "recorded" ? format(execution.tokens.total.value) : execution.tokens.total.state}`];
-      for (const [key, label] of [["skill", "Skill"], ["tool", "Tool"], ["subagent", "Sub-agent"], ["error", "Error"], ["retry", "Retry"]]) summaryFacts.push(`${label} ${execution.activity[key].state === "recorded" ? format(execution.activity[key].count) : execution.activity[key].state}`);
-      toggle.append(el("strong", null, `実行 ${execution.source ?? "不明"} · ${execution.status}`), el("span", null, summaryFacts.join(" · ")));
+      const summaryFacts = [`活動 ${format(execution.child_count)}件`, timingLabel(execution), `トークン ${execution.tokens.total.state === "recorded" ? format(execution.tokens.total.value) : stateLabel(execution.tokens.total.state)}`];
+      for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) summaryFacts.push(`${label} ${execution.activity[key].state === "recorded" ? `${format(execution.activity[key].count)}件` : stateLabel(execution.activity[key].state)}`);
+      toggle.append(el("strong", null, `実行 ${execution.source ?? "確認できません"} · ${STATUS_LABELS[execution.status]}`), el("span", null, summaryFacts.join(" · ")));
       toggle.addEventListener("click", async () => {
         memory.open = !memory.open;
         if (memory.open && !memory.pages.has("root")) await loadTimeline(execution.execution_id);
@@ -565,12 +569,16 @@
 
   function appendInspectorFact(section, label, fact, key = "value") {
     const row = el("p"); row.append(el("strong", null, `${label}: `));
-    row.append(document.createTextNode(fact?.state === "recorded" ? String(Object.hasOwn(fact, key) ? fact[key] : "recorded") : fact?.state ?? "not_observed")); section.append(row);
+    if (fact?.state === "recorded") {
+      const value = Object.hasOwn(fact, key) ? fact[key] : "recorded";
+      row.append(document.createTextNode(String(STATUS_LABELS[value] ?? ({ recorded: "記録あり", explicit: "明示", true: "はい", false: "いいえ" })[String(value)] ?? value)));
+    } else renderFact(row.appendChild(el("span")), fact ?? { state: "not_observed" });
+    section.append(row);
   }
 
   function appendContentAction(section, detail, part) {
     const content = detail.content[part]; const row = el("p"); row.append(el("strong", null, `${CONTENT_LABELS[part]}: `));
-    if (content.available) { const button = el("button", null, `${CONTENT_LABELS[part]} を表示`); button.type = "button"; button.addEventListener("click", () => readGenericContent(button, detail.node.node_id, part)); row.append(button); }
+    if (content.available) { const button = el("button", null, `${CONTENT_LABELS[part]}を表示`); button.type = "button"; button.addEventListener("click", () => readGenericContent(button, detail.node.node_id, part)); row.append(button); }
     else row.append(document.createTextNode(CONTENT_STATE_LABELS[content.state] ?? content.state)); section.append(row);
   }
 
@@ -582,9 +590,9 @@
 
   const AI_STATE_LABELS = Object.freeze({
     queued: "分析を待っています", running: "分析しています", succeeded: "分析が完了しました",
-    zero_findings: "指摘はありませんでした", provider_failed: "AI provider で分析できませんでした",
+    zero_findings: "指摘はありませんでした", provider_failed: "AIで分析できませんでした",
     provider_partial: "不完全な結果のため表示できません", timed_out: "分析がタイムアウトしました",
-    canceled: "分析をキャンセルしました", stale_snapshot: "Session が更新されたため分析を完了できませんでした",
+    canceled: "分析をキャンセルしました", stale_snapshot: "セッションが更新されたため分析を完了できませんでした",
     scope_too_large: "分析対象が上限を超えています", invalid_result: "AI結果を安全に確認できません",
     invalid_evidence: "証拠を確認できないため結果を表示できません",
   });
@@ -621,32 +629,32 @@
     }
     const heading = el("h3", null, "AIによる解釈"); heading.tabIndex = -1; target.append(heading);
     if (result.scope && typeof result.scope === "object") {
-      const scope = el("section"); scope.append(el("h4", null, "対象範囲"));
-      for (const [key, label] of [["kind", "scope"], ["session_id", "Session"], ["node_id", "node"], ["anchor_id", "anchor"]]) appendAiField(scope, label, result.scope[key]);
+      const scope = el("section"); scope.append(el("h4", null, "分析対象の技術情報"));
+      for (const [key, label] of [["kind", "種類"], ["session_id", "セッションID"], ["node_id", "ノードID"], ["anchor_id", "基準ID"]]) appendAiField(scope, label, result.scope[key]);
       target.append(scope);
     }
     if (result.snapshot && typeof result.snapshot === "object") {
-      const snapshot = el("section"); snapshot.append(el("h4", null, "スナップショット")); appendAiField(snapshot, "snapshot", result.snapshot.snapshot_id); appendAiField(snapshot, "payload SHA-256", result.snapshot.payload_sha256); target.append(snapshot);
+      const snapshot = el("section"); snapshot.append(el("h4", null, "記録時点の技術情報")); appendAiField(snapshot, "スナップショットID", result.snapshot.snapshot_id); appendAiField(snapshot, "内容のSHA-256", result.snapshot.payload_sha256); target.append(snapshot);
     }
     target.append(el("h4", null, "要約"), el("p", null, result.summary));
     if (result.findings.length) target.append(el("h4", null, "指摘"));
     for (const finding of result.findings) {
       const article = el("article", "local-monitor-ai-finding"); article.append(el("h5", null, String(finding.title ?? "指摘")));
-      appendAiField(article, "finding id", finding.finding_id); appendAiField(article, "explanation", finding.explanation); appendAiField(article, "evidence state", finding.evidence_state); appendAiField(article, "limitation", finding.limitation);
+      appendAiField(article, "指摘ID", finding.finding_id); appendAiField(article, "解釈", finding.explanation); appendAiField(article, "根拠の状態", finding.evidence_state); appendAiField(article, "制約", finding.limitation);
       for (const reference of Array.isArray(finding.evidence_refs) ? finding.evidence_refs : []) article.append(evidenceAction(reference));
       target.append(article);
     }
     if (result.improvement_suggestions.length) target.append(el("h4", null, "改善案"));
     for (const suggestion of result.improvement_suggestions) {
       const article = el("article", "local-monitor-ai-suggestion");
-      appendAiField(article, "suggestion id", suggestion.suggestion_id); appendAiField(article, "target kind", suggestion.target_kind); appendAiField(article, "target label", suggestion.target_label); appendAiField(article, "rationale", suggestion.rationale); appendAiField(article, "concrete change", suggestion.concrete_change); appendAiField(article, "expected effect", suggestion.expected_effect); appendAiField(article, "risks or limitations", suggestion.risks_or_limitations);
+      appendAiField(article, "提案ID", suggestion.suggestion_id); appendAiField(article, "対象の種類", suggestion.target_kind); appendAiField(article, "対象", suggestion.target_label); appendAiField(article, "理由", suggestion.rationale); appendAiField(article, "変更案", suggestion.concrete_change); appendAiField(article, "期待される効果（AIによる提案）", suggestion.expected_effect); appendAiField(article, "リスク・制約", suggestion.risks_or_limitations);
       for (const reference of Array.isArray(suggestion.evidence_refs) ? suggestion.evidence_refs : []) article.append(evidenceAction(reference));
       target.append(article);
     }
     if (result.limitations.length) { target.append(el("h4", null, "制約")); for (const limitation of result.limitations) target.append(el("p", null, String(limitation))); }
     if (result.provenance && typeof result.provenance === "object") {
-      const provenance = el("section"); provenance.append(el("h4", null, "来歴"));
-      for (const [key, label] of [["provider", "provider"], ["model", "model"], ["configuration_sha256", "configuration"], ["prompt_template_version", "template"], ["requested_at", "requested"], ["started_at", "started"], ["completed_at", "completed"], ["snapshot_id", "snapshot"], ["snapshot_sha256", "snapshot SHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      const provenance = el("section"); provenance.append(el("h4", null, "分析の技術情報"));
+      for (const [key, label] of [["provider", "プロバイダー"], ["model", "モデル"], ["configuration_sha256", "設定のSHA-256"], ["prompt_template_version", "テンプレート"], ["requested_at", "依頼日時"], ["started_at", "開始日時"], ["completed_at", "完了日時"], ["snapshot_id", "スナップショットID"], ["snapshot_sha256", "内容のSHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
       if (result.provenance.coverage && typeof result.provenance.coverage === "object") {
         appendAiField(provenance, "included", result.provenance.coverage.included); appendAiField(provenance, "excluded", result.provenance.coverage.excluded); appendAiField(provenance, "content", result.provenance.coverage.content_available ? "content available" : "content unavailable");
       }
@@ -815,7 +823,7 @@
   function appendNodeAi(section, nodeId) {
     if (section.querySelector("[data-node-ai-start]")) return;
     const start = el("section", "local-monitor-node-ai-start"); start.dataset.nodeAiStart = "";
-    start.append(el("p", null, "選択した項目と利用可能な raw content は GitHub Copilot service へ送信される場合があります。"));
+    start.append(el("p", null, "選択した項目と利用可能な記録内容は GitHub Copilot へ送信される場合があります。"));
     const action = el("button", null, "この項目をAIで分析"); action.type = "button";
     action.addEventListener("click", async () => {
       action.disabled = true;
@@ -836,38 +844,38 @@
       setBackgroundInert(true);
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
-    const overview = el("button", null, "Session overviewに戻る"); overview.type = "button"; overview.addEventListener("click", () => { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
-    section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : node.kind), el("p", null, `${node.kind} · ${node.status} · ${timingLabel(node)}`));
+    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
+    section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
     if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
-      appendInspectorFact(section, "Start", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "End", { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "Duration", { state: node.timing.state, value: node.timing.duration_ms === null ? null : `${node.timing.duration_ms} ms` });
-      appendInspectorFact(section, "Caller", metadata.caller, "node_id"); appendInspectorFact(section, "Lifecycle", metadata.lifecycle); appendInspectorFact(section, "Status", metadata.status); appendInspectorFact(section, "Exit", metadata.exit);
-      if (metadata.mcp_server_identity.state === "recorded") appendInspectorFact(section, "MCP server identity", metadata.mcp_server_identity);
-      appendInspectorFact(section, "Tool", metadata.mcp_tool_name);
+      appendInspectorFact(section, "開始", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "終了", { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "所要時間", { state: node.timing.state, value: node.timing.duration_ms === null ? null : `${node.timing.duration_ms} ms` });
+      appendInspectorFact(section, "呼び出し元", metadata.caller, "node_id"); appendInspectorFact(section, "ライフサイクル", metadata.lifecycle); appendInspectorFact(section, "状態", metadata.status); appendInspectorFact(section, "終了状態", metadata.exit);
+      if (metadata.mcp_server_identity.state === "recorded") appendInspectorFact(section, "MCPサーバーID", metadata.mcp_server_identity);
+      appendInspectorFact(section, "ツール", metadata.mcp_tool_name);
     } else if (node.kind === "skill") {
-      section.append(el("p", null, `Current valid state: ${metadata.current_valid_state}`)); appendInspectorFact(section, "Source", metadata.source); appendInspectorFact(section, "Trigger", metadata.trigger); appendInspectorFact(section, "Inventory reference", metadata.inventory_reference);
+      section.append(el("p", null, `現在の状態: ${STATUS_LABELS[metadata.current_valid_state]}`)); appendInspectorFact(section, "取得元", metadata.source); appendInspectorFact(section, "起動条件", metadata.trigger); appendInspectorFact(section, "一覧の参照先", metadata.inventory_reference);
       if (metadata.historical_snapshot_reference.state === "recorded") {
         const snapshotId = metadata.historical_snapshot_reference.value; const historical = el("button", null, "履歴スナップショットを表示"); historical.type = "button"; historical.addEventListener("click", () => readSkillContent(historical, snapshotId, false));
         const current = el("button", null, "現在のファイルを読み取る"); current.type = "button"; current.addEventListener("click", () => readSkillContent(current, snapshotId, true)); section.append(historical, current);
       } else section.append(el("p", null, "履歴スナップショットはありません"));
     } else if (node.kind === "subagent") {
-      for (const key of ["selected", "started", "completed", "failed", "deselected"]) appendInspectorFact(section, key, metadata.lifecycle[key]);
-      for (const [key, label] of [["skill", "Skill activity"], ["tool", "Tool activity"], ["subagent", "Sub-agent activity"], ["error", "Error activity"], ["retry", "Retry activity"]]) appendInspectorFact(section, label, metadata.activity[key], "count");
-      for (const [key, label] of [["input", "Input tokens"], ["output", "Output tokens"], ["total", "Total tokens"], ["reasoning", "Reasoning tokens"], ["cache_read", "Cache read tokens"], ["cache_creation", "Cache creation tokens"], ["new_input", "New input tokens"]]) appendInspectorFact(section, label, metadata.tokens[key]);
-      appendInspectorFact(section, "Children", metadata.children, "count");
+      for (const [key, label] of [["selected", "選択"], ["started", "開始"], ["completed", "完了"], ["failed", "失敗"], ["deselected", "選択解除"]]) appendInspectorFact(section, label, metadata.lifecycle[key]);
+      for (const [key, label] of [["skill", "スキル活動"], ["tool", "ツール活動"], ["subagent", "サブエージェント活動"], ["error", "エラー活動"], ["retry", "再試行活動"]]) appendInspectorFact(section, label, metadata.activity[key], "count");
+      for (const [key, label] of [["input", "入力トークン"], ["output", "出力トークン"], ["total", "トークン合計"], ["reasoning", "推論トークン"], ["cache_read", "キャッシュから読み込み"], ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"]]) appendInspectorFact(section, label, metadata.tokens[key]);
+      appendInspectorFact(section, "子項目", metadata.children, "count");
     } else if (node.kind === "error") {
-      appendInspectorFact(section, "Error code", metadata.error_code); appendInspectorFact(section, "Status", metadata.status);
+      appendInspectorFact(section, "エラーコード", metadata.error_code); appendInspectorFact(section, "状態", metadata.status);
     } else if (node.kind === "permission") {
-      appendInspectorFact(section, "Decision", metadata.decision); appendInspectorFact(section, "Wait", metadata.wait);
+      appendInspectorFact(section, "判断", metadata.decision); appendInspectorFact(section, "待機", metadata.wait);
     } else if (node.kind === "event") {
-      appendInspectorFact(section, "Event", metadata.event_name); appendInspectorFact(section, "Source time", metadata.source_time);
+      appendInspectorFact(section, "イベント", metadata.event_name); appendInspectorFact(section, "取得元の時刻", metadata.source_time);
     } else if (node.kind === "retry") {
-      appendInspectorFact(section, "Attempt", metadata.attempt); appendInspectorFact(section, "Target", metadata.target, "node_id"); appendInspectorFact(section, "Recovered", metadata.recovered);
+      appendInspectorFact(section, "試行回数", metadata.attempt); appendInspectorFact(section, "対象", metadata.target, "node_id"); appendInspectorFact(section, "復旧", metadata.recovered);
     }
     if (node.kind !== "skill") for (const part of CONTENT_PARTS) appendContentAction(section, detail, part);
-    if (detail.parent_path.length) { section.append(el("h3", null, "Parent path")); const path = el("ol"); for (const item of detail.parent_path) path.append(el("li", null, item.name.state === "recorded" ? item.name.text : item.kind)); section.append(path); }
-    appendRelated(section, "Retry", detail.related.retry); appendRelated(section, "Recovery", detail.related.recovery); appendRelated(section, "Children", detail.related.children);
-    const refs = node.technical_references; const technical = el("details"); technical.append(el("summary", null, "Technical references")); for (const key of ["source_kind", "source_identity", "trace_id", "span_id", "event_id"]) if (refs[key] !== null) technical.append(el("p", null, `${key}: ${refs[key]}`)); section.append(technical);
+    if (detail.parent_path.length) { section.append(el("h3", null, "親項目の経路")); const path = el("ol"); for (const item of detail.parent_path) path.append(el("li", null, item.name.state === "recorded" ? item.name.text : KIND_LABELS[item.kind])); section.append(path); }
+    appendRelated(section, "再試行", detail.related.retry); appendRelated(section, "復旧", detail.related.recovery); appendRelated(section, "子項目", detail.related.children);
+    const refs = node.technical_references; const technical = el("details"); technical.append(el("summary", null, "技術情報")); for (const key of ["source_kind", "source_identity", "trace_id", "span_id", "event_id"]) if (refs[key] !== null) technical.append(el("p", null, `${key}: ${refs[key]}`)); section.append(technical);
     inspector.append(section);
     if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
@@ -917,29 +925,29 @@
 
   function renderRouteRecovery(error) {
     state.selectedNodeId = null;
-    const action = error?.status === 409 ? "open_all_sessions" : "retry";
-    inspector.setAttribute("aria-label", "Session detail unavailable");
-    inspector.replaceChildren(el("h2", null, "Session detail unavailable"), el("p", null, action));
+    const action = error?.status === 409 ? "セッション一覧を開いてください" : "もう一度お試しください";
+    inspector.setAttribute("aria-label", "セッション詳細を表示できません");
+    inspector.replaceChildren(el("h2", null, "セッション詳細を表示できません"), el("p", null, action));
     normalizeInspectorBreakpoint(narrowInspector);
   }
 
   function renderOverview(summary) {
     const session = summary.session;
-    const overview = root.querySelector("[data-session-overview]"); overview.setAttribute("aria-label", "Session overview"); overview.replaceChildren(el("h2", null, "Session overview"));
+    const overview = root.querySelector("[data-session-overview]"); overview.setAttribute("aria-label", "セッションの概要"); overview.replaceChildren(el("h2", null, "セッションの概要"));
     overview.append(el("h3", null, "最初の指示"), el("p", null, session.instruction.label || "記録されていません"));
     overview.append(el("p", null, session.instruction.additional_count === null
       ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
-    overview.append(el("p", null, `状態 ${session.status} · 実行 ${format(summary.executions.length)}件`));
-    const sourceRow = el("p"); sourceRow.append(document.createTextNode("Source ")); const source = sourceRow.appendChild(el("span")); source.dataset.sessionOverviewSource = "";
+    overview.append(el("p", null, `状態 ${STATUS_LABELS[session.status]} · 実行 ${format(summary.executions.length)}件`));
+    const sourceRow = el("p"); sourceRow.append(document.createTextNode("取得元 ")); const source = sourceRow.appendChild(el("span")); source.dataset.sessionOverviewSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
-    const timeRow = el("p"); timeRow.append(document.createTextNode("Time ")); const time = timeRow.appendChild(el("span")); time.dataset.sessionOverviewTime = "";
+    const timeRow = el("p"); timeRow.append(document.createTextNode("時刻 ")); const time = timeRow.appendChild(el("span")); time.dataset.sessionOverviewTime = "";
     if (session.timing.state === "recorded") time.textContent = timingLabel(session);
     else renderFact(time, { state: session.timing.state, count: null });
     overview.append(sourceRow, timeRow);
-    const coverage = el("ul"); for (const item of session.capture.coverage) coverage.append(el("li", null, `${item.signal_family}: ${item.state}`));
+    const coverage = el("ul"); for (const item of session.capture.coverage) coverage.append(el("li", null, `${SIGNAL_LABELS[item.signal_family]}: ${stateLabel(item.state)}`));
     overview.append(el("h3", null, "取得範囲"), coverage);
-    const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `revision ${summary.workspace_revision}`));
+    const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `リビジョン ${summary.workspace_revision}`));
     for (const [key, values] of Object.entries(summary.technical_references)) for (const value of values) technical.append(el("p", null, `${key}: ${value}`)); overview.append(technical);
     normalizeInspectorBreakpoint(narrowInspector);
   }
@@ -977,10 +985,10 @@
 
   function render(summary, openLatest = true) {
     const session = summary.session;
-    root.querySelector("[data-session-breadcrumb]").textContent = session.instruction.label || "Session";
-    root.querySelector("[data-session-title]").textContent = session.instruction.label || "Session";
+    root.querySelector("[data-session-breadcrumb]").textContent = session.instruction.label || "セッション";
+    root.querySelector("[data-session-title]").textContent = session.instruction.label || "セッション";
     const context = root.querySelector("[data-session-context-content]");
-    context.replaceChildren(el("strong", null, session.instruction.label || "Session"), el("span", null, ` ${session.status}`));
+    context.replaceChildren(el("strong", null, session.instruction.label || "セッション"), el("span", null, ` ${STATUS_LABELS[session.status]}`));
     const source = el("span"); source.dataset.sessionSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
@@ -998,25 +1006,25 @@
     if (session.tokens.total.state === "recorded"
         && session.tokens.input.state === "recorded" && session.tokens.output.state === "recorded"
         && session.tokens.total.value === session.tokens.input.value + session.tokens.output.value) {
-      renderBars(total, session.tokens.input, session.tokens.output, "local-monitor-token-bar", "入力トークン", "出力トークン");
+      renderBars(total, session.tokens.input, session.tokens.output, "local-monitor-token-bar", "入力", "出力");
     }
     const cache = tokenMetric("入力トークンの内訳", session.tokens.cache_read_ratio_basis_points);
     if (session.tokens.input.state === "recorded" && session.tokens.cache_read.state === "recorded"
         && session.tokens.new_input.state === "recorded" && session.tokens.cache_read_ratio_basis_points.state === "recorded"
         && session.tokens.input.value === session.tokens.cache_read.value + session.tokens.new_input.value
         && session.tokens.cache_read_ratio_basis_points.value === Math.round(session.tokens.cache_read.value * 10000 / session.tokens.input.value)) {
-      renderBars(cache, session.tokens.cache_read, session.tokens.new_input, "local-monitor-cache-bar", "cache read", "new input");
+      renderBars(cache, session.tokens.cache_read, session.tokens.new_input, "local-monitor-cache-bar", "キャッシュから読み込み", "新規入力");
     }
-    if (session.tokens.cache_creation.state === "recorded") cache.append(el("small", null, `cache write ${format(session.tokens.cache_creation.value)}`));
+    if (session.tokens.cache_creation.state === "recorded") cache.append(el("small", null, `キャッシュ書き込み ${format(session.tokens.cache_creation.value)}`));
     const input = namedFact("入力", session.tokens.input, "Input");
     const output = namedFact("出力", session.tokens.output, "Output");
-    const cacheRead = namedFact("cache read", session.tokens.cache_read, "CacheRead");
-    const newInput = namedFact("new input", session.tokens.new_input, "NewInput");
+    const cacheRead = namedFact("キャッシュから読み込み", session.tokens.cache_read, "CacheRead");
+    const newInput = namedFact("新規入力", session.tokens.new_input, "NewInput");
     const coverageCard = el("div", "local-monitor-session-summary-card"); coverageCard.dataset.sessionFixedCoverage = "";
     coverageCard.append(el("h2", null, "取得範囲"));
     const coverageList = el("ul", "local-monitor-session-coverage");
     for (const item of session.capture.coverage) {
-      const row = el("li"); row.append(el("span", null, `${item.signal_family}: `));
+      const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
       const factTarget = row.appendChild(el("span"));
       if (item.state === "recorded") factTarget.textContent = "記録済み";
       else if (item.state === "complete_zero") factTarget.textContent = "0件（完全）";
@@ -1025,7 +1033,7 @@
     }
     coverageCard.append(coverageList);
     summaryRoot.append(total, cache, input, output, cacheRead, newInput, coverageCard);
-    for (const [key, label] of [["skill", "Skill"], ["tool", "Tool"], ["subagent", "Sub-agent"], ["error", "Error"], ["retry", "Retry"]]) {
+    for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) {
       const card = el("div", "local-monitor-session-summary-card"); card.append(el("h2", null, label));
       renderFact(card.appendChild(el("div")), session.activity[key]); summaryRoot.append(card);
     }
@@ -1038,7 +1046,7 @@
   async function load(refresh = false, applyCurrentRoute = true) {
     try {
       const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error("Session summary unavailable");
+      if (!response.ok) throw new Error("セッションの概要を表示できません");
       const summary = validate(JSON.parse(await response.text()));
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
       state.summary = summary; state.revision = summary.workspace_revision; render(summary);
@@ -1049,7 +1057,7 @@
         if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id);
       }
     } catch {
-      root.querySelector("[data-session-context-content]").textContent = "Session を読み込めませんでした";
+      root.querySelector("[data-session-context-content]").textContent = "セッションを読み込めませんでした";
     }
   }
 

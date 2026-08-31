@@ -673,10 +673,10 @@ public class MonitorShellPlaywrightTests
         releaseHistory.TrySetResult();
         await page.Locator("[data-settings-navigation='storage']").ClickAsync();
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("保持 待機中");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("データベース 4096 bytes");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("データベース 4096バイト");
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("直近の履歴取り込みは実行中です");
         await Expect(page.Locator("[data-settings-section='storage']")).Not.ToContainTextAsync("running");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: 対応していません。");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: 今回の設定にはありません。");
         Assert.Contains(requestedUrls, url => url.EndsWith("/api/local-monitor/v1/settings/storage", StringComparison.Ordinal));
         await Expect(page.Locator("[data-settings-section='storage'] a[href='/diagnostics#retention-diagnostics']")).ToHaveCountAsync(1);
         await page.Locator("[data-settings-backup-now]").ClickAsync();
@@ -687,7 +687,7 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-diagnostics-health]")).ToContainTextAsync("受信状態に注意が必要です");
         await Expect(page.Locator("[data-settings-diagnostics-projection]")).ToContainTextAsync("投影待ち 7件");
         await Expect(page.Locator("[data-settings-diagnostics-source]")).ToContainTextAsync("互換性を確認済み");
-        await Expect(page.Locator("[data-settings-diagnostics-repositories]")).ToContainTextAsync("先頭ページ 0件 · アーカイブ 1件 · 未設定セッション 2件");
+        await Expect(page.Locator("[data-settings-diagnostics-repositories]")).ToContainTextAsync("先頭ページ 0件 · アーカイブ 1件 · リポジトリ未設定のセッション 2件");
         await Expect(page.Locator("[data-settings-section='diagnostics'] a[href='/diagnostics']")).ToHaveCountAsync(1);
         await page.Locator("[data-settings-navigation='storage']").ClickAsync();
         await page.Locator("[data-settings-backup-now]").ClickAsync();
