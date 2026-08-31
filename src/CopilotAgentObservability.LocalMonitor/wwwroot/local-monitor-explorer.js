@@ -753,17 +753,17 @@
 
   function renderAiMetadata(preview) {
     aiPreviewContent.replaceChildren();
-    const states = Object.freeze({ not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", not_captured: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", partial: "記録が一部欠けています", available: "内容を利用できます", expired_pending_deletion: "保存期間を過ぎたため表示できません" });
+    const states = Object.freeze({ recorded: "記録済み", not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", not_captured: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", redacted: "内容は記録されていません", malformed: "記録が一部欠けています", oversized: "記録が一部欠けています", inconsistent: "内訳を表示できません", projection_invalid: "記録が一部欠けています", partial: "記録が一部欠けています", available: "内容を利用できます", expired_pending_deletion: "保存期間を過ぎたため表示できません" });
     const exclusions = Object.freeze({ session_not_found: "セッションを確認できないため除外されました", repository_mismatch: "リポジトリが一致しないため除外されました", session_archived: "セッションがアーカイブ済みのため除外されました", repository_archived: "リポジトリがアーカイブ済みのため除外されました", projection_unavailable: "比較用データを利用できないため除外されました" });
     const factValues = value => value === null ? null : value.values.length > 0 ? value.values : states[value.state] ?? value.state;
     const archiveState = value => ({ active: "有効", archived: "アーカイブ済み" })[value] ?? value;
-    for (const [heading, values] of [["対象", preview.included], ["除外", preview.excluded]]) {
+    for (const [heading, values] of [["対象の技術情報", preview.included], ["除外項目の技術情報", preview.excluded]]) {
       const section = element("section");
       section.append(element("h3", null, `${heading} ${values.length}件`));
       const list = element("ul");
       for (const value of values) {
         const item = element("li");
-        item.textContent = [value.session_id, exclusions[value.reason] ?? value.reason, `セッション ${archiveState(value.session_archive_state)} 改訂 ${value.session_archive_revision}`, `リポジトリ ${archiveState(value.repository_archive_state)} 改訂 ${value.repository_archive_revision}`, exclusions[value.archive_exclusion_reason] ?? value.archive_exclusion_reason, factValues(value.source), factValues(value.model), states[value.completeness] ?? (value.completeness === null ? null : "記録済み"), states[value.content_state] ?? value.content_state, value.workspace_revision, value.truncated === false ? "省略なし" : value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
+        item.textContent = [`セッションID: ${value.session_id}`, exclusions[value.reason] ?? value.reason, `セッション ${archiveState(value.session_archive_state)} 改訂 ${value.session_archive_revision}`, `リポジトリ ${archiveState(value.repository_archive_state)} 改訂 ${value.repository_archive_revision}`, exclusions[value.archive_exclusion_reason] ?? value.archive_exclusion_reason, factValues(value.source), factValues(value.model), states[value.completeness] ?? (value.completeness === null ? null : "記録済み"), states[value.content_state] ?? value.content_state, value.workspace_revision === null ? null : `ワークスペースのSHA-256: ${value.workspace_revision}`, value.truncated === false ? "省略なし" : value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
         list.append(item);
       }
       section.append(list); aiPreviewContent.append(section);
@@ -815,7 +815,9 @@
     aiResult.append(element("h3", null, "AIによる解釈（セッション一覧の記録ではありません）"));
     const scope = element("section"); scope.append(element("h4", null, "分析対象の技術情報"));
     appendAiValue(scope, "種類", result.scope.kind === "repository_selection" ? "リポジトリ選択" : result.scope.kind); appendAiValue(scope, "リポジトリID", result.scope.repository_id);
-    appendAiValue(scope, "スナップショットID", result.snapshot.snapshot_id); appendAiValue(scope, "内容のSHA-256", result.snapshot.payload_sha256); aiResult.append(scope);
+    aiResult.append(scope);
+    const snapshot = element("section"); snapshot.append(element("h4", null, "記録時点の技術情報"));
+    appendAiValue(snapshot, "スナップショットID", result.snapshot.snapshot_id); appendAiValue(snapshot, "内容のSHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
     aiResult.append(element("h4", null, "要約"), element("p", null, result.summary));
     const findings = element("section"); findings.append(element("h4", null, "指摘"));
     for (const finding of result.findings) { const article = element("article"); article.append(element("h5", null, finding.title), element("p", null, finding.explanation)); appendAiValue(article, "根拠の状態", ({ supported: "根拠あり", limited: "根拠に制約あり" })[finding.evidence_state] ?? finding.evidence_state); appendAiValue(article, "制約", finding.limitation); appendEvidence(article, finding.evidence_refs); findings.append(article); } aiResult.append(findings);
