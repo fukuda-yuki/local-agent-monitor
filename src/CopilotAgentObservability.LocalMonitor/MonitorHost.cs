@@ -973,7 +973,12 @@ internal static class MonitorHost
             var localAiPath = !options.SanitizedOnly && LocalAiRoutesV1.IsPath(context.Request.Path);
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
+            var rawHumanPath = IsRawHumanPath(context.Request.Path);
             var rawHumanGetPath = IsRawHumanGetRequest(context.Request);
+            if (rawHumanPath)
+            {
+                RegisterRawHumanNoStoreOnStarting(context);
+            }
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
             if (LocalMonitorV1HumanRoutes.IsRetiredHistoricalAnalysis(context))
             {
@@ -2311,7 +2316,12 @@ internal static class MonitorHost
     private static bool IsRawHumanGetRequest(HttpRequest request)
     {
         if (!HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)) return false;
-        var segments = CanonicalRawHumanPath(request.Path)?.Split('/', StringSplitOptions.None);
+        return IsRawHumanGetPath(request.Path);
+    }
+
+    private static bool IsRawHumanGetPath(PathString path)
+    {
+        var segments = CanonicalRawHumanPath(path)?.Split('/', StringSplitOptions.None);
         if (segments is null || segments.Length < 3
             || !string.Equals(segments[1], "traces", StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrEmpty(segments[2])) return false;
@@ -2342,14 +2352,27 @@ internal static class MonitorHost
 
     private static bool IsRawHumanErrorRequest(HttpRequest request)
     {
-        if (IsRawHumanGetRequest(request)) return true;
-        if (!HttpMethods.IsPost(request.Method)) return false;
-        var segments = CanonicalRawHumanPath(request.Path)?.Split('/', StringSplitOptions.None);
+        return IsRawHumanPath(request.Path);
+    }
+
+    private static bool IsRawHumanPath(PathString path) =>
+        IsRawHumanGetPath(path) || IsRawAnalysisActionPath(path);
+
+    private static bool IsRawAnalysisActionPath(PathString path)
+    {
+        var segments = CanonicalRawHumanPath(path)?.Split('/', StringSplitOptions.None);
         return segments is ["", var traces, var traceId, var analysis]
             && string.Equals(traces, "traces", StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrEmpty(traceId)
             && string.Equals(analysis, "analysis", StringComparison.OrdinalIgnoreCase);
     }
+
+    internal static void RegisterRawHumanNoStoreOnStarting(HttpContext context) =>
+        context.Response.OnStarting(static state =>
+        {
+            ((HttpResponse)state).Headers.CacheControl = "no-store";
+            return Task.CompletedTask;
+        }, context.Response);
 
     private static string? CanonicalRawHumanPath(PathString path)
     {

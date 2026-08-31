@@ -334,6 +334,69 @@ public class MonitorSecurityBoundaryTests
         Assert.Contains("invalid_host", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("HEAD", "/traces/1/raw", false)]
+    [InlineData("POST", "/traces/1/raw", true)]
+    [InlineData("OPTIONS", "/traces/trace-id/spans/span-id/detail", true)]
+    [InlineData("PUT", "/traces/trace-id/analysis/runs/1/", true)]
+    public async Task ExactRawHumanRoute_FallbackResponseAddsOnlyNoStore(string method, string path, bool hasEntity)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Empty(response.Content.Headers.Allow);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.ToString());
+        var entity = await response.Content.ReadAsByteArrayAsync();
+        if (hasEntity)
+        {
+            Assert.Equal(
+                Encoding.UTF8.GetBytes("{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"),
+                entity);
+        }
+        else
+        {
+            Assert.Empty(entity);
+        }
+    }
+
+    [Theory]
+    [InlineData("PUT", "/traces/1/raw")]
+    [InlineData("OPTIONS", "/traces/trace-id/spans/span-id/detail")]
+    [InlineData("PUT", "/traces/trace-id/analysis/runs/1/")]
+    public async Task ExactRawHumanRoute_UnsupportedMethodInvalidHostReturnsNoStore400(string method, string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+        using var request = new HttpRequestMessage(new HttpMethod(method), path)
+        {
+            Headers = { Host = "example.com" },
+        };
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("invalid_host", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("PUT", "/traces/1/raw/unknown")]
+    [InlineData("OPTIONS", "/traces/trace-id/spans/span-id/detail/unknown")]
+    [InlineData("PUT", "/traces/trace-id/analysis/runs/1//")]
+    public async Task NonExactRawHumanRoute_UnsupportedMethodDoesNotSetNoStore(string method, string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Null(response.Headers.CacheControl);
+    }
+
     [Fact]
     public async Task RawAnalysisAction_InvalidHostReturnsFixedSafeNoStoreError()
     {

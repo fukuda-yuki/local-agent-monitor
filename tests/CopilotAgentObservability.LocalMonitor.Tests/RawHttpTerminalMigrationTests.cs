@@ -739,6 +739,10 @@ public sealed class RawHttpTerminalMigrationTests
         context.Request.Path = path;
         context.Request.RouteValues = routeValues;
         context.SetEndpoint(endpoint);
+        if (owner is not "session-content")
+        {
+            MonitorHost.RegisterRawHumanNoStoreOnStarting(context);
+        }
 
         await endpoint.RequestDelegate!(context);
         return projectionStore;
