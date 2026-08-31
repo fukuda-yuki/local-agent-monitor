@@ -866,17 +866,110 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Fact]
-    public async Task OverviewActionCancelsDelayedClosedContentConflict()
+    public async Task ReopenedContentOnSameNodeCannotBeOverwrittenByOlderCompletion()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
-        const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; var (summaryText, timeline, node, oldRevision) = InspectorDocuments("permission"); var summary = JsonNode.Parse(summaryText)!.AsObject(); timeline["items"]![0]!["node_id"] = nodeA; timeline["items"]![0]!["name"]!["text"] = "content A"; node["node"]!["node_id"] = nodeA; node["node"]!["name"]!["text"] = "content A"; node["content"]!["instruction"] = JsonNode.Parse("""{"state":"available","available":true}"""); var freshRevision = new string('2', 64);
+        var (summary, timeline, node, revision) = InspectorDocuments("permission"); node["content"]!["instruction"] = JsonNode.Parse("""{"state":"available","available":true}"""); var requests = 0; var releaseOlder = new TaskCompletionSource(); var olderStarted = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/content?*", async r => { if (++requests == 1) { olderStarted.SetResult(); await releaseOlder.Task; await r.FulfillAsync(Json(ContentDocument(revision, "instruction", "older raw").ToJsonString())); return; } await r.FulfillAsync(Json(ContentDocument(revision, "instruction", "newer raw").ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await page.Locator("[data-timeline-node]").ClickAsync(); await InstallBrowserSettlementSignal(page, "/content?", 2); var trigger = page.GetByRole(AriaRole.Button, new() { Name = "指示を表示" }); await trigger.ClickAsync(); await olderStarted.Task; await page.Keyboard.PressAsync("Escape"); await trigger.ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync("newer raw");
+        releaseOlder.SetResult(); await WaitForBrowserSettlement(page); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync("newer raw"); await Expect(page.GetByRole(AriaRole.Dialog).Locator("[data-raw-content-status]")).ToContainTextAsync("session_event_content"); Assert.Equal(2, requests); await AssertNoUnhandledRejections(page);
+    }
+
+    [Fact]
+    public async Task PendingNodeRouteClearsObsoleteRawTriggerFocusBeforeEnter()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summary, timeline, detailTemplate, revision) = InspectorDocuments("permission"); var itemA = timeline["items"]![0]!.DeepClone(); itemA["node_id"] = nodeA; itemA["name"]!["text"] = "content A"; var itemB = itemA.DeepClone(); itemB["node_id"] = nodeB; itemB["name"]!["text"] = "pending B"; timeline["items"] = new JsonArray(itemA, itemB);
+        JsonObject Detail(string nodeId, string name) { var value = detailTemplate.DeepClone().AsObject(); value["node"]!["node_id"] = nodeId; value["node"]!["name"]!["text"] = name; value["content"]!["instruction"] = JsonNode.Parse("""{"state":"available","available":true}"""); return value; }
+        var destinationStarted = new TaskCompletionSource(); var releaseDestination = new TaskCompletionSource(); var releaseContent = new TaskCompletionSource(); var contentRequests = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", async r => { if (!r.Request.Url.Contains(nodeB)) { await r.FulfillAsync(Json(Detail(nodeA, "content A").ToJsonString())); return; } destinationStarted.SetResult(); await releaseDestination.Task; await r.FulfillAsync(Json(Detail(nodeB, "pending B").ToJsonString())); });
+        await page.RouteAsync("**/content?*", async r => { contentRequests++; await releaseContent.Task; await r.FulfillAsync(Json(ContentDocument(revision, "instruction", "stale raw").ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await page.Locator($"[data-timeline-node='{nodeA}']").ClickAsync(); await InstallBrowserSettlementSignal(page, "/content?"); var trigger = page.GetByRole(AriaRole.Button, new() { Name = "指示を表示" }); await trigger.ClickAsync(); await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeB }); await destinationStarted.Task;
+        await Expect(page.Locator("[data-raw-content-dialog][open]")).ToHaveCountAsync(0); await Expect(trigger).Not.ToBeFocusedAsync(); await page.Keyboard.PressAsync("Enter"); await Expect(page.Locator("[data-raw-content-dialog][open]")).ToHaveCountAsync(0); Assert.Equal(1, contentRequests);
+        releaseDestination.SetResult(); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("pending B"); releaseContent.SetResult(); await WaitForBrowserSettlement(page); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={nodeB}"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-raw-content-dialog][open]")).ToHaveCountAsync(0); await AssertNoUnhandledRejections(page);
+    }
+
+    [Fact]
+    public async Task ReopenedSkillContentIgnoresOlderDelayedBodyCompletion()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("skill"); var requests = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/skill-invocations/**", r => { var body = ++requests == 1 ? "older Skill body" : "newer Skill body"; return r.FulfillAsync(Json($$"""{"schema_version":"local-skill-invocation-snapshot.content.v1","snapshot_id":"018f0000-0000-7000-8000-000000000099","content_kind":"historical_snapshot","body":"{{body}}","definition_path":"SKILL.md","body_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","definition_path_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","captured_at":"2026-08-29T01:02:03.0000000+00:00"}""")); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await page.Locator("[data-timeline-node]").ClickAsync(); await page.EvaluateAsync("""
+            () => {
+              const originalFetch = window.fetch;
+              let matching = 0;
+              let startBody;
+              let releaseBody;
+              let settleBody;
+              window.__oldSkillBodyStarted = new Promise(resolve => { startBody = resolve; });
+              const released = new Promise(resolve => { releaseBody = resolve; });
+              window.__releaseOldSkillBody = releaseBody;
+              window.__oldSkillBodySettled = new Promise(resolve => { settleBody = resolve; });
+              window.fetch = async (...args) => {
+                const response = await originalFetch(...args);
+                if (!String(args[0]).includes('/skill-invocations/') || ++matching !== 1) return response;
+                return { ok: response.ok, status: response.status, text: async () => { startBody(); await released; const text = await response.text(); setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settleBody)), 0); return text; } };
+              };
+            }
+            """);
+        var trigger = page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" }); await trigger.ClickAsync(); await page.EvaluateAsync("() => window.__oldSkillBodyStarted"); await page.Keyboard.PressAsync("Escape"); await trigger.ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync("newer Skill body");
+        await page.EvaluateAsync("() => window.__releaseOldSkillBody()"); await page.EvaluateAsync("() => window.__oldSkillBodySettled"); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync("newer Skill body"); Assert.Equal(2, requests); await AssertNoUnhandledRejections(page);
+    }
+
+    [Fact]
+    public async Task ReopenedSkillContentDiscardsOlderResponseBeforeInspectingIt()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("skill"); var requests = 0; var olderStarted = new TaskCompletionSource(); var releaseOlder = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/skill-invocations/**", async r => { if (++requests == 1) { olderStarted.SetResult(); await releaseOlder.Task; await r.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); return; } await r.FulfillAsync(Json("""{"schema_version":"local-skill-invocation-snapshot.content.v1","snapshot_id":"018f0000-0000-7000-8000-000000000099","content_kind":"historical_snapshot","body":"newer Skill response","definition_path":"SKILL.md","body_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","definition_path_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","captured_at":"2026-08-29T01:02:03.0000000+00:00"}""")); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await page.Locator("[data-timeline-node]").ClickAsync(); await page.EvaluateAsync("""
+            () => {
+              const originalFetch = window.fetch;
+              let matching = 0;
+              let settleOlder;
+              window.__oldSkillResponseInspected = false;
+              window.__oldSkillHttpSettled = new Promise(resolve => { settleOlder = resolve; });
+              window.fetch = async (...args) => {
+                const older = String(args[0]).includes('/skill-invocations/') && ++matching === 1;
+                const response = await originalFetch(...args);
+                if (!older) return response;
+                setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settleOlder)), 0);
+                return {
+                  get ok() { window.__oldSkillResponseInspected = true; return response.ok; },
+                  get status() { window.__oldSkillResponseInspected = true; return response.status; },
+                  text: () => { window.__oldSkillResponseInspected = true; return response.text(); }
+                };
+              };
+            }
+            """);
+        var trigger = page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" }); await trigger.ClickAsync(); await olderStarted.Task; await page.Keyboard.PressAsync("Escape"); await trigger.ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync("newer Skill response");
+        releaseOlder.SetResult(); await page.EvaluateAsync("() => window.__oldSkillHttpSettled"); Assert.False(await page.EvaluateAsync<bool>("() => window.__oldSkillResponseInspected")); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync("newer Skill response"); await Expect(page.GetByRole(AriaRole.Dialog).Locator("[data-raw-content-status]")).Not.ToHaveTextAsync("読み込んでいます"); await Expect(page.GetByRole(AriaRole.Dialog).Locator("[data-raw-content-status]")).Not.ToContainTextAsync("読み取れません"); Assert.Equal(2, requests); await AssertNoUnhandledRejections(page);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RouteWithoutNodeClosesAndCancelsDelayedContentConflict(bool executionOnly)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; var (summaryText, timeline, node, oldRevision) = InspectorDocuments("permission"); var summary = JsonNode.Parse(summaryText)!.AsObject(); timeline["items"]![0]!["node_id"] = nodeA; timeline["items"]![0]!["name"]!["text"] = "content A"; node["node"]!["node_id"] = nodeA; node["node"]!["name"]!["text"] = "content A"; node["content"]!["instruction"] = JsonNode.Parse("""{"state":"available","available":true}"""); var freshRevision = new string('2', 64);
         var contentStarted = new TaskCompletionSource(); var releaseContent = new TaskCompletionSource(); var summaries = 0;
         await page.RouteAsync("**/summary", r => { summaries++; var body = summary.DeepClone(); body["workspace_revision"] = summaries == 1 ? oldRevision : freshRevision; return r.FulfillAsync(Json(body.ToJsonString())); }); await page.RouteAsync("**/timeline?*", r => { var body = timeline.DeepClone(); body["workspace_revision"] = r.Request.Url.Contains(freshRevision) ? freshRevision : oldRevision; return r.FulfillAsync(Json(body.ToJsonString())); }); await page.RouteAsync("**/nodes/*?*", r => { var body = node.DeepClone(); body["workspace_revision"] = r.Request.Url.Contains(freshRevision) ? freshRevision : oldRevision; return r.FulfillAsync(Json(body.ToJsonString())); });
         await page.RouteAsync("**/content?*", async r => { contentStarted.SetResult(); await releaseContent.Task; await r.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); });
-        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await page.Locator($"[data-timeline-node='{nodeA}']").ClickAsync(); await InstallBrowserSettlementSignal(page, "/content?"); await page.GetByRole(AriaRole.Button, new() { Name = "指示を表示" }).ClickAsync(); await contentStarted.Task; await page.Keyboard.PressAsync("Escape"); await page.GetByRole(AriaRole.Button, new() { Name = "セッションの概要に戻る" }).ClickAsync();
-        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("セッションの概要"); releaseContent.SetResult(); await WaitForBrowserSettlement(page);
-        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("セッションの概要"); await Expect(page.Locator("[data-raw-content-dialog][open]")).ToHaveCountAsync(0); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await AssertNoUnhandledRejections(page); Assert.Equal(1, summaries);
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await page.Locator($"[data-timeline-node='{nodeA}']").ClickAsync(); await InstallBrowserSettlementSignal(page, "/content?"); await page.GetByRole(AriaRole.Button, new() { Name = "指示を表示" }).ClickAsync(); await contentStarted.Task;
+        if (executionOnly) await page.EvaluateAsync("execution => window.LocalMonitorV1History.push({ execution, node: null })", executionId); else await page.GoBackAsync();
+        var expectedUrl = host.Url + $"/sessions/{SessionId}" + (executionOnly ? $"?execution={executionId}" : ""); await Expect(page).ToHaveURLAsync(expectedUrl); await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("セッションの概要"); await Expect(page.Locator("[data-raw-content-dialog][open]")).ToHaveCountAsync(0); releaseContent.SetResult(); await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(expectedUrl); await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("セッションの概要"); await Expect(page.Locator("[data-raw-content-dialog][open]")).ToHaveCountAsync(0); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await AssertNoUnhandledRejections(page); Assert.Equal(1, summaries);
     }
 
     [Fact]
@@ -1265,18 +1358,20 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("user.message"); Assert.Equal("node-a8a773d6614d5030f505ff195b452dd6", await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId"));
     }
 
-    private static Task InstallBrowserSettlementSignal(IPage page, string requestFragment) => page.EvaluateAsync("""
-        fragment => {
+    private static Task InstallBrowserSettlementSignal(IPage page, string requestFragment, int completionCount = 1) => page.EvaluateAsync("""
+        value => {
+          const [fragment, expected] = value;
           const originalFetch = window.fetch;
+          let completed = 0;
           window.__staleRouteSettled = new Promise(resolve => {
             window.fetch = async (...args) => {
               const response = await originalFetch(...args);
-              if (String(args[0]).includes(fragment)) setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 0);
+              if (String(args[0]).includes(fragment) && ++completed === expected) setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 0);
               return response;
             };
           });
         }
-        """, requestFragment);
+        """, new object[] { requestFragment, completionCount });
 
     private static Task WaitForBrowserSettlement(IPage page) => page.EvaluateAsync("() => window.__staleRouteSettled");
 

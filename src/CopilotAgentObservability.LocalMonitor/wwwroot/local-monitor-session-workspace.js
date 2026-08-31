@@ -24,6 +24,7 @@
   const narrowInspector = matchMedia("(max-width: 1179px)");
   let inspectorReturnFocus = null;
   let rawDialogTrigger = null;
+  let rawContentGeneration = 0;
   let aiReady = false;
   let sessionAiInvoker = null;
   let sessionReports = [];
@@ -346,23 +347,27 @@
   const stateLabel = value => ({ recorded: "記録あり", complete_zero: "今回の記録にはありません", not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", malformed: "記録が一部欠けています", oversized: "記録が一部欠けています", projection_invalid: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", not_captured: "内容は記録されていません", redacted: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", inconsistent: "内訳を表示できません" })[value] ?? "記録が一部欠けています";
   const sourceLabel = value => SOURCES.has(value) ? window.LocalMonitorV1FactState.sessionSourceLabel(value) : value;
 
-  function closeRawDialog() {
-    if (!rawDialog?.open) return;
-    rawDialog.close();
+  function closeRawDialog(restoreFocus = true) {
+    rawContentGeneration++;
     const trigger = rawDialogTrigger; rawDialogTrigger = null;
-    trigger?.focus();
+    if (rawDialog?.open) rawDialog.close();
+    if (restoreFocus) trigger?.focus();
+    else if (document.activeElement === trigger) trigger.blur();
   }
 
   function showRawDialog(trigger, title) {
+    const generation = ++rawContentGeneration;
     rawDialogTrigger = trigger;
     rawDialog.querySelector("[data-raw-content-title]").textContent = title;
     rawDialog.querySelector("[data-raw-content-status]").textContent = "読み込んでいます";
     rawDialog.querySelector("[data-raw-content-text]").textContent = "";
     rawDialog.showModal();
     rawDialog.querySelector("[data-raw-content-close]").focus();
+    return generation;
   }
 
-  function publishRawText(text, status) {
+  function publishRawText(text, status, generation = rawContentGeneration) {
+    if (generation !== rawContentGeneration) return;
     rawDialog.querySelector("[data-raw-content-status]").textContent = status;
     rawDialog.querySelector("[data-raw-content-text]").textContent = text;
   }
@@ -384,65 +389,72 @@
 
   async function readGenericContent(trigger, nodeId, part) {
     const generation = routeGeneration;
-    showRawDialog(trigger, CONTENT_LABELS[part]);
+    const contentGeneration = showRawDialog(trigger, CONTENT_LABELS[part]);
+    const currentContent = () => contentGeneration === rawContentGeneration;
     try {
       const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part });
-      const document = validateContent(await requestJson(urlFactory, false, () => selectNode(state.selectedExecutionId, nodeId, false, true, generation), generation), nodeId, part);
+      const document = validateContent(await requestJson(urlFactory, false, () => selectNode(state.selectedExecutionId, nodeId, false, true, generation, currentContent), generation, currentContent), nodeId, part);
       throwIfRouteSuperseded(generation);
-      publishRawText(document.text, `${format(document.utf8_byte_length)}バイト · ${format(document.unicode_scalar_length)} Unicodeスカラー · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · リビジョン ${format(document.source_reference.revision)}`);
-    } catch (error) { if (!(error instanceof RouteSuperseded)) publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "記録内容を読み取れませんでした"); }
+      if (!currentContent()) throw new RouteSuperseded();
+      publishRawText(document.text, `${format(document.utf8_byte_length)}バイト · ${format(document.unicode_scalar_length)} Unicodeスカラー · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · リビジョン ${format(document.source_reference.revision)}`, contentGeneration);
+    } catch (error) { if (!(error instanceof RouteSuperseded)) publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "記録内容を読み取れませんでした", contentGeneration); }
   }
 
   async function readSkillContent(trigger, snapshotId, current) {
     const title = current ? "現在のファイル" : "履歴スナップショット";
-    showRawDialog(trigger, title);
+    const contentGeneration = showRawDialog(trigger, title);
+    const throwIfContentSuperseded = () => { if (contentGeneration !== rawContentGeneration) throw new RouteSuperseded(); };
     const path = `/api/local-monitor/v1/sessions/${root.dataset.sessionId}/skill-invocations/${snapshotId}/${current ? "current-file-read" : "content"}`;
     try {
       const response = await fetch(path, current ? { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: '{"schema_version":"local-skill-current-file-read.request.v1"}' } : { headers: { Accept: "application/json" } });
-      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "スキルの内容を読み取れませんでした"); return; }
+      throwIfContentSuperseded();
+      if (!response.ok) { publishRawText("", HTTP_CONTENT_LABELS[response.status] ?? "スキルの内容を読み取れませんでした", contentGeneration); return; }
       const document = JSON.parse(await response.text());
+      throwIfContentSuperseded();
       const validHistorical = !current && exact(document, ["schema_version", "snapshot_id", "content_kind", "body", "definition_path", "body_sha256", "definition_path_sha256", "captured_at"]) && document.schema_version === "local-skill-invocation-snapshot.content.v1" && document.content_kind === "historical_snapshot";
       const validCurrent = current && exact(document, ["schema_version", "snapshot_id", "content_kind", "comparison", "historical_body_sha256", "current_body_sha256", "current_body_utf8_bytes", "body", "read_at"]) && document.schema_version === "local-skill-current-file-read.response.v1" && document.content_kind === "current_file" && ["same", "changed"].includes(document.comparison);
       if ((!validHistorical && !validCurrent) || document.snapshot_id !== snapshotId || typeof document.body !== "string") throw new TypeError("invalid Skill document");
       const comparisonLabel = current ? { same: "変更なし", changed: "変更あり" }[document.comparison] : null;
-      publishRawText(document.body, current ? `${title} · ${comparisonLabel}` : `${title} · ${document.captured_at} · 定義パス: ${document.definition_path}`);
-    } catch { publishRawText("", "スキルの内容を読み取れませんでした"); }
+      publishRawText(document.body, current ? `${title} · ${comparisonLabel}` : `${title} · ${document.captured_at} · 定義パス: ${document.definition_path}`, contentGeneration);
+    } catch (error) { if (!(error instanceof RouteSuperseded)) publishRawText("", "スキルの内容を読み取れませんでした", contentGeneration); }
   }
 
   const currentRouteGeneration = generation => generation === null || generation === routeGeneration;
   const throwIfRouteSuperseded = generation => { if (!currentRouteGeneration(generation)) throw new RouteSuperseded(); };
 
-  async function requestJson(urlFactory, attempted = false, reestablish = null, generation = null) {
+  const throwIfRequestSuperseded = (generation, current) => { throwIfRouteSuperseded(generation); if (current && !current()) throw new RouteSuperseded(); };
+
+  async function requestJson(urlFactory, attempted = false, reestablish = null, generation = null, current = null) {
     let response;
     try { response = await fetch(urlFactory(), { headers: { Accept: "application/json" } }); }
-    catch (error) { throwIfRouteSuperseded(generation); throw error; }
-    throwIfRouteSuperseded(generation);
+    catch (error) { throwIfRequestSuperseded(generation, current); throw error; }
+    throwIfRequestSuperseded(generation, current);
     if (response.status === 409 && !attempted) {
       const error = await response.json().catch(() => null);
-      throwIfRouteSuperseded(generation);
+      throwIfRequestSuperseded(generation, current);
       if (error?.error === "workspace_snapshot_stale") {
         const previous = state.revision;
-        if (!await refreshSummary(generation)) throw new RouteSuperseded();
+        if (!await refreshSummary(generation, current)) throw new RouteSuperseded();
         if (state.revision === previous) throw new Error("Session revision did not advance");
         if (reestablish) await reestablish();
-        throwIfRouteSuperseded(generation);
-        return requestJson(urlFactory, true, reestablish, generation);
+        throwIfRequestSuperseded(generation, current);
+        return requestJson(urlFactory, true, reestablish, generation, current);
       }
     }
     if (!response.ok) { const failure = new Error("Session detail unavailable"); failure.status = response.status; throw failure; }
     const body = await response.text();
-    throwIfRouteSuperseded(generation);
+    throwIfRequestSuperseded(generation, current);
     return JSON.parse(body);
   }
 
-  async function refreshSummary(generation = null) {
+  async function refreshSummary(generation = null, current = null) {
     let response;
     try { response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } }); }
-    catch (error) { throwIfRouteSuperseded(generation); throw error; }
-    throwIfRouteSuperseded(generation);
+    catch (error) { throwIfRequestSuperseded(generation, current); throw error; }
+    throwIfRequestSuperseded(generation, current);
     if (!response.ok) throw new Error("Session summary unavailable");
     const body = await response.text();
-    throwIfRouteSuperseded(generation);
+    throwIfRequestSuperseded(generation, current);
     const summary = validate(JSON.parse(body));
     state.executionState.clear(); state.summary = summary; state.revision = summary.workspace_revision;
     render(summary, false);
@@ -456,14 +468,14 @@
     return state.executionState.get(executionId);
   }
 
-  async function loadTimeline(executionId, parentNodeId = null, after = null, attempted = false, generation = null) {
+  async function loadTimeline(executionId, parentNodeId = null, after = null, attempted = false, generation = null, current = null) {
     const parameters = { workspace_revision: state.revision, execution_id: executionId };
     if (parentNodeId) parameters.parent_node_id = parentNodeId;
     if (after) parameters.after = after;
     parameters.limit = "100";
     const urlFactory = () => { parameters.workspace_revision = state.revision; return requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/timeline`, parameters); };
-    const page = validateTimeline(await requestJson(urlFactory, attempted, null, generation), executionId, parentNodeId);
-    if (generation !== null && generation !== routeGeneration) return false;
+    const page = validateTimeline(await requestJson(urlFactory, attempted, null, generation, current), executionId, parentNodeId);
+    throwIfRequestSuperseded(generation, current);
     const memory = executionMemory(executionId);
     memory.open = true;
     const key = parentNodeId ?? "root";
@@ -920,20 +932,20 @@
     if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
 
-  async function selectNode(executionId, nodeId, push, attempted = false, generation = null) {
+  async function selectNode(executionId, nodeId, push, attempted = false, generation = null, current = null) {
     generation ??= ++routeGeneration;
-    if (!attempted && currentRouteGeneration(generation)) closeRawDialog();
+    if (!attempted && currentRouteGeneration(generation)) closeRawDialog(false);
     if (state.selectedNodeId !== nodeId) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; }
     const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
-    const rawDetail = await requestJson(urlFactory, attempted, null, generation);
+    const rawDetail = await requestJson(urlFactory, attempted, null, generation, current);
     const detail = validateNode(rawDetail, nodeId, executionId);
-    if (generation !== routeGeneration) return false;
+    throwIfRequestSuperseded(generation, current);
     executionId = detail.execution.execution_id;
     const memory = executionMemory(executionId);
     const path = (detail.parent_path ?? []).filter(parent => ["exact", "explicit"].includes(parent.relationship_authority));
-    if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation)) return false;
-    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation)) return false;
-    if (generation !== routeGeneration) return false;
+    if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation, current)) return false;
+    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
+    throwIfRequestSuperseded(generation, current);
     state.selectedExecutionId = executionId; state.selectedNodeId = nodeId; memory.open = true;
     for (const parent of path) memory.expanded.add(parent.node_id);
     renderInspector(detail);
@@ -950,6 +962,7 @@
   }
 
   function fallbackSelection(replace) {
+    closeRawDialog(false);
     state.selectedExecutionId = null; state.selectedNodeId = null;
     renderOverview(state.summary);
     if (replace) window.LocalMonitorV1History.replace({ execution: null, node: null });
@@ -959,6 +972,7 @@
     const generation = ++routeGeneration;
     try {
       if (!state.summary) return;
+      if (!route.node) closeRawDialog(false);
       const closedAnalysis = !route.analysis && document.querySelector("[data-session-ai-dialog]")?.open;
       if (closedAnalysis) closeSessionAi(!route.execution && !route.node);
       if (route.analysis) { const outcome = await restoreExactAnalysis(route.analysis, route, generation); if (generation !== routeGeneration || outcome === "closed" || outcome === "canceled" || document.querySelector("[data-node-ai-surface]")) return; }
