@@ -669,6 +669,89 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_revalidates_sidecar_length_on_the_acquired_handle()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+        var replacement = new byte[] { 1, 2, 3, 4 };
+        var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
+        {
+            if (checkpoint == SqliteRuntimeBackupService.BeforeEmptyReadSidecarOwnershipCheckpoint)
+                File.WriteAllBytes(temp.Target + "-wal", replacement);
+        });
+
+        var initialization = service.InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Equal(replacement, File.ReadAllBytes(temp.Target + "-wal"));
+        Assert.True(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
+    public void Monitor_startup_holds_sidecar_ownership_through_path_deletion()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+        var displacedWal = temp.Target + "-wal-displaced";
+        var replacementWindowObserved = false;
+        var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
+        {
+            if (checkpoint != SqliteRuntimeBackupService.BeforeEmptyReadSidecarDeleteCheckpoint) return;
+            try
+            {
+                File.Move(temp.Target + "-wal", displacedWal);
+                File.WriteAllBytes(temp.Target + "-wal", [1, 2, 3, 4]);
+                replacementWindowObserved = true;
+            }
+            catch (IOException) { }
+        });
+
+        var initialization = service.InitializeForMonitor(temp.Target);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        Assert.False(replacementWindowObserved);
+        Assert.False(File.Exists(displacedWal));
+        Assert.False(File.Exists(temp.Target + "-wal"));
+        Assert.False(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
+    public void Monitor_startup_does_not_follow_a_sidecar_reparse_substitution()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+        var target = Path.Combine(temp.Root, "foreign-zero-byte-target");
+        File.WriteAllBytes(target, []);
+        var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
+        {
+            if (checkpoint != SqliteRuntimeBackupService.BeforeEmptyReadSidecarOwnershipCheckpoint) return;
+            File.Delete(temp.Target + "-wal");
+            try { File.CreateSymbolicLink(temp.Target + "-wal", target); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            { throw Xunit.Sdk.SkipException.ForSkip($"Cannot create sidecar reparse fixture: {exception.GetType().Name}"); }
+        });
+
+        var initialization = service.InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.True(File.Exists(target));
+        Assert.True(new FileInfo(temp.Target + "-wal").LinkTarget is not null);
+        Assert.True(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
     public void Monitor_startup_defers_exact_workspace_v2_migration_until_completion()
     {
         using var temp = new RestoreTemp();
