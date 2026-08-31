@@ -30,6 +30,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using System.Security.Cryptography;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
@@ -88,7 +89,7 @@ internal static class MonitorHost
         "/local-monitor-settings.js",
         "/local-monitor-explorer.js",
         "/local-monitor-compare.js",
-        "/local-monitor-workspace.js",
+        "/local-monitor-session-workspace.js",
         "/monitor.css",
         "/monitor.js",
     };
@@ -944,6 +945,12 @@ internal static class MonitorHost
                     return;
                 }
 
+                if (IsRawHumanErrorRequest(context.Request))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status500InternalServerError, "internal_error", "The request could not be processed.");
+                    return;
+                }
+
                 await WriteFailureAsync(context, StatusCodes.Status500InternalServerError, "internal_error", "The request could not be processed.");
             });
         });
@@ -966,6 +973,7 @@ internal static class MonitorHost
             var localAiPath = !options.SanitizedOnly && LocalAiRoutesV1.IsPath(context.Request.Path);
             var localMonitorV1HumanPath = LocalMonitorV1HumanRoutes.IsCandidate(context);
             var localMonitorV1HumanAsset = LocalMonitorV1HumanRoutes.IsPrimaryAsset(context.Request.Path);
+            var rawHumanGetPath = IsRawHumanGetRequest(context.Request);
             var retiredTraceListPath = !options.SanitizedOnly && LocalMonitorV1HumanRoutes.IsRetiredTraceList(context);
             if (LocalMonitorV1HumanRoutes.IsRetiredHistoricalAnalysis(context))
             {
@@ -1087,6 +1095,10 @@ internal static class MonitorHost
                 {
                     await LocalMonitorV1HumanRoutes.InvalidHostAsync(context);
                 }
+                else if (IsRawHumanErrorRequest(context.Request))
+                {
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
+                }
                 else
                 {
                     await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
@@ -1102,6 +1114,7 @@ internal static class MonitorHost
                     || localMonitorV1ComparisonPath
                     || ((HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
                         && localMonitorV1HumanPath)
+                    || rawHumanGetPath
                     || RuntimeBackupRoutes.IsPath(context.Request.Path)
                     || IsKnownHumanRequest(context.Request)))
             {
@@ -1804,11 +1817,9 @@ internal static class MonitorHost
             // no-store, and the payload rendered as HTML-encoded inert text.
             app.MapGet("/traces/{rawRecordId:long}/raw", async (long rawRecordId, HttpContext context) =>
             {
-                context.Response.Headers["Cache-Control"] = "no-store";
-
                 if (IsCrossSiteRequest(context))
                 {
-                    await WriteFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The raw detail view is same-origin only.");
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden", "The raw detail view is same-origin only.");
                     return;
                 }
 
@@ -1819,16 +1830,16 @@ internal static class MonitorHost
                 }
                 catch (PersistenceBusyException)
                 {
-                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
                     return;
                 }
 
                 if (result.Lease is null)
                 {
                     if (result.Disposition == RetentionReadDisposition.Busy)
-                        await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
                     else
-                        await WriteFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
                     return;
                 }
 
@@ -1842,16 +1853,36 @@ internal static class MonitorHost
                             return;
                         }
                         if (postGrantDisposition == RetentionReadDisposition.Busy)
-                            await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                            await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
                         else
-                            await WriteFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
+                            await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
                         return;
                     }
                     string entity;
-                    using (var reference = lease.AcquireValueReference())
+                    try
                     {
+                        using var reference = lease.AcquireValueReference();
                         var encodedPayload = HtmlEncoder.Default.Encode(reference.Value.PayloadJson);
                         entity = $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>";
+                    }
+                    catch (Exception exception)
+                    {
+                        RetentionRawTerminalResult terminal;
+                        try
+                        {
+                            terminal = lease.TryCompleteWithoutRaw();
+                        }
+                        catch
+                        {
+                            ExceptionDispatchInfo.Capture(exception).Throw();
+                            throw;
+                        }
+                        if (!RawResponsePublication.AuthorizesFixedSafePublication(terminal))
+                        {
+                            RawResponsePublication.Abort(context);
+                            return;
+                        }
+                        throw;
                     }
                     if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
                     {
@@ -1859,6 +1890,7 @@ internal static class MonitorHost
                         RawResponsePublication.Abort(context);
                         return;
                     }
+                    context.Response.Headers["Cache-Control"] = "no-store";
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     context.Response.ContentType = "text/html; charset=utf-8";
                     await context.Response.WriteAsync(entity);
@@ -2274,6 +2306,58 @@ internal static class MonitorHost
                 && string.Equals(traces, "traces", StringComparison.OrdinalIgnoreCase)
             || segments is ["", var tracePrefix, _]
                 && string.Equals(tracePrefix, "traces", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRawHumanGetRequest(HttpRequest request)
+    {
+        if (!HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)) return false;
+        var segments = CanonicalRawHumanPath(request.Path)?.Split('/', StringSplitOptions.None);
+        if (segments is null || segments.Length < 3
+            || !string.Equals(segments[1], "traces", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrEmpty(segments[2])) return false;
+
+        return segments switch
+        {
+            ["", _, _] => true,
+            ["", _, var rawRecordId, var raw]
+                when long.TryParse(rawRecordId, out _) && string.Equals(raw, "raw", StringComparison.OrdinalIgnoreCase) => true,
+            ["", _, _, var promptLabel]
+                when string.Equals(promptLabel, "prompt-label", StringComparison.OrdinalIgnoreCase) => true,
+            ["", _, _, var spans, var spanId, var detail]
+                when string.Equals(spans, "spans", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrEmpty(spanId)
+                    && string.Equals(detail, "detail", StringComparison.OrdinalIgnoreCase) => true,
+            ["", _, _, var analysis, var runs, var runId]
+                when string.Equals(analysis, "analysis", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(runs, "runs", StringComparison.OrdinalIgnoreCase)
+                    && long.TryParse(runId, out _) => true,
+            ["", _, _, var analysis, var runs, var runId, var safeSummary]
+                when string.Equals(analysis, "analysis", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(runs, "runs", StringComparison.OrdinalIgnoreCase)
+                    && long.TryParse(runId, out _)
+                    && string.Equals(safeSummary, "safe-summary", StringComparison.OrdinalIgnoreCase) => true,
+            _ => false,
+        };
+    }
+
+    private static bool IsRawHumanErrorRequest(HttpRequest request)
+    {
+        if (IsRawHumanGetRequest(request)) return true;
+        if (!HttpMethods.IsPost(request.Method)) return false;
+        var segments = CanonicalRawHumanPath(request.Path)?.Split('/', StringSplitOptions.None);
+        return segments is ["", var traces, var traceId, var analysis]
+            && string.Equals(traces, "traces", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(traceId)
+            && string.Equals(analysis, "analysis", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? CanonicalRawHumanPath(PathString path)
+    {
+        var value = path.Value;
+        if (value is null || value.Contains("//", StringComparison.Ordinal)) return null;
+        return value.Length > 1 && value.EndsWith("/", StringComparison.Ordinal)
+            ? value[..^1]
+            : value;
     }
 
     private static bool IsRetentionHumanPagePath(string path)

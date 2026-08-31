@@ -76,7 +76,7 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
-    [InlineData("MonitorHost.cs", 5)]
+    [InlineData("MonitorHost.cs", 6)]
     [InlineData("Sessions/SessionRoutes.cs", 2)]
     [InlineData("RawReplayRoutes.cs", 3)]
     [InlineData("Pages/TraceDetail.cshtml.cs", 1)]

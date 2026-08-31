@@ -23,17 +23,22 @@ internal static class LocalMonitorV1HumanRoutes
     private static readonly HashSet<string> PrimaryExtensionAssets = new(StringComparer.Ordinal)
     {
         "/local-monitor-repositories.js",
+        "/local-monitor-settings.js",
         "/local-monitor-explorer.js",
+        "/local-monitor-session-workspace.js",
         "/local-monitor-compare.js",
-        "/local-monitor-workspace.js",
     };
     private static readonly HashSet<string> PrimaryAssets = new(StringComparer.Ordinal)
     {
         SharedAsset,
+        "/monitor.css",
+        "/monitor.js",
+        "/monitor-shell.js",
         "/local-monitor-repositories.js",
+        "/local-monitor-settings.js",
         "/local-monitor-explorer.js",
+        "/local-monitor-session-workspace.js",
         "/local-monitor-compare.js",
-        "/local-monitor-workspace.js",
     };
 
     internal static bool IsPrimaryAsset(PathString path) =>
