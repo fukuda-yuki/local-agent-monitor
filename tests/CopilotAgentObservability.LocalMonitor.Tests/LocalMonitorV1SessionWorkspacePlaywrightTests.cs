@@ -331,6 +331,15 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
         Assert.True(await page.Locator(".local-monitor-session-summary").EvaluateAsync<bool>("e => e.getBoundingClientRect().width > innerWidth * .75"));
+        var sessionSummary = page.Locator("[data-session-summary]");
+        var summaryHeights = await sessionSummary.EvaluateAsync<int[]>("e => [e.scrollHeight, e.clientHeight]");
+        var summaryCardHeights = await sessionSummary.EvaluateAsync<string>("e => [...e.children].map((card,index)=>`${index}:${card.scrollHeight}/${card.clientHeight}`).join(',')");
+        Assert.True(summaryHeights[0] <= summaryHeights[1] + 1, $"Summary scrollHeight {summaryHeights[0]} exceeded clientHeight {summaryHeights[1]} ({summaryCardHeights}).");
+        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => { const bottom=e.getBoundingClientRect().bottom; return [...e.querySelectorAll('.local-monitor-session-summary-card')].filter(card => card.getClientRects().length).every(card => card.getBoundingClientRect().bottom <= bottom + 1); }"));
+        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => { const cards=[...e.querySelectorAll('.local-monitor-session-summary-card')].filter(card => card.getClientRects().length), top=cards[0].getBoundingClientRect().top; return cards.every(card => Math.abs(card.getBoundingClientRect().top - top) <= 1); }"));
+        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => { const bottom=e.getBoundingClientRect().bottom; return [...e.querySelectorAll('.local-monitor-session-coverage li')].every(item => item.getBoundingClientRect().bottom <= bottom + 1); }"));
+        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => e.scrollWidth > e.clientWidth"));
+        await Expect(page.Locator(".local-monitor-session-execution-workspace")).ToBeVisibleAsync();
         var executionToggle = page.Locator("[data-execution-toggle]").First; var executionTitle = executionToggle.Locator("strong"); var executionSummary = executionToggle.Locator("span");
         Assert.True(await executionTitle.EvaluateAsync<bool>("e => e.getBoundingClientRect().width >= 240"));
         Assert.True(await executionToggle.EvaluateAsync<bool>("e => { const title=e.querySelector('strong').getBoundingClientRect(), summary=e.querySelector('span').getBoundingClientRect(); return summary.top >= title.bottom && summary.left < title.right && title.left < summary.right; }"));
