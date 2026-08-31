@@ -159,6 +159,45 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
+    public void ProcessNextBatch_GenericPathUsesRequestModelWhenResponseModelWasNotObserved()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var startedAt = DateTimeOffset.Parse("2026-07-16T00:00:01Z");
+        InsertProjectedSpan(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            "generic-request-model-trace",
+            "generic-request-model-span",
+            null,
+            "copilot-cli",
+            "generic-repo",
+            startedAt);
+        Execute(
+            temp.DatabasePath,
+            """
+            UPDATE monitor_spans
+            SET request_model='request-only-model',
+                response_model=NULL
+            WHERE trace_id='generic-request-model-trace'
+              AND span_id='generic-request-model-span';
+            """);
+
+        Assert.Equal(
+            1,
+            new SqliteSessionOtelEnricher(
+                temp.DatabasePath,
+                store,
+                temp.RetentionContext).ProcessNextBatch(1));
+
+        var session = Assert.Single(store.ListMostRecent(10));
+        var run = Assert.Single(store.GetDetail(session.SessionId)!.Runs);
+        Assert.Equal("request-only-model", run.Model);
+    }
+
+    [Fact]
     public void ProcessNextBatch_RealGenericNormalizationProjectsExactWorkspaceRunFactsWithoutTokenDuplication()
     {
         const string traceId = "11111111111111111111111111111111";
