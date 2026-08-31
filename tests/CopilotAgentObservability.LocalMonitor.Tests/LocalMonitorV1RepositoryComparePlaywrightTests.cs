@@ -67,7 +67,9 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
-        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync("安全に表示できません");
+        var failure = page.Locator("[data-compare-ai-status]");
+        await Expect(failure).ToContainTextAsync("安全に表示できません");
+        await AssertVisibleFocusAndBlurCleanup(page, failure);
         Assert.Equal(0, await page.Locator("[data-compare-ai-result] a").CountAsync());
         await Expect(page.Locator(".local-monitor-compare-section")).ToHaveCountAsync(9);
     }
@@ -170,7 +172,9 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
-        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync(accepted ? "指摘はありません" : "安全に表示できません");
+        var status = page.Locator("[data-compare-ai-status]");
+        await Expect(status).ToContainTextAsync(accepted ? "指摘はありません" : "安全に表示できません");
+        if (!accepted) await AssertVisibleFocusAndBlurCleanup(page, status);
     }
 
     [Fact]
@@ -233,7 +237,9 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
-        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync(accepted ? "完了" : sizeCase == "over_envelope" ? "再試行" : "安全に表示できません");
+        var status = page.Locator("[data-compare-ai-status]");
+        await Expect(status).ToContainTextAsync(accepted ? "完了" : sizeCase == "over_envelope" ? "再試行" : "安全に表示できません");
+        if (!accepted && sizeCase != "over_envelope") await AssertVisibleFocusAndBlurCleanup(page, status);
     }
 
     [Fact]
@@ -369,9 +375,29 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
-        await Expect(page.Locator("[data-compare-ai-status]")).ToContainTextAsync("表示できません");
+        var failure = page.Locator("[data-compare-ai-status]");
+        await Expect(failure).ToContainTextAsync("表示できません");
+        await AssertVisibleFocusAndBlurCleanup(page, failure);
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
         await Expect(page.Locator(".local-monitor-compare-section")).ToHaveCountAsync(9);
+    }
+
+    private static async Task AssertVisibleFocusAndBlurCleanup(IPage page, ILocator failure)
+    {
+        await Expect(failure).ToBeFocusedAsync();
+        var focusStyle = await failure.EvaluateAsync<string[]>("""
+            element => {
+              const style = getComputedStyle(element);
+              return [style.outlineStyle, style.outlineWidth, style.outlineColor];
+            }
+            """);
+        Assert.NotEqual("none", focusStyle[0]);
+        Assert.True(double.Parse(focusStyle[1].Replace("px", "", StringComparison.Ordinal), System.Globalization.CultureInfo.InvariantCulture) >= 2);
+        Assert.NotEqual("rgba(0, 0, 0, 0)", focusStyle[2]);
+        var settings = page.GetByRole(AriaRole.Button, new() { Name = "設定", Exact = true });
+        await settings.FocusAsync();
+        await Expect(settings).ToBeFocusedAsync();
+        Assert.Equal("none", await failure.EvaluateAsync<string>("element => getComputedStyle(element).outlineStyle"));
     }
 
     [Fact]

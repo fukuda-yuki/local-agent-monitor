@@ -465,6 +465,11 @@
     scope_too_large: "比較がAI解釈の上限を超えています。",
   });
 
+  function finishAiFailure(message) {
+    activeAiRun = null; aiCancelFailed = false; aiCancel.hidden = true; aiCancel.disabled = false; aiResult.replaceChildren(); aiStatus.textContent = message;
+    aiStatus.tabIndex = -1; aiStatus.dataset.terminalFailure = "true"; aiStatus.focus();
+  }
+
   function appendAiField(target, label, value) {
     if (value === null || value === undefined || value === "") return;
     const row = element("p"); row.append(element("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
@@ -541,7 +546,7 @@
     aiResult.replaceChildren();
     const acceptedEvidence = validateAiResult(result);
     if (!acceptedEvidence) {
-      aiStatus.textContent = AI_STATES.invalid_result; return false;
+      finishAiFailure(AI_STATES.invalid_result); return false;
     }
     aiResult.append(element("h3", null, "AIによる解釈"));
     if (result.scope && typeof result.scope === "object") {
@@ -596,25 +601,23 @@
         if (!response.ok) throw new Error("poll_failed");
         const wire = await readStrictJson(response, RUN_MAXIMUM_BYTES, true); const run = wire.value;
         if (generation !== aiGeneration || activeAiRun !== runId) return;
-        if (!ownsComparisonRun(run, runId)) { activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
+        if (!ownsComparisonRun(run, runId)) { finishAiFailure("この比較に属するAI解釈を表示できません。"); return; }
         if (["succeeded", "zero_findings"].includes(run.state)) {
           const span = wire.resultSpan;
           if (!span || new TextEncoder().encode(wire.text.slice(span.start, span.end)).length > RESULT_MAXIMUM_BYTES) {
-            activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+            finishAiFailure(AI_STATES.invalid_result); return;
           }
         }
         if (["succeeded", "zero_findings"].includes(run.state)
             && (!validateAiResult(run.result) || (run.state === "zero_findings") !== (run.result.findings.length === 0))) {
-          activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+          finishAiFailure(AI_STATES.invalid_result); return;
         }
         if (!aiCancelFailed || !["queued", "running"].includes(run.state)) aiStatus.textContent = AI_STATES[run.state] ?? "AI解釈を表示できません。";
         if (!["queued", "running"].includes(run.state)) {
           activeAiRun = null; aiCancelFailed = false; aiCancel.hidden = true;
           if (["succeeded", "zero_findings"].includes(run.state) && !renderAiResult(run.result)) return;
           if (!["succeeded", "zero_findings"].includes(run.state)) {
-            aiStatus.tabIndex = -1;
-            aiStatus.dataset.terminalFailure = "true";
-            aiStatus.focus();
+            finishAiFailure(aiStatus.textContent);
           }
           return;
         }
@@ -631,12 +634,12 @@
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
       });
-      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AIを利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
-      const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
+      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); finishAiFailure(failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AIを利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"); return; }
+      const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { finishAiFailure("AI解釈を開始できませんでした。"); return; }
       activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
       try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
       await pollAiRun(activeAiRun, generation);
-    } catch { aiStatus.textContent = "AI解釈を開始できませんでした。"; }
+    } catch { finishAiFailure("AI解釈を開始できませんでした。"); }
     finally { aiStart.disabled = false; }
   }
 
@@ -680,7 +683,7 @@
       const value = response.ok ? await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES) : null;
       if (generation !== aiGeneration || activeAiRun !== runId) return;
       if (!response.ok || !exactSet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; return; }
-      aiGeneration++; activeAiRun = null; aiCancel.hidden = true; aiStatus.textContent = AI_STATES.canceled;
+      aiGeneration++; finishAiFailure(AI_STATES.canceled);
     } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
   });
   document.addEventListener("cao-route-state", event => {
