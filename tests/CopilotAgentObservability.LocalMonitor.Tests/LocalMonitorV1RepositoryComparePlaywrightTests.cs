@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json.Nodes;
 using CopilotAgentObservability.Persistence.Sqlite;
@@ -374,6 +375,59 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task CompareAiProviderFailureIsVisibleFocusedAndCapturedAtTheHardViewport()
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions { ViewportSize = new ViewportSize { Width = 1366, Height = 768 } });
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(Run("provider_failed", "null", "provider_failed"))));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
+        var failure = page.Locator("[data-compare-ai-status]");
+        await Expect(failure).ToHaveTextAsync("AIで解釈できませんでした。");
+        await Expect(failure).ToBeFocusedAsync();
+        var focusStyle = await failure.EvaluateAsync<string[]>("""
+            element => {
+              const style = getComputedStyle(element);
+              return [style.outlineStyle, style.outlineWidth, style.outlineColor];
+            }
+            """);
+        Assert.NotEqual("none", focusStyle[0]);
+        Assert.True(double.Parse(focusStyle[1].Replace("px", "", StringComparison.Ordinal), System.Globalization.CultureInfo.InvariantCulture) >= 2);
+        Assert.NotEqual("rgba(0, 0, 0, 0)", focusStyle[2]);
+        var settings = page.GetByRole(AriaRole.Button, new() { Name = "設定", Exact = true });
+        await settings.FocusAsync();
+        await Expect(settings).ToBeFocusedAsync();
+        Assert.Equal("none", await failure.EvaluateAsync<string>("element => getComputedStyle(element).outlineStyle"));
+        Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
+        Assert.True(await page.EvaluateAsync<bool>("""
+            () => [...document.querySelectorAll('.local-monitor-compare-result-heading th')].every(cell => {
+              const boundary = cell.getBoundingClientRect().right;
+              return [...cell.querySelectorAll('.local-monitor-compare-evidence-actions button')]
+                .every(button => button.getBoundingClientRect().right <= boundary + 1);
+            })
+            """));
+
+        await failure.FocusAsync();
+        await Expect(failure).ToBeFocusedAsync();
+        var screenshotPath = CompareArtifactPath("compare-ai-provider-failed-1366x768.png");
+        await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath });
+        var png = await File.ReadAllBytesAsync(screenshotPath);
+        Assert.True(png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }));
+        Assert.Equal(1366, BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(16, 4)));
+        Assert.Equal(768, BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(20, 4)));
+    }
+
+    [Fact]
     [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ImmutableCompareRendersNineSectionsRowsEvidenceAndResponsiveTableWithoutRecompute()
     {
@@ -397,6 +451,9 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
             {
                 rowQueries.Add(new Uri(route.Request.Url).Query);
                 var rows = JsonNode.Parse(Golden("local-monitor-comparison-rows.response.json").GetAwaiter().GetResult())!.AsObject();
+                rows["items"]![0]!["display_name"] = "表示ツール";
+                rows["items"]![0]!["values"]![0]!["value"] = "stored-display-name";
+                rows["items"]![0]!["values"]![1]!["value"] = "hidden-sort-key";
                 rows["next_cursor"] = rowQueries.Count <= 2 ? "cursor-one" : null;
                 return route.FulfillAsync(Json(rows.ToJsonString()));
             }
@@ -417,12 +474,22 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal(new[] { "対象", "トークン", "入力トークンの内訳", "時間・実行量", "スキル", "ツール", "サブエージェント", "エラー・再試行", "比較条件" },
             await page.Locator(".local-monitor-compare-section > h2").AllTextContentsAsync());
         await Expect(page.Locator("[data-compare-cohort-count='a']")).ToHaveTextAsync("1件");
-        await Expect(page.Locator(".local-monitor-compare-result-heading th").First).ToHaveTextAsync("トークン合計");
-        Assert.Equal(
-            ["基準・セッション数", "基準・利用可能件数", "基準・中央値", "基準・最小値", "基準・最大値", "基準・合計",
-             "比較対象・セッション数", "比較対象・利用可能件数", "比較対象・中央値", "比較対象・最小値", "比較対象・最大値", "比較対象・合計",
-             "絶対差", "相対差", "記録項目", "基準・利用できない状態"],
-            await page.Locator(".local-monitor-compare-table").First.Locator("tbody > tr:not(.local-monitor-compare-result-heading) > th").AllTextContentsAsync());
+        var scalarTable = page.Locator(".local-monitor-compare-table").First;
+        Assert.Equal(["指標", "基準", "比較対象", "差"], await scalarTable.Locator("thead th").AllTextContentsAsync());
+        await Expect(scalarTable.Locator("tbody > tr")).ToHaveCountAsync(1);
+        var scalarCells = scalarTable.Locator("tbody > tr").First.Locator(":scope > th, :scope > td");
+        await Expect(scalarCells).ToHaveCountAsync(4);
+        await Expect(scalarCells.Nth(0)).ToContainTextAsync("トークン合計");
+        Assert.Equal(["セッション数", "利用可能件数", "中央値", "最小値", "最大値", "合計", "利用できない状態"],
+            await scalarCells.Nth(1).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
+        Assert.Equal(["1", "1", "10", "10", "10", "10"],
+            await scalarCells.Nth(1).Locator(".local-monitor-compare-fact:nth-child(-n+6) > span:nth-child(2)").AllTextContentsAsync());
+        Assert.Equal(["セッション数", "利用可能件数", "中央値", "最小値", "最大値", "合計"],
+            await scalarCells.Nth(2).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
+        Assert.Equal(["1", "1", "12", "12", "12", "12"],
+            await scalarCells.Nth(2).Locator(".local-monitor-compare-fact > span:nth-child(2)").AllTextContentsAsync());
+        Assert.Equal(["絶対差", "相対差"], await scalarCells.Nth(3).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
+        Assert.Equal(["2", "20.0"], await scalarCells.Nth(3).Locator(".local-monitor-compare-fact > span:nth-child(2)").AllTextContentsAsync());
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("0");
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("今回の記録にはありません");
         var compareBody = page.Locator(".local-monitor-repository-compare-body");
@@ -436,7 +503,14 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         var toolSection = page.Locator(".local-monitor-compare-section").Filter(new LocatorFilterOptions { Has = page.Locator("h2", new PageLocatorOptions { HasText = "ツール" }) });
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "ツールを読み込む" }).ClickAsync();
-        await Expect(toolSection).ToContainTextAsync("tool-helper");
+        await Expect(toolSection).ToContainTextAsync("表示ツール");
+        await Expect(toolSection).Not.ToContainTextAsync("stored-display-name");
+        await Expect(toolSection).Not.ToContainTextAsync("hidden-sort-key");
+        var toolRow = toolSection.Locator("tbody > tr").First;
+        await Expect(toolRow.Locator(":scope > th, :scope > td")).ToHaveCountAsync(4);
+        var failureRelativeDifference = toolRow.Locator("td").Nth(2).Locator(".local-monitor-compare-fact").Filter(new() { HasText = "失敗回数・相対差" });
+        await Expect(failureRelativeDifference).ToContainTextAsync("今回の記録にはありません");
+        await Expect(failureRelativeDifference).Not.ToContainTextAsync("失敗回数・相対差0");
         await toolSection.GetByPlaceholder("ツールを検索").FillAsync("synthetic");
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "検索" }).ClickAsync();
         Assert.Contains(rowQueries, query => query.Contains("family=tool&q=synthetic", StringComparison.Ordinal));
@@ -557,20 +631,25 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         var body = page.Locator(".local-monitor-repository-compare-body");
         foreach (var (_, label) in rowLabels) await Expect(body).ToContainTextAsync(label);
-        Assert.Equal(
-            ["基準・呼び出し回数", "比較対象・呼び出し回数", "基準・失敗回数", "比較対象・開始回数",
-             "基準・完了回数", "比較対象・失敗回数", "基準・トークン合計", "基準・呼び出しあり", "比較対象・呼び出しあり",
-             "基準・開始あり", "基準・利用可能件数", "開始", "終了", "相対差", "内訳", "基準・呼び出し回数・セッション数",
-             "基準・失敗回数・利用可能件数", "呼び出し回数・絶対差", "比較対象・トークン合計・利用できない状態",
-             "基準・アーカイブ済みセッション数", "比較対象・アーカイブ済みリポジトリのセッション数",
-             "基準・アーカイブ済みを含む", "比較対象・アーカイブ済みを含む", "表示名", "並び順",
-             "基準・入力トークン", "比較対象・再試行件数", "記録項目"],
-            await page.Locator(".local-monitor-compare-result-heading").Last.Locator("xpath=following-sibling::tr/th").AllTextContentsAsync());
+        var structuralRow = page.Locator(".local-monitor-compare-result-heading").Last;
+        var structuralCells = structuralRow.Locator(":scope > th, :scope > td");
+        await Expect(structuralCells).ToHaveCountAsync(4);
+        Assert.Equal(["開始", "終了", "内訳", "記録項目"],
+            await structuralCells.Nth(0).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
+        Assert.Equal(["呼び出し回数", "失敗回数", "完了回数", "トークン合計", "呼び出しあり", "開始あり", "利用可能件数",
+            "呼び出し回数・セッション数", "失敗回数・利用可能件数", "アーカイブ済みセッション数", "アーカイブ済みを含む", "入力トークン"],
+            await structuralCells.Nth(1).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
+        Assert.Equal(["呼び出し回数", "開始回数", "失敗回数", "呼び出しあり", "トークン合計・利用できない状態",
+            "アーカイブ済みリポジトリのセッション数", "アーカイブ済みを含む", "再試行件数"],
+            await structuralCells.Nth(2).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
+        Assert.Equal(["相対差", "呼び出し回数・絶対差"],
+            await structuralCells.Nth(3).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
         await Expect(body).ToContainTextAsync("比較項目");
-        Assert.Equal(
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "2026-08-01", "2026-08-31", "11", "true", "1", "2", "3",
-             "今回の記録にはありません", "12", "13", "はい", "いいえ", "true", "false", "14", "15", "kept-value"],
-            await page.Locator(".local-monitor-compare-result-heading").Last.Locator("xpath=following-sibling::tr/td[1]").AllTextContentsAsync());
+        await Expect(structuralCells.Nth(0)).ToContainTextAsync("kept-value");
+        await Expect(structuralCells.Nth(1)).ToContainTextAsync("はい");
+        await Expect(structuralCells.Nth(2)).ToContainTextAsync("いいえ");
+        await Expect(structuralCells.Nth(3)).ToContainTextAsync("3");
+        await Expect(structuralRow).Not.ToContainTextAsync("truefalse");
         await Expect(body).Not.ToContainTextAsync("unexpected_row_key");
         await Expect(body).Not.ToContainTextAsync("unexpected_value_key");
         await Expect(body).Not.ToContainTextAsync("a_s2_input_tokens");
@@ -589,7 +668,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         });
         read["results"]!.AsArray().Add(new JsonObject
         {
-            ["result_ordinal"] = 3, ["section_key"] = "target", ["row_kind"] = "condition", ["row_key"] = "archived_inclusion",
+            ["result_ordinal"] = 3, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "archived_inclusion",
             ["values"] = new JsonArray(
                 new JsonObject { ["key"] = "a_included_count", ["value"] = "0" },
                 new JsonObject { ["key"] = "a_includes_archived", ["value"] = "false" },
@@ -599,8 +678,27 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         });
         read["results"]!.AsArray().Add(new JsonObject
         {
-            ["result_ordinal"] = 4, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "archived_inclusion",
+            ["result_ordinal"] = 4, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "unexpected_condition",
             ["values"] = new JsonArray(new JsonObject { ["key"] = "a_includes_archived", ["value"] = "false" }),
+        });
+        var conditionRows = new[] { "sources", "models", "source_versions", "adapter_versions", "completeness" };
+        foreach (var (rowKey, index) in conditionRows.Select((rowKey, index) => (rowKey, index)))
+        {
+            read["results"]!.AsArray().Add(new JsonObject
+            {
+                ["result_ordinal"] = 5 + index, ["section_key"] = "conditions", ["row_kind"] = "scalar", ["row_key"] = rowKey,
+                ["values"] = new JsonArray(new JsonObject { ["key"] = "distribution", ["value"] = "synthetic" }),
+            });
+        }
+        read["results"]!.AsArray().Add(new JsonObject
+        {
+            ["result_ordinal"] = 10, ["section_key"] = "conditions", ["row_kind"] = "scalar", ["row_key"] = "metric_availability",
+            ["values"] = new JsonArray(new JsonObject { ["key"] = "a_s2_input_tokens", ["value"] = "1" }),
+        });
+        read["results"]!.AsArray().Add(new JsonObject
+        {
+            ["result_ordinal"] = 11, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "period",
+            ["values"] = new JsonArray(new JsonObject { ["key"] = "start", ["value"] = "2026-08-01" }),
         });
         var readBody = read.ToJsonString();
         var evidenceGolden = await Golden("local-monitor-comparison-evidence.response.json");
@@ -652,6 +750,8 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
                     1 => field is "median" or "total_tokens",
                     2 => field == "count",
                     3 => field == "condition",
+                    >= 5 and <= 9 => field == "condition",
+                    11 => field == "condition",
                     20 => field is "count" or "error_count" or "retry_count",
                     21 => field == "count",
                     22 => field is "count" or "total_tokens",
@@ -679,23 +779,39 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
-        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        var tokenSection = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = "トークン" }) });
+        await Expect(tokenSection.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true })).ToBeVisibleAsync();
-        var archivedRows = page.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "アーカイブ済みの対象" }) });
-        await Expect(archivedRows).ToHaveCountAsync(2);
-        var validArchivedRow = archivedRows.Nth(0);
-        var invalidArchivedRow = archivedRows.Nth(1);
+        var targetSection = page.Locator(".local-monitor-compare-section").First;
+        var archivedRows = targetSection.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "アーカイブ済みの対象" }) });
+        await Expect(archivedRows).ToHaveCountAsync(1);
+        var validArchivedRow = archivedRows.First;
+        var invalidArchivedRow = targetSection.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "比較項目" }) });
         await Expect(validArchivedRow.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true })).ToBeVisibleAsync();
+        var periodRow = targetSection.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "期間" }) });
+        await Expect(periodRow.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true })).ToBeVisibleAsync();
         Assert.Equal(0, await invalidArchivedRow.GetByRole(AriaRole.Button).CountAsync());
         Assert.Equal(0, await page.GetByRole(AriaRole.Button, new() { Name = "a_session_countの根拠を表示", Exact = true }).CountAsync());
 
-        await page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true }).ClickAsync();
+        await tokenSection.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true }).ClickAsync();
         await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
         await page.Keyboard.PressAsync("Escape");
         await validArchivedRow.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true }).ClickAsync();
         await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
         await page.Keyboard.PressAsync("Escape");
         Assert.DoesNotContain(evidenceQueries, query => query.Contains("result_ordinal=4", StringComparison.Ordinal));
+        var conditions = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = "比較条件" }) });
+        var conditionEvidence = conditions.GetByRole(AriaRole.Button, new() { Name = "条件の根拠を表示", Exact = true });
+        await Expect(conditionEvidence).ToHaveCountAsync(conditionRows.Length);
+        var metricAvailability = conditions.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "指標の利用可能件数" }) });
+        Assert.Equal(0, await metricAvailability.GetByRole(AriaRole.Button).CountAsync());
+        for (var index = 0; index < conditionRows.Length; index++)
+        {
+            await conditionEvidence.Nth(index).ClickAsync();
+            await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");
+            await page.Keyboard.PressAsync("Escape");
+        }
+        Assert.DoesNotContain(evidenceQueries, query => query.Contains("result_ordinal=10", StringComparison.Ordinal));
 
         var targetEvidence = page.Locator(".local-monitor-compare-section").First.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true });
         await targetEvidence.ClickAsync();
@@ -729,7 +845,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "次のページ", Exact = true }).ClickAsync();
         await Expect(toolSection.Locator("table tbody .local-monitor-compare-result-heading")).ToHaveCountAsync(2);
         Assert.Equal(new[] { "Synthetic tool", "Second tool" },
-            await toolSection.Locator("table tbody .local-monitor-compare-result-heading th").AllTextContentsAsync());
+            await toolSection.Locator("table tbody .local-monitor-compare-result-heading th > div:first-child").AllTextContentsAsync());
         Assert.Equal(0, await toolSection.Locator(":scope > div > div > tr").CountAsync());
         Assert.Contains(rowQueries, query => query.Contains("after=rows-cursor", StringComparison.Ordinal));
         Assert.DoesNotContain(evidenceQueries, query => query.Contains("field_key=a_", StringComparison.Ordinal));
@@ -741,6 +857,13 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
     private static Task<string> Golden(string name) => File.ReadAllTextAsync(Path.Combine(
         AppContext.BaseDirectory, "TestData", "LocalMonitorV1Comparison", name));
+
+    private static string CompareArtifactPath(string name)
+    {
+        var directory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "artifacts", "repository-compare"));
+        Directory.CreateDirectory(directory);
+        return Path.Combine(directory, name);
+    }
 
     private static string Readiness() => """{"provider":"github_copilot","selected_model":"model","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""";
 
