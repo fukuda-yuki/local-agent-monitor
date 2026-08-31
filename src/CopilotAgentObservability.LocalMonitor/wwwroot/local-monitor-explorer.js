@@ -1683,7 +1683,7 @@
     const overlap = [...a].filter(id => b.has(id));
     const selected = new Set([...a, ...b]);
     const locallyExcluded = id => state.excludedSelections.has(id)
-      && !(includeArchived.checked && state.exclusionReasons.get(id) === "session_archived");
+      && !(includeArchived.checked && ["session_archived", "repository_archived"].includes(state.exclusionReasons.get(id)));
     const excluded = [...selected].filter(locallyExcluded);
     const availableA = [...a].filter(id => !locallyExcluded(id));
     const availableB = [...b].filter(id => !locallyExcluded(id));
@@ -1763,15 +1763,26 @@
       !exactKeys(item, ["cohort", "request_ordinal", "session_id"])
       || item.cohort !== expected[index].cohort || item.request_ordinal !== expected[index].request_ordinal
       || item.session_id !== expected[index].session_id)) throw new TypeError("invalid comparison preview");
-    const metadata = candidate => exactKeys(candidate, ["archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"])
+    const version = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$/.test(value);
+    const nullableVersions = value => value === null || Array.isArray(value) && value.length <= 63
+      && new Set(value).size === value.length && value.every(version);
+    const metadata = candidate => exactKeys(candidate, ["archive_state", "session_archive_revision", "assigned_repository_archive_state", "assigned_repository_archive_revision", "archive_exclusion_reason", "source", "model", "projection_version", "completeness", "metric_coverage", "source_application_versions", "adapter_versions", "session_revision", "projection_revision"])
       && ["active", "archived"].includes(candidate.archive_state)
-      && (candidate.source === null || typeof candidate.source === "string")
-      && (candidate.model === null || typeof candidate.model === "string")
-      && (candidate.projection_version === null || typeof candidate.projection_version === "bigint")
+      && (candidate.session_archive_revision === null || typeof candidate.session_archive_revision === "bigint" && candidate.session_archive_revision >= 0n)
+      && ["active", "archived", null].includes(candidate.assigned_repository_archive_state)
+      && (candidate.assigned_repository_archive_revision === null || typeof candidate.assigned_repository_archive_revision === "bigint" && candidate.assigned_repository_archive_revision >= 0n)
+      && ["session_archived", "repository_archived", null].includes(candidate.archive_exclusion_reason)
+      && (candidate.source === null || typeof candidate.source === "string" && Array.from(candidate.source).length <= 100)
+      && (candidate.model === null || typeof candidate.model === "string" && Array.from(candidate.model).length <= 200)
+      && (candidate.projection_version === null || typeof candidate.projection_version === "bigint" && candidate.projection_version >= 1n)
       && ["unbound", "partial", "rich", "full", null].includes(candidate.completeness)
-      && Array.isArray(candidate.metric_coverage)
-      && (candidate.session_revision === null || typeof candidate.session_revision === "bigint")
-      && (candidate.projection_revision === null || REVISION.test(candidate.projection_revision));
+      && (candidate.metric_coverage === null || Array.isArray(candidate.metric_coverage) && candidate.metric_coverage.length <= 64
+        && new Set(candidate.metric_coverage).size === candidate.metric_coverage.length
+        && candidate.metric_coverage.every(value => typeof value === "string" && Array.from(value).length >= 1 && Array.from(value).length <= 80))
+      && nullableVersions(candidate.source_application_versions)
+      && nullableVersions(candidate.adapter_versions)
+      && (candidate.session_revision === null || typeof candidate.session_revision === "bigint" && candidate.session_revision >= 0n)
+      && (candidate.projection_revision === null || typeof candidate.projection_revision === "string" && REVISION.test(candidate.projection_revision));
     if (value.included.some(item => !exactKeys(item, ["cohort", "session_id", "metadata"])
         || !["a", "b"].includes(item.cohort) || !UUID_V7.test(item.session_id) || !metadata(item.metadata))
         || value.excluded.some(item => !exactKeys(item, ["cohort", "request_ordinal", "session_id", "reason", "metadata"])
