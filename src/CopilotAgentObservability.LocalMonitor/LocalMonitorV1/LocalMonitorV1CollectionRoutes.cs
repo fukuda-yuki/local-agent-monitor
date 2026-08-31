@@ -26,6 +26,7 @@ internal static class LocalMonitorV1CollectionRoutes
                 var snapshot = await service.ReadAsync(new(LocalRepositoryScopeKind.All, null), context.RequestAborted);
                 await Success(context, LocalMonitorV1CollectionApplication.SerializeRepositories(snapshot, request, repositoryCursorKey, testOverrides?.RepositoryCollectionRevision, testOverrides?.RepositoryItemRevision));
             }
+            catch (LocalWorkspaceSessionDetailException e) when (e.Error == "local_monitor_ui_unavailable") { await Error(context, 503, e.Error); }
             catch (LocalRepositoryScopeSnapshotException) { await Error(context, 503, "persistence_busy"); }
             catch (LocalMonitorV1CollectionException e) { await Error(context, e.Error == "workspace_too_large" ? 409 : 400, e.Error); }
         });
@@ -49,6 +50,7 @@ internal static class LocalMonitorV1CollectionRoutes
                 await Success(context, LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request, cursorKey, testOverrides?.SessionCollectionRevision, testOverrides?.SessionItemRevision));
             }
             catch (InvalidOperationException e) when (e.Message == "local_repository_scope_repository_not_found") { await Error(context, 404, "repository_not_found"); }
+            catch (LocalWorkspaceSessionDetailException e) when (e.Error == "local_monitor_ui_unavailable") { await Error(context, 503, e.Error); }
             catch (LocalRepositoryScopeSnapshotException) { await Error(context, 503, "persistence_busy"); }
             catch (LocalMonitorV1CollectionException e) { await Error(context, e.Error == "workspace_too_large" ? 409 : 400, e.Error); }
         });

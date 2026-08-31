@@ -41,6 +41,40 @@ public sealed class LocalMonitorV1CollectionRouteTests
     }
 
     [Theory]
+    [InlineData("GET", false)]
+    [InlineData("HEAD", true)]
+    public async Task RepositoryCompositionUnavailablePublishesFrozenServiceUnavailableResponse(string method, bool suppressesBody)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new CompositionUnavailableSnapshotService()));
+        using var request = new HttpRequestMessage(new HttpMethod(method), "/api/local-monitor/v1/repositories");
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType!.ToString());
+        Assert.Equal(40, response.Content.Headers.ContentLength);
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+        Assert.Equal(suppressesBody ? [] : Encoding.UTF8.GetBytes("{\"error\":\"local_monitor_ui_unavailable\"}"), await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task SessionCompositionUnavailablePublishesFrozenServiceUnavailableResponse()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new CompositionUnavailableSnapshotService()));
+        using var request = Post(host, RequestJson);
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType!.ToString());
+        Assert.Equal(40, response.Content.Headers.ContentLength);
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+        Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
     [InlineData("PUT")]
     [InlineData("PATCH")]
     [InlineData("DELETE")]
@@ -310,4 +344,6 @@ public sealed class LocalMonitorV1CollectionRouteTests
     { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>ValueTask.FromResult(snapshot with { Request=request }); }
     private sealed class BusySnapshotService : ILocalRepositoryScopeSnapshotService
     { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>throw new LocalRepositoryScopeSnapshotException(LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",new InvalidOperationException()); }
+    private sealed class CompositionUnavailableSnapshotService : ILocalRepositoryScopeSnapshotService
+    { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"); }
 }
