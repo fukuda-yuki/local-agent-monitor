@@ -234,7 +234,7 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
-    public void ProcessNextBatch_RealGenericNormalizationProjectsExactWorkspaceRunFactsWithoutTokenDuplication()
+    public async Task ProcessNextBatch_RealGenericNormalizationProjectsExactWorkspaceRunFactsWithoutTokenDuplication()
     {
         const string traceId = "11111111111111111111111111111111";
         using var temp = new MonitorTempDirectory();
@@ -249,9 +249,7 @@ public sealed class SessionOtelEnrichmentTests
                "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
                "status":{"code":"1"},"attributes":[
                  {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
-                 {"key":"gen_ai.request.model","value":{"stringValue":"parent-model"}},
-                 {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
-                 {"key":"gen_ai.usage.output_tokens","value":{"intValue":"20"}}
+                 {"key":"gen_ai.request.model","value":{"stringValue":"parent-model"}}
                ]},
               {"traceId":"{{{traceId}}}","spanId":"2222222222222222","parentSpanId":"1111111111111111","name":"chat",
                "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
@@ -293,7 +291,14 @@ public sealed class SessionOtelEnrichmentTests
 
         using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
+        using (var clearRunTokens = connection.CreateCommand())
+        {
+            clearRunTokens.CommandText = "UPDATE session_runs SET input_tokens=NULL,output_tokens=NULL,total_tokens=NULL;";
+            Assert.True(clearRunTokens.ExecuteNonQuery() > 0);
+        }
         var authority = FixedSkillRegistryGenerationAuthority.Load();
+        LocalRepositoryCatalogSchemaV1.Ensure(connection);
+        LocalArchiveSchemaV1.Ensure(connection);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, ObservedAt, authority);
         using (var transaction = connection.BeginTransaction())
         {
@@ -322,7 +327,7 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal("response-model", reader.GetString(0));
         Assert.Equal("recorded", reader.GetString(1));
         Assert.Equal(1000, reader.GetInt64(2));
-        Assert.Equal("session_run", reader.GetString(3));
+        Assert.Equal("llm_span", reader.GetString(3));
         Assert.Equal(100, reader.GetInt64(4));
         Assert.Equal(20, reader.GetInt64(5));
         Assert.Equal("not_observed", reader.GetString(6));
@@ -333,6 +338,38 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal(100, reader.GetInt64(0));
         Assert.Equal(20, reader.GetInt64(1));
         Assert.True(reader.IsDBNull(2));
+        reader.Close();
+
+        using var sessionCommand = connection.CreateCommand();
+        sessionCommand.CommandText = "SELECT session_id FROM local_workspace_sessions;";
+        var sessionId = Assert.IsType<string>(sessionCommand.ExecuteScalar());
+        var clock = new FixedTimeProvider(ObservedAt.AddMinutes(1));
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(
+                registryAuthority: authority,
+                timeProvider: clock),
+            skillRegistryAuthority: authority,
+            timeProvider: clock);
+
+        var summary = await service.ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId),
+            CancellationToken.None);
+
+        var execution = Assert.Single(
+            summary.Detail.Executions,
+            value => value.Model == "response-model");
+        Assert.Equal("recorded", execution.TimeAuthority);
+        Assert.Equal(1000, execution.DurationMilliseconds);
+        Assert.Equal("llm_span", execution.Tokens.Authority);
+        Assert.Equal("recorded", execution.Tokens.Input.State);
+        Assert.Equal(100, execution.Tokens.Input.Value);
+        Assert.Equal("recorded", execution.Tokens.Output.State);
+        Assert.Equal(20, execution.Tokens.Output.Value);
+        Assert.Equal("not_observed", execution.Tokens.Total.State);
+        Assert.Null(execution.Tokens.Total.Value);
     }
 
     [Fact]
