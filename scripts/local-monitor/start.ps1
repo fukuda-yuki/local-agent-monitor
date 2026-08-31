@@ -15,6 +15,50 @@ param(
 
 . "$PSScriptRoot\common.ps1"
 
+function Remove-LocalMonitorStateForStartedProcess {
+    param($Process)
+
+    $state = Get-LocalMonitorState
+    $stateProcessId = 0
+    if ($null -ne $state `
+        -and [int]::TryParse([string] $state.process_id, [ref] $stateProcessId) `
+        -and $stateProcessId -eq $Process.Id) {
+        Remove-LocalMonitorState
+    }
+}
+
+function Exit-LocalMonitorStartIfChildExited {
+    param($Process)
+
+    $hasExitedProperty = $Process.PSObject.Properties['HasExited']
+    if ($null -eq $hasExitedProperty -or -not [bool] $hasExitedProperty.Value) {
+        return
+    }
+
+    $exitCode = $Process.ExitCode
+    Remove-LocalMonitorStateForStartedProcess -Process $Process
+    Write-LocalMonitorLog "monitor_start_failed process_id=$($Process.Id) exit_code=$exitCode"
+    Write-Error 'monitor_start_failed'
+    exit 1
+}
+
+function Stop-LocalMonitorStartedProcess {
+    param($Process)
+
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill($true)
+            if (-not $Process.WaitForExit(10000)) {
+                return $false
+            }
+        }
+        return $Process.HasExited
+    }
+    catch {
+        return $false
+    }
+}
+
 if (-not (Test-LocalMonitorPricingRegistryOverrideCount -PricingRegistryOverride $PricingRegistryOverride)) {
     Write-Error 'pricing_registry_override_count_invalid'
     exit 1
@@ -149,14 +193,23 @@ $process = Start-LocalMonitorProcess `
     -ArgumentList $arguments `
     -StandardOutputPath $stdoutPath `
     -StandardErrorPath $stderrPath
-Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
-Write-LocalMonitorLog "start process_id=$($process.Id) url=$Url mode=$stateMode sanitized_only=$($SanitizedOnly.IsPresent)"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$stateSaved = $false
 do {
+    Exit-LocalMonitorStartIfChildExited -Process $process
+
     Start-Sleep -Milliseconds 500
     $live = Test-LocalMonitorHealth -Url $Url -Path '/health/live'
     if ($null -ne $live -and [int] $live.StatusCode -eq 200) {
+        Exit-LocalMonitorStartIfChildExited -Process $process
+        if (-not $stateSaved) {
+            Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
+            Write-LocalMonitorLog "start process_id=$($process.Id) url=$Url mode=$stateMode sanitized_only=$($SanitizedOnly.IsPresent)"
+            $stateSaved = $true
+        }
+        Exit-LocalMonitorStartIfChildExited -Process $process
+
         if (-not $WaitReady) {
             Write-Output "started"
             exit 0
@@ -166,6 +219,7 @@ do {
         if ($null -eq $ready) {
             continue
         }
+        Exit-LocalMonitorStartIfChildExited -Process $process
 
         $readyBody = $ready.Content | ConvertFrom-Json
         if ($readyBody.status -eq 'ready' -or $readyBody.status -eq 'degraded') {
@@ -178,6 +232,14 @@ do {
         exit 2
     }
 } while ((Get-Date) -lt $deadline)
+
+Exit-LocalMonitorStartIfChildExited -Process $process
+$childStopped = Stop-LocalMonitorStartedProcess -Process $process
+if (-not $childStopped) {
+    Write-LocalMonitorLog "monitor_start_cleanup_failed process_id=$($process.Id)"
+} else {
+    Remove-LocalMonitorStateForStartedProcess -Process $process
+}
 
 Write-LocalMonitorLog "monitor_start_timeout url=$Url"
 Write-Error 'monitor_start_timeout'

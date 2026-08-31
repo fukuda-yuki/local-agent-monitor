@@ -533,6 +533,142 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_removes_unlocked_empty_read_sidecars_before_recovery_guard()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        Assert.False(File.Exists(temp.Target + "-wal"));
+        Assert.False(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
+    public void Monitor_startup_preserves_empty_read_sidecars_when_another_monitor_is_live()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        var wal = temp.Target + "-wal";
+        var sharedMemory = temp.Target + "-shm";
+        File.WriteAllBytes(wal, []);
+        File.WriteAllBytes(sharedMemory, new byte[32 * 1024]);
+        File.WriteAllText(
+            Path.Combine(Path.GetDirectoryName(temp.Target)!, "local-monitor.state.json"),
+            JsonSerializer.Serialize(new { process_id = Environment.ProcessId }));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.True(File.Exists(wal));
+        Assert.True(File.Exists(sharedMemory));
+    }
+
+    [Fact]
+    public void Monitor_startup_preserves_nonempty_wal_and_shared_memory()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        var wal = temp.Target + "-wal";
+        var sharedMemory = temp.Target + "-shm";
+        File.WriteAllBytes(wal, [0x01]);
+        File.WriteAllBytes(sharedMemory, new byte[32 * 1024]);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.Equal(new byte[] { 0x01 }, File.ReadAllBytes(wal));
+        Assert.True(File.Exists(sharedMemory));
+    }
+
+    [Theory]
+    [InlineData("wal_only")]
+    [InlineData("shm_only")]
+    [InlineData("malformed_shm")]
+    public void Monitor_startup_preserves_incomplete_or_malformed_read_sidecars(string kind)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        var wal = temp.Target + "-wal";
+        var sharedMemory = temp.Target + "-shm";
+        if (kind is "wal_only" or "malformed_shm") File.WriteAllBytes(wal, []);
+        if (kind is "shm_only") File.WriteAllBytes(sharedMemory, new byte[32 * 1024]);
+        if (kind is "malformed_shm") File.WriteAllBytes(sharedMemory, [0x01]);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.Equal(kind is "wal_only" or "malformed_shm", File.Exists(wal));
+        Assert.Equal(kind is "shm_only" or "malformed_shm", File.Exists(sharedMemory));
+    }
+
+    [Theory]
+    [InlineData("wal")]
+    [InlineData("shm")]
+    public void Monitor_startup_preserves_empty_read_sidecars_when_a_cleanup_handle_competes(string lockedSidecar)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        var wal = temp.Target + "-wal";
+        var sharedMemory = temp.Target + "-shm";
+        File.WriteAllBytes(wal, []);
+        File.WriteAllBytes(sharedMemory, new byte[32 * 1024]);
+        using var competingHandle = new FileStream(
+            lockedSidecar == "wal" ? wal : sharedMemory,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.True(File.Exists(wal));
+        Assert.True(File.Exists(sharedMemory));
+    }
+
+    [Fact]
+    public void Monitor_startup_preserves_paired_reparse_read_sidecars()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        var wal = temp.Target + "-wal";
+        var sharedMemory = temp.Target + "-shm";
+        var walTarget = Path.Combine(temp.Root, "wal-target");
+        var sharedMemoryTarget = Path.Combine(temp.Root, "shm-target");
+        File.WriteAllBytes(walTarget, []);
+        File.WriteAllBytes(sharedMemoryTarget, new byte[32 * 1024]);
+        try
+        {
+            File.CreateSymbolicLink(wal, walTarget);
+            File.CreateSymbolicLink(sharedMemory, sharedMemoryTarget);
+        }
+        catch (Exception exception) when (exception is PlatformNotSupportedException or UnauthorizedAccessException or IOException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Cannot create paired reparse fixture: {exception.GetType().Name}");
+        }
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.NotNull(new FileInfo(wal).LinkTarget);
+        Assert.NotNull(new FileInfo(sharedMemory).LinkTarget);
+    }
+
+    [Fact]
     public void Monitor_startup_defers_exact_workspace_v2_migration_until_completion()
     {
         using var temp = new RestoreTemp();

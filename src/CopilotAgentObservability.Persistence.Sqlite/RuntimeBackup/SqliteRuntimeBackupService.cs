@@ -213,8 +213,16 @@ public sealed class SqliteRuntimeBackupService
         if (!RecoverTransientFiles(Path.GetDirectoryName(database)!, Path.GetFileName(database))
             || !RecoverTransientFiles(Path.Combine(Path.GetDirectoryName(database)!, "runtime-backups"), Path.GetFileName(database)))
             return new(false, RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
-        var recoveryGuard = PathEntryExists(database) ? TryAcquireRecoveryGuard(database) : null;
-        if ((PathEntryExists(database) && recoveryGuard is null) || (!PathEntryExists(database) && (HasLiveMonitorState(database) || HasActiveSqliteSidecar(database))))
+        var databaseExists = PathEntryExists(database);
+        if (databaseExists)
+        {
+            if (HasLiveMonitorState(database)) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+            using var cleanupGuard = TryAcquireSidecarCleanupDatabaseGuard(database);
+            if (cleanupGuard is null || !TryRemoveEmptyReadSidecars(database))
+                return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+        }
+        var recoveryGuard = databaseExists ? TryAcquireRecoveryGuard(database) : null;
+        if ((databaseExists && recoveryGuard is null) || (!databaseExists && (HasLiveMonitorState(database) || HasActiveSqliteSidecar(database))))
             return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         if (!RecoverInterruptedRestore(database))
         {
@@ -3594,16 +3602,70 @@ public sealed class SqliteRuntimeBackupService
             var wal = path + "-wal";
             var sharedMemory = path + "-shm";
             if (PathEntryExists(journal)) return false;
-            if (PathEntryExists(wal)
-                && (!IsRegularControlFile(wal) || new FileInfo(wal).Length != 0)) return false;
-            if (PathEntryExists(sharedMemory) && !IsRegularControlFile(sharedMemory)) return false;
-            if (PathEntryExists(sharedMemory)) File.Delete(sharedMemory);
-            if (PathEntryExists(wal)) File.Delete(wal);
+            var walExists = PathEntryExists(wal);
+            var sharedMemoryExists = PathEntryExists(sharedMemory);
+            if (walExists != sharedMemoryExists) return false;
+            if (!TryDeleteVerifiedReadSidecars(wal, walExists, sharedMemory, sharedMemoryExists)) return false;
             return !HasActiveSqliteSidecar(path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             return false;
+        }
+    }
+
+    private static bool TryDeleteVerifiedReadSidecars(
+        string wal,
+        bool walExists,
+        string sharedMemory,
+        bool sharedMemoryExists)
+    {
+        using var walGuard = walExists ? TryAcquireSidecarCleanupGuard(wal, expectedLength: 0) : null;
+        if (walExists && walGuard is null) return false;
+        using var sharedMemoryGuard = sharedMemoryExists ? TryAcquireSidecarCleanupGuard(sharedMemory, expectedLength: 32 * 1024) : null;
+        if (sharedMemoryExists && sharedMemoryGuard is null) return false;
+        if (sharedMemoryExists) File.Delete(sharedMemory);
+        if (walExists) File.Delete(wal);
+        return true;
+    }
+
+    private static FileStream? TryAcquireSidecarCleanupDatabaseGuard(string path)
+    {
+        try
+        {
+            if (!IsRegularControlFile(path) || HasLiveMonitorState(path)) return null;
+            var guard = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            if (!IsRegularControlFile(path) || HasLiveMonitorState(path))
+            {
+                guard.Dispose();
+                return null;
+            }
+            return guard;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return null;
+        }
+    }
+
+    private static FileStream? TryAcquireSidecarCleanupGuard(string path, long expectedLength)
+    {
+        try
+        {
+            if (RuntimeBackupNativePathClassifier.Read(path) != RuntimeBackupNativePathKind.RegularFile) return null;
+            var guard = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Delete);
+            if (RuntimeBackupNativePathClassifier.Read(guard.SafeFileHandle) != RuntimeBackupNativePathKind.RegularFile
+                || guard.Length != expectedLength
+                || RuntimeBackupNativePathClassifier.Read(path) != RuntimeBackupNativePathKind.RegularFile)
+            {
+                guard.Dispose();
+                return null;
+            }
+            return guard;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return null;
         }
     }
 

@@ -1645,6 +1645,90 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void PublishedStartPublishesStateOnlyAfterLivenessSucceeds()
+    {
+        var result = RunPublishedStartWithHealth("ready");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.False(result.StatePublishedBeforeLive, "The child PID must not become live-monitor state before its HTTP host is live.");
+        Assert.True(result.StateExists, "A live child must publish durable monitor state.");
+    }
+
+    [Fact]
+    public void PublishedStartReportsChildExitWithoutTimeoutOrRunningState()
+    {
+        var result = RunPublishedStartWithHealth("child_exit");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_failed", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor_start_timeout", result.Error, StringComparison.Ordinal);
+        Assert.False(result.StateExists, "An exited child must not leave running monitor state.");
+    }
+
+    [Fact]
+    public void PublishedStartReportsChildExitObservedByTheFinalHealthProbe()
+    {
+        var result = RunPublishedStartWithHealth("child_exit_after_probe");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_failed", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor_start_timeout", result.Error, StringComparison.Ordinal);
+        Assert.False(result.StateExists, "An exited child must not leave running monitor state.");
+    }
+
+    [Fact]
+    public void PublishedStartPreservesForeignStateWhenItsChildExits()
+    {
+        var result = RunPublishedStartWithHealth("child_exit_foreign_state");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_failed", result.Error, StringComparison.Ordinal);
+        Assert.Equal("foreign-state", result.StateContent);
+    }
+
+    [Fact]
+    public void PublishedStartRejectsAChildThatExitsDuringTheSuccessfulLiveProbe()
+    {
+        var result = RunPublishedStartWithHealth("child_exit_after_live");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_failed", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("started", result.Output, StringComparison.Ordinal);
+        Assert.False(result.StateExists);
+    }
+
+    [Fact]
+    public void PublishedStartRemovesItsOwnedStateWhenTheChildExitsDuringReadiness()
+    {
+        var result = RunPublishedStartWithHealth("child_exit_after_state");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_failed", result.Error, StringComparison.Ordinal);
+        Assert.False(result.StateExists, "State published after liveness must be removed when that exact child exits.");
+    }
+
+    [Fact]
+    public void PublishedStartTimeoutTerminatesTheUntrackedChild()
+    {
+        var result = RunPublishedStartWithHealth("unreachable");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_timeout", result.Error, StringComparison.Ordinal);
+        Assert.True(result.ProcessTerminated, "A child that never becomes live must not remain untracked after timeout.");
+        Assert.False(result.StateExists);
+    }
+
+    [Fact]
+    public void PublishedStartTimeoutPreservesOwnedStateWhenChildCleanupFails()
+    {
+        var result = RunPublishedStartWithHealth("timeout_cleanup_failure_after_state");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("monitor_start_timeout", result.Error, StringComparison.Ordinal);
+        Assert.True(result.StateExists, "A child that could not be stopped must remain discoverable through its owned state.");
+    }
+
+    [Fact]
     public void UninstallKeepsDataByDefaultAndRemovesRuntimeOnlyWithRemoveData()
     {
         var uninstall = File.ReadAllText(ScriptPath("uninstall-startup-task.ps1"));
@@ -2383,7 +2467,7 @@ public class LocalMonitorScriptTests
         Assert.Contains(expected, File.ReadAllText(ScriptPath(script)), StringComparison.Ordinal);
     }
 
-    private static (int ExitCode, string Output, string Error, bool ReadyProbeObserved) RunPublishedStartWithHealth(string healthStatus)
+    private static (int ExitCode, string Output, string Error, bool ReadyProbeObserved, bool StatePublishedBeforeLive, bool StateExists, bool ProcessTerminated, string? StateContent) RunPublishedStartWithHealth(string healthStatus)
     {
         var root = CreateTemporaryDirectory("cao-published-readiness");
         try
@@ -2395,6 +2479,10 @@ public class LocalMonitorScriptTests
             var executable = Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe");
             File.WriteAllText(executable, string.Empty);
             var readyProbeMarker = Path.Combine(root, "ready-probed");
+            var statePath = Path.Combine(root, "local-monitor.state.json");
+            var prematureStateMarker = Path.Combine(root, "state-before-live");
+            var processTerminatedMarker = Path.Combine(root, "process-terminated");
+            if (healthStatus == "child_exit_foreign_state") File.WriteAllText(statePath, "foreign-state");
             var start = Path.Combine(scripts, "start.ps1");
             File.Copy(ScriptPath("start.ps1"), start);
             var readyStatus = healthStatus.StartsWith("existing_", StringComparison.Ordinal)
@@ -2414,13 +2502,29 @@ public class LocalMonitorScriptTests
                 function Initialize-LocalMonitorRuntime { param([string] $DbPath) }
                 function Test-LocalMonitorHealth {
                     param([string] $Url, [string] $Path)
-                    if ('{{healthStatus}}' -eq 'unreachable') { return $null }
+                    if ('{{healthStatus}}' -eq 'unreachable' -or '{{healthStatus}}' -eq 'child_exit') { return $null }
+                    if ('{{healthStatus}}' -eq 'child_exit_after_probe') {
+                        if ($null -ne $script:StartedProcess) { $script:StartedProcess.HasExited = $true }
+                        return $null
+                    }
+                    if ('{{healthStatus}}' -eq 'child_exit_after_live' -and $null -ne $script:StartedProcess -and $Path -eq '/health/live') {
+                        $script:StartedProcess.HasExited = $true
+                        return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+                    }
+                    if ('{{healthStatus}}' -eq 'child_exit_after_state' -and $null -ne $script:StartedProcess -and $Path -eq '/health/ready') {
+                        $script:StartedProcess.HasExited = $true
+                        return $null
+                    }
+                    if ('{{healthStatus}}' -eq 'timeout_cleanup_failure_after_state' -and $Path -eq '/health/ready') { return $null }
                     if ('{{healthStatus}}'.StartsWith('existing_') -and $Path -eq '/health/live') {
                         return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
                     }
                     if ($Path -eq '/health/live') {
                         $script:LiveProbeCount++
                         if ($script:LiveProbeCount -eq 1) { return $null }
+                        if (Test-Path -LiteralPath '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}') {
+                            [System.IO.File]::WriteAllText('{{prematureStateMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'published')
+                        }
                         return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
                     }
                     if ($Path -ne '/health/ready') { throw "unexpected_health_path:$Path" }
@@ -2438,7 +2542,14 @@ public class LocalMonitorScriptTests
                         [string] $WorkingDirectory,
                         [string] $StandardOutputPath,
                         [string] $StandardErrorPath)
-                    return [pscustomobject]@{ Id = 4242 }
+                    $script:StartedProcess = [pscustomobject]@{
+                        Id = 4242
+                        HasExited = ('{{healthStatus}}' -eq 'child_exit' -or '{{healthStatus}}' -eq 'child_exit_foreign_state')
+                        ExitCode = if ('{{healthStatus}}' -eq 'child_exit' -or '{{healthStatus}}' -eq 'child_exit_foreign_state') { 17 } else { 0 }
+                    }
+                    $script:StartedProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value { param([bool] $EntireProcessTree) if ('{{healthStatus}}' -ne 'timeout_cleanup_failure_after_state') { $this.HasExited = $true; [System.IO.File]::WriteAllText('{{processTerminatedMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'terminated') } }
+                    $script:StartedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param([int] $Milliseconds) return '{{healthStatus}}' -ne 'timeout_cleanup_failure_after_state' }
+                    return $script:StartedProcess
                 }
                 function Save-LocalMonitorState {
                     param(
@@ -2450,7 +2561,16 @@ public class LocalMonitorScriptTests
                         [string] $InstallRoot,
                         [string] $ExecutablePath,
                         [switch] $SanitizedOnly)
+                    [System.IO.File]::WriteAllText(
+                        '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}',
+                        (@{ process_id = $ProcessId } | ConvertTo-Json -Compress))
                 }
+                function Get-LocalMonitorState {
+                    if (-not (Test-Path -LiteralPath '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}')) { return $null }
+                    $content = Get-Content -Raw -LiteralPath '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}'
+                    try { return $content | ConvertFrom-Json } catch { return $null }
+                }
+                function Remove-LocalMonitorState { Remove-Item -LiteralPath '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}' -ErrorAction SilentlyContinue }
                 function Write-LocalMonitorLog { param([string] $Message) }
                 """);
 
@@ -2463,7 +2583,15 @@ public class LocalMonitorScriptTests
                 "-NoBrowser",
                 "-WaitReady",
                 "-TimeoutSeconds", timeoutSeconds);
-            return (result.ExitCode, result.Output, result.Error, File.Exists(readyProbeMarker));
+            return (
+                result.ExitCode,
+                result.Output,
+                result.Error,
+                File.Exists(readyProbeMarker),
+                File.Exists(prematureStateMarker),
+                File.Exists(statePath),
+                File.Exists(processTerminatedMarker),
+                File.Exists(statePath) ? File.ReadAllText(statePath) : null);
         }
         finally
         {
