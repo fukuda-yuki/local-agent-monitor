@@ -106,6 +106,40 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         else await Expect(page.Locator("#session-ai-start")).ToBeEnabledAsync();
     }
 
+    [Theory]
+    [InlineData("unbound", "ネイティブセッションとの関連を確認できません", false)]
+    [InlineData("partial", "ライフサイクルまたは入力の記録が一部欠けています", false)]
+    [InlineData("rich", "内容または終了状態の記録が一部欠けています", false)]
+    [InlineData("full", "必要な記録がそろっています", false)]
+    [InlineData("complete", null, true)]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task RepositoryAiPreviewRendersOnlyCanonicalCompletenessLabels(string completeness, string? expectedLabel, bool rejected)
+    {
+        var hash = new string('a', 64);
+        var preview = JsonSerializer.Serialize(new { schema_version = "local-ai-repository-preview.response.v1", snapshot_id = "018f0000-0000-7000-8000-000000000020", payload_sha256 = hash, expires_at = "2026-08-31T12:00:00.0000000+00:00", included = new[] { new { session_id = SessionId, session_archive_state = "active", session_archive_revision = 1, repository_archive_state = "active", repository_archive_revision = 2, archive_exclusion_reason = (string?)null, source = new { state = "recorded", values = new[] { "vscode" } }, model = new { state = "recorded", values = new[] { "synthetic" } }, completeness, content_state = "not_captured", workspace_revision = hash, truncated = false } }, excluded = Array.Empty<object>(), truncated = false });
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json(preview)));
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await page.Locator("#session-ai-open").ClickAsync(); await page.Locator("#session-ai-preview").ClickAsync();
+
+        var previewContent = page.Locator("#session-ai-preview-content");
+        if (rejected)
+        {
+            await Expect(page.Locator("#session-ai-status")).ToContainTextAsync("分析対象を確認できませんでした。");
+            await Expect(page.Locator("#session-ai-start")).ToBeDisabledAsync();
+        }
+        else
+        {
+            await Expect(previewContent).ToContainTextAsync(expectedLabel!);
+            await Expect(page.Locator("#session-ai-start")).ToBeEnabledAsync();
+        }
+        foreach (var rawToken in new[] { "unbound", "partial", "rich", "full", "complete" }) await Expect(previewContent).Not.ToContainTextAsync(rawToken);
+    }
+
     [Fact]
     [Trait("ValidationLane", "Nightly")]
     public async Task RepositoryAiRendersClosedResultAndOnlyCanonicalEvidenceAsAnExactLink()
@@ -120,7 +154,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
-        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json($$"""{"schema_version":"local-ai-repository-preview.response.v1","snapshot_id":"{{snapshotId}}","payload_sha256":"{{hash}}","expires_at":"2026-08-31T12:00:00.0000000+00:00","included":[{"session_id":"{{SessionId}}","session_archive_state":"active","session_archive_revision":1,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":null,"source":{"state":"redacted","values":[]},"model":{"state":"malformed","values":[]},"completeness":"complete","content_state":"not_captured","workspace_revision":"{{hash}}","truncated":false}],"excluded":[{"session_id":"{{SecondSessionId}}","reason":"session_archived","session_archive_state":"archived","session_archive_revision":3,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":"session_archived","source":{"state":"oversized","values":[]},"model":{"state":"inconsistent","values":[]},"completeness":"partial","content_state":null,"workspace_revision":null,"truncated":null}],"truncated":false}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json($$"""{"schema_version":"local-ai-repository-preview.response.v1","snapshot_id":"{{snapshotId}}","payload_sha256":"{{hash}}","expires_at":"2026-08-31T12:00:00.0000000+00:00","included":[{"session_id":"{{SessionId}}","session_archive_state":"active","session_archive_revision":1,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":null,"source":{"state":"redacted","values":[]},"model":{"state":"malformed","values":[]},"completeness":"full","content_state":"not_captured","workspace_revision":"{{hash}}","truncated":false}],"excluded":[{"session_id":"{{SecondSessionId}}","reason":"session_archived","session_archive_state":"archived","session_archive_revision":3,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":"session_archived","source":{"state":"oversized","values":[]},"model":{"state":"inconsistent","values":[]},"completeness":"partial","content_state":null,"workspace_revision":null,"truncated":null}],"truncated":false}""")));
         string? startBody = null; await page.RouteAsync("**/api/local-monitor/v1/ai/repository-runs", route => { startBody = route.Request.PostData; return route.FulfillAsync(Json($$"""{"run_id":"{{runId}}"}""")); });
         var resultBody = JsonSerializer.Serialize(new { run_id = runId, state = "succeeded", scope_kind = "repository_selection", session_id = (string?)null, node_id = (string?)null, repository_id = RepositoryId, error = (string?)null, result = new { scope = new { kind = "repository_selection", repository_id = RepositoryId, anchor_id = RepositoryId }, snapshot = new { snapshot_id = snapshotId, payload_sha256 = hash }, summary = "<img src=x onerror=alert(1)> summary", findings = new[] { new { finding_id = "f-1", title = "Finding", explanation = "Explanation", evidence_state = "supported", evidence_refs = new[] { evidence }, limitation = "none" } }, improvement_suggestions = Array.Empty<object>(), limitations = Array.Empty<string>(), provenance = new { provider = "github_copilot_sdk", model = "synthetic", configuration_sha256 = configuration, prompt_template_version = "v1", requested_at = "2026-08-31T00:00:00.0000000+00:00", started_at = "2026-08-31T00:00:01.0000000+00:00", completed_at = "2026-08-31T00:00:02.0000000+00:00", snapshot_id = snapshotId, snapshot_sha256 = hash, coverage = new { included = 1, excluded = 0, content_available = true } } } });
         await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{runId}", route => route.FulfillAsync(Json(resultBody)));
@@ -131,8 +165,8 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(previewContent.GetByRole(AriaRole.Heading, new() { Name = "除外項目の技術情報 1件", Exact = true })).ToBeVisibleAsync();
         await Expect(previewContent).ToContainTextAsync($"セッションID: {SessionId}");
         await Expect(previewContent).ToContainTextAsync($"ワークスペースのSHA-256: {hash}");
-        await Expect(previewContent).ToContainTextAsync("内容は記録されていません / 記録が一部欠けています / 記録済み");
-        await Expect(previewContent).ToContainTextAsync("記録が一部欠けています / 内訳を表示できません / 記録が一部欠けています");
+        await Expect(previewContent).ToContainTextAsync("内容は記録されていません / 記録が一部欠けています / 必要な記録がそろっています");
+        await Expect(previewContent).ToContainTextAsync("記録が一部欠けています / 内訳を表示できません / ライフサイクルまたは入力の記録が一部欠けています");
         await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("セッションがアーカイブ済みのため除外されました");
         await page.Locator("#session-ai-start").ClickAsync();
         var renderedResult = page.Locator("#session-ai-result");

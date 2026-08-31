@@ -305,7 +305,7 @@
       && reasons.has(value.archive_exclusion_reason)
       && fact(value.source, SOURCES.size, item => SOURCES.has(item))
       && fact(value.model, 16, item => boundedText(item, 256))
-      && (value.completeness === null || boundedText(value.completeness, 128))
+      && (value.completeness === null || ["unbound", "partial", "rich", "full"].includes(value.completeness))
       && (value.content_state === null || ["available", "not_captured", "expired_pending_deletion"].includes(value.content_state))
       && (value.workspace_revision === null || REVISION.test(value.workspace_revision))
       && (value.truncated === null || value.truncated === false)
@@ -754,6 +754,7 @@
   function renderAiMetadata(preview) {
     aiPreviewContent.replaceChildren();
     const states = Object.freeze({ recorded: "記録済み", not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", not_captured: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", redacted: "内容は記録されていません", malformed: "記録が一部欠けています", oversized: "記録が一部欠けています", inconsistent: "内訳を表示できません", projection_invalid: "記録が一部欠けています", partial: "記録が一部欠けています", available: "内容を利用できます", expired_pending_deletion: "保存期間を過ぎたため表示できません" });
+    const completenessLabels = Object.freeze({ unbound: "ネイティブセッションとの関連を確認できません", partial: "ライフサイクルまたは入力の記録が一部欠けています", rich: "内容または終了状態の記録が一部欠けています", full: "必要な記録がそろっています" });
     const exclusions = Object.freeze({ session_not_found: "セッションを確認できないため除外されました", repository_mismatch: "リポジトリが一致しないため除外されました", session_archived: "セッションがアーカイブ済みのため除外されました", repository_archived: "リポジトリがアーカイブ済みのため除外されました", projection_unavailable: "比較用データを利用できないため除外されました" });
     const factValues = value => value === null ? null : value.values.length > 0 ? value.values : states[value.state] ?? value.state;
     const archiveState = value => ({ active: "有効", archived: "アーカイブ済み" })[value] ?? value;
@@ -763,7 +764,7 @@
       const list = element("ul");
       for (const value of values) {
         const item = element("li");
-        item.textContent = [`セッションID: ${value.session_id}`, exclusions[value.reason] ?? value.reason, `セッション ${archiveState(value.session_archive_state)} 改訂 ${value.session_archive_revision}`, `リポジトリ ${archiveState(value.repository_archive_state)} 改訂 ${value.repository_archive_revision}`, exclusions[value.archive_exclusion_reason] ?? value.archive_exclusion_reason, factValues(value.source), factValues(value.model), states[value.completeness] ?? (value.completeness === null ? null : "記録済み"), states[value.content_state] ?? value.content_state, value.workspace_revision === null ? null : `ワークスペースのSHA-256: ${value.workspace_revision}`, value.truncated === false ? "省略なし" : value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
+        item.textContent = [`セッションID: ${value.session_id}`, exclusions[value.reason] ?? value.reason, `セッション ${archiveState(value.session_archive_state)} 改訂 ${value.session_archive_revision}`, `リポジトリ ${archiveState(value.repository_archive_state)} 改訂 ${value.repository_archive_revision}`, exclusions[value.archive_exclusion_reason] ?? value.archive_exclusion_reason, factValues(value.source), factValues(value.model), value.completeness === null ? null : completenessLabels[value.completeness], states[value.content_state] ?? value.content_state, value.workspace_revision === null ? null : `ワークスペースのSHA-256: ${value.workspace_revision}`, value.truncated === false ? "省略なし" : value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
         list.append(item);
       }
       section.append(list); aiPreviewContent.append(section);

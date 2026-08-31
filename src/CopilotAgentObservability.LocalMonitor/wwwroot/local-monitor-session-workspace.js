@@ -400,7 +400,8 @@
       const validHistorical = !current && exact(document, ["schema_version", "snapshot_id", "content_kind", "body", "definition_path", "body_sha256", "definition_path_sha256", "captured_at"]) && document.schema_version === "local-skill-invocation-snapshot.content.v1" && document.content_kind === "historical_snapshot";
       const validCurrent = current && exact(document, ["schema_version", "snapshot_id", "content_kind", "comparison", "historical_body_sha256", "current_body_sha256", "current_body_utf8_bytes", "body", "read_at"]) && document.schema_version === "local-skill-current-file-read.response.v1" && document.content_kind === "current_file" && ["same", "changed"].includes(document.comparison);
       if ((!validHistorical && !validCurrent) || document.snapshot_id !== snapshotId || typeof document.body !== "string") throw new TypeError("invalid Skill document");
-      publishRawText(document.body, current ? `${title} · ${document.comparison}` : `${title} · ${document.captured_at} · 定義パス: ${document.definition_path}`);
+      const comparisonLabel = current ? { same: "変更なし", changed: "変更あり" }[document.comparison] : null;
+      publishRawText(document.body, current ? `${title} · ${comparisonLabel}` : `${title} · ${document.captured_at} · 定義パス: ${document.definition_path}`);
     } catch { publishRawText("", "スキルの内容を読み取れませんでした"); }
   }
 
