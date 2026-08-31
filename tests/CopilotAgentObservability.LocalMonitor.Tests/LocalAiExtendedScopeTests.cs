@@ -11,6 +11,7 @@ public sealed class LocalAiExtendedScopeTests
     private const string RepositoryId = "018f0000-0000-7000-8000-000000000001";
     private const string ComparisonId = "018f0000-0000-7000-8000-000000000002";
     private const string SnapshotId = "018f0000-0000-7000-8000-000000000003";
+    private const string CanonicalEvidenceLocation = "/sessions/018f0000-0000-7000-8000-000000000001?node=node-11111111111111111111111111111111";
 
     [Theory]
     [InlineData(ProviderBehavior.Complete)]
@@ -165,16 +166,18 @@ Return raw JSON only: no Markdown, code fences, or surrounding prose.
 Return one closed object with exactly these root fields: summary (string), findings (array), improvement_suggestions (array), limitations (array of strings).
 Each findings item is one closed object with exactly: finding_id (non-blank string: not empty or whitespace-only), title (non-blank string: not empty or whitespace-only), explanation (non-blank string: not empty or whitespace-only), evidence_state (one of "supported" or "limited"), evidence_refs (array of 1 to 16 non-blank strings, each not empty or whitespace-only and exactly matching an identifier in the supplied evidence index), limitation (non-blank string: not empty or whitespace-only).
 Each improvement_suggestions item is one closed object with exactly: suggestion_id (non-blank string: not empty or whitespace-only), target_kind (one of "instructions", "skill", "agent", "subagent_input", or "tool_configuration"), target_label (non-blank string: not empty or whitespace-only), concrete_change (non-blank string: not empty or whitespace-only), rationale (non-blank string: not empty or whitespace-only), expected_effect (non-blank string: not empty or whitespace-only), risks_or_limitations (non-blank string: not empty or whitespace-only), evidence_refs (array of 1 to 16 non-blank strings, each not empty or whitespace-only and exactly matching an identifier in the supplied evidence index).
-Never include credentials, paths, prompts, tool payloads, scope, snapshot, or provider metadata.
+Never include credentials, local filesystem paths, prompts, tool payloads, scope, snapshot, or provider metadata. Exact supplied canonical evidence-location strings, including slash-delimited locations, may appear solely as string values in evidence_refs.
 """;
         var comparison=ProviderRequest("comparison");
         var comparisonPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(comparison);
         Assert.Contains(structuredResultInstruction,comparisonPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
+        Assert.Contains(CanonicalEvidenceLocation,comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("stored observed differences",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Cite only the exact supplied evidence locations",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state an effect verdict",comparisonPrompt,StringComparison.Ordinal);
         var repositoryPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("repository_selection"));
         Assert.Contains(structuredResultInstruction,repositoryPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
+        Assert.Contains(CanonicalEvidenceLocation,repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not explore",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("never cite a bare node ID",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state or promote AI output as a deterministic fact",repositoryPrompt,StringComparison.Ordinal);
@@ -186,7 +189,7 @@ Never include credentials, paths, prompts, tool payloads, scope, snapshot, or pr
     private static LocalAiProviderRequestV1 ProviderRequest(string scope)
     {
         var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,scope,null,null,
-            scope=="comparison"?ComparisonId:RepositoryId,"revision","{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),
+            scope=="comparison"?ComparisonId:RepositoryId,"revision","{}"u8.ToArray(),Encoding.UTF8.GetBytes($$"""{"evidence_refs":["{{CanonicalEvidenceLocation}}"]}"""),new string('a',64),new HashSet<string>{CanonicalEvidenceLocation},
             RepositoryId:RepositoryId,ComparisonId:scope=="comparison"?ComparisonId:null);
         var run=new LocalAiRunStatusV1(SnapshotId,"running",scope,null,null,null,RepositoryId:RepositoryId,ComparisonId:snapshot.ComparisonId);
         return new(snapshot,run,new LocalAiRawReadCapabilityV1([],static (_,_)=>ValueTask.FromResult(Array.Empty<byte>())),null,[]);
