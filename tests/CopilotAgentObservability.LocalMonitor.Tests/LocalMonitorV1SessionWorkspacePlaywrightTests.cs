@@ -242,7 +242,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
         var result = page.Locator("[data-node-ai-result]");
-        foreach (var expected in new[] { "node", "snapshot-coverage", "finding-id", "supported", "finding limitation", "suggestion-id", "skill", "target label", "rationale", "concrete change", "expected effect", "risk detail", "top limitation", "github_copilot_sdk", "synthetic-model", "configuration-hash", "template-v1", "2026-08-30T01:00:00", "included: 1", "excluded: 0", "content available" }) await Expect(result).ToContainTextAsync(expected);
+        foreach (var expected in new[] { "node", "snapshot-coverage", "finding-id", "supported", "finding limitation", "suggestion-id", "skill", "target label", "rationale", "concrete change", "expected effect", "risk detail", "top limitation", "github_copilot_sdk", "synthetic-model", "configuration-hash", "template-v1", "2026-08-30T01:00:00", "対象件数: 1", "除外件数: 0", "記録内容: 利用できます" }) await Expect(result).ToContainTextAsync(expected);
         await Expect(result.GetByRole(AriaRole.Button, new() { Name = "証拠を表示" })).ToHaveCountAsync(2);
         await Expect(result.GetByRole(AriaRole.Heading, new() { Name = "AIによる解釈" })).ToBeFocusedAsync();
         await result.GetByRole(AriaRole.Button, new() { Name = "証拠を表示" }).Nth(1).ClickAsync(); await Expect(page.Locator("[data-timeline-node][aria-selected=true]")).ToBeFocusedAsync();
@@ -395,7 +395,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
     [Theory]
     [InlineData("subagent", "サブエージェント入力", "子項目: 2")]
-    [InlineData("error", "エラーメッセージ", "エラーコード: E_SAMPLE")]
+    [InlineData("error", "エラーメッセージ", "エラーコード: failed")]
     [InlineData("permission", "指示", "判断: 拒否")]
     [InlineData("event", "イベント内容", "イベント: sample.event")]
     [InlineData("retry", "ツール結果", "試行回数: 3")]
@@ -427,7 +427,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var (summary, timeline, node, revision) = InspectorDocuments("permission"); node["content"]![part] = JsonNode.Parse("""{"state":"available","available":true}"""); var raw = $"{part} \ud83d\ude80"; var urls = new List<string>();
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { urls.Add(r.Request.Url); return r.FulfillAsync(Json(ContentDocument(revision, part, raw).ToJsonString())); });
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); Assert.Empty(urls); await page.GetByRole(AriaRole.Button, new() { Name = $"{PartLabel(part)}を表示" }).ClickAsync();
-        await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync($"{System.Text.Encoding.UTF8.GetByteCount(raw)}バイト"); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync($"{raw.EnumerateRunes().Count()}文字"); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync("session_event_content · synthetic · リビジョン 1"); Assert.Single(urls); Assert.EndsWith($"part={part}", urls[0]);
+        await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync($"{System.Text.Encoding.UTF8.GetByteCount(raw)}バイト"); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync($"{raw.EnumerateRunes().Count()} Unicodeスカラー"); await Expect(page.GetByRole(AriaRole.Dialog)).ToContainTextAsync("session_event_content · synthetic · リビジョン 1"); Assert.Single(urls); Assert.EndsWith($"part={part}", urls[0]);
     }
 
     [Theory]
@@ -466,7 +466,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var (summary, timeline, node, _) = InspectorDocuments("skill"); node["node"]!["metadata"]!["historical_snapshot_reference"] = JsonNode.Parse("""{"state":"not_observed","value":null}"""); var rawRequests = 0;
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { rawRequests++; return r.AbortAsync(); }); await page.RouteAsync("**/skill-invocations/**", r => { rawRequests++; return r.AbortAsync(); });
-        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await Expect(page.Locator("[data-inspector-kind=skill]")).ToContainTextAsync("履歴スナップショットはありません"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" })).ToHaveCountAsync(0); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "現在のファイルを読み取る" })).ToHaveCountAsync(0); Assert.Equal(0, rawRequests);
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await Expect(page.Locator("[data-inspector-kind=skill]")).ToContainTextAsync("今回の記録にはありません"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" })).ToHaveCountAsync(0); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "現在のファイルを読み取る" })).ToHaveCountAsync(0); Assert.Equal(0, rawRequests);
     }
 
     [Theory]
@@ -822,7 +822,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("取得元 VS Code");
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("時刻 1,000 ms");
-        await Expect(page.Locator("[data-session-overview] details")).ToContainTextAsync("native_session_ids");
+        await Expect(page.Locator("[data-session-overview] details")).ToContainTextAsync("取得元のセッションID");
 
         await Expect(page.Locator("[data-execution-toggle][aria-expanded=true]")).ToHaveCountAsync(1);
         await Expect(page.Locator("[data-timeline-node]")).ToHaveCountAsync(1);
@@ -944,6 +944,26 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-fixed-coverage]")).ToContainTextAsync("記録が一部欠けています");
     }
 
+    [Theory]
+    [InlineData("not_observed", "今回の記録にはありません")]
+    [InlineData("source_unsupported", "この取得元では記録できません")]
+    [InlineData("capture_gap", "記録が一部欠けています")]
+    [InlineData("malformed", "記録が一部欠けています")]
+    [InlineData("oversized", "記録が一部欠けています")]
+    [InlineData("projection_invalid", "記録が一部欠けています")]
+    [InlineData("certification_pending", "安定して取得できるか未確認です")]
+    [InlineData("not_captured", "内容は記録されていません")]
+    [InlineData("redacted", "内容は記録されていません")]
+    [InlineData("expired", "保存期間を過ぎたため表示できません")]
+    [InlineData("inconsistent", "内訳を表示できません")]
+    public async Task ExecutionSummaryMapsEveryAcceptedFactStateWithoutRawTokens(string factState, string expected)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); summary["executions"]![0]!["activity"]!["skill"]!["state"] = factState; summary["executions"]![0]!["activity"]!["skill"]!["count"] = null;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await Expect(page.Locator("[data-execution-toggle]")).ToContainTextAsync($"スキル {expected}"); await Expect(page.Locator("[data-execution-toggle]")).Not.ToContainTextAsync(factState);
+    }
+
     [Fact]
     public async Task RepresentativeClosedShapeMutationsFailBeforeStateAssignmentOrRendering()
     {
@@ -1041,7 +1061,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         node["node"]!["metadata"] = kind switch
         {
             "subagent" => JsonNode.Parse("""{"kind":"subagent","lifecycle":{"selected":{"state":"recorded"},"started":{"state":"recorded"},"completed":{"state":"recorded"},"failed":{"state":"not_observed"},"deselected":{"state":"not_observed"}},"input":{"state":"available","available":true},"activity":{"skill":{"state":"recorded","count":1},"tool":{"state":"recorded","count":2},"subagent":{"state":"recorded","count":0},"error":{"state":"recorded","count":0},"retry":{"state":"recorded","count":0}},"tokens":{"authority":"llm_span","state":"recorded","available_execution_count":1,"total_execution_count":1,"input":{"state":"recorded","value":5},"output":{"state":"recorded","value":3},"total":{"state":"recorded","value":8},"reasoning":{"state":"not_observed","value":null},"cache_read":{"state":"recorded","value":0},"cache_creation":{"state":"not_observed","value":null},"new_input":{"state":"recorded","value":5},"cache_read_ratio_basis_points":{"state":"recorded","value":0}},"children":{"state":"recorded","count":2},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-subagent","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
-            "error" => JsonNode.Parse("""{"kind":"error","error_code":{"state":"recorded","value":"E_SAMPLE"},"message":{"state":"available","available":true},"status":{"state":"recorded","value":"failed"},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-error","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
+            "error" => JsonNode.Parse("""{"kind":"error","error_code":{"state":"recorded","value":"failed"},"message":{"state":"available","available":true},"status":{"state":"recorded","value":"failed"},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-error","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
             "permission" => JsonNode.Parse("""{"kind":"permission","decision":{"state":"recorded","value":"denied"},"wait":{"state":"recorded"},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-permission","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
             "event" => JsonNode.Parse("""{"kind":"event","event_name":{"state":"recorded","value":"sample.event"},"source_time":{"state":"recorded","value":"2026-08-26T01:02:03.0000000+00:00"},"content":{"state":"available","available":true},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-event","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),
             "retry" => JsonNode.Parse("""{"kind":"retry","attempt":{"state":"recorded","value":3},"target":{"state":"recorded","node_id":"node-2db4028cf76015c954848d7dcbb5deca"},"recovered":{"state":"recorded","value":true},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-retry","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}"""),

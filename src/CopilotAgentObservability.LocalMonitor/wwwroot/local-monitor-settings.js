@@ -132,7 +132,7 @@
       operationResult.dataset.settingsStorageOperations = "";
       operationResult.setAttribute("aria-live", "polite");
       section.append(actions, backupResult, operationResult,
-        element("p", "local-monitor-settings-note", "自動バックアップ: 今回の設定にはありません。"),
+        element("p", "local-monitor-settings-note", "自動バックアップ: この画面では確認できません。"),
         element("p", "local-monitor-settings-note",
           "アーカイブは元に戻せる管理情報です。削除・保持・固定とは異なります。復元や削除など影響のある操作は、移動先で確認してから実行します。"));
     } else if (token === "diagnostics") {

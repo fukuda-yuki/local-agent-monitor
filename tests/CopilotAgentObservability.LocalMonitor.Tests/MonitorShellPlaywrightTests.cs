@@ -676,7 +676,7 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("データベース 4096バイト");
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("直近の履歴取り込みは実行中です");
         await Expect(page.Locator("[data-settings-section='storage']")).Not.ToContainTextAsync("running");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: 今回の設定にはありません。");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: この画面では確認できません。");
         Assert.Contains(requestedUrls, url => url.EndsWith("/api/local-monitor/v1/settings/storage", StringComparison.Ordinal));
         await Expect(page.Locator("[data-settings-section='storage'] a[href='/diagnostics#retention-diagnostics']")).ToHaveCountAsync(1);
         await page.Locator("[data-settings-backup-now]").ClickAsync();
