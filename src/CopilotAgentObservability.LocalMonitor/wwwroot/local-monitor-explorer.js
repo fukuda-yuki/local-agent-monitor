@@ -1763,14 +1763,23 @@
       !exactKeys(item, ["cohort", "request_ordinal", "session_id"])
       || item.cohort !== expected[index].cohort || item.request_ordinal !== expected[index].request_ordinal
       || item.session_id !== expected[index].session_id)) throw new TypeError("invalid comparison preview");
-    const metadata = candidate => exactKeys(candidate, ["archive_state", "source", "model", "projection_version", "completeness", "metric_coverage", "session_revision", "projection_revision"])
+    const nullableStrings = candidate => candidate === null
+      || (Array.isArray(candidate) && candidate.every(item => typeof item === "string"));
+    const nullableRevision = candidate => candidate === null || (typeof candidate === "bigint" && candidate >= 0n);
+    const metadata = candidate => exactKeys(candidate, ["archive_state", "session_archive_revision", "assigned_repository_archive_state", "assigned_repository_archive_revision", "archive_exclusion_reason", "source", "model", "projection_version", "completeness", "metric_coverage", "source_application_versions", "adapter_versions", "session_revision", "projection_revision"])
       && ["active", "archived"].includes(candidate.archive_state)
+      && nullableRevision(candidate.session_archive_revision)
+      && ["active", "archived", null].includes(candidate.assigned_repository_archive_state)
+      && nullableRevision(candidate.assigned_repository_archive_revision)
+      && ["session_archived", "repository_archived", null].includes(candidate.archive_exclusion_reason)
       && (candidate.source === null || typeof candidate.source === "string")
       && (candidate.model === null || typeof candidate.model === "string")
-      && (candidate.projection_version === null || typeof candidate.projection_version === "bigint")
+      && (candidate.projection_version === null || (typeof candidate.projection_version === "bigint" && candidate.projection_version >= 1n))
       && ["unbound", "partial", "rich", "full", null].includes(candidate.completeness)
-      && Array.isArray(candidate.metric_coverage)
-      && (candidate.session_revision === null || typeof candidate.session_revision === "bigint")
+      && nullableStrings(candidate.metric_coverage)
+      && nullableStrings(candidate.source_application_versions)
+      && nullableStrings(candidate.adapter_versions)
+      && nullableRevision(candidate.session_revision)
       && (candidate.projection_revision === null || REVISION.test(candidate.projection_revision));
     if (value.included.some(item => !exactKeys(item, ["cohort", "session_id", "metadata"])
         || !["a", "b"].includes(item.cohort) || !UUID_V7.test(item.session_id) || !metadata(item.metadata))
