@@ -234,6 +234,108 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
+    public void ProcessNextBatch_RealGenericNormalizationProjectsExactWorkspaceRunFactsWithoutTokenDuplication()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var payload = $$$"""
+            {"resourceSpans":[{"resource":{"attributes":[
+              {"key":"client.kind","value":{"stringValue":"github-copilot"}}
+            ]},"scopeSpans":[{"spans":[
+              {"traceId":"{{{traceId}}}","spanId":"1111111111111111","name":"invoke_agent",
+               "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
+               "status":{"code":"1"},"attributes":[
+                 {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+                 {"key":"gen_ai.request.model","value":{"stringValue":"parent-model"}},
+                 {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+                 {"key":"gen_ai.usage.output_tokens","value":{"intValue":"20"}}
+               ]},
+              {"traceId":"{{{traceId}}}","spanId":"2222222222222222","parentSpanId":"1111111111111111","name":"chat",
+               "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
+               "status":{"code":"1"},"attributes":[
+                 {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+                 {"key":"gen_ai.request.model","value":{"stringValue":"requested-model"}},
+                 {"key":"gen_ai.response.model","value":{"stringValue":"response-model"}},
+                 {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+                 {"key":"gen_ai.usage.output_tokens","value":{"intValue":"20"}}
+               ]}
+            ]}]}]}
+            """;
+        var rawStore = new RawTelemetryStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var rawRecordId = rawStore.Insert(new RawTelemetryRecord(
+            null, "raw-otlp", traceId, ObservedAt, null, payload));
+        var persisted = new RawTelemetryRecord(
+            rawRecordId, "raw-otlp", traceId, ObservedAt, null, payload);
+        Assert.True(rawStore.ApplyProjection(
+            rawRecordId,
+            persisted.Source,
+            persisted.ReceivedAt,
+            MonitorProjectionBuilder.Build(persisted),
+            ObservedAt));
+        Assert.True(rawStore.ApplySpanProjection(
+            rawRecordId,
+            MonitorSpanProjectionBuilder.Build(persisted),
+            ObservedAt));
+
+        Assert.Equal(
+            2,
+            new SqliteSessionOtelEnricher(
+                temp.DatabasePath,
+                store,
+                temp.RetentionContext,
+                new FixedTimeProvider(ObservedAt.AddMinutes(1))).ProcessNextBatch(2));
+
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ObservedAt, authority);
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, ObservedAt.AddMinutes(1), authority);
+            transaction.Commit();
+        }
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT model,time_authority,duration_ms,token_authority,input_tokens,output_tokens,total_token_state,total_tokens
+            FROM local_workspace_execution_headers
+            ORDER BY source_ordinal;
+            SELECT SUM(input_tokens),SUM(output_tokens),SUM(total_tokens)
+            FROM local_workspace_execution_headers;
+            """;
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal("parent-model", reader.GetString(0));
+        Assert.Equal("recorded", reader.GetString(1));
+        Assert.Equal(3000, reader.GetInt64(2));
+        Assert.Equal("none", reader.GetString(3));
+        Assert.True(reader.IsDBNull(4));
+        Assert.True(reader.IsDBNull(5));
+        Assert.Equal("not_observed", reader.GetString(6));
+        Assert.True(reader.IsDBNull(7));
+        Assert.True(reader.Read());
+        Assert.Equal("response-model", reader.GetString(0));
+        Assert.Equal("recorded", reader.GetString(1));
+        Assert.Equal(1000, reader.GetInt64(2));
+        Assert.Equal("session_run", reader.GetString(3));
+        Assert.Equal(100, reader.GetInt64(4));
+        Assert.Equal(20, reader.GetInt64(5));
+        Assert.Equal("not_observed", reader.GetString(6));
+        Assert.True(reader.IsDBNull(7));
+        Assert.False(reader.Read());
+        Assert.True(reader.NextResult());
+        Assert.True(reader.Read());
+        Assert.Equal(100, reader.GetInt64(0));
+        Assert.Equal(20, reader.GetInt64(1));
+        Assert.True(reader.IsDBNull(2));
+    }
+
+    [Fact]
     public void ProcessNextBatch_RechecksSourceInsideWriteAfterConflictConsumesPendingRetry()
     {
         const string traceId = "11111111111111111111111111111111";
