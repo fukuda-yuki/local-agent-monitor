@@ -595,17 +595,16 @@ public sealed class RuntimeBackupRestoreTests
         temp.CreateDatabase(temp.Target, "current", includeRaw: false);
         File.WriteAllBytes(temp.Target + "-wal", []);
         File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+        var displacedWal = temp.Target + "-wal-displaced";
+        var replacement = new byte[] { 1, 2, 3, 4 };
         var replacementWindowObserved = false;
         var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
         {
             if (checkpoint != SqliteRuntimeBackupService.BeforeEmptyReadSidecarDeleteCheckpoint) return;
             try
             {
-                using var replacement = new FileStream(
-                    temp.Target + "-wal",
-                    FileMode.Open,
-                    FileAccess.ReadWrite,
-                    FileShare.ReadWrite | FileShare.Delete);
+                File.Move(temp.Target + "-wal", displacedWal);
+                File.WriteAllBytes(temp.Target + "-wal", replacement);
                 replacementWindowObserved = true;
             }
             catch (IOException) { }
@@ -616,6 +615,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
         using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
         Assert.False(replacementWindowObserved);
+        Assert.False(File.Exists(displacedWal));
         Assert.False(File.Exists(temp.Target + "-wal"));
         Assert.False(File.Exists(temp.Target + "-shm"));
     }
