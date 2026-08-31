@@ -56,6 +56,31 @@ public sealed class LocalAiExtendedScopeTests
         Assert.True(client.SessionMarkerPresent);
     }
 
+    [Theory]
+    [InlineData(ProviderBehavior.Exception, typeof(InvalidOperationException), "synthetic_provider_failure")]
+    [InlineData(ProviderBehavior.Timeout, typeof(TimeoutException), "synthetic_timeout")]
+    [InlineData(ProviderBehavior.Cancellation, typeof(OperationCanceledException), null)]
+    public async Task ProviderSession_DeleteFailurePreservesPrimaryFailure(
+        ProviderBehavior behavior,
+        Type expectedType,
+        string? expectedMessage)
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior, failDelete: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        using var cancellation = new CancellationTokenSource();
+        if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
+
+        var error = await Record.ExceptionAsync(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token));
+
+        Assert.IsType(expectedType, error);
+        if (expectedMessage is not null) Assert.Equal(expectedMessage, error!.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.True(client.SessionMarkerPresent);
+    }
+
     [Fact]
     public void RepositoryRunRequest_RequiresClosedVersionedSnapshotReceipt()
     {
