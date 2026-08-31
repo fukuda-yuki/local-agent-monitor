@@ -334,9 +334,16 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         Assert.DoesNotContain(console, value => value.Contains(SessionId, StringComparison.Ordinal) || value.Contains(SecondSessionId, StringComparison.Ordinal));
     }
 
-    [Fact]
+    [Theory]
+    [InlineData("missing_session_archive_revision")]
+    [InlineData("wrong_assigned_repository_archive_state")]
+    [InlineData("wrong_assigned_repository_archive_revision")]
+    [InlineData("wrong_archive_exclusion_reason")]
+    [InlineData("wrong_source_application_versions")]
+    [InlineData("wrong_adapter_versions")]
+    [InlineData("unknown_archive_revision")]
     [Trait("ValidationLane", "Nightly")]
-    public async Task ComparePreviewRejectsMissingWrongTypeAndUnknownArchiveRevisionMetadata()
+    public async Task ComparePreviewRejectsMissingWrongTypeAndUnknownArchiveRevisionMetadata(string mutation)
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
@@ -345,16 +352,20 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
-        var previewCalls = 0;
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/preview", route =>
         {
             var preview = JsonNode.Parse(ComparisonPreview())!.AsObject();
             var metadata = preview["included"]!.AsArray()[0]!["metadata"]!.AsObject();
-            switch (previewCalls++)
+            switch (mutation)
             {
-                case 0: metadata.Remove("session_archive_revision"); break;
-                case 1: metadata["assigned_repository_archive_revision"] = "0"; break;
-                default: metadata["unknown_archive_revision"] = 0; break;
+                case "missing_session_archive_revision": metadata.Remove("session_archive_revision"); break;
+                case "wrong_assigned_repository_archive_state": metadata["assigned_repository_archive_state"] = 0; break;
+                case "wrong_assigned_repository_archive_revision": metadata["assigned_repository_archive_revision"] = "0"; break;
+                case "wrong_archive_exclusion_reason": metadata["archive_exclusion_reason"] = false; break;
+                case "wrong_source_application_versions": metadata["source_application_versions"] = "source-1"; break;
+                case "wrong_adapter_versions": metadata["adapter_versions"] = "adapter-1"; break;
+                case "unknown_archive_revision": metadata["unknown_archive_revision"] = 0; break;
+                default: throw new ArgumentOutOfRangeException(nameof(mutation));
             }
             return route.FulfillAsync(Json(Canonical(preview)));
         });
@@ -363,15 +374,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
 
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            await page.Locator("#session-compare-preview").ClickAsync();
-            await Expect(page.Locator("#session-comparison-preview-status")).ToContainTextAsync("比較内容を読み込めませんでした");
-            await Expect(page.Locator("#session-comparison-create")).ToBeDisabledAsync();
-            await page.Locator("#session-comparison-cancel").ClickAsync();
-        }
-
-        Assert.Equal(3, previewCalls);
+        await page.Locator("#session-compare-preview").ClickAsync();
+        await Expect(page.Locator("#session-comparison-preview-status")).ToContainTextAsync("比較内容を読み込めませんでした");
+        await Expect(page.Locator("#session-comparison-create")).ToBeDisabledAsync();
     }
 
     [Fact]
