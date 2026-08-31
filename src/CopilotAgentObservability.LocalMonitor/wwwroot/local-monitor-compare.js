@@ -209,7 +209,10 @@
       }
       return;
     }
-    target.textContent = pair.value === "true" ? "はい" : pair.value === "false" ? "いいえ" : pair.value;
+    const archivedBoolean = pair.key === "a_includes_archived" || pair.key === "b_includes_archived";
+    target.textContent = archivedBoolean && pair.value === "true" ? "はい"
+      : archivedBoolean && pair.value === "false" ? "いいえ"
+        : pair.value;
   }
 
   function rowLabel(key) {
@@ -220,12 +223,16 @@
     const cohort = key.startsWith("a_") ? "基準" : key.startsWith("b_") ? "比較対象" : null;
     const structuralKey = cohort === null ? key : key.slice(2);
     const metric = /^s[1-9][0-9]*_(.+)$/.exec(structuralKey);
-    if (metric) return ROW_LABELS.get(metric[1]) ?? "記録項目";
+    if (metric) {
+      const label = ROW_LABELS.get(metric[1]);
+      return label ? [cohort, label].filter(Boolean).join("・") : "記録項目";
+    }
     const direct = VALUE_LABELS.get(structuralKey) ?? ROW_LABELS.get(structuralKey);
     if (direct) return cohort === null ? direct : `${cohort}・${direct}`;
     for (const [suffix, label] of VALUE_LABELS) {
       if (!structuralKey.endsWith(`_${suffix}`)) continue;
-      const core = ROW_LABELS.get(structuralKey.slice(0, -(suffix.length + 1)));
+      const coreKey = structuralKey.slice(0, -(suffix.length + 1));
+      const core = VALUE_LABELS.get(coreKey) ?? ROW_LABELS.get(coreKey);
       if (core) return [cohort, core, label].filter(Boolean).join("・");
     }
     return "記録項目";

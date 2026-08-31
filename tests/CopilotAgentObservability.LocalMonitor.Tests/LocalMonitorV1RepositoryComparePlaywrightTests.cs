@@ -535,11 +535,14 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
                 new JsonObject { ["key"] = "b_called_session_count", ["value"] = "9" }, new JsonObject { ["key"] = "a_started_session_count", ["value"] = "10" },
                 new JsonObject { ["key"] = "a_available_session_count", ["value"] = "11" }, new JsonObject { ["key"] = "start", ["value"] = "2026-08-01" },
                 new JsonObject { ["key"] = "end", ["value"] = "2026-08-31" }, new JsonObject { ["key"] = "relative_difference_percent", ["value"] = "11" },
-                new JsonObject { ["key"] = "distribution", ["value"] = "dynamic-source" }, new JsonObject { ["key"] = "a_total_tokens_available_count", ["value"] = "1" },
+                new JsonObject { ["key"] = "distribution", ["value"] = "true" }, new JsonObject { ["key"] = "a_call_count_session_count", ["value"] = "1" },
+                new JsonObject { ["key"] = "a_failure_count_available_count", ["value"] = "2" }, new JsonObject { ["key"] = "call_count_absolute_difference", ["value"] = "3" },
+                new JsonObject { ["key"] = "b_recorded_tokens_unavailable_states", ["value"] = "none" },
                 new JsonObject { ["key"] = "a_direct_session_archived_count", ["value"] = "12" }, new JsonObject { ["key"] = "b_assigned_repository_archived_count", ["value"] = "13" },
                 new JsonObject { ["key"] = "a_includes_archived", ["value"] = "true" }, new JsonObject { ["key"] = "b_includes_archived", ["value"] = "false" },
-                new JsonObject { ["key"] = "display_name", ["value"] = "動的な表示名" }, new JsonObject { ["key"] = "sort_key", ["value"] = "dynamic.sort" },
-                new JsonObject { ["key"] = "s1_total_tokens", ["value"] = "14" }, new JsonObject { ["key"] = "unexpected_value_key", ["value"] = "kept-value" }),
+                new JsonObject { ["key"] = "display_name", ["value"] = "true" }, new JsonObject { ["key"] = "sort_key", ["value"] = "false" },
+                new JsonObject { ["key"] = "a_s2_input_tokens", ["value"] = "14" }, new JsonObject { ["key"] = "b_s8_retry_count", ["value"] = "15" },
+                new JsonObject { ["key"] = "unexpected_value_key", ["value"] = "kept-value" }),
         });
         read["results"] = results;
 
@@ -557,19 +560,21 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal(
             ["基準・呼び出し回数", "比較対象・呼び出し回数", "基準・失敗回数", "比較対象・開始回数",
              "基準・完了回数", "比較対象・失敗回数", "基準・トークン合計", "基準・呼び出しあり", "比較対象・呼び出しあり",
-             "基準・開始あり", "基準・利用可能件数", "開始", "終了", "相対差", "内訳", "基準・トークン合計・利用可能件数",
+             "基準・開始あり", "基準・利用可能件数", "開始", "終了", "相対差", "内訳", "基準・呼び出し回数・セッション数",
+             "基準・失敗回数・利用可能件数", "呼び出し回数・絶対差", "比較対象・トークン合計・利用できない状態",
              "基準・アーカイブ済みセッション数", "比較対象・アーカイブ済みリポジトリのセッション数",
-             "基準・アーカイブ済みを含む", "比較対象・アーカイブ済みを含む", "表示名", "並び順", "トークン合計", "記録項目"],
+             "基準・アーカイブ済みを含む", "比較対象・アーカイブ済みを含む", "表示名", "並び順",
+             "基準・入力トークン", "比較対象・再試行件数", "記録項目"],
             await page.Locator(".local-monitor-compare-result-heading").Last.Locator("xpath=following-sibling::tr/th").AllTextContentsAsync());
         await Expect(body).ToContainTextAsync("比較項目");
-        await Expect(body).ToContainTextAsync("動的な表示名");
-        await Expect(body).ToContainTextAsync("dynamic-source");
-        await Expect(body).ToContainTextAsync("dynamic.sort");
-        await Expect(body).ToContainTextAsync("はい");
-        await Expect(body).ToContainTextAsync("いいえ");
+        Assert.Equal(
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "2026-08-01", "2026-08-31", "11", "true", "1", "2", "3",
+             "今回の記録にはありません", "12", "13", "はい", "いいえ", "true", "false", "14", "15", "kept-value"],
+            await page.Locator(".local-monitor-compare-result-heading").Last.Locator("xpath=following-sibling::tr/td[1]").AllTextContentsAsync());
         await Expect(body).Not.ToContainTextAsync("unexpected_row_key");
         await Expect(body).Not.ToContainTextAsync("unexpected_value_key");
-        await Expect(body).Not.ToContainTextAsync("s1_total_tokens");
+        await Expect(body).Not.ToContainTextAsync("a_s2_input_tokens");
+        await Expect(body).Not.ToContainTextAsync("b_s8_retry_count");
     }
 
     [Fact]
