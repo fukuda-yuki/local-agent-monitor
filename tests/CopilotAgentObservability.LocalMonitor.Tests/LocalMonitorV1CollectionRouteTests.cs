@@ -46,7 +46,7 @@ public sealed class LocalMonitorV1CollectionRouteTests
     public async Task RepositoryCompositionUnavailablePublishesFrozenServiceUnavailableResponse(string method, bool suppressesBody)
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new CompositionUnavailableSnapshotService()));
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new SessionDetailFailureSnapshotService("local_monitor_ui_unavailable")));
         using var request = new HttpRequestMessage(new HttpMethod(method), "/api/local-monitor/v1/repositories");
 
         using var response = await host.Client.SendAsync(request);
@@ -62,7 +62,7 @@ public sealed class LocalMonitorV1CollectionRouteTests
     public async Task SessionCompositionUnavailablePublishesFrozenServiceUnavailableResponse()
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new CompositionUnavailableSnapshotService()));
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new SessionDetailFailureSnapshotService("local_monitor_ui_unavailable")));
         using var request = Post(host, RequestJson);
 
         using var response = await host.Client.SendAsync(request);
@@ -72,6 +72,31 @@ public sealed class LocalMonitorV1CollectionRouteTests
         Assert.Equal(40, response.Content.Headers.ContentLength);
         Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
         Assert.Equal("{\"error\":\"local_monitor_ui_unavailable\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task RepositoryNonmatchingSessionDetailFailureRemainsAnInternalError()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new SessionDetailFailureSnapshotService("workspace_snapshot_stale")));
+
+        using var response = await host.Client.GetAsync("/api/local-monitor/v1/repositories");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("{\"accepted\":false,\"error\":\"internal_error\",\"message\":\"The request could not be processed.\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task SessionNonmatchingSessionDetailFailureRemainsAnInternalError()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new SessionDetailFailureSnapshotService("workspace_snapshot_stale")));
+        using var request = Post(host, RequestJson);
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("{\"accepted\":false,\"error\":\"internal_error\",\"message\":\"The request could not be processed.\"}", await response.Content.ReadAsStringAsync());
     }
 
     [Theory]
@@ -344,6 +369,6 @@ public sealed class LocalMonitorV1CollectionRouteTests
     { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>ValueTask.FromResult(snapshot with { Request=request }); }
     private sealed class BusySnapshotService : ILocalRepositoryScopeSnapshotService
     { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>throw new LocalRepositoryScopeSnapshotException(LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",new InvalidOperationException()); }
-    private sealed class CompositionUnavailableSnapshotService : ILocalRepositoryScopeSnapshotService
-    { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"); }
+    private sealed class SessionDetailFailureSnapshotService(string error) : ILocalRepositoryScopeSnapshotService
+    { public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request,CancellationToken cancellationToken)=>throw new LocalWorkspaceSessionDetailException(error); }
 }
