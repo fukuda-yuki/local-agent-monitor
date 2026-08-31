@@ -92,6 +92,175 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
+    public void ProcessNextBatch_GenericCopilotCliPathPreservesNormalizedPerSpanRunFacts()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var startedAt = DateTimeOffset.Parse("2026-07-16T00:00:01Z");
+        var endedAt = startedAt.AddSeconds(7);
+        InsertProjectedSpan(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            "generic-facts-trace",
+            "generic-facts-span",
+            null,
+            "copilot-cli",
+            "generic-repo",
+            startedAt);
+        CreateSpanFactsTable(temp.DatabasePath);
+        Execute(
+            temp.DatabasePath,
+            $"""
+            UPDATE monitor_spans
+            SET category='llm_call',
+                operation='chat',
+                request_model='requested-model',
+                response_model='response-model',
+                status='ok',
+                end_time='{endedAt:O}',
+                input_tokens=10840,
+                output_tokens=77,
+                total_tokens=10917
+            WHERE trace_id='generic-facts-trace'
+              AND span_id='generic-facts-span';
+            INSERT INTO local_workspace_span_facts(
+                raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT raw_record_id,span_ordinal,NULL,10917
+            FROM monitor_spans
+            WHERE trace_id='generic-facts-trace'
+              AND span_id='generic-facts-span';
+            """);
+
+        Assert.Equal(
+            1,
+            new SqliteSessionOtelEnricher(
+                temp.DatabasePath,
+                store,
+                temp.RetentionContext,
+                new FixedTimeProvider(startedAt),
+                checkpoint =>
+                {
+                    if (checkpoint == "before_raw_terminal")
+                        Execute(temp.DatabasePath, "DROP TABLE local_workspace_span_facts;");
+                }).ProcessNextBatch(1));
+
+        var session = Assert.Single(store.ListMostRecent(10));
+        var run = Assert.Single(store.GetDetail(session.SessionId)!.Runs);
+        Assert.Equal(SessionSourceSurface.CopilotCli, run.SourceSurface);
+        Assert.Equal("response-model", run.Model);
+        Assert.Equal(ObservedSessionStatus.Completed, run.Status);
+        Assert.Equal(startedAt, run.StartedAt);
+        Assert.Equal(endedAt, run.EndedAt);
+        Assert.Equal(10840, run.InputTokens);
+        Assert.Equal(77, run.OutputTokens);
+        Assert.Equal(10917, run.TotalTokens);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_RealGenericNormalizationProjectsExactWorkspaceRunFactsWithoutTokenDuplication()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var payload = $$$"""
+            {"resourceSpans":[{"resource":{"attributes":[
+              {"key":"client.kind","value":{"stringValue":"github-copilot"}}
+            ]},"scopeSpans":[{"spans":[
+              {"traceId":"{{{traceId}}}","spanId":"1111111111111111","name":"invoke_agent",
+               "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000003000000000",
+               "status":{"code":"1"},"attributes":[
+                 {"key":"gen_ai.operation.name","value":{"stringValue":"invoke_agent"}},
+                 {"key":"gen_ai.request.model","value":{"stringValue":"parent-model"}},
+                 {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+                 {"key":"gen_ai.usage.output_tokens","value":{"intValue":"20"}}
+               ]},
+              {"traceId":"{{{traceId}}}","spanId":"2222222222222222","parentSpanId":"1111111111111111","name":"chat",
+               "startTimeUnixNano":"1710000001000000000","endTimeUnixNano":"1710000002000000000",
+               "status":{"code":"1"},"attributes":[
+                 {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+                 {"key":"gen_ai.request.model","value":{"stringValue":"requested-model"}},
+                 {"key":"gen_ai.response.model","value":{"stringValue":"response-model"}},
+                 {"key":"gen_ai.usage.input_tokens","value":{"intValue":"100"}},
+                 {"key":"gen_ai.usage.output_tokens","value":{"intValue":"20"}}
+               ]}
+            ]}]}]}
+            """;
+        var rawStore = new RawTelemetryStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var rawRecordId = rawStore.Insert(new RawTelemetryRecord(
+            null, "raw-otlp", traceId, ObservedAt, null, payload));
+        var persisted = new RawTelemetryRecord(
+            rawRecordId, "raw-otlp", traceId, ObservedAt, null, payload);
+        Assert.True(rawStore.ApplyProjection(
+            rawRecordId,
+            persisted.Source,
+            persisted.ReceivedAt,
+            MonitorProjectionBuilder.Build(persisted),
+            ObservedAt));
+        Assert.True(rawStore.ApplySpanProjection(
+            rawRecordId,
+            MonitorSpanProjectionBuilder.Build(persisted),
+            ObservedAt));
+
+        Assert.Equal(
+            2,
+            new SqliteSessionOtelEnricher(
+                temp.DatabasePath,
+                store,
+                temp.RetentionContext,
+                new FixedTimeProvider(ObservedAt.AddMinutes(1))).ProcessNextBatch(2));
+
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ObservedAt, authority);
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, ObservedAt.AddMinutes(1), authority);
+            transaction.Commit();
+        }
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT model,time_authority,duration_ms,token_authority,input_tokens,output_tokens,total_token_state,total_tokens
+            FROM local_workspace_execution_headers
+            ORDER BY source_ordinal;
+            SELECT SUM(input_tokens),SUM(output_tokens),SUM(total_tokens)
+            FROM local_workspace_execution_headers;
+            """;
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal("parent-model", reader.GetString(0));
+        Assert.Equal("recorded", reader.GetString(1));
+        Assert.Equal(3000, reader.GetInt64(2));
+        Assert.Equal("none", reader.GetString(3));
+        Assert.True(reader.IsDBNull(4));
+        Assert.True(reader.IsDBNull(5));
+        Assert.Equal("not_observed", reader.GetString(6));
+        Assert.True(reader.IsDBNull(7));
+        Assert.True(reader.Read());
+        Assert.Equal("response-model", reader.GetString(0));
+        Assert.Equal("recorded", reader.GetString(1));
+        Assert.Equal(1000, reader.GetInt64(2));
+        Assert.Equal("session_run", reader.GetString(3));
+        Assert.Equal(100, reader.GetInt64(4));
+        Assert.Equal(20, reader.GetInt64(5));
+        Assert.Equal("not_observed", reader.GetString(6));
+        Assert.True(reader.IsDBNull(7));
+        Assert.False(reader.Read());
+        Assert.True(reader.NextResult());
+        Assert.True(reader.Read());
+        Assert.Equal(100, reader.GetInt64(0));
+        Assert.Equal(20, reader.GetInt64(1));
+        Assert.True(reader.IsDBNull(2));
+    }
+
+    [Fact]
     public void ProcessNextBatch_RechecksSourceInsideWriteAfterConflictConsumesPendingRetry()
     {
         const string traceId = "11111111111111111111111111111111";
@@ -718,6 +887,17 @@ public sealed class SessionOtelEnrichmentTests
         command.CommandText = sql;
         command.ExecuteNonQuery();
     }
+
+    private static void CreateSpanFactsTable(string databasePath) => Execute(
+        databasePath,
+        """
+        CREATE TABLE local_workspace_span_facts (
+            raw_record_id INTEGER NOT NULL,
+            span_ordinal INTEGER NOT NULL,
+            retry_count INTEGER NULL,
+            producer_total_tokens INTEGER NULL,
+            PRIMARY KEY(raw_record_id,span_ordinal));
+        """);
 
     private static long Count(string databasePath, string sql)
     {
