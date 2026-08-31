@@ -390,13 +390,23 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(ThreeSessionsAsync().GetAwaiter().GetResult())));
+        var previewResponse = ComparisonPreviewWithExclusion();
+        using (var preview = JsonDocument.Parse(previewResponse))
+        {
+            Assert.Matches("^[0-9a-f]{64}$", preview.RootElement.GetProperty("selection_sha256").GetString());
+            Assert.All(preview.RootElement.GetProperty("excluded").EnumerateArray(), excluded =>
+                Assert.Equal(
+                    ["archive_state", "session_archive_revision", "assigned_repository_archive_state", "assigned_repository_archive_revision", "archive_exclusion_reason", "source", "model", "projection_version", "completeness", "metric_coverage", "source_application_versions", "adapter_versions", "session_revision", "projection_revision"],
+                    excluded.GetProperty("metadata").EnumerateObject().Select(property => property.Name)));
+            Assert.Equal("session_archived", preview.RootElement.GetProperty("included")[0].GetProperty("metadata").GetProperty("archive_exclusion_reason").GetString());
+        }
         var previewCalls = 0;
         string? previewBody = null;
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/preview", route =>
         {
             previewCalls++;
             previewBody = route.Request.PostData;
-            return route.FulfillAsync(Json(ComparisonPreviewWithExclusion()));
+            return route.FulfillAsync(Json(previewResponse));
         });
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions?mode=compare", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
@@ -2685,7 +2695,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     private static string ComparisonPreviewWithExclusion() => """
-        {"schema_version":"local-monitor-comparison-preview.response.v1","valid":false,"selection_sha256":null,"preview_revision":"2222222222222222222222222222222222222222222222222222222222222222","cohorts":{"a":{"label":"基準","requested_count":2,"included_count":1,"excluded_count":1},"b":{"label":"比較対象","requested_count":1,"included_count":0,"excluded_count":1}},"requested":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}"},{"cohort":"a","request_ordinal":2,"session_id":"{THIRD}"},{"cohort":"b","request_ordinal":1,"session_id":"{SECOND}"}],"included":[{"cohort":"a","session_id":"{THIRD}","metadata":{"archive_state":"archived","session_archive_revision":1,"assigned_repository_archive_state":"active","assigned_repository_archive_revision":0,"archive_exclusion_reason":null,"source":"synthetic","model":"test","projection_version":1,"completeness":"full","metric_coverage":[],"source_application_versions":[],"adapter_versions":[],"session_revision":1,"projection_revision":"3333333333333333333333333333333333333333333333333333333333333333"}}],"excluded":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}","reason":"projection_unavailable","metadata":null},{"cohort":"b","request_ordinal":1,"session_id":"{SECOND}","reason":"projection_unavailable","metadata":null}]}
+        {"schema_version":"local-monitor-comparison-preview.response.v1","valid":false,"selection_sha256":"1111111111111111111111111111111111111111111111111111111111111111","preview_revision":"2222222222222222222222222222222222222222222222222222222222222222","cohorts":{"a":{"label":"基準","requested_count":2,"included_count":1,"excluded_count":1},"b":{"label":"比較対象","requested_count":1,"included_count":0,"excluded_count":1}},"requested":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}"},{"cohort":"a","request_ordinal":2,"session_id":"{THIRD}"},{"cohort":"b","request_ordinal":1,"session_id":"{SECOND}"}],"included":[{"cohort":"a","session_id":"{THIRD}","metadata":{"archive_state":"archived","session_archive_revision":1,"assigned_repository_archive_state":"active","assigned_repository_archive_revision":0,"archive_exclusion_reason":"session_archived","source":"synthetic","model":"test","projection_version":1,"completeness":"full","metric_coverage":[],"source_application_versions":[],"adapter_versions":[],"session_revision":3,"projection_revision":"5555555555555555555555555555555555555555555555555555555555555555"}}],"excluded":[{"cohort":"a","request_ordinal":1,"session_id":"{SESSION}","reason":"projection_unavailable","metadata":{"archive_state":"active","session_archive_revision":0,"assigned_repository_archive_state":"active","assigned_repository_archive_revision":0,"archive_exclusion_reason":null,"source":"synthetic","model":"test","projection_version":1,"completeness":"full","metric_coverage":[],"source_application_versions":null,"adapter_versions":null,"session_revision":1,"projection_revision":"3333333333333333333333333333333333333333333333333333333333333333"}},{"cohort":"b","request_ordinal":1,"session_id":"{SECOND}","reason":"projection_unavailable","metadata":{"archive_state":"active","session_archive_revision":0,"assigned_repository_archive_state":"active","assigned_repository_archive_revision":0,"archive_exclusion_reason":null,"source":null,"model":null,"projection_version":1,"completeness":"partial","metric_coverage":[],"source_application_versions":null,"adapter_versions":null,"session_revision":2,"projection_revision":"4444444444444444444444444444444444444444444444444444444444444444"}}]}
         """.Replace("{SESSION}", SessionId, StringComparison.Ordinal)
             .Replace("{SECOND}", SecondSessionId, StringComparison.Ordinal)
             .Replace("{THIRD}", ThirdSessionId, StringComparison.Ordinal);
