@@ -200,6 +200,7 @@ metadata-only fallback.
 | `task_not_registered` | Register startup before enabling or disabling it. |
 | `non_loopback_url` | Use `http://127.0.0.1:<port>`, `http://localhost:<port>`, or `http://[::1]:<port>`. |
 | `port_already_in_use` | Stop the other process or pass another loopback URL. |
+| `monitor_start_failed` | The child exited before accepted health. Inspect `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\logs\local-monitor.stderr.log`; no running state is published. |
 | `monitor_start_timeout` | Inspect `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\logs\`. |
 | `/health/live` is reachable but ready is `503` | Run `status.ps1` and inspect readiness status / degraded reasons. |
 | VS Code telemetry does not arrive | If using user env, restart VS Code after `install-user-env.ps1`. If using shell env, regenerate and apply `profile-vscode-env --profile raw-local-receiver --target monitor`, then start VS Code from that shell. |

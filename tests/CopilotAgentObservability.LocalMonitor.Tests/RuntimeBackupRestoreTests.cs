@@ -588,6 +588,39 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_holds_sidecar_ownership_through_path_deletion()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+        var replacementWindowObserved = false;
+        var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
+        {
+            if (checkpoint != SqliteRuntimeBackupService.BeforeEmptyReadSidecarDeleteCheckpoint) return;
+            try
+            {
+                using var replacement = new FileStream(
+                    temp.Target + "-wal",
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.ReadWrite | FileShare.Delete);
+                replacementWindowObserved = true;
+            }
+            catch (IOException) { }
+        });
+
+        var initialization = service.InitializeForMonitor(temp.Target);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        Assert.False(replacementWindowObserved);
+        Assert.False(File.Exists(temp.Target + "-wal"));
+        Assert.False(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
     public void Monitor_startup_still_rejects_a_separate_live_monitor_state()
     {
         using var temp = new RestoreTemp();

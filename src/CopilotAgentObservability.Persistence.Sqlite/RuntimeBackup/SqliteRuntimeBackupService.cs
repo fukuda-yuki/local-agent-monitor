@@ -29,6 +29,7 @@ public sealed class SqliteRuntimeBackupService
     internal const string CatalogAfterMonitorTailCheckpoint = "catalog-after-monitor-tail";
     internal const string CatalogAfterCreateTailCheckpoint = "catalog-after-create-tail";
     internal const string CatalogBeforeInstalledValidationCheckpoint = "catalog-before-installed-validation";
+    internal const string BeforeEmptyReadSidecarDeleteCheckpoint = "before-empty-read-sidecar-delete";
     private static readonly DateTimeOffset ArchiveTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
     private static readonly StringComparison FileNameComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -3584,7 +3585,7 @@ public sealed class SqliteRuntimeBackupService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return null; }
     }
 
-    private static FileStream? TryAcquireStartupRecoveryGuard(string path)
+    private FileStream? TryAcquireStartupRecoveryGuard(string path)
     {
         try
         {
@@ -3602,7 +3603,7 @@ public sealed class SqliteRuntimeBackupService
 
     private static bool HasActiveSqliteSidecar(string path) => RestoreControlSidecars(path).Any(PathEntryExists);
 
-    private static bool TryRemoveEmptyReadSidecars(string path)
+    private bool TryRemoveEmptyReadSidecars(string path)
     {
         try
         {
@@ -3619,9 +3620,10 @@ public sealed class SqliteRuntimeBackupService
             {
                 if ((PathEntryExists(wal) && walOwnership is null)
                     || (PathEntryExists(sharedMemory) && sharedMemoryOwnership is null)) return false;
+                checkpoint?.Invoke(BeforeEmptyReadSidecarDeleteCheckpoint);
+                if (PathEntryExists(sharedMemory)) File.Delete(sharedMemory);
+                if (PathEntryExists(wal)) File.Delete(wal);
             }
-            if (PathEntryExists(sharedMemory)) File.Delete(sharedMemory);
-            if (PathEntryExists(wal)) File.Delete(wal);
             return !HasActiveSqliteSidecar(path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
@@ -3634,7 +3636,7 @@ public sealed class SqliteRuntimeBackupService
     {
         try
         {
-            var ownership = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var ownership = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Delete);
             if (RuntimeBackupNativePathClassifier.Read(ownership.SafeFileHandle) == RuntimeBackupNativePathKind.RegularFile)
                 return ownership;
             ownership.Dispose();
