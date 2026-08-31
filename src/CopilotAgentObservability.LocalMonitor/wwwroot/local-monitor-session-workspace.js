@@ -33,6 +33,8 @@
   let activeSessionRun = null;
   let sessionPollGeneration = 0;
   let nodePollGeneration = 0;
+  let routeGeneration = 0;
+  class RouteSuperseded extends Error {}
   window.LocalMonitorSessionWorkspace = state;
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
@@ -315,10 +317,10 @@
     return card;
   }
 
-  function tokenMetric(title, value) {
+  function tokenMetric(title, value, valueLabel = format) {
     const card = el("div", "local-monitor-session-summary-card");
     card.append(el("h2", null, title));
-    if (value.state === "recorded") card.append(el("strong", null, format(value.value)));
+    if (value.state === "recorded") card.append(el("strong", null, valueLabel(value.value)));
     else renderFact(card.appendChild(el("div")), value);
     return card;
   }
@@ -405,28 +407,44 @@
     } catch { publishRawText("", "スキルの内容を読み取れませんでした"); }
   }
 
-  async function requestJson(urlFactory, attempted = false, reestablish = null) {
-    const response = await fetch(urlFactory(), { headers: { Accept: "application/json" } });
+  const currentRouteGeneration = generation => generation === null || generation === routeGeneration;
+  const throwIfRouteSuperseded = generation => { if (!currentRouteGeneration(generation)) throw new RouteSuperseded(); };
+
+  async function requestJson(urlFactory, attempted = false, reestablish = null, generation = null) {
+    let response;
+    try { response = await fetch(urlFactory(), { headers: { Accept: "application/json" } }); }
+    catch (error) { throwIfRouteSuperseded(generation); throw error; }
+    throwIfRouteSuperseded(generation);
     if (response.status === 409 && !attempted) {
       const error = await response.json().catch(() => null);
+      throwIfRouteSuperseded(generation);
       if (error?.error === "workspace_snapshot_stale") {
         const previous = state.revision;
-        await refreshSummary();
+        if (!await refreshSummary(generation)) throw new RouteSuperseded();
         if (state.revision === previous) throw new Error("Session revision did not advance");
         if (reestablish) await reestablish();
-        return requestJson(urlFactory, true, reestablish);
+        throwIfRouteSuperseded(generation);
+        return requestJson(urlFactory, true, reestablish, generation);
       }
     }
     if (!response.ok) { const failure = new Error("Session detail unavailable"); failure.status = response.status; throw failure; }
-    return JSON.parse(await response.text());
+    const body = await response.text();
+    throwIfRouteSuperseded(generation);
+    return JSON.parse(body);
   }
 
-  async function refreshSummary() {
-    const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
+  async function refreshSummary(generation = null) {
+    let response;
+    try { response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } }); }
+    catch (error) { throwIfRouteSuperseded(generation); throw error; }
+    throwIfRouteSuperseded(generation);
     if (!response.ok) throw new Error("Session summary unavailable");
-    const summary = validate(JSON.parse(await response.text()));
+    const body = await response.text();
+    throwIfRouteSuperseded(generation);
+    const summary = validate(JSON.parse(body));
     state.executionState.clear(); state.summary = summary; state.revision = summary.workspace_revision;
     render(summary, false);
+    return true;
   }
 
   function executionMemory(executionId) {
@@ -436,19 +454,21 @@
     return state.executionState.get(executionId);
   }
 
-  async function loadTimeline(executionId, parentNodeId = null, after = null, attempted = false) {
+  async function loadTimeline(executionId, parentNodeId = null, after = null, attempted = false, generation = null) {
     const parameters = { workspace_revision: state.revision, execution_id: executionId };
     if (parentNodeId) parameters.parent_node_id = parentNodeId;
     if (after) parameters.after = after;
     parameters.limit = "100";
     const urlFactory = () => { parameters.workspace_revision = state.revision; return requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/timeline`, parameters); };
-    const page = validateTimeline(await requestJson(urlFactory, attempted), executionId, parentNodeId);
+    const page = validateTimeline(await requestJson(urlFactory, attempted, null, generation), executionId, parentNodeId);
+    if (generation !== null && generation !== routeGeneration) return false;
     const memory = executionMemory(executionId);
     memory.open = true;
     const key = parentNodeId ?? "root";
     const existing = after ? memory.pages.get(key)?.items ?? [] : [];
     memory.pages.set(key, { items: [...existing, ...page.items], nextCursor: page.next_cursor });
     renderExecutions();
+    return true;
   }
 
   function timingLabel(node) {
@@ -486,7 +506,7 @@
       }
       row.addEventListener("click", async () => {
         if (node.child_count > 0) await setExpanded(execution.execution_id, node.node_id, !memory.expanded.has(node.node_id));
-        await selectNode(execution.execution_id, node.node_id, true);
+        await selectNodeFromUser(execution.execution_id, node.node_id, true);
       });
       wrapper.append(row);
       if (memory.expanded.has(node.node_id)) wrapper.append(renderNodes(execution, memory, node.node_id, depth + 1, node.child_count));
@@ -564,7 +584,7 @@
     else if (event.key === "ArrowRight" && row.hasAttribute("aria-expanded")) { event.preventDefault(); await setExpanded(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, true); return; }
     else if (event.key === "ArrowLeft" && expanded) { event.preventDefault(); await setExpanded(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, false); return; }
     else if (event.key === "ArrowLeft") target = rows.slice(0, index).reverse().find(candidate => Number(candidate.getAttribute("aria-level")) < Number(row.getAttribute("aria-level"))) ?? row;
-    else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); await selectNode(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, true); return; }
+    else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); await selectNodeFromUser(row.closest("[data-execution-id]").dataset.executionId, row.dataset.timelineNode, true); return; }
     else return;
     event.preventDefault(); rows.forEach(item => item.tabIndex = -1); target.tabIndex = 0; target.focus();
   }
@@ -586,7 +606,7 @@
 
   function appendRelated(section, title, items) {
     if (!items.length) return; section.append(el("h3", null, title)); const list = el("ul");
-    for (const item of items) { const button = el("button", null, item.name.state === "recorded" ? item.name.text : KIND_LABELS[item.kind]); button.type = "button"; button.addEventListener("click", () => selectNode(item.execution_id, item.node_id, true)); const li = el("li"); li.append(button); list.append(li); }
+    for (const item of items) { const button = el("button", null, item.name.state === "recorded" ? item.name.text : KIND_LABELS[item.kind]); button.type = "button"; button.addEventListener("click", () => selectNodeFromUser(item.execution_id, item.node_id, true)); const li = el("li"); li.append(button); list.append(li); }
     section.append(list);
   }
 
@@ -610,7 +630,7 @@
       try {
         const dialog = document.querySelector("[data-session-ai-dialog]");
         if (dialog?.open) closeSessionAi(false);
-        await selectNode(null, reference, true);
+        if (!await selectNodeFromUser(null, reference, true)) return;
         root.querySelector(`[data-timeline-node='${reference}']`)?.focus();
       }
       catch { button.replaceWith(el("span", "local-monitor-ai-evidence-unavailable", "この証拠は現在のタイムラインでは表示できません")); }
@@ -668,16 +688,16 @@
     if (focus) heading.focus();
   }
 
-  async function pollAiRun(runId, scope, generation = null) {
+  async function pollAiRun(runId, scope, generation = null, routeGenerationValue = null) {
     const status = document.querySelector(scope === "session" ? "[data-session-ai-status]" : "[data-node-ai-status]");
     const deadline = Date.now() + 610000;
-    while (Date.now() < deadline && (scope === "session" ? generation === sessionPollGeneration && activeSessionRun === runId : generation === nodePollGeneration)) {
+    while (Date.now() < deadline && currentRouteGeneration(routeGenerationValue) && (scope === "session" ? generation === sessionPollGeneration && activeSessionRun === runId : generation === nodePollGeneration)) {
       try {
         const response = await fetch(`/api/local-monitor/v1/ai/${scope}-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
         if (!response.ok) throw new Error("poll_failed");
-        const value = await response.json(); if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
+        const value = await response.json(); if (!currentRouteGeneration(routeGenerationValue)) return null; if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
         if (!["queued", "running"].includes(value.state)) return value;
-      } catch { if (status) status.textContent = "AI分析の状態を一時的に確認できません。再試行しています"; }
+      } catch { if (!currentRouteGeneration(routeGenerationValue)) return null; if (status) status.textContent = "AI分析の状態を一時的に確認できません。再試行しています"; }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     return null;
@@ -695,22 +715,25 @@
     if (updateHistory && UUID_V7.test(item.run_id)) { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: item.run_id }); }
   }
 
-  async function readSessionReports(cursor = null, open = false) {
+  async function readSessionReports(cursor = null, open = false, generation = null) {
     const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "20"); if (cursor) url.searchParams.set("cursor", cursor);
     const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
-    const page = await response.json(); sessionReports = cursor ? [...sessionReports, ...(page.reports ?? [])] : page.reports ?? []; sessionReportCursor = page.next_cursor ?? null;
+    const page = await response.json(); if (!currentRouteGeneration(generation)) return false;
+    sessionReports = cursor ? [...sessionReports, ...(page.reports ?? [])] : page.reports ?? []; sessionReportCursor = page.next_cursor ?? null;
     const history = document.querySelector("[data-session-ai-history]"); history.replaceChildren();
     for (const item of sessionReports) { const button = el("button", null, item.run_id); button.type = "button"; button.addEventListener("click", () => showSessionReport(item)); history.append(button); }
     document.querySelector("[data-session-ai-more]").hidden = !sessionReportCursor;
     if (open && sessionReports[0]) showSessionReport(sessionReports[0]);
+    return true;
   }
 
-  async function readExactSessionReport(runId) {
+  async function readExactSessionReport(runId, generation = null) {
     let cursor = null;
     do {
       const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "100"); if (cursor) url.searchParams.set("cursor", cursor);
-      const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return { state: "unavailable", report: null };
-      const page = await response.json(); const exact = (page.reports ?? []).find(item => item.run_id === runId); if (exact) return { state: "found", report: exact }; cursor = page.next_cursor ?? null;
+      const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!currentRouteGeneration(generation)) return { state: "canceled", report: null }; if (!response.ok) return { state: "unavailable", report: null };
+      const page = await response.json(); if (!currentRouteGeneration(generation)) return { state: "canceled", report: null };
+      const exact = (page.reports ?? []).find(item => item.run_id === runId); if (exact) return { state: "found", report: exact }; cursor = page.next_cursor ?? null;
     } while (cursor);
     return { state: "missing", report: null };
   }
@@ -721,26 +744,27 @@
     sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); if (!dialog.open) dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
   }
 
-  async function restoreExactSessionAnalysis(run) {
+  async function restoreExactSessionAnalysis(run, routeGenerationValue = null) {
+    if (!currentRouteGeneration(routeGenerationValue)) return "canceled";
     const runId = run.run_id;
     showSessionDialog(document.querySelector("[data-session-ai-open]"));
     if (["queued", "running"].includes(run.state)) {
-      activeSessionRun = runId; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false;
+      activeSessionRun = runId; const pollGeneration = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false;
       showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
-      const terminal = await pollAiRun(runId, "session", generation); if (generation !== sessionPollGeneration) return;
+      const terminal = await pollAiRun(runId, "session", pollGeneration, routeGenerationValue); if (pollGeneration !== sessionPollGeneration || !currentRouteGeneration(routeGenerationValue)) return "canceled";
       activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
       if (terminal && ["succeeded", "zero_findings"].includes(terminal.state)) {
-        const exact = await readExactSessionReport(runId); if (exact.state === "unavailable") return closeExactAnalysisUnavailable(); showSessionReport(exact.report ?? { ...terminal, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
+        const exact = await readExactSessionReport(runId, routeGenerationValue); if (exact.state === "canceled") return "canceled"; if (exact.state === "unavailable") return closeExactAnalysisUnavailable(503, routeGenerationValue); showSessionReport(exact.report ?? { ...terminal, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
       } else if (terminal) showSessionReport({ ...terminal, content_state: "status_only", snapshot_changed: false }, false, true);
-      await readSessionReports(null, false);
+      await readSessionReports(null, false, routeGenerationValue);
     } else if (["succeeded", "zero_findings"].includes(run.state)) {
-      const exact = await readExactSessionReport(runId); if (exact.state === "unavailable") return closeExactAnalysisUnavailable(); if (exact.report) showSessionReport(exact.report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
+      const exact = await readExactSessionReport(runId, routeGenerationValue); if (exact.state === "canceled") return "canceled"; if (exact.state === "unavailable") return closeExactAnalysisUnavailable(503, routeGenerationValue); if (exact.report) showSessionReport(exact.report, false); else showSessionReport({ ...run, result: null, content_state: "status_only", snapshot_changed: false }, false);
     } else showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
     return "restored";
   }
 
-  async function restoreExactNodeAnalysis(run, route) {
-    await selectNode(route.execution ?? null, run.node_id, false);
+  async function restoreExactNodeAnalysis(run, route, routeGenerationValue = null) {
+    if (!await selectNode(route.execution ?? null, run.node_id, false, false, routeGenerationValue) || !currentRouteGeneration(routeGenerationValue)) return "canceled";
     const section = inspector.querySelector("[data-inspector-kind]"); if (!section) return;
     const action = section.querySelector("[data-node-ai-start] button"); if (action) action.disabled = true;
     const surface = createNodeAiSurface(section, run.node_id); nodeTranscript = []; nodeAiContext = run.node_id;
@@ -749,28 +773,31 @@
     }
     const status = surface.querySelector("[data-node-ai-status]"); status.textContent = AI_STATE_LABELS[run.state] ?? "";
     if (["queued", "running"].includes(run.state)) {
-      const generation = ++nodePollGeneration; const terminal = await pollAiRun(run.run_id, "node", generation); if (generation !== nodePollGeneration || !terminal) return;
+      const generation = ++nodePollGeneration; const terminal = await pollAiRun(run.run_id, "node", generation, routeGenerationValue); if (generation !== nodePollGeneration || !terminal || !currentRouteGeneration(routeGenerationValue)) return "canceled";
       if (["succeeded", "zero_findings"].includes(terminal.state) && terminal.result) renderAiResult(surface.querySelector("[data-node-ai-result]"), terminal.result, true);
       else focusNodeAiFailure(surface, terminal.state);
     } else if (["succeeded", "zero_findings"].includes(run.state) && run.result) renderAiResult(surface.querySelector("[data-node-ai-result]"), run.result);
     else focusNodeAiFailure(surface, run.state);
+    return "restored";
   }
 
-  async function restoreExactAnalysis(runId, route) {
+  async function restoreExactAnalysis(runId, route, generation = null) {
     try {
       const response = await fetch(`/api/local-monitor/v1/ai/runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (!currentRouteGeneration(generation)) return "canceled";
       if (response.status === 404) { location.reload(); return "closed"; }
-      if (!response.ok) return closeExactAnalysisUnavailable(response.status);
+      if (!response.ok) return closeExactAnalysisUnavailable(response.status, generation);
       const run = await response.json();
-      if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) return closeExactAnalysisUnavailable();
-      if (run.scope_kind === "node" && NODE.test(run.node_id)) await restoreExactNodeAnalysis(run, route);
-      else if (run.scope_kind === "session") return await restoreExactSessionAnalysis(run);
-      else return closeExactAnalysisUnavailable();
-      return "restored";
-    } catch { return closeExactAnalysisUnavailable(); }
+      if (!currentRouteGeneration(generation)) return "canceled";
+      if (run.run_id !== runId || run.session_id !== root.dataset.sessionId) return closeExactAnalysisUnavailable(503, generation);
+      if (run.scope_kind === "node" && NODE.test(run.node_id)) return await restoreExactNodeAnalysis(run, route, generation);
+      else if (run.scope_kind === "session") return await restoreExactSessionAnalysis(run, generation);
+      else return closeExactAnalysisUnavailable(503, generation);
+    } catch { return closeExactAnalysisUnavailable(503, generation); }
   }
 
-  function closeExactAnalysisUnavailable(status = 503) {
+  function closeExactAnalysisUnavailable(status = 503, generation = null) {
+    if (!currentRouteGeneration(generation)) return "canceled";
     nodePollGeneration++; nodeTranscript = []; nodeAiContext = null;
     const dialog = document.querySelector("[data-session-ai-dialog]"); if (dialog?.open) closeSessionAi(false); else { activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; }
     document.querySelector("[data-session-ai-report]")?.replaceChildren(); document.querySelector("[data-session-ai-history]")?.replaceChildren();
@@ -853,7 +880,7 @@
     section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
     if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
-      appendInspectorFact(section, "開始", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "終了", { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "所要時間", { state: node.timing.state, value: node.timing.duration_ms === null ? null : `${node.timing.duration_ms} ms` });
+      appendInspectorFact(section, "開始", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "終了", node.timing.ended_at === null ? { state: "not_observed" } : { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "所要時間", node.timing.duration_ms === null ? { state: "not_observed" } : { state: node.timing.state, value: `${node.timing.duration_ms} ms` });
       appendInspectorFact(section, "呼び出し元", metadata.caller, "node_id"); appendInspectorFact(section, "ライフサイクル", metadata.lifecycle, "value", value => STATUS_LABELS[value]); appendInspectorFact(section, "状態", metadata.status, "value", value => STATUS_LABELS[value]); appendInspectorFact(section, "終了状態", metadata.exit);
       if (metadata.mcp_server_identity.state === "recorded") appendInspectorFact(section, "MCPサーバーID", metadata.mcp_server_identity);
       appendInspectorFact(section, "ツール", metadata.mcp_tool_name);
@@ -885,22 +912,31 @@
     if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
 
-  async function selectNode(executionId, nodeId, push, attempted = false) {
+  async function selectNode(executionId, nodeId, push, attempted = false, generation = null) {
+    generation ??= ++routeGeneration;
     if (state.selectedNodeId !== nodeId) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; }
     const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
-    const rawDetail = await requestJson(urlFactory, attempted);
+    const rawDetail = await requestJson(urlFactory, attempted, null, generation);
     const detail = validateNode(rawDetail, nodeId, executionId);
+    if (generation !== routeGeneration) return false;
     executionId = detail.execution.execution_id;
-    state.selectedExecutionId = executionId; state.selectedNodeId = nodeId;
-    const memory = executionMemory(executionId); memory.open = true;
+    const memory = executionMemory(executionId);
     const path = (detail.parent_path ?? []).filter(parent => ["exact", "explicit"].includes(parent.relationship_authority));
+    if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation)) return false;
+    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation)) return false;
+    if (generation !== routeGeneration) return false;
+    state.selectedExecutionId = executionId; state.selectedNodeId = nodeId; memory.open = true;
     for (const parent of path) memory.expanded.add(parent.node_id);
-    if (!memory.pages.has("root")) await loadTimeline(executionId);
-    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id)) await loadTimeline(executionId, parent.node_id);
     renderInspector(detail);
     if (push) { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: executionId, node: nodeId }); }
     else if (!window.LocalMonitorV1History.current().execution) window.LocalMonitorV1History.replace({ execution: executionId, node: nodeId });
     renderExecutions();
+    return true;
+  }
+
+  async function selectNodeFromUser(executionId, nodeId, push) {
+    try { return await selectNode(executionId, nodeId, push); }
+    catch (error) { if (error instanceof RouteSuperseded) return false; throw error; }
   }
 
   function fallbackSelection(replace) {
@@ -910,22 +946,29 @@
   }
 
   async function applyRoute(route) {
-    if (!state.summary) return;
-    const closedAnalysis = !route.analysis && document.querySelector("[data-session-ai-dialog]")?.open;
-    if (closedAnalysis) closeSessionAi(!route.execution && !route.node);
-    if (route.analysis) { const outcome = await restoreExactAnalysis(route.analysis, route); if (outcome === "closed" || document.querySelector("[data-node-ai-surface]")) return; }
-    if (route.node) {
-      if (document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi(false);
-      try { await selectNode(route.execution ?? null, route.node, false); if (closedAnalysis) root.querySelector("[data-timeline-node][aria-selected=true]")?.focus(); }
-      catch (error) { if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
-    } else if (route.execution) {
-      const execution = state.summary.executions.find(item => item.execution_id === route.execution);
-      if (!execution) { fallbackSelection(true); return; }
-      state.selectedExecutionId = execution.execution_id; state.selectedNodeId = null;
-      for (const item of state.summary.executions) executionMemory(item.execution_id).open = item.execution_id === execution.execution_id;
-      if (!executionMemory(execution.execution_id).pages.has("root")) await loadTimeline(execution.execution_id);
-      renderOverview(state.summary); renderExecutions(); if (closedAnalysis) root.querySelector(`[data-execution-id='${route.execution}'] [data-execution-toggle]`)?.focus();
-    } else fallbackSelection(false);
+    const generation = ++routeGeneration;
+    try {
+      if (!state.summary) return;
+      const closedAnalysis = !route.analysis && document.querySelector("[data-session-ai-dialog]")?.open;
+      if (closedAnalysis) closeSessionAi(!route.execution && !route.node);
+      if (route.analysis) { const outcome = await restoreExactAnalysis(route.analysis, route, generation); if (generation !== routeGeneration || outcome === "closed" || outcome === "canceled" || document.querySelector("[data-node-ai-surface]")) return; }
+      if (route.node) {
+        if (document.querySelector("[data-session-ai-dialog]")?.open) closeSessionAi(false);
+        try { const selected = await selectNode(route.execution ?? null, route.node, false, false, generation); if (selected && generation === routeGeneration && closedAnalysis) root.querySelector("[data-timeline-node][aria-selected=true]")?.focus(); }
+        catch (error) { if (error instanceof RouteSuperseded) return; if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
+      } else if (route.execution) {
+        const execution = state.summary.executions.find(item => item.execution_id === route.execution);
+        if (!execution) { fallbackSelection(true); return; }
+        if (!executionMemory(execution.execution_id).pages.has("root") && !await loadTimeline(execution.execution_id, null, null, false, generation)) return;
+        if (generation !== routeGeneration) return;
+        state.selectedExecutionId = execution.execution_id; state.selectedNodeId = null;
+        for (const item of state.summary.executions) executionMemory(item.execution_id).open = item.execution_id === execution.execution_id;
+        renderOverview(state.summary); renderExecutions(); if (closedAnalysis) root.querySelector(`[data-execution-id='${route.execution}'] [data-execution-toggle]`)?.focus();
+      } else fallbackSelection(false);
+    } catch (error) {
+      if (error instanceof RouteSuperseded) return;
+      renderRouteRecovery(error);
+    }
   }
 
   function renderRouteRecovery(error) {
@@ -990,10 +1033,12 @@
 
   function render(summary, openLatest = true) {
     const session = summary.session;
-    root.querySelector("[data-session-breadcrumb]").textContent = session.instruction.label || "セッション";
-    root.querySelector("[data-session-title]").textContent = session.instruction.label || "セッション";
+    const safeInstant = session.timing.started_at ?? session.timing.last_seen_at;
+    const sessionLabel = session.instruction.label !== null ? session.instruction.label : safeInstant === null ? "日時不明のセッション" : `${new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(safeInstant))} のセッション`;
+    root.querySelector("[data-session-breadcrumb]").textContent = sessionLabel;
+    root.querySelector("[data-session-title]").textContent = sessionLabel;
     const context = root.querySelector("[data-session-context-content]");
-    context.replaceChildren(el("strong", null, session.instruction.label || "セッション"), el("span", null, ` ${STATUS_LABELS[session.status]}`));
+    context.replaceChildren(el("strong", null, sessionLabel), el("span", null, ` ${STATUS_LABELS[session.status]}`));
     const source = el("span"); source.dataset.sessionSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
@@ -1013,7 +1058,7 @@
         && session.tokens.total.value === session.tokens.input.value + session.tokens.output.value) {
       renderBars(total, session.tokens.input, session.tokens.output, "local-monitor-token-bar", "入力", "出力");
     }
-    const cache = tokenMetric("入力トークンの内訳", session.tokens.cache_read_ratio_basis_points);
+    const cache = tokenMetric("入力トークンの内訳", session.tokens.cache_read_ratio_basis_points, value => `${format(value / 100)}%`);
     if (session.tokens.input.state === "recorded" && session.tokens.cache_read.state === "recorded"
         && session.tokens.new_input.state === "recorded" && session.tokens.cache_read_ratio_basis_points.state === "recorded"
         && session.tokens.input.value === session.tokens.cache_read.value + session.tokens.new_input.value

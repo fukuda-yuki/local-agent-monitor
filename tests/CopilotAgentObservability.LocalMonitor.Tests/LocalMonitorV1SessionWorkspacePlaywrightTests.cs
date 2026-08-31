@@ -742,6 +742,112 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要"); Assert.Null(await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId")); await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RapidRouteChangesIgnoreOlderNodeCompletionAndFailure(bool olderFails)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summary, timeline, detailTemplate, _) = InspectorDocuments("event"); var itemA = timeline["items"]![0]!.DeepClone(); itemA["node_id"] = nodeA; itemA["name"]!["text"] = "older A"; var itemB = itemA.DeepClone(); itemB["node_id"] = nodeB; itemB["name"]!["text"] = "newer B"; timeline["items"] = new JsonArray(itemA, itemB);
+        JsonObject Detail(string nodeId, string name) { var detail = detailTemplate.DeepClone().AsObject(); detail["node"]!["node_id"] = nodeId; detail["node"]!["name"]!["text"] = name; return detail; }
+        var olderStarted = new TaskCompletionSource(); var releaseOlder = new TaskCompletionSource(); var olderFinished = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
+        await page.RouteAsync("**/nodes/*?*", async r => { if (r.Request.Url.Contains(nodeA)) { olderStarted.SetResult(); await releaseOlder.Task; if (olderFails) await r.FulfillAsync(new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"delayed\"}" }); else await r.FulfillAsync(Json(Detail(nodeA, "older A").ToJsonString())); olderFinished.SetResult(); return; } await r.FulfillAsync(Json(Detail(nodeB, "newer B").ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await InstallBrowserSettlementSignal(page, nodeA); await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeA }); await olderStarted.Task;
+        await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeB }); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("newer B");
+        releaseOlder.SetResult(); await olderFinished.Task; await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={nodeB}"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("newer B"); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0);
+        await AssertNoUnhandledRejections(page);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RapidRouteChangesDiscardOlderAnalysisRestoreSuccessAndFailure(bool olderFails)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summary, timeline, detail, _) = InspectorDocuments("event"); var item = timeline["items"]![0]!; item["node_id"] = nodeB; item["name"]!["text"] = "current B"; detail["node"]!["node_id"] = nodeB; detail["node"]!["name"]!["text"] = "current B";
+        var analysisStarted = new TaskCompletionSource(); var releaseAnalysis = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(detail.ToJsonString())));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{AiRunId}", async r => { analysisStarted.SetResult(); await releaseAnalysis.Task; if (olderFails) await r.FulfillAsync(new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"delayed\"}" }); else await r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"provider_failed","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":null}""")); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await InstallBrowserSettlementSignal(page, $"/ai/runs/{AiRunId}"); await page.EvaluateAsync("run => window.LocalMonitorV1History.push({ analysis: run })", AiRunId); await analysisStarted.Task;
+        await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeB, analysis = (string?)null }); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true");
+        releaseAnalysis.SetResult(); await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={nodeB}"); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("current B"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-session-ai-dialog][open], [data-node-ai-surface]")).ToHaveCountAsync(0); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); await Expect(page.Locator("[data-execution-toggle]")).ToHaveAttributeAsync("aria-expanded", "true");
+        await AssertNoUnhandledRejections(page);
+    }
+
+    [Fact]
+    public async Task RapidExecutionRouteSupersessionDoesNotRejectTheDomListenerPromise()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionA = "8a5590c8-46e3-7069-af48-3844d2bf17a4"; const string executionB = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summaryText, timelineB, detailB, _) = InspectorDocuments("event"); var summary = JsonNode.Parse(summaryText)!.AsObject(); AddSecondExecution(summary, "2026-08-26T01:02:02.0000000+00:00", "claude-code", false); timelineB["items"]![0]!["node_id"] = nodeB; timelineB["items"]![0]!["name"]!["text"] = "current B"; detailB["node"]!["node_id"] = nodeB; detailB["node"]!["name"]!["text"] = "current B";
+        var executionStarted = new TaskCompletionSource(); var releaseExecution = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString())));
+        await page.RouteAsync("**/timeline?*", async r => { if (r.Request.Url.Contains(executionA)) { executionStarted.SetResult(); await releaseExecution.Task; var empty = JsonNode.Parse(Summary("timeline-empty.json"))!.AsObject(); empty["workspace_revision"] = summary["workspace_revision"]!.GetValue<string>(); empty["execution_id"] = executionA; await r.FulfillAsync(Json(empty.ToJsonString())); return; } await r.FulfillAsync(Json(timelineB.ToJsonString())); });
+        await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(detailB.ToJsonString())));
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await InstallBrowserSettlementSignal(page, executionA);
+        await page.EvaluateAsync("execution => window.LocalMonitorV1History.push({ execution, node: null })", executionA); await executionStarted.Task;
+        await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionB, node = nodeB }); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("current B"); releaseExecution.SetResult(); await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionB}&node={nodeB}"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-execution-id='8a5590c8-46e3-7069-af48-3844d2bf17a4'] [data-execution-toggle]")).ToHaveAttributeAsync("aria-expanded", "false"); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); await AssertNoUnhandledRejections(page);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SupersededWorkspaceRefreshDiscardsNonSuccessAndMalformedBodies(bool malformed)
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summary, timeline, detailTemplate, _) = InspectorDocuments("event"); var itemA = timeline["items"]![0]!.DeepClone(); itemA["node_id"] = nodeA; itemA["name"]!["text"] = "stale A"; var itemB = itemA.DeepClone(); itemB["node_id"] = nodeB; itemB["name"]!["text"] = "current B"; timeline["items"] = new JsonArray(itemA, itemB);
+        var detailB = detailTemplate.DeepClone().AsObject(); detailB["node"]!["node_id"] = nodeB; detailB["node"]!["name"]!["text"] = "current B";
+        var summaries = 0; var refreshStarted = new TaskCompletionSource(); var releaseRefresh = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", async r => { if (++summaries == 1) { await r.FulfillAsync(Json(summary)); return; } refreshStarted.SetResult(); await releaseRefresh.Task; await r.FulfillAsync(malformed ? new() { Status = 200, ContentType = "application/json", Body = "{" } : new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"delayed\"}" }); });
+        await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.Request.Url.Contains(nodeA) ? r.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }) : r.FulfillAsync(Json(detailB.ToJsonString())));
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await InstallBrowserSettlementSignal(page, "/summary");
+        await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeA }); await refreshStarted.Task;
+        await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeB }); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("current B"); releaseRefresh.SetResult(); await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={nodeB}"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("current B"); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); await AssertNoUnhandledRejections(page); Assert.Equal(2, summaries);
+    }
+
+    [Fact]
+    public async Task RapidDirectSelectionsDiscardOlderCompletionWithoutUnhandledRejection()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summary, timeline, detailTemplate, _) = InspectorDocuments("event"); var itemA = timeline["items"]![0]!.DeepClone(); itemA["node_id"] = nodeA; itemA["name"]!["text"] = "older direct A"; var itemB = itemA.DeepClone(); itemB["node_id"] = nodeB; itemB["name"]!["text"] = "newer direct B"; timeline["items"] = new JsonArray(itemA, itemB);
+        JsonObject Detail(string nodeId, string name) { var value = detailTemplate.DeepClone().AsObject(); value["node"]!["node_id"] = nodeId; value["node"]!["name"]!["text"] = name; return value; }
+        var olderStarted = new TaskCompletionSource(); var releaseOlder = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", async r => { if (r.Request.Url.Contains(nodeA)) { olderStarted.SetResult(); await releaseOlder.Task; await r.FulfillAsync(Json(Detail(nodeA, "older direct A").ToJsonString())); return; } await r.FulfillAsync(Json(Detail(nodeB, "newer direct B").ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallUnhandledRejectionRecorder(page); await InstallBrowserSettlementSignal(page, nodeA);
+        await page.Locator($"[data-timeline-node='{nodeA}']").ClickAsync(); await olderStarted.Task; await page.Locator($"[data-timeline-node='{nodeB}']").ClickAsync(); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("newer direct B"); releaseOlder.SetResult(); await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={nodeB}"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("newer direct B"); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); await AssertNoUnhandledRejections(page);
+    }
+
+    [Fact]
+    public async Task RapidRouteChangesDiscardOlderWorkspaceSnapshotRefresh()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        const string executionId = "9a5590c8-46e3-7069-af48-3844d2bf17a4"; const string nodeA = "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; const string nodeB = "node-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var (summary, timeline, detailTemplate, _) = InspectorDocuments("event"); var itemA = timeline["items"]![0]!.DeepClone(); itemA["node_id"] = nodeA; itemA["name"]!["text"] = "stale A"; var itemB = itemA.DeepClone(); itemB["node_id"] = nodeB; itemB["name"]!["text"] = "current B"; timeline["items"] = new JsonArray(itemA, itemB);
+        JsonObject Detail(string nodeId, string name) { var value = detailTemplate.DeepClone().AsObject(); value["node"]!["node_id"] = nodeId; value["node"]!["name"]!["text"] = name; return value; }
+        var staleStarted = new TaskCompletionSource(); var releaseStale = new TaskCompletionSource(); var summaries = 0;
+        await page.RouteAsync("**/summary", r => { summaries++; return r.FulfillAsync(Json(summary)); }); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
+        await page.RouteAsync("**/nodes/*?*", async r => { if (r.Request.Url.Contains(nodeA)) { staleStarted.SetResult(); await releaseStale.Task; await r.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); return; } await r.FulfillAsync(Json(Detail(nodeB, "current B").ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await InstallBrowserSettlementSignal(page, nodeA); await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeA }); await staleStarted.Task;
+        await page.EvaluateAsync("route => window.LocalMonitorV1History.push(route)", new { execution = executionId, node = nodeB }); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); releaseStale.SetResult(); await WaitForBrowserSettlement(page);
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={nodeB}"); await Expect(page.Locator("[data-inspector-kind] h2")).ToHaveTextAsync("current B"); await Expect(page.Locator($"[data-timeline-node='{nodeB}']")).ToHaveAttributeAsync("aria-selected", "true"); await Expect(page.Locator("[data-execution-toggle]")).ToHaveAttributeAsync("aria-expanded", "true"); await Expect(page.GetByText("セッション詳細を表示できません")).ToHaveCountAsync(0); Assert.Equal(1, summaries);
+    }
+
     [Fact]
     public async Task StaleExactNodeRefreshesSummaryAndRetriesSameTargetOnce()
     {
@@ -959,12 +1065,21 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         fixture = "summary-nonrecorded-evidence.json";
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("2026/8/26 10:02 のセッション");
+        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("2026/8/26 10:02 のセッション");
+        await Expect(page.Locator("[data-session-context-content] strong")).ToHaveTextAsync("2026/8/26 10:02 のセッション");
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要");
         await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("VS Code");
         await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("今回の記録にはありません");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
             await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-fixed-coverage]")).ToContainTextAsync("記録が一部欠けています");
+
+        fixture = "summary-empty.json";
+        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("日時不明のセッション");
+        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("日時不明のセッション");
+        await Expect(page.Locator("[data-session-context-content] strong")).ToHaveTextAsync("日時不明のセッション");
     }
 
     [Theory]
@@ -1066,6 +1181,31 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         foreach (var label in new[] { "入力 10", "出力 5", "キャッシュから読み込み 4", "新規入力 6" })
             await Expect(page.GetByLabel(label)).ToHaveCountAsync(1);
+        await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("40%");
+        await Expect(page.Locator("[data-session-summary]")).Not.ToContainTextAsync("4,000");
+    }
+
+    [Fact]
+    public async Task ZeroCacheReadRatioDisplaysAsZeroPercent()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); var tokens = summary["session"]!["tokens"]!;
+        tokens["cache_read"] = JsonNode.Parse("""{"state":"recorded","value":0}"""); tokens["new_input"] = JsonNode.Parse("""{"state":"recorded","value":10}"""); tokens["cache_read_ratio_basis_points"] = JsonNode.Parse("""{"state":"recorded","value":0}""");
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("0%");
+    }
+
+    [Fact]
+    public async Task ActiveToolInspectorRendersHonestAbsenceForOpenEndAndDuration()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision;
+        node["node"]!["kind"] = "tool"; node["node"]!["lifecycle"] = "started"; node["node"]!["status"] = "active"; node["node"]!["timing"]!["ended_at"] = null; node["node"]!["timing"]!["duration_ms"] = null;
+        node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"tool","caller":{"state":"recorded","node_id":"node-2db4028cf76015c954848d7dcbb5deca"},"lifecycle":{"state":"recorded","value":"started"},"status":{"state":"recorded","value":"active"},"exit":{"state":"not_observed"},"mcp_server_identity":{"state":"not_observed","value":null},"mcp_server_name":{"state":"not_observed","value":null},"mcp_tool_name":{"state":"recorded","value":"open-tool"},"input":{"state":"not_captured","available":false},"result":{"state":"not_captured","available":false},"error":{"state":"not_captured","available":false},"retry":{"state":"recorded","node_ids":[]},"recovery":{"state":"recorded","node_ids":[]},"child_activity":{"skill":{"state":"not_observed","count":null},"tool":{"state":"recorded","count":0},"subagent":{"state":"not_observed","count":null},"error":{"state":"not_observed","count":null},"retry":{"state":"not_observed","count":null}},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-tool","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}""");
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
+        var inspector = page.Locator("[data-inspector-kind=tool]"); await Expect(inspector).ToContainTextAsync("終了: 今回の記録にはありません"); await Expect(inspector).ToContainTextAsync("所要時間: 今回の記録にはありません"); await Expect(inspector).Not.ToContainTextAsync("終了: null"); await Expect(inspector).Not.ToContainTextAsync("所要時間: null");
     }
 
     private static async Task AssertValidNodeShape(Action<JsonObject> mutate)
@@ -1077,6 +1217,31 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: '9a5590c8-46e3-7069-af48-3844d2bf17a4', node: 'node-a8a773d6614d5030f505ff195b452dd6' })");
         await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("user.message"); Assert.Equal("node-a8a773d6614d5030f505ff195b452dd6", await page.EvaluateAsync<string?>("() => window.LocalMonitorSessionWorkspace.selectedNodeId"));
     }
+
+    private static Task InstallBrowserSettlementSignal(IPage page, string requestFragment) => page.EvaluateAsync("""
+        fragment => {
+          const originalFetch = window.fetch;
+          window.__staleRouteSettled = new Promise(resolve => {
+            window.fetch = async (...args) => {
+              const response = await originalFetch(...args);
+              if (String(args[0]).includes(fragment)) setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 0);
+              return response;
+            };
+          });
+        }
+        """, requestFragment);
+
+    private static Task WaitForBrowserSettlement(IPage page) => page.EvaluateAsync("() => window.__staleRouteSettled");
+
+    private static Task InstallUnhandledRejectionRecorder(IPage page) => page.EvaluateAsync("""
+        () => {
+          window.__routeUnhandledRejections = [];
+          addEventListener("unhandledrejection", event => window.__routeUnhandledRejections.push(String(event.reason)));
+        }
+        """);
+
+    private static async Task AssertNoUnhandledRejections(IPage page) =>
+        Assert.Empty(await page.EvaluateAsync<string[]>("() => window.__routeUnhandledRejections"));
 
     private static (string Summary, JsonObject Timeline, JsonObject Node, string Revision) InspectorDocuments(string kind)
     {
