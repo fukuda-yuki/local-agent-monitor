@@ -144,9 +144,13 @@ public sealed class SqliteSessionOtelEnricher
                 sessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Unbound,
                 row.Repository, row.Workspace, null, null, occurredAt,
                 SessionRawRetentionState.NotCaptured, now, now);
+        var hasLlmTokenAuthority = string.Equals(row.Category, "llm_call", StringComparison.Ordinal);
         var run = new ObservedSessionRun(
             runId, sessionId, confirmedSurface, null, row.TraceId, null, row.ResponseModel ?? row.RequestModel,
-            ParseRunStatus(row.Status), row.StartTime, row.EndTime, row.InputTokens, row.OutputTokens, row.TotalTokens);
+            ParseRunStatus(row.Status), row.StartTime, row.EndTime,
+            hasLlmTokenAuthority ? row.InputTokens : null,
+            hasLlmTokenAuthority ? row.OutputTokens : null,
+            hasLlmTokenAuthority ? row.ProducerTotalTokens : null);
         var @event = new ObservedSessionEvent(
             eventId, sessionId, runId, confirmedSurface, null, row.TraceId, null,
             "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, SessionContentState.NotCaptured,
@@ -351,13 +355,20 @@ public sealed class SqliteSessionOtelEnricher
         var observationJoin = hasSourceObservations
             ? "LEFT JOIN source_schema_observations o ON o.raw_record_id=s.raw_record_id"
             : string.Empty;
+        var hasSpanFacts = TableExists(connection, "local_workspace_span_facts");
+        var producerTotalTokensColumn = hasSpanFacts ? "f.producer_total_tokens" : "NULL";
+        var spanFactsJoin = hasSpanFacts
+            ? "LEFT JOIN local_workspace_span_facts f ON f.raw_record_id=s.raw_record_id AND f.span_ordinal=s.span_ordinal"
+            : string.Empty;
         command.CommandText = $"""
             SELECT s.id,s.raw_record_id,s.trace_id,COALESCE(s.span_id,''),s.conversation_id,t.client_kind,
                    t.repository_name,t.workspace_label,s.start_time,s.end_time,s.projected_at,
-                   s.request_model,s.response_model,s.input_tokens,s.output_tokens,s.total_tokens,s.status,
+                   s.category,s.request_model,s.response_model,s.input_tokens,s.output_tokens,
+                   s.total_tokens,{producerTotalTokensColumn},s.status,
                    {observationColumns}
             FROM monitor_spans s
             JOIN monitor_traces t ON t.trace_id=s.trace_id
+            {spanFactsJoin}
             {observationJoin}
             WHERE s.id > $after ORDER BY s.id LIMIT $limit;
             """;
@@ -371,8 +382,9 @@ public sealed class SqliteSessionOtelEnricher
                 reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3), Nullable(reader, 4), Nullable(reader, 5),
                 Nullable(reader, 6), Nullable(reader, 7), Timestamp(reader, 8), Timestamp(reader, 9),
                 DateTimeOffset.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                Nullable(reader, 11), Nullable(reader, 12), NullableInt64(reader, 13), NullableInt64(reader, 14), NullableInt64(reader, 15), Nullable(reader, 16),
-                PayloadJson: null, Nullable(reader, 17), Nullable(reader, 18), Nullable(reader, 19), Nullable(reader, 20), Nullable(reader, 21)));
+                Nullable(reader, 11), Nullable(reader, 12), Nullable(reader, 13),
+                NullableInt64(reader, 14), NullableInt64(reader, 15), NullableInt64(reader, 16), NullableInt64(reader, 17), Nullable(reader, 18),
+                PayloadJson: null, Nullable(reader, 19), Nullable(reader, 20), Nullable(reader, 21), Nullable(reader, 22), Nullable(reader, 23)));
         }
         return rows;
     }
@@ -437,11 +449,13 @@ public sealed class SqliteSessionOtelEnricher
         DateTimeOffset? StartTime,
         DateTimeOffset? EndTime,
         DateTimeOffset ProjectedAt,
+        string? Category,
         string? RequestModel,
         string? ResponseModel,
         long? InputTokens,
         long? OutputTokens,
         long? TotalTokens,
+        long? ProducerTotalTokens,
         string? Status,
         string? PayloadJson,
         string? SourceSurface,

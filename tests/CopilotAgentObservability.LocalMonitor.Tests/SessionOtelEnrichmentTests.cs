@@ -109,17 +109,26 @@ public sealed class SessionOtelEnrichmentTests
             "copilot-cli",
             "generic-repo",
             startedAt);
+        CreateSpanFactsTable(temp.DatabasePath);
         Execute(
             temp.DatabasePath,
             $"""
             UPDATE monitor_spans
-            SET request_model='requested-model',
+            SET category='llm_call',
+                operation='chat',
+                request_model='requested-model',
                 response_model='response-model',
                 status='ok',
                 end_time='{endedAt:O}',
                 input_tokens=10840,
                 output_tokens=77,
                 total_tokens=10917
+            WHERE trace_id='generic-facts-trace'
+              AND span_id='generic-facts-span';
+            INSERT INTO local_workspace_span_facts(
+                raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT raw_record_id,span_ordinal,NULL,10917
+            FROM monitor_spans
             WHERE trace_id='generic-facts-trace'
               AND span_id='generic-facts-span';
             """);
@@ -129,7 +138,13 @@ public sealed class SessionOtelEnrichmentTests
             new SqliteSessionOtelEnricher(
                 temp.DatabasePath,
                 store,
-                temp.RetentionContext).ProcessNextBatch(1));
+                temp.RetentionContext,
+                new FixedTimeProvider(startedAt),
+                checkpoint =>
+                {
+                    if (checkpoint == "before_raw_terminal")
+                        Execute(temp.DatabasePath, "DROP TABLE local_workspace_span_facts;");
+                }).ProcessNextBatch(1));
 
         var session = Assert.Single(store.ListMostRecent(10));
         var run = Assert.Single(store.GetDetail(session.SessionId)!.Runs);
@@ -141,6 +156,81 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal(10840, run.InputTokens);
         Assert.Equal(77, run.OutputTokens);
         Assert.Equal(10917, run.TotalTokens);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_GenericMultiSpanPathKeepsTokensOnLlmRunWithoutReconstructedTotal()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var startedAt = DateTimeOffset.Parse("2026-07-16T00:00:01Z");
+        InsertProjectedSpan(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            "generic-multi-trace",
+            "generic-parent-span",
+            null,
+            "copilot-cli",
+            "generic-repo",
+            startedAt);
+        CreateSpanFactsTable(temp.DatabasePath);
+        Execute(
+            temp.DatabasePath,
+            $"""
+            UPDATE monitor_spans
+            SET operation='invoke_agent',
+                category='agent_invocation',
+                request_model='parent-model',
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120
+            WHERE trace_id='generic-multi-trace'
+              AND span_id='generic-parent-span';
+            INSERT INTO local_workspace_span_facts(
+                raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT raw_record_id,span_ordinal,NULL,120
+            FROM monitor_spans
+            WHERE trace_id='generic-multi-trace'
+              AND span_id='generic-parent-span';
+            INSERT INTO monitor_spans(
+                raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,
+                operation,category,request_model,response_model,input_tokens,
+                output_tokens,total_tokens,status,start_time,end_time,projected_at)
+            SELECT raw_record_id,trace_id,'generic-child-span','generic-parent-span',1,
+                   'chat','llm_call','requested-child-model','response-child-model',
+                   100,20,120,'ok','{startedAt.AddSeconds(1):O}',
+                   '{startedAt.AddSeconds(2):O}','{startedAt.AddSeconds(2):O}'
+            FROM monitor_spans
+            WHERE trace_id='generic-multi-trace'
+              AND span_id='generic-parent-span';
+            """);
+
+        Assert.Equal(
+            2,
+            new SqliteSessionOtelEnricher(
+                temp.DatabasePath,
+                store,
+                temp.RetentionContext,
+                new FixedTimeProvider(startedAt),
+                checkpoint =>
+                {
+                    if (checkpoint == "before_raw_terminal")
+                        Execute(temp.DatabasePath, "DROP TABLE local_workspace_span_facts;");
+                }).ProcessNextBatch(2));
+
+        var session = Assert.Single(store.ListMostRecent(10));
+        var runs = store.GetDetail(session.SessionId)!.Runs;
+        Assert.Equal(2, runs.Count);
+        var parent = Assert.Single(runs, run => run.Model == "parent-model");
+        Assert.Null(parent.InputTokens);
+        Assert.Null(parent.OutputTokens);
+        Assert.Null(parent.TotalTokens);
+        var child = Assert.Single(runs, run => run.Model == "response-child-model");
+        Assert.Equal(100, child.InputTokens);
+        Assert.Equal(20, child.OutputTokens);
+        Assert.Null(child.TotalTokens);
     }
 
     [Fact]
@@ -770,6 +860,17 @@ public sealed class SessionOtelEnrichmentTests
         command.CommandText = sql;
         command.ExecuteNonQuery();
     }
+
+    private static void CreateSpanFactsTable(string databasePath) => Execute(
+        databasePath,
+        """
+        CREATE TABLE local_workspace_span_facts (
+            raw_record_id INTEGER NOT NULL,
+            span_ordinal INTEGER NOT NULL,
+            retry_count INTEGER NULL,
+            producer_total_tokens INTEGER NULL,
+            PRIMARY KEY(raw_record_id,span_ordinal));
+        """);
 
     private static long Count(string databasePath, string sql)
     {
