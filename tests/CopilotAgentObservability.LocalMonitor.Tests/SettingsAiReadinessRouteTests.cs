@@ -253,11 +253,12 @@ public sealed class SettingsAiReadinessRouteTests
             Task.FromResult<IReadOnlyList<CopilotDiscoveredSkillFactV1>?>([]);
         public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
-        public Task<string?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<OwnedCopilotFinalResponseV1?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
         {
             SendCalls++;
-            return Task.FromResult<string?>(
-                "{\"summary\":\"shared-factory\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}");
+            return Task.FromResult<OwnedCopilotFinalResponseV1?>(new(
+                "{\"summary\":\"shared-factory\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}",
+                "gpt-5"));
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
