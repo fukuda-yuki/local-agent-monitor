@@ -4112,8 +4112,14 @@ a.kpi-card:hover {
   white-space: nowrap;
 }
 
+.local-monitor-session-table-region [data-compare-column],
 .local-monitor-session-cohorts {
   width: 152px;
+}
+
+.local-monitor-session-table-region table:has([data-compare-column]:not([hidden])) th:nth-child(2),
+.local-monitor-session-table-region table:has([data-compare-column]:not([hidden])) .local-monitor-session-identity {
+  width: calc(31% - 152px);
 }
 
 .local-monitor-session-cohort-option {

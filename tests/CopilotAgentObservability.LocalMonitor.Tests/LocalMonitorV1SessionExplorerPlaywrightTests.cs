@@ -1069,7 +1069,10 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions
+        {
+            ViewportSize = new ViewportSize { Width = 1366, Height = 768 },
+        });
         var requestUrls = new List<string>();
         page.Request += (_, request) => requestUrls.Add(request.Url);
         var responseBody = await TwoSessionsAsync();
@@ -1082,6 +1085,17 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("#session-compare-mode").PressAsync("Enter");
         await Expect(page.Locator("[data-cohort]")).ToHaveCountAsync(4);
         await Expect(page.Locator("#session-compare-bar")).ToBeVisibleAsync();
+        Assert.True(await page.Locator($"[data-session-row][data-session-id='{SessionId}']").EvaluateAsync<bool>("""
+            row => {
+              const cohorts = row.querySelector('.local-monitor-session-cohorts').getBoundingClientRect();
+              const session = row.querySelector('.local-monitor-session-identity').getBoundingClientRect();
+              const labels = [...row.querySelectorAll('.local-monitor-session-cohort-option')]
+                .map(label => label.getBoundingClientRect());
+              return cohorts.width >= 150
+                && labels.every(label => label.left >= cohorts.left && label.right <= cohorts.right)
+                && cohorts.right <= session.left;
+            }
+            """));
         Assert.True(await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']")
             .EvaluateAsync<bool>("node => node === document.activeElement"));
         Assert.Contains("mode=compare", page.Url, StringComparison.Ordinal);
