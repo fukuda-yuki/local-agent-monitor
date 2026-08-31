@@ -145,8 +145,8 @@ public sealed class SqliteSessionOtelEnricher
                 row.Repository, row.Workspace, null, null, occurredAt,
                 SessionRawRetentionState.NotCaptured, now, now);
         var run = new ObservedSessionRun(
-            runId, sessionId, confirmedSurface, null, row.TraceId, null, null,
-            ObservedSessionStatus.Unknown, occurredAt, null, null, null, null);
+            runId, sessionId, confirmedSurface, null, row.TraceId, null, row.ResponseModel ?? row.RequestModel,
+            ParseRunStatus(row.Status), row.StartTime, row.EndTime, row.InputTokens, row.OutputTokens, row.TotalTokens);
         var @event = new ObservedSessionEvent(
             eventId, sessionId, runId, confirmedSurface, null, row.TraceId, null,
             "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, SessionContentState.NotCaptured,
@@ -354,7 +354,7 @@ public sealed class SqliteSessionOtelEnricher
         command.CommandText = $"""
             SELECT s.id,s.raw_record_id,s.trace_id,COALESCE(s.span_id,''),s.conversation_id,t.client_kind,
                    t.repository_name,t.workspace_label,s.start_time,s.end_time,s.projected_at,
-                   s.request_model,s.input_tokens,s.output_tokens,s.total_tokens,s.status,
+                   s.request_model,s.response_model,s.input_tokens,s.output_tokens,s.total_tokens,s.status,
                    {observationColumns}
             FROM monitor_spans s
             JOIN monitor_traces t ON t.trace_id=s.trace_id
@@ -371,8 +371,8 @@ public sealed class SqliteSessionOtelEnricher
                 reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3), Nullable(reader, 4), Nullable(reader, 5),
                 Nullable(reader, 6), Nullable(reader, 7), Timestamp(reader, 8), Timestamp(reader, 9),
                 DateTimeOffset.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                Nullable(reader, 11), NullableInt64(reader, 12), NullableInt64(reader, 13), NullableInt64(reader, 14), Nullable(reader, 15),
-                PayloadJson: null, Nullable(reader, 16), Nullable(reader, 17), Nullable(reader, 18), Nullable(reader, 19), Nullable(reader, 20)));
+                Nullable(reader, 11), Nullable(reader, 12), NullableInt64(reader, 13), NullableInt64(reader, 14), NullableInt64(reader, 15), Nullable(reader, 16),
+                PayloadJson: null, Nullable(reader, 17), Nullable(reader, 18), Nullable(reader, 19), Nullable(reader, 20), Nullable(reader, 21)));
         }
         return rows;
     }
@@ -438,6 +438,7 @@ public sealed class SqliteSessionOtelEnricher
         DateTimeOffset? EndTime,
         DateTimeOffset ProjectedAt,
         string? RequestModel,
+        string? ResponseModel,
         long? InputTokens,
         long? OutputTokens,
         long? TotalTokens,

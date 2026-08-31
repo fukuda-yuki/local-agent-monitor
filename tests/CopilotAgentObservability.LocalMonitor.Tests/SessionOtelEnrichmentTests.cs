@@ -92,6 +92,58 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
+    public void ProcessNextBatch_GenericCopilotCliPathPreservesNormalizedPerSpanRunFacts()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var startedAt = DateTimeOffset.Parse("2026-07-16T00:00:01Z");
+        var endedAt = startedAt.AddSeconds(7);
+        InsertProjectedSpan(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            "generic-facts-trace",
+            "generic-facts-span",
+            null,
+            "copilot-cli",
+            "generic-repo",
+            startedAt);
+        Execute(
+            temp.DatabasePath,
+            $"""
+            UPDATE monitor_spans
+            SET request_model='requested-model',
+                response_model='response-model',
+                status='ok',
+                end_time='{endedAt:O}',
+                input_tokens=10840,
+                output_tokens=77,
+                total_tokens=10917
+            WHERE trace_id='generic-facts-trace'
+              AND span_id='generic-facts-span';
+            """);
+
+        Assert.Equal(
+            1,
+            new SqliteSessionOtelEnricher(
+                temp.DatabasePath,
+                store,
+                temp.RetentionContext).ProcessNextBatch(1));
+
+        var session = Assert.Single(store.ListMostRecent(10));
+        var run = Assert.Single(store.GetDetail(session.SessionId)!.Runs);
+        Assert.Equal(SessionSourceSurface.CopilotCli, run.SourceSurface);
+        Assert.Equal("response-model", run.Model);
+        Assert.Equal(ObservedSessionStatus.Completed, run.Status);
+        Assert.Equal(startedAt, run.StartedAt);
+        Assert.Equal(endedAt, run.EndedAt);
+        Assert.Equal(10840, run.InputTokens);
+        Assert.Equal(77, run.OutputTokens);
+        Assert.Equal(10917, run.TotalTokens);
+    }
+
+    [Fact]
     public void ProcessNextBatch_RechecksSourceInsideWriteAfterConflictConsumesPendingRetry()
     {
         const string traceId = "11111111111111111111111111111111";
