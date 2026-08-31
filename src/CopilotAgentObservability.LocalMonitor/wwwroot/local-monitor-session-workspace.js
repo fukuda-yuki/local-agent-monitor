@@ -871,7 +871,7 @@
     } else if (node.kind === "event") {
       appendInspectorFact(section, "イベント", metadata.event_name); appendInspectorFact(section, "取得元の時刻", metadata.source_time);
     } else if (node.kind === "retry") {
-      appendInspectorFact(section, "試行回数", metadata.attempt); appendInspectorFact(section, "対象", metadata.target, "node_id"); appendInspectorFact(section, "復旧", metadata.recovered);
+      appendInspectorFact(section, "試行回数", metadata.attempt); appendInspectorFact(section, "対象", metadata.target, "node_id"); appendInspectorFact(section, "復旧", metadata.recovered, "value", value => value ? "はい" : "いいえ");
     }
     if (node.kind !== "skill") for (const part of CONTENT_PARTS) appendContentAction(section, detail, part);
     if (detail.parent_path.length) { section.append(el("h3", null, "親項目の経路")); const path = el("ol"); for (const item of detail.parent_path) path.append(el("li", null, item.name.state === "recorded" ? item.name.text : KIND_LABELS[item.kind])); section.append(path); }
