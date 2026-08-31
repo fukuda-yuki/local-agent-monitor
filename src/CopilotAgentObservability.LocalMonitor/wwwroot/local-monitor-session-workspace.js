@@ -622,6 +622,9 @@
     const row = el("p"); row.append(el("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
   }
 
+  const AI_EVIDENCE_STATE_LABELS = { supported: "根拠あり", limited: "根拠に制約あり" };
+  const AI_TARGET_KIND_LABELS = { instructions: "指示", skill: "スキル", agent: "エージェント", subagent_input: "サブエージェント入力", tool_configuration: "ツール設定" };
+
   function renderAiResult(target, result, focus = false) {
     target.replaceChildren();
     if (!result || typeof result !== "object" || typeof result.summary !== "string" || !Array.isArray(result.findings)
@@ -641,14 +644,14 @@
     if (result.findings.length) target.append(el("h4", null, "指摘"));
     for (const finding of result.findings) {
       const article = el("article", "local-monitor-ai-finding"); article.append(el("h5", null, String(finding.title ?? "指摘")));
-      appendAiField(article, "指摘ID", finding.finding_id); appendAiField(article, "解釈", finding.explanation); appendAiField(article, "根拠の状態", finding.evidence_state); appendAiField(article, "制約", finding.limitation);
+      appendAiField(article, "指摘ID", finding.finding_id); appendAiField(article, "解釈", finding.explanation); appendAiField(article, "根拠の状態", AI_EVIDENCE_STATE_LABELS[finding.evidence_state]); appendAiField(article, "制約", finding.limitation);
       for (const reference of Array.isArray(finding.evidence_refs) ? finding.evidence_refs : []) article.append(evidenceAction(reference));
       target.append(article);
     }
     if (result.improvement_suggestions.length) target.append(el("h4", null, "改善案"));
     for (const suggestion of result.improvement_suggestions) {
       const article = el("article", "local-monitor-ai-suggestion");
-      appendAiField(article, "提案ID", suggestion.suggestion_id); appendAiField(article, "対象の種類", suggestion.target_kind); appendAiField(article, "対象", suggestion.target_label); appendAiField(article, "理由", suggestion.rationale); appendAiField(article, "変更案", suggestion.concrete_change); appendAiField(article, "期待される効果（AIによる提案）", suggestion.expected_effect); appendAiField(article, "リスク・制約", suggestion.risks_or_limitations);
+      appendAiField(article, "提案ID", suggestion.suggestion_id); appendAiField(article, "対象の種類", AI_TARGET_KIND_LABELS[suggestion.target_kind]); appendAiField(article, "対象", suggestion.target_label); appendAiField(article, "理由", suggestion.rationale); appendAiField(article, "変更案", suggestion.concrete_change); appendAiField(article, "期待される効果（AIによる提案）", suggestion.expected_effect); appendAiField(article, "リスク・制約", suggestion.risks_or_limitations);
       for (const reference of Array.isArray(suggestion.evidence_refs) ? suggestion.evidence_refs : []) article.append(evidenceAction(reference));
       target.append(article);
     }

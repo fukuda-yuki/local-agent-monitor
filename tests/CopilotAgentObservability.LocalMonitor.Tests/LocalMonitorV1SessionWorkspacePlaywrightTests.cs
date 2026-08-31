@@ -242,7 +242,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
         var result = page.Locator("[data-node-ai-result]");
-        foreach (var expected in new[] { "node", "snapshot-coverage", "finding-id", "supported", "finding limitation", "suggestion-id", "skill", "target label", "rationale", "concrete change", "expected effect", "risk detail", "top limitation", "github_copilot_sdk", "synthetic-model", "configuration-hash", "template-v1", "2026-08-30T01:00:00", "対象件数: 1", "除外件数: 0", "記録内容: 利用できます" }) await Expect(result).ToContainTextAsync(expected);
+        foreach (var expected in new[] { "node", "snapshot-coverage", "finding-id", "根拠あり", "finding limitation", "suggestion-id", "スキル", "target label", "rationale", "concrete change", "expected effect", "risk detail", "top limitation", "github_copilot_sdk", "synthetic-model", "configuration-hash", "template-v1", "2026-08-30T01:00:00", "対象件数: 1", "除外件数: 0", "記録内容: 利用できます" }) await Expect(result).ToContainTextAsync(expected);
+        await Expect(result).Not.ToContainTextAsync("supported"); await Expect(result).Not.ToContainTextAsync("skill");
         await Expect(result.GetByRole(AriaRole.Button, new() { Name = "証拠を表示" })).ToHaveCountAsync(2);
         await Expect(result.GetByRole(AriaRole.Heading, new() { Name = "AIによる解釈" })).ToBeFocusedAsync();
         await result.GetByRole(AriaRole.Button, new() { Name = "証拠を表示" }).Nth(1).ClickAsync(); await Expect(page.Locator("[data-timeline-node][aria-selected=true]")).ToBeFocusedAsync();
@@ -329,6 +330,10 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync("**/content?*", r => r.FulfillAsync(Json(ContentDocument(revision, "event_content", "sanitized screenshot content").ToJsonString())));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
+        Assert.True(await page.Locator(".local-monitor-session-summary").EvaluateAsync<bool>("e => e.getBoundingClientRect().width > innerWidth * .75"));
+        var executionToggle = page.Locator("[data-execution-toggle]").First; var executionTitle = executionToggle.Locator("strong"); var executionSummary = executionToggle.Locator("span");
+        Assert.True(await executionTitle.EvaluateAsync<bool>("e => e.getBoundingClientRect().width >= 240"));
+        Assert.True(await executionToggle.EvaluateAsync<bool>("e => { const title=e.querySelector('strong').getBoundingClientRect(), summary=e.querySelector('span').getBoundingClientRect(); return summary.top >= title.bottom && summary.left < title.right && title.left < summary.right; }"));
         Assert.InRange(await page.Locator("[data-session-overview]").EvaluateAsync<float>("e => e.getBoundingClientRect().width"), 360, 420);
         var executionScroll = page.Locator("[data-execution-scroll]"); Assert.True(await executionScroll.EvaluateAsync<bool>("e => e.scrollHeight > e.clientHeight")); await executionScroll.EvaluateAsync("e => e.scrollTop = e.scrollHeight"); Assert.True(await executionScroll.EvaluateAsync<double>("e => e.scrollTop") > 0);
         await page.ScreenshotAsync(new() { Path = ArtifactPath("session-workspace-normal-1366x768.png"), FullPage = true });
