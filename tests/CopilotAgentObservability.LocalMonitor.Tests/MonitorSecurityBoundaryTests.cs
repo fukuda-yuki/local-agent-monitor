@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
@@ -191,15 +192,42 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task RawRoute_IsAbsentUnderSanitizedOnly()
+    public async Task RawHumanGetRoutes_AreEmptyNoStore404UnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
-        var id = SeedSensitiveProjectedRecord(temp);
+        SeedSensitiveProjectedRecord(temp);
         await using var host = await StartReadOnlyHostAsync(temp, sanitizedOnly: true);
 
-        var response = await host.Client.GetAsync($"/traces/{id}/raw");
+        foreach (var path in new[]
+                 {
+                     "/traces/trace-id",
+                     "/traces/1/raw",
+                     "/traces/trace-id/spans/span-id/detail",
+                     "/traces/trace-id/prompt-label",
+                     "/traces/trace-id/analysis/runs/1",
+                     "/traces/trace-id/analysis/runs/1/safe-summary",
+                     "/traces/1/raw/",
+                     "/traces/trace-id/analysis/runs/1/",
+                 })
+        {
+            foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
+            {
+                using var response = await host.Client.SendAsync(new HttpRequestMessage(method, path));
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+                Assert.True(response.Headers.CacheControl?.NoStore);
+                Assert.Equal(0, response.Content.Headers.ContentLength);
+                Assert.Null(response.Content.Headers.ContentType);
+                Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+            }
+        }
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        using var unknown = await host.Client.GetAsync("/traces/trace-id/unknown/");
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        Assert.Null(unknown.Headers.CacheControl);
+
+        using var doubleSlash = await host.Client.GetAsync("/traces/1/raw//");
+        Assert.Equal(HttpStatusCode.NotFound, doubleSlash.StatusCode);
+        Assert.Null(doubleSlash.Headers.CacheControl);
     }
 
     [Fact]
@@ -286,6 +314,163 @@ public class MonitorSecurityBoundaryTests
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("invalid_host", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task RawHumanRoute_InvalidHostReturnsFixedSafeNoStoreError()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/traces/1/raw")
+        {
+            Headers = { Host = "example.com" },
+        };
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.ToString());
+        Assert.Contains("invalid_host", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("HEAD", "/traces/1/raw", false)]
+    [InlineData("POST", "/traces/1/raw", true)]
+    [InlineData("OPTIONS", "/traces/trace-id/spans/span-id/detail", true)]
+    [InlineData("PUT", "/traces/trace-id/analysis/runs/1/", true)]
+    public async Task ExactRawHumanRoute_FallbackResponseAddsOnlyNoStore(string method, string path, bool hasEntity)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Empty(response.Content.Headers.Allow);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.ToString());
+        var entity = await response.Content.ReadAsByteArrayAsync();
+        if (hasEntity)
+        {
+            Assert.Equal(
+                Encoding.UTF8.GetBytes("{\"accepted\":false,\"error\":\"unsupported_endpoint\",\"message\":\"Only /v1/traces is supported.\"}"),
+                entity);
+        }
+        else
+        {
+            Assert.Empty(entity);
+        }
+    }
+
+    [Theory]
+    [InlineData("PUT", "/traces/1/raw")]
+    [InlineData("OPTIONS", "/traces/trace-id/spans/span-id/detail")]
+    [InlineData("PUT", "/traces/trace-id/analysis/runs/1/")]
+    public async Task ExactRawHumanRoute_UnsupportedMethodInvalidHostReturnsNoStore400(string method, string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+        using var request = new HttpRequestMessage(new HttpMethod(method), path)
+        {
+            Headers = { Host = "example.com" },
+        };
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("invalid_host", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("PUT", "/traces/1/raw/unknown")]
+    [InlineData("OPTIONS", "/traces/trace-id/spans/span-id/detail/unknown")]
+    [InlineData("PUT", "/traces/trace-id/analysis/runs/1//")]
+    public async Task NonExactRawHumanRoute_UnsupportedMethodDoesNotSetNoStore(string method, string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Null(response.Headers.CacheControl);
+    }
+
+    [Fact]
+    public async Task RawAnalysisAction_InvalidHostReturnsFixedSafeNoStoreError()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadOnlyHostAsync(temp);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/traces/trace-id/analysis/")
+        {
+            Headers = { Host = "example.com" },
+            Content = JsonContent("{\"focus\":\"latency\"}"),
+        };
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("invalid_host", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var unknownRequest = new HttpRequestMessage(HttpMethod.Post, "/traces/trace-id/unknown/")
+        {
+            Headers = { Host = "example.com" },
+        };
+        using var unknownResponse = await host.Client.SendAsync(unknownRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, unknownResponse.StatusCode);
+        Assert.Null(unknownResponse.Headers.CacheControl);
+    }
+
+    [Fact]
+    public async Task RawAnalysisAction_UnexpectedRunnerFailureReturnsFixedSafeNoStoreError()
+    {
+        using var temp = new MonitorTempDirectory();
+        var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: new MonitorHostTestOptions
+            {
+                AnalysisStore = analysisStore,
+                AnalysisRunner = new ThrowingAnalysisRunner(),
+                StartWriter = false,
+                StartProjectionWorker = false,
+            });
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/traces/trace-id/analysis/")
+        {
+            Content = JsonContent("{\"focus\":\"latency\"}"),
+        };
+        request.Headers.Add("x-monitor-csrf", "local-monitor");
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("internal_error", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawRecordRoute_UnexpectedStoreFailureReturnsFixedSafeNoStoreError()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter).CreateMonitorSchema();
+        new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter).CreateSchema();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: new MonitorHostTestOptions
+            {
+                ProjectionStore = new ThrowingRawRecordStore(),
+                StartWriter = false,
+                StartProjectionWorker = false,
+            });
+
+        using var response = await host.Client.GetAsync("/traces/1/raw");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.ToString());
+        Assert.Contains("internal_error", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -572,6 +757,21 @@ public class MonitorSecurityBoundaryTests
         public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) =>
             inner.ListMonitorIngestions(afterRawRecordId, limit);
     }
+
+    private sealed class ThrowingRawRecordStore : ProjectionStoreTestDouble
+    {
+        public override ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(
+            long id,
+            RetentionReadKind readKind,
+            CancellationToken cancellationToken) => throw new InvalidOperationException("synthetic raw store failure");
+    }
+
+    private sealed class ThrowingAnalysisRunner : IMonitorAnalysisRunner
+    {
+        public Task StartAsync(MonitorAnalysisContext context, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("synthetic analysis runner failure");
+    }
+
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
 

@@ -708,21 +708,26 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     [Fact]
-    public async Task SanitizedOnly_DoesNotExposeSessionWorkspaceAssetOrSurface()
+    public async Task SanitizedOnly_DoesNotExposeHumanAssetsOrSessionSurface()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true);
 
         using var route = await host.Client.GetAsync($"/sessions/{SessionId}");
-        using var asset = await host.Client.GetAsync("/local-monitor-session-workspace.js");
-        using var compareAsset = await host.Client.GetAsync("/local-monitor-compare.js");
-
         Assert.Equal(HttpStatusCode.NotFound, route.StatusCode);
         Assert.DoesNotContain("data-session-workspace", await route.Content.ReadAsStringAsync(), StringComparison.Ordinal);
-        Assert.Equal(HttpStatusCode.NotFound, asset.StatusCode);
-        Assert.Equal(0, asset.Content.Headers.ContentLength);
-        Assert.Equal(HttpStatusCode.NotFound, compareAsset.StatusCode);
-        Assert.Equal(0, compareAsset.Content.Headers.ContentLength);
+        foreach (var assetPath in RazorReferencedHumanAssets)
+        {
+            foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
+            {
+                using var response = await host.Client.SendAsync(new HttpRequestMessage(method, assetPath));
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+                Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+                Assert.Equal(0, response.Content.Headers.ContentLength);
+                Assert.Null(response.Content.Headers.ContentType);
+                Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+            }
+        }
     }
 
     [Fact]
@@ -730,13 +735,10 @@ public sealed class LocalMonitorV1HumanRouteTests
     {
         using var temp = new MonitorTempDirectory();
         var webRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "primary-assets"));
-        var assets = new Dictionary<string, byte[]>(StringComparer.Ordinal)
-        {
-            ["local-monitor-repositories.js"] = "window.repositories = true;"u8.ToArray(),
-            ["local-monitor-explorer.js"] = "window.explorer = true;"u8.ToArray(),
-            ["local-monitor-compare.js"] = "window.compare = true;"u8.ToArray(),
-            ["local-monitor-workspace.js"] = "window.workspace = true;"u8.ToArray(),
-        };
+        var assets = RazorReferencedHumanAssets.ToDictionary(
+            path => path[1..],
+            path => Encoding.UTF8.GetBytes($"asset:{path}"),
+            StringComparer.Ordinal);
         foreach (var (name, body) in assets) await File.WriteAllBytesAsync(Path.Combine(webRoot.FullName, name), body);
         using var provider = new PhysicalFileProvider(webRoot.FullName);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: AssetOptions(provider));
@@ -758,6 +760,19 @@ public sealed class LocalMonitorV1HumanRouteTests
             Assert.Empty(await head.Content.ReadAsByteArrayAsync());
         }
     }
+
+    private static readonly string[] RazorReferencedHumanAssets =
+    [
+        "/monitor.css",
+        "/monitor.js",
+        "/monitor-shell.js",
+        "/local-monitor-v1-shared.js",
+        "/local-monitor-repositories.js",
+        "/local-monitor-settings.js",
+        "/local-monitor-explorer.js",
+        "/local-monitor-session-workspace.js",
+        "/local-monitor-compare.js",
+    ];
 
     [Theory]
     [InlineData("missing")]

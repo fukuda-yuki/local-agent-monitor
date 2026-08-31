@@ -16,6 +16,7 @@
     [8, "errors_and_retries", "エラー・再試行"], [9, "conditions", "比較条件"],
   ];
   const FAMILY = new Map([["skills", "skill"], ["tools", "tool"], ["subagents", "subagent"]]);
+  const STATIC_CONDITION_ROWS = new Set(["sources", "models", "source_versions", "adapter_versions", "completeness"]);
   const EVIDENCE_LABELS = new Map([
     ["value", "保存値"], ["available_count", "利用可能件数"], ["median", "中央値"], ["minimum", "最小値"],
     ["maximum", "最大値"], ["total", "合計"], ["absolute_difference", "絶対差"],
@@ -74,6 +75,14 @@
   let aiGeneration = 0;
   let restoredAiRun = null;
   let aiCancelFailed = false;
+
+  const clearAiStatusOutline = () => { aiStatus.style.outline = ""; aiStatus.style.outlineOffset = ""; };
+  aiStatus.addEventListener("focus", () => {
+    if (aiStatus.dataset.terminalFailure !== "true") return;
+    aiStatus.style.outline = "2px solid currentColor";
+    aiStatus.style.outlineOffset = "2px";
+  });
+  aiStatus.addEventListener("blur", clearAiStatusOutline);
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && Object.keys(value).every((key, index) => key === keys[index]);
@@ -261,13 +270,13 @@
   function evidenceFields(result) {
     if (result.section_key === "target") {
       if (["included_session_count", "available_session_count"].includes(result.row_key)) return ["count"];
-      if (result.row_kind === "condition" && ["period", "archived_inclusion"].includes(result.row_key)) return ["condition"];
+      if (["period", "archived_inclusion"].includes(result.row_key)) return ["condition"];
       return [];
     }
+    if (result.section_key === "conditions") return STATIC_CONDITION_ROWS.has(result.row_key) ? ["condition"] : [];
     if (result.row_kind === "skill") return ["count"];
     if (result.row_kind === "tool") return ["count", "error_count", "retry_count"];
     if (result.row_kind === "subagent") return ["count", "total_tokens"];
-    if (result.row_kind === "condition") return ["condition"];
     if (result.row_kind !== "scalar") return [];
     const fields = ["value", "available_count", "median", "minimum", "maximum", "total", "absolute_difference", "relative_difference_percent"];
     const specialized = new Map([
@@ -284,31 +293,43 @@
     const caption = element("caption", null, captionText);
     const head = element("thead");
     const headerRow = element("tr");
-    ["項目", "保存された値", "根拠"].forEach(label => headerRow.append(element("th", null, label)));
+    ["指標", "基準", "比較対象", "差"].forEach(label => headerRow.append(element("th", null, label)));
     head.append(headerRow);
     const body = element("tbody");
     for (const result of items) {
-      const group = element("tr", "local-monitor-compare-result-heading");
-      const groupLabel = element("th", null, result.display_name ?? rowLabel(result.row_key));
-      groupLabel.colSpan = 2;
-      const actions = element("td", "local-monitor-compare-evidence-actions");
+      const row = element("tr", "local-monitor-compare-result-heading");
+      const indicator = element("th");
+      indicator.append(element("div", null, result.display_name ?? rowLabel(result.row_key)));
+      const baseline = element("td");
+      const comparison = element("td");
+      const difference = element("td");
+      const actions = element("div", "local-monitor-compare-evidence-actions");
+      actions.style.display = "grid";
       for (const field of evidenceFields(result)) {
         const button = element("button", null, `${EVIDENCE_LABELS.get(field)}の根拠を表示`);
         button.type = "button";
+        button.style.whiteSpace = "normal";
         button.addEventListener("click", () => openEvidence(result.result_ordinal, field, button));
         actions.append(button);
       }
-      group.append(groupLabel, actions);
-      body.append(group);
+      indicator.append(actions);
       for (const pair of result.values) {
-        const row = element("tr");
-        row.append(element("th", null, valueLabel(pair.key)));
-        const value = element("td");
+        if (pair.key === "display_name" || pair.key === "sort_key") continue;
+        const cohort = pair.key.startsWith("a_") ? "a" : pair.key.startsWith("b_") ? "b" : null;
+        const structuralKey = cohort === null ? pair.key : pair.key.slice(2);
+        const isDifference = structuralKey === "absolute_difference" || structuralKey === "relative_difference"
+          || structuralKey === "relative_difference_percent" || structuralKey.endsWith("_absolute_difference")
+          || structuralKey.endsWith("_relative_difference") || structuralKey.endsWith("_relative_difference_percent");
+        const owner = cohort === "a" ? baseline : cohort === "b" ? comparison : isDifference ? difference : indicator;
+        const fact = element("div", "local-monitor-compare-fact");
+        fact.append(element("span", null, valueLabel(structuralKey)));
+        const value = element("span");
         renderStoredValue(value, pair);
-        row.append(value);
-        row.append(element("td"));
-        body.append(row);
+        fact.append(value);
+        owner.append(fact);
       }
+      row.append(indicator, baseline, comparison, difference);
+      body.append(row);
     }
     table.append(caption, head, body);
     return table;
@@ -444,6 +465,17 @@
     scope_too_large: "比較がAI解釈の上限を超えています。",
   });
 
+  function finishAiFailure(message) {
+    activeAiRun = null; aiCancelFailed = false; aiCancel.hidden = true; aiCancel.disabled = false; aiResult.replaceChildren(); aiStatus.textContent = message;
+    aiStatus.tabIndex = -1; aiStatus.dataset.terminalFailure = "true"; aiStatus.focus();
+  }
+
+  function resetAiFailureFocus(restoreInitiator) {
+    const ownedFocus = document.activeElement === aiStatus && aiStatus.dataset.terminalFailure === "true";
+    delete aiStatus.dataset.terminalFailure; clearAiStatusOutline();
+    if (restoreInitiator && ownedFocus && aiStart.isConnected && !aiStart.hidden && !aiStart.disabled) aiStart.focus();
+  }
+
   function appendAiField(target, label, value) {
     if (value === null || value === undefined || value === "") return;
     const row = element("p"); row.append(element("strong", null, `${label}: `), document.createTextNode(String(value))); target.append(row);
@@ -520,9 +552,10 @@
     aiResult.replaceChildren();
     const acceptedEvidence = validateAiResult(result);
     if (!acceptedEvidence) {
-      aiStatus.textContent = AI_STATES.invalid_result; return false;
+      finishAiFailure(AI_STATES.invalid_result); return false;
     }
-    aiResult.append(element("h3", null, "AIによる解釈"));
+    resetAiFailureFocus(false);
+    const resultHeading = element("h3", null, "AIによる解釈"); resultHeading.tabIndex = -1; aiResult.append(resultHeading);
     if (result.scope && typeof result.scope === "object") {
       const scope = element("section"); scope.append(element("h4", null, "分析対象の技術情報"));
       for (const [key, label] of [["kind", "種類"], ["repository_id", "リポジトリID"], ["comparison_id", "比較ID"], ["anchor_id", "基準ID"]]) appendAiField(scope, label, key === "kind" && result.scope[key] === "comparison" ? "セッション比較" : result.scope[key]);
@@ -554,7 +587,7 @@
       for (const [key, label] of [["provider", "プロバイダー"], ["model", "モデル"], ["configuration_sha256", "設定のSHA-256"], ["prompt_template_version", "テンプレート"], ["snapshot_id", "スナップショットID"], ["snapshot_sha256", "内容のSHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
       aiResult.append(provenance);
     }
-    return true;
+    resultHeading.focus(); return true;
   }
 
   function ownsComparisonRun(run, runId) {
@@ -575,21 +608,24 @@
         if (!response.ok) throw new Error("poll_failed");
         const wire = await readStrictJson(response, RUN_MAXIMUM_BYTES, true); const run = wire.value;
         if (generation !== aiGeneration || activeAiRun !== runId) return;
-        if (!ownsComparisonRun(run, runId)) { activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = "この比較に属するAI解釈を表示できません。"; return; }
+        if (!ownsComparisonRun(run, runId)) { finishAiFailure("この比較に属するAI解釈を表示できません。"); return; }
         if (["succeeded", "zero_findings"].includes(run.state)) {
           const span = wire.resultSpan;
           if (!span || new TextEncoder().encode(wire.text.slice(span.start, span.end)).length > RESULT_MAXIMUM_BYTES) {
-            activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+            finishAiFailure(AI_STATES.invalid_result); return;
           }
         }
         if (["succeeded", "zero_findings"].includes(run.state)
             && (!validateAiResult(run.result) || (run.state === "zero_findings") !== (run.result.findings.length === 0))) {
-          activeAiRun = null; aiCancel.hidden = true; aiResult.replaceChildren(); aiStatus.textContent = AI_STATES.invalid_result; return;
+          finishAiFailure(AI_STATES.invalid_result); return;
         }
         if (!aiCancelFailed || !["queued", "running"].includes(run.state)) aiStatus.textContent = AI_STATES[run.state] ?? "AI解釈を表示できません。";
         if (!["queued", "running"].includes(run.state)) {
           activeAiRun = null; aiCancelFailed = false; aiCancel.hidden = true;
           if (["succeeded", "zero_findings"].includes(run.state) && !renderAiResult(run.result)) return;
+          if (!["succeeded", "zero_findings"].includes(run.state)) {
+            finishAiFailure(aiStatus.textContent);
+          }
           return;
         }
       } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiStatus.textContent = "AI解釈の状態を確認できません。再試行しています。"; }
@@ -598,24 +634,25 @@
   }
 
   async function startAi() {
-    aiResult.replaceChildren(); aiCancelFailed = false; aiCancel.disabled = false; aiStatus.textContent = "AI解釈を開始しています。"; aiStart.disabled = true;
+    resetAiFailureFocus(false); aiResult.replaceChildren(); aiCancelFailed = false; aiCancel.disabled = false; aiStatus.textContent = "AI解釈を開始しています。"; aiStart.disabled = true;
     try {
       const response = await fetch("/api/local-monitor/v1/ai/comparison-runs", {
         method: "POST", credentials: "same-origin", cache: "no-store",
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
       });
-      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AIを利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
-      const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
+      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); finishAiFailure(failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AIを利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"); return; }
+      const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { finishAiFailure("AI解釈を開始できませんでした。"); return; }
       activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
       try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
       await pollAiRun(activeAiRun, generation);
-    } catch { aiStatus.textContent = "AI解釈を開始できませんでした。"; }
+    } catch { finishAiFailure("AI解釈を開始できませんでした。"); }
     finally { aiStart.disabled = false; }
   }
 
   async function restoreAi(runId) {
     if (!UUID_V7.test(runId ?? "") || restoredAiRun === runId || activeAiRun === runId) return;
+    resetAiFailureFocus(true);
     restoredAiRun = runId;
     activeAiRun = runId; const generation = ++aiGeneration; aiCancel.hidden = false; await pollAiRun(runId, generation);
   }
@@ -654,13 +691,14 @@
       const value = response.ok ? await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES) : null;
       if (generation !== aiGeneration || activeAiRun !== runId) return;
       if (!response.ok || !exactSet(value, ["run_id", "state"]) || value.run_id !== runId || value.state !== "canceled") { aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; return; }
-      aiGeneration++; activeAiRun = null; aiCancel.hidden = true; aiStatus.textContent = AI_STATES.canceled;
+      aiGeneration++; finishAiFailure(AI_STATES.canceled);
     } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
   });
   document.addEventListener("cao-route-state", event => {
     if (aiSurface.hidden) return;
     const runId = event.detail?.analysis;
     if (UUID_V7.test(runId ?? "")) { restoreAi(runId); return; }
+    resetAiFailureFocus(true);
     if (restoredAiRun) { aiGeneration++; activeAiRun = null; restoredAiRun = null; aiCancel.hidden = true; aiCancel.disabled = false; aiStatus.textContent = ""; aiResult.replaceChildren(); }
   });
   window.addEventListener("pagehide", () => { state.controller?.abort(); aiGeneration++; closeEvidence(); });
