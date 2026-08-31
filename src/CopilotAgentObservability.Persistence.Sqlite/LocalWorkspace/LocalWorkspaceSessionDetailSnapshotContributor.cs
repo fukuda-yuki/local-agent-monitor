@@ -809,6 +809,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         WITH ranked_tokens AS (
           SELECT observation.*,
                  row_number() OVER(PARTITION BY observation.session_id,observation.execution_id ORDER BY
+                   CASE WHEN observation.input_tokens IS NULL AND observation.output_tokens IS NULL AND observation.total_tokens IS NULL
+                              AND observation.reasoning_tokens IS NULL AND observation.cache_read_tokens IS NULL AND observation.cache_creation_tokens IS NULL
+                        THEN 1 ELSE 0 END,
                    observation.authority_rank,observation.source_identity COLLATE BINARY) ordinal
           FROM local_workspace_token_observations observation
           WHERE observation.session_id=$session_id
