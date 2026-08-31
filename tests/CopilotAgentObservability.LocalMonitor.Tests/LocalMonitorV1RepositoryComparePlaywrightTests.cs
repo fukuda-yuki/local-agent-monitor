@@ -204,6 +204,71 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal(2, runReads);
     }
 
+    [Fact]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task CompareAiRouteClearRemovesFocusedFailureLifecycleAndReturnsToInitiator()
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(Run("provider_failed", "null", "provider_failed"))));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        var initiator = page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true });
+        await initiator.ClickAsync();
+        var failure = page.Locator("[data-compare-ai-status]");
+        await Expect(failure).ToBeFocusedAsync();
+
+        await page.EvaluateAsync("document.dispatchEvent(new CustomEvent('cao-route-state', { detail: {} }))");
+
+        await Expect(failure).ToHaveTextAsync("");
+        await Expect(failure).Not.ToHaveAttributeAsync("data-terminal-failure", "true");
+        Assert.Equal("", await failure.EvaluateAsync<string>("element => element.style.outline"));
+        await Expect(initiator).ToBeFocusedAsync();
+    }
+
+    [Theory]
+    [InlineData("succeeded")]
+    [InlineData("zero_findings")]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task CompareAiSuccessfulRestoreReplacesFocusedFailureWithResultFocus(string restoredState)
+    {
+        const string restoredRunId = "018f0000-0000-7000-8000-000000000097";
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        var restoredResult = JsonNode.Parse(ValidResult())!.AsObject();
+        if (restoredState == "zero_findings") restoredResult["findings"] = new JsonArray();
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/comparison-runs", route => route.FulfillAsync(Json($"{{\"run_id\":\"{RunId}\"}}")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{RunId}", route => route.FulfillAsync(Json(Run("provider_failed", "null", "provider_failed"))));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{restoredRunId}", route => route.FulfillAsync(Json(Run(restoredState, restoredResult.ToJsonString()).Replace(RunId, restoredRunId, StringComparison.Ordinal))));
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true }).ClickAsync();
+        var failure = page.Locator("[data-compare-ai-status]");
+        await Expect(failure).ToBeFocusedAsync();
+
+        await page.EvaluateAsync($"document.dispatchEvent(new CustomEvent('cao-route-state', {{ detail: {{ analysis: '{restoredRunId}' }} }}))");
+
+        await Expect(failure).Not.ToHaveAttributeAsync("data-terminal-failure", "true");
+        Assert.Equal("", await failure.EvaluateAsync<string>("element => element.style.outline"));
+        var resultHeading = page.GetByRole(AriaRole.Heading, new() { Name = "AIによる解釈", Exact = true });
+        await Expect(resultHeading).ToBeFocusedAsync();
+    }
+
     [Theory]
     [InlineData("near_limit", true)]
     [InlineData("over_result", false)]
