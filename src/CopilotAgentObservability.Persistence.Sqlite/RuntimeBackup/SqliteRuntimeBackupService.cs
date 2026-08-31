@@ -29,6 +29,7 @@ public sealed class SqliteRuntimeBackupService
     internal const string CatalogAfterMonitorTailCheckpoint = "catalog-after-monitor-tail";
     internal const string CatalogAfterCreateTailCheckpoint = "catalog-after-create-tail";
     internal const string CatalogBeforeInstalledValidationCheckpoint = "catalog-before-installed-validation";
+    internal const string BeforeEmptyReadSidecarOwnershipCheckpoint = "before-empty-read-sidecar-ownership";
     internal const string BeforeEmptyReadSidecarDeleteCheckpoint = "before-empty-read-sidecar-delete";
     private static readonly DateTimeOffset ArchiveTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
@@ -39,6 +40,7 @@ public sealed class SqliteRuntimeBackupService
     private const uint WindowsSidecarDeleteAccess = 0xc0010000;
     private const uint WindowsOpenExisting = 3;
     private const uint WindowsNormalFileAttributes = 0x80;
+    private const uint WindowsOpenReparsePoint = 0x00200000;
     private const int WindowsFileDispositionInformationClass = 4;
     private static readonly IReadOnlyDictionary<string, int> SupportedComponents = new Dictionary<string, int>(StringComparer.Ordinal)
     {
@@ -3614,27 +3616,23 @@ public sealed class SqliteRuntimeBackupService
             var journal = path + "-journal";
             var wal = path + "-wal";
             var sharedMemory = path + "-shm";
+            var hasWal = PathEntryExists(wal);
+            var hasSharedMemory = PathEntryExists(sharedMemory);
             if (PathEntryExists(journal)) return false;
-            if (PathEntryExists(wal)
+            if (hasWal
                 && (!IsRegularControlFile(wal) || new FileInfo(wal).Length != 0)) return false;
-            if (PathEntryExists(sharedMemory)
-                && (!PathEntryExists(wal) || !IsRegularControlFile(sharedMemory) || new FileInfo(sharedMemory).Length != 32 * 1024)) return false;
-            using (var walOwnership = PathEntryExists(wal) ? TryAcquireSidecarOwnership(wal) : null)
-            using (var sharedMemoryOwnership = PathEntryExists(sharedMemory) ? TryAcquireSidecarOwnership(sharedMemory) : null)
+            if (hasSharedMemory
+                && (!hasWal || !IsRegularControlFile(sharedMemory) || new FileInfo(sharedMemory).Length != 32 * 1024)) return false;
+            if (!OperatingSystem.IsWindows() && (hasWal || hasSharedMemory)) return false;
+            checkpoint?.Invoke(BeforeEmptyReadSidecarOwnershipCheckpoint);
+            using (var walOwnership = hasWal ? TryAcquireSidecarOwnership(wal, expectedLength: 0) : null)
+            using (var sharedMemoryOwnership = hasSharedMemory ? TryAcquireSidecarOwnership(sharedMemory, expectedLength: 32 * 1024) : null)
             {
-                if ((PathEntryExists(wal) && walOwnership is null)
-                    || (PathEntryExists(sharedMemory) && sharedMemoryOwnership is null)) return false;
+                if ((hasWal && walOwnership is null)
+                    || (hasSharedMemory && sharedMemoryOwnership is null)) return false;
                 checkpoint?.Invoke(BeforeEmptyReadSidecarDeleteCheckpoint);
-                if (OperatingSystem.IsWindows())
-                {
-                    if (sharedMemoryOwnership is not null && !TryMarkOwnedSidecarForDeletion(sharedMemoryOwnership)) return false;
-                    if (walOwnership is not null && !TryMarkOwnedSidecarForDeletion(walOwnership)) return false;
-                }
-                else
-                {
-                    if (sharedMemoryOwnership is not null) File.Delete(sharedMemory);
-                    if (walOwnership is not null) File.Delete(wal);
-                }
+                if (sharedMemoryOwnership is not null && !TryMarkOwnedSidecarForDeletion(sharedMemoryOwnership)) return false;
+                if (walOwnership is not null && !TryMarkOwnedSidecarForDeletion(walOwnership)) return false;
             }
             return !HasActiveSqliteSidecar(path);
         }
@@ -3644,15 +3642,14 @@ public sealed class SqliteRuntimeBackupService
         }
     }
 
-    private static FileStream? TryAcquireSidecarOwnership(string path)
+    private static FileStream? TryAcquireSidecarOwnership(string path, long expectedLength)
     {
         try
         {
-            var ownership = OperatingSystem.IsWindows()
-                ? OpenWindowsSidecarOwnership(path)
-                : new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var ownership = OpenWindowsSidecarOwnership(path);
             if (ownership is null) return null;
-            if (RuntimeBackupNativePathClassifier.Read(ownership.SafeFileHandle) == RuntimeBackupNativePathKind.RegularFile)
+            if (RuntimeBackupNativePathClassifier.Read(ownership.SafeFileHandle) == RuntimeBackupNativePathKind.RegularFile
+                && ownership.Length == expectedLength)
                 return ownership;
             ownership.Dispose();
             return null;
@@ -3668,7 +3665,7 @@ public sealed class SqliteRuntimeBackupService
             shareMode: 0,
             securityAttributes: IntPtr.Zero,
             creationDisposition: WindowsOpenExisting,
-            flagsAndAttributes: WindowsNormalFileAttributes,
+            flagsAndAttributes: WindowsNormalFileAttributes | WindowsOpenReparsePoint,
             templateFile: IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -3691,7 +3688,7 @@ public sealed class SqliteRuntimeBackupService
     [StructLayout(LayoutKind.Sequential)]
     private struct FileDispositionInformation
     {
-        [MarshalAs(UnmanagedType.Bool)]
+        [MarshalAs(UnmanagedType.U1)]
         internal bool DeleteFile;
     }
 
