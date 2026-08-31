@@ -383,12 +383,14 @@
   }
 
   async function readGenericContent(trigger, nodeId, part) {
+    const generation = routeGeneration;
     showRawDialog(trigger, CONTENT_LABELS[part]);
     try {
       const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}/content`, { workspace_revision: state.revision, part });
-      const document = validateContent(await requestJson(urlFactory, false, () => selectNode(state.selectedExecutionId, nodeId, false, true)), nodeId, part);
+      const document = validateContent(await requestJson(urlFactory, false, () => selectNode(state.selectedExecutionId, nodeId, false, true, generation), generation), nodeId, part);
+      throwIfRouteSuperseded(generation);
       publishRawText(document.text, `${format(document.utf8_byte_length)}バイト · ${format(document.unicode_scalar_length)} Unicodeスカラー · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · リビジョン ${format(document.source_reference.revision)}`);
-    } catch (error) { publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "記録内容を読み取れませんでした"); }
+    } catch (error) { if (!(error instanceof RouteSuperseded)) publishRawText("", HTTP_CONTENT_LABELS[error?.status] ?? "記録内容を読み取れませんでした"); }
   }
 
   async function readSkillContent(trigger, snapshotId, current) {
@@ -505,8 +507,9 @@
         wrapper.append(geometry);
       }
       row.addEventListener("click", async () => {
-        if (node.child_count > 0) await setExpanded(execution.execution_id, node.node_id, !memory.expanded.has(node.node_id));
-        await selectNodeFromUser(execution.execution_id, node.node_id, true);
+        const generation = ++routeGeneration;
+        if (node.child_count > 0 && !await setExpanded(execution.execution_id, node.node_id, !memory.expanded.has(node.node_id), generation)) return;
+        await selectNodeFromUser(execution.execution_id, node.node_id, true, generation);
       });
       wrapper.append(row);
       if (memory.expanded.has(node.node_id)) wrapper.append(renderNodes(execution, memory, node.node_id, depth + 1, node.child_count));
@@ -528,11 +531,16 @@
     return fragment;
   }
 
-  async function setExpanded(executionId, nodeId, expanded) {
+  async function setExpanded(executionId, nodeId, expanded, generation = null) {
+    generation ??= ++routeGeneration;
     const memory = executionMemory(executionId);
-    if (expanded) { memory.expanded.add(nodeId); if (!memory.pages.has(nodeId)) await loadTimeline(executionId, nodeId); }
+    try { if (expanded && !memory.pages.has(nodeId) && !await loadTimeline(executionId, nodeId, null, false, generation)) return false; }
+    catch (error) { if (error instanceof RouteSuperseded) return false; throw error; }
+    if (!currentRouteGeneration(generation)) return false;
+    if (expanded) memory.expanded.add(nodeId);
     else memory.expanded.delete(nodeId);
     renderExecutions();
+    return true;
   }
 
   function renderExecutions() {
@@ -876,7 +884,7 @@
       setBackgroundInert(true);
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
-    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
+    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
     section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
     if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
@@ -914,6 +922,7 @@
 
   async function selectNode(executionId, nodeId, push, attempted = false, generation = null) {
     generation ??= ++routeGeneration;
+    if (!attempted && currentRouteGeneration(generation)) closeRawDialog();
     if (state.selectedNodeId !== nodeId) { nodePollGeneration++; nodeTranscript = []; nodeAiContext = null; }
     const urlFactory = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${nodeId}`, { workspace_revision: state.revision });
     const rawDetail = await requestJson(urlFactory, attempted, null, generation);
@@ -934,8 +943,9 @@
     return true;
   }
 
-  async function selectNodeFromUser(executionId, nodeId, push) {
-    try { return await selectNode(executionId, nodeId, push); }
+  async function selectNodeFromUser(executionId, nodeId, push, generation = null) {
+    generation ??= ++routeGeneration;
+    try { return await selectNode(executionId, nodeId, push, false, generation); }
     catch (error) { if (error instanceof RouteSuperseded) return false; throw error; }
   }
 
