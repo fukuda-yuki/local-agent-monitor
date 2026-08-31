@@ -25,6 +25,34 @@
     ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"],
     ["error_count", "エラー件数"], ["retry_count", "再試行件数"],
   ]);
+  const ROW_LABELS = new Map([
+    ["included_session_count", "対象セッション数"], ["excluded_session_count", "除外セッション数"],
+    ["available_session_count", "利用可能なセッション数"], ["period", "期間"], ["archived_inclusion", "アーカイブ済みの対象"],
+    ["input_tokens", "入力トークン"], ["output_tokens", "出力トークン"], ["total_tokens", "トークン合計"],
+    ["cache_read_tokens", "キャッシュから読み込み"], ["new_input_tokens", "新規入力"],
+    ["cache_creation_tokens", "キャッシュ書き込み"], ["cache_read_ratio", "キャッシュ読み込み比率"],
+    ["session_duration", "セッションの所要時間"], ["execution_count", "実行数"], ["model_turn_count", "モデル応答数"],
+    ["tool_call_count", "ツール呼び出し数"], ["skill_invocation_count", "スキル呼び出し数"],
+    ["subagent_start_count", "サブエージェント開始数"], ["error_count", "エラー件数"], ["retry_count", "再試行件数"],
+    ["subagent_aggregate_start_count", "サブエージェント開始数"], ["subagent_aggregate_completed_count", "サブエージェント完了数"],
+    ["subagent_aggregate_failed_count", "サブエージェント失敗数"], ["subagent_aggregate_recorded_tokens", "サブエージェントのトークン合計"],
+    ["error_session_count", "エラーのあるセッション数"], ["retry_session_count", "再試行のあるセッション数"],
+    ["recovery_relation_count", "復旧関係数"], ["sources", "取得元"], ["models", "モデル"],
+    ["source_versions", "取得元のバージョン"], ["adapter_versions", "アダプターのバージョン"],
+    ["completeness", "記録の完全性"], ["metric_availability", "指標の利用可能件数"],
+  ]);
+  const VALUE_LABELS = new Map([
+    ["invocation_count", "呼び出し回数"], ["call_count", "呼び出し回数"], ["failure_count", "失敗回数"],
+    ["start_count", "開始回数"], ["completed_count", "完了回数"], ["failed_count", "失敗回数"], ["recorded_tokens", "トークン合計"],
+    ["session_count", "セッション数"], ["available_session_count", "利用可能件数"], ["available_count", "利用可能件数"],
+    ["invoked_session_count", "呼び出しあり"], ["called_session_count", "呼び出しあり"], ["started_session_count", "開始あり"],
+    ["median", "中央値"], ["minimum", "最小値"], ["maximum", "最大値"], ["total", "合計"],
+    ["unavailable_states", "利用できない状態"], ["absolute_difference", "絶対差"], ["relative_difference", "相対差"],
+    ["relative_difference_percent", "相対差"], ["count", "件数"], ["start", "開始"], ["end", "終了"],
+    ["distribution", "内訳"], ["included_count", "対象件数"], ["direct_session_archived_count", "アーカイブ済みセッション数"],
+    ["assigned_repository_archived_count", "アーカイブ済みリポジトリのセッション数"], ["includes_archived", "アーカイブ済みを含む"],
+    ["display_name", "表示名"], ["sort_key", "並び順"],
+  ]);
   const state = { generation: 0, controller: null, evidenceGeneration: 0, evidenceController: null, evidenceCursor: null, evidenceResultOrdinal: null, evidenceField: null, invoker: null };
   const sections = root.querySelector("[data-compare-sections]");
   const status = root.querySelector("#repository-compare-status");
@@ -181,7 +209,26 @@
       }
       return;
     }
-    target.textContent = pair.value;
+    target.textContent = pair.value === "true" ? "はい" : pair.value === "false" ? "いいえ" : pair.value;
+  }
+
+  function rowLabel(key) {
+    return ROW_LABELS.get(key) ?? "比較項目";
+  }
+
+  function valueLabel(key) {
+    const cohort = key.startsWith("a_") ? "基準" : key.startsWith("b_") ? "比較対象" : null;
+    const structuralKey = cohort === null ? key : key.slice(2);
+    const metric = /^s[1-9][0-9]*_(.+)$/.exec(structuralKey);
+    if (metric) return ROW_LABELS.get(metric[1]) ?? "記録項目";
+    const direct = VALUE_LABELS.get(structuralKey) ?? ROW_LABELS.get(structuralKey);
+    if (direct) return cohort === null ? direct : `${cohort}・${direct}`;
+    for (const [suffix, label] of VALUE_LABELS) {
+      if (!structuralKey.endsWith(`_${suffix}`)) continue;
+      const core = ROW_LABELS.get(structuralKey.slice(0, -(suffix.length + 1)));
+      if (core) return [cohort, core, label].filter(Boolean).join("・");
+    }
+    return "記録項目";
   }
 
   function renderFactState(target, token) {
@@ -235,7 +282,7 @@
     const body = element("tbody");
     for (const result of items) {
       const group = element("tr", "local-monitor-compare-result-heading");
-      const groupLabel = element("th", null, result.display_name ?? result.row_key);
+      const groupLabel = element("th", null, result.display_name ?? rowLabel(result.row_key));
       groupLabel.colSpan = 2;
       const actions = element("td", "local-monitor-compare-evidence-actions");
       for (const field of evidenceFields(result)) {
@@ -248,7 +295,7 @@
       body.append(group);
       for (const pair of result.values) {
         const row = element("tr");
-        row.append(element("th", null, pair.key));
+        row.append(element("th", null, valueLabel(pair.key)));
         const value = element("td");
         renderStoredValue(value, pair);
         row.append(value);

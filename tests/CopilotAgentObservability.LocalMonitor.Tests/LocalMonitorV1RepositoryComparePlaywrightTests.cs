@@ -417,10 +417,18 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal(new[] { "対象", "トークン", "入力トークンの内訳", "時間・実行量", "スキル", "ツール", "サブエージェント", "エラー・再試行", "比較条件" },
             await page.Locator(".local-monitor-compare-section > h2").AllTextContentsAsync());
         await Expect(page.Locator("[data-compare-cohort-count='a']")).ToHaveTextAsync("1件");
+        await Expect(page.Locator(".local-monitor-compare-result-heading th").First).ToHaveTextAsync("トークン合計");
+        Assert.Equal(
+            ["基準・セッション数", "基準・利用可能件数", "基準・中央値", "基準・最小値", "基準・最大値", "基準・合計",
+             "比較対象・セッション数", "比較対象・利用可能件数", "比較対象・中央値", "比較対象・最小値", "比較対象・最大値", "比較対象・合計",
+             "絶対差", "相対差", "記録項目", "基準・利用できない状態"],
+            await page.Locator(".local-monitor-compare-table").First.Locator("tbody > tr:not(.local-monitor-compare-result-heading) > th").AllTextContentsAsync());
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("0");
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("今回の記録にはありません");
         var compareBody = page.Locator(".local-monitor-repository-compare-body");
         await Expect(compareBody).Not.ToContainTextAsync("not_observed");
+        await Expect(compareBody).Not.ToContainTextAsync("total_tokens");
+        await Expect(compareBody).Not.ToContainTextAsync("a_session_count");
         await Expect(compareBody).Not.ToContainTextAsync("おすすめ");
         await Expect(compareBody).Not.ToContainTextAsync("AI");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true })).ToHaveCountAsync(0);
@@ -482,6 +490,86 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(page.Locator("[data-session-explorer]")).ToBeVisibleAsync();
         await page.GoBackAsync(new PageGoBackOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Nightly")]
+    public async Task ComparePresentsClosedRegistryAndStructuralValueKeysWithoutExposingMachineKeys()
+    {
+        var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
+        var rowLabels = new (string Key, string Label)[]
+        {
+            ("included_session_count", "対象セッション数"), ("excluded_session_count", "除外セッション数"),
+            ("available_session_count", "利用可能なセッション数"), ("period", "期間"), ("archived_inclusion", "アーカイブ済みの対象"),
+            ("input_tokens", "入力トークン"), ("output_tokens", "出力トークン"), ("total_tokens", "トークン合計"),
+            ("cache_read_tokens", "キャッシュから読み込み"), ("new_input_tokens", "新規入力"),
+            ("cache_creation_tokens", "キャッシュ書き込み"), ("cache_read_ratio", "キャッシュ読み込み比率"),
+            ("session_duration", "セッションの所要時間"), ("execution_count", "実行数"), ("model_turn_count", "モデル応答数"),
+            ("tool_call_count", "ツール呼び出し数"), ("skill_invocation_count", "スキル呼び出し数"),
+            ("subagent_start_count", "サブエージェント開始数"), ("error_count", "エラー件数"), ("retry_count", "再試行件数"),
+            ("subagent_aggregate_start_count", "サブエージェント開始数"), ("subagent_aggregate_completed_count", "サブエージェント完了数"),
+            ("subagent_aggregate_failed_count", "サブエージェント失敗数"), ("subagent_aggregate_recorded_tokens", "サブエージェントのトークン合計"),
+            ("error_session_count", "エラーのあるセッション数"), ("retry_session_count", "再試行のあるセッション数"),
+            ("recovery_relation_count", "復旧関係数"), ("sources", "取得元"), ("models", "モデル"),
+            ("source_versions", "取得元のバージョン"), ("adapter_versions", "アダプターのバージョン"),
+            ("completeness", "記録の完全性"), ("metric_availability", "指標の利用可能件数"),
+        };
+        var results = new JsonArray();
+        var ordinal = 1;
+        foreach (var (key, _) in rowLabels)
+        {
+            results.Add(new JsonObject
+            {
+                ["result_ordinal"] = ordinal++, ["section_key"] = "conditions", ["row_kind"] = "condition", ["row_key"] = key,
+                ["values"] = new JsonArray(new JsonObject { ["key"] = "count", ["value"] = "1" }),
+            });
+        }
+        results.Add(new JsonObject
+        {
+            ["result_ordinal"] = ordinal, ["section_key"] = "conditions", ["row_kind"] = "condition", ["row_key"] = "unexpected_row_key",
+            ["values"] = new JsonArray(
+                new JsonObject { ["key"] = "a_invocation_count", ["value"] = "1" }, new JsonObject { ["key"] = "b_call_count", ["value"] = "2" },
+                new JsonObject { ["key"] = "a_failure_count", ["value"] = "3" }, new JsonObject { ["key"] = "b_start_count", ["value"] = "4" },
+                new JsonObject { ["key"] = "a_completed_count", ["value"] = "5" }, new JsonObject { ["key"] = "b_failed_count", ["value"] = "6" },
+                new JsonObject { ["key"] = "a_recorded_tokens", ["value"] = "7" }, new JsonObject { ["key"] = "a_invoked_session_count", ["value"] = "8" },
+                new JsonObject { ["key"] = "b_called_session_count", ["value"] = "9" }, new JsonObject { ["key"] = "a_started_session_count", ["value"] = "10" },
+                new JsonObject { ["key"] = "a_available_session_count", ["value"] = "11" }, new JsonObject { ["key"] = "start", ["value"] = "2026-08-01" },
+                new JsonObject { ["key"] = "end", ["value"] = "2026-08-31" }, new JsonObject { ["key"] = "relative_difference_percent", ["value"] = "11" },
+                new JsonObject { ["key"] = "distribution", ["value"] = "dynamic-source" }, new JsonObject { ["key"] = "a_total_tokens_available_count", ["value"] = "1" },
+                new JsonObject { ["key"] = "a_direct_session_archived_count", ["value"] = "12" }, new JsonObject { ["key"] = "b_assigned_repository_archived_count", ["value"] = "13" },
+                new JsonObject { ["key"] = "a_includes_archived", ["value"] = "true" }, new JsonObject { ["key"] = "b_includes_archived", ["value"] = "false" },
+                new JsonObject { ["key"] = "display_name", ["value"] = "動的な表示名" }, new JsonObject { ["key"] = "sort_key", ["value"] = "dynamic.sort" },
+                new JsonObject { ["key"] = "s1_total_tokens", ["value"] = "14" }, new JsonObject { ["key"] = "unexpected_value_key", ["value"] = "kept-value" }),
+        });
+        read["results"] = results;
+
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(read.ToJsonString()));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+
+        var body = page.Locator(".local-monitor-repository-compare-body");
+        foreach (var (_, label) in rowLabels) await Expect(body).ToContainTextAsync(label);
+        Assert.Equal(
+            ["基準・呼び出し回数", "比較対象・呼び出し回数", "基準・失敗回数", "比較対象・開始回数",
+             "基準・完了回数", "比較対象・失敗回数", "基準・トークン合計", "基準・呼び出しあり", "比較対象・呼び出しあり",
+             "基準・開始あり", "基準・利用可能件数", "開始", "終了", "相対差", "内訳", "基準・トークン合計・利用可能件数",
+             "基準・アーカイブ済みセッション数", "比較対象・アーカイブ済みリポジトリのセッション数",
+             "基準・アーカイブ済みを含む", "比較対象・アーカイブ済みを含む", "表示名", "並び順", "トークン合計", "記録項目"],
+            await page.Locator(".local-monitor-compare-result-heading").Last.Locator("xpath=following-sibling::tr/th").AllTextContentsAsync());
+        await Expect(body).ToContainTextAsync("比較項目");
+        await Expect(body).ToContainTextAsync("動的な表示名");
+        await Expect(body).ToContainTextAsync("dynamic-source");
+        await Expect(body).ToContainTextAsync("dynamic.sort");
+        await Expect(body).ToContainTextAsync("はい");
+        await Expect(body).ToContainTextAsync("いいえ");
+        await Expect(body).Not.ToContainTextAsync("unexpected_row_key");
+        await Expect(body).Not.ToContainTextAsync("unexpected_value_key");
+        await Expect(body).Not.ToContainTextAsync("s1_total_tokens");
     }
 
     [Fact]
@@ -588,7 +676,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true })).ToBeVisibleAsync();
-        var archivedRows = page.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "archived_inclusion" }) });
+        var archivedRows = page.Locator(".local-monitor-compare-result-heading").Filter(new() { Has = page.Locator("th", new() { HasText = "アーカイブ済みの対象" }) });
         await Expect(archivedRows).ToHaveCountAsync(2);
         var validArchivedRow = archivedRows.Nth(0);
         var invalidArchivedRow = archivedRows.Nth(1);
