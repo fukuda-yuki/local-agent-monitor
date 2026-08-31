@@ -281,7 +281,7 @@
     count.setAttribute("aria-label", `アクティブなセッション ${countText(item.active_session_count)}`);
     const observed = element("div", "local-monitor-repository-last-observed");
     observed.dataset.repositoryLastObserved = "";
-    const observedLabel = element("span", "local-monitor-repository-fact-label", "最終観測");
+    const observedLabel = element("span", "local-monitor-repository-fact-label", "最終記録");
     const observedValue = element("div", "local-monitor-repository-fact-value");
     renderLastObserved(observedValue, item.last_observed_at);
     observed.append(observedLabel, observedValue);

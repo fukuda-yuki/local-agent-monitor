@@ -45,7 +45,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions?source=vscode", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#session-ai-open")).ToBeVisibleAsync();
+        await Expect(page.Locator("#session-ai-open")).ToHaveTextAsync("現在の絞り込みをAIで分析");
         await page.Locator("#session-ai-open").ClickAsync();
+        await Expect(page.Locator("#session-ai-title")).ToHaveTextAsync("リポジトリ選択のAI分析");
         await page.Locator("#session-ai-preview").ClickAsync();
 
         using var request = JsonDocument.Parse(previewBody!);
@@ -118,15 +120,31 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
-        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json($$"""{"schema_version":"local-ai-repository-preview.response.v1","snapshot_id":"{{snapshotId}}","payload_sha256":"{{hash}}","expires_at":"2026-08-31T12:00:00.0000000+00:00","included":[{"session_id":"{{SessionId}}","session_archive_state":"active","session_archive_revision":1,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":null,"source":{"state":"recorded","values":["vscode"]},"model":{"state":"recorded","values":["model-a"]},"completeness":"complete","content_state":"not_captured","workspace_revision":"{{hash}}","truncated":false}],"excluded":[{"session_id":"{{SecondSessionId}}","reason":"session_archived","session_archive_state":"archived","session_archive_revision":3,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":"session_archived","source":{"state":"recorded","values":["vscode"]},"model":{"state":"recorded","values":["model-b"]},"completeness":"partial","content_state":null,"workspace_revision":null,"truncated":null}],"truncated":false}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json($$"""{"schema_version":"local-ai-repository-preview.response.v1","snapshot_id":"{{snapshotId}}","payload_sha256":"{{hash}}","expires_at":"2026-08-31T12:00:00.0000000+00:00","included":[{"session_id":"{{SessionId}}","session_archive_state":"active","session_archive_revision":1,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":null,"source":{"state":"redacted","values":[]},"model":{"state":"malformed","values":[]},"completeness":"complete","content_state":"not_captured","workspace_revision":"{{hash}}","truncated":false}],"excluded":[{"session_id":"{{SecondSessionId}}","reason":"session_archived","session_archive_state":"archived","session_archive_revision":3,"repository_archive_state":"active","repository_archive_revision":2,"archive_exclusion_reason":"session_archived","source":{"state":"oversized","values":[]},"model":{"state":"inconsistent","values":[]},"completeness":"partial","content_state":null,"workspace_revision":null,"truncated":null}],"truncated":false}""")));
         string? startBody = null; await page.RouteAsync("**/api/local-monitor/v1/ai/repository-runs", route => { startBody = route.Request.PostData; return route.FulfillAsync(Json($$"""{"run_id":"{{runId}}"}""")); });
         var resultBody = JsonSerializer.Serialize(new { run_id = runId, state = "succeeded", scope_kind = "repository_selection", session_id = (string?)null, node_id = (string?)null, repository_id = RepositoryId, error = (string?)null, result = new { scope = new { kind = "repository_selection", repository_id = RepositoryId, anchor_id = RepositoryId }, snapshot = new { snapshot_id = snapshotId, payload_sha256 = hash }, summary = "<img src=x onerror=alert(1)> summary", findings = new[] { new { finding_id = "f-1", title = "Finding", explanation = "Explanation", evidence_state = "supported", evidence_refs = new[] { evidence }, limitation = "none" } }, improvement_suggestions = Array.Empty<object>(), limitations = Array.Empty<string>(), provenance = new { provider = "github_copilot_sdk", model = "synthetic", configuration_sha256 = configuration, prompt_template_version = "v1", requested_at = "2026-08-31T00:00:00.0000000+00:00", started_at = "2026-08-31T00:00:01.0000000+00:00", completed_at = "2026-08-31T00:00:02.0000000+00:00", snapshot_id = snapshotId, snapshot_sha256 = hash, coverage = new { included = 1, excluded = 0, content_available = true } } } });
         await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{runId}", route => route.FulfillAsync(Json(resultBody)));
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.Locator("#session-ai-open").ClickAsync(); await page.Locator("#session-ai-preview").ClickAsync();
-        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("vscode / model-a / complete / content not_captured");
-        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("session_archived");
-        await page.Locator("#session-ai-start").ClickAsync(); await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AI による解釈");
+        var previewContent = page.Locator("#session-ai-preview-content");
+        await Expect(previewContent.GetByRole(AriaRole.Heading, new() { Name = "対象の技術情報 1件", Exact = true })).ToBeVisibleAsync();
+        await Expect(previewContent.GetByRole(AriaRole.Heading, new() { Name = "除外項目の技術情報 1件", Exact = true })).ToBeVisibleAsync();
+        await Expect(previewContent).ToContainTextAsync($"セッションID: {SessionId}");
+        await Expect(previewContent).ToContainTextAsync($"ワークスペースのSHA-256: {hash}");
+        await Expect(previewContent).ToContainTextAsync("内容は記録されていません / 記録が一部欠けています / 記録済み");
+        await Expect(previewContent).ToContainTextAsync("記録が一部欠けています / 内訳を表示できません / 記録が一部欠けています");
+        await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("セッションがアーカイブ済みのため除外されました");
+        await page.Locator("#session-ai-start").ClickAsync();
+        var renderedResult = page.Locator("#session-ai-result");
+        await Expect(renderedResult).ToContainTextAsync("AIによる解釈（セッション一覧の記録ではありません）");
+        await Expect(renderedResult).ToContainTextAsync("分析対象の技術情報");
+        await Expect(renderedResult).ToContainTextAsync("記録時点の技術情報");
+        await Expect(renderedResult).ToContainTextAsync("分析の技術情報");
+        await Expect(renderedResult).ToContainTextAsync("種類:");
+        await Expect(renderedResult).ToContainTextAsync("種類: リポジトリ選択");
+        await Expect(renderedResult).ToContainTextAsync("リポジトリID:");
+        await Expect(renderedResult).ToContainTextAsync("内容のSHA-256:");
+        await Expect(renderedResult).ToContainTextAsync("プロバイダー:");
         await Expect(page.Locator("#session-ai-result a")).ToHaveAttributeAsync("href", evidence);
         Assert.Equal(0, await page.Locator("#session-ai-result img").CountAsync());
         using var start = JsonDocument.Parse(startBody!); Assert.Equal(new[] { "schema_version", "snapshot_id", "payload_sha256", "timeout_seconds" }, start.RootElement.EnumerateObject().Select(x => x.Name));
@@ -155,7 +173,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.EvaluateAsync($"window.LocalMonitorV1History.push({{ analysis: '{runId}' }})");
 
-        await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AI による解釈");
+        await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AIによる解釈（セッション一覧の記録ではありません）");
         await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("\\\"result\\\":");
     }
 
@@ -1051,7 +1069,10 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions
+        {
+            ViewportSize = new ViewportSize { Width = 1366, Height = 768 },
+        });
         var requestUrls = new List<string>();
         page.Request += (_, request) => requestUrls.Add(request.Url);
         var responseBody = await TwoSessionsAsync();
@@ -1064,6 +1085,17 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("#session-compare-mode").PressAsync("Enter");
         await Expect(page.Locator("[data-cohort]")).ToHaveCountAsync(4);
         await Expect(page.Locator("#session-compare-bar")).ToBeVisibleAsync();
+        Assert.True(await page.Locator($"[data-session-row][data-session-id='{SessionId}']").EvaluateAsync<bool>("""
+            row => {
+              const cohorts = row.querySelector('.local-monitor-session-cohorts').getBoundingClientRect();
+              const session = row.querySelector('.local-monitor-session-identity').getBoundingClientRect();
+              const labels = [...row.querySelectorAll('.local-monitor-session-cohort-option')]
+                .map(label => label.getBoundingClientRect());
+              return cohorts.width >= 150
+                && labels.every(label => label.left >= cohorts.left && label.right <= cohorts.right)
+                && cohorts.right <= session.left;
+            }
+            """));
         Assert.True(await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']")
             .EvaluateAsync<bool>("node => node === document.activeElement"));
         Assert.Contains("mode=compare", page.Url, StringComparison.Ordinal);

@@ -58,6 +58,8 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
             .ToHaveAttributeAsync("datetime", "2026-08-28T02:03:04.0000000+00:00");
         await Expect(cards.Nth(0).Locator("[data-repository-last-observed]"))
             .ToContainTextAsync("2026年8月28日");
+        await Expect(cards.Nth(0).Locator(".local-monitor-repository-fact-label"))
+            .ToHaveTextAsync("最終記録");
         await Expect(cards.Nth(1).Locator("[data-repository-last-observed] time"))
             .ToHaveAttributeAsync("datetime", "0001-01-01T00:00:00.0000000+00:00");
         await Expect(cards.Nth(0).Locator("[data-repository-open]"))

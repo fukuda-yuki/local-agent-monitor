@@ -21,9 +21,37 @@
     ["maximum", "最大値"], ["total", "合計"], ["absolute_difference", "絶対差"],
     ["relative_difference_percent", "相対差"], ["condition", "条件"], ["count", "件数"],
     ["duration_ms", "所要時間"], ["input_tokens", "入力トークン"], ["output_tokens", "出力トークン"],
-    ["total_tokens", "合計トークン"], ["cache_read", "キャッシュ読み取り"],
-    ["cache_creation", "キャッシュ作成"], ["new_input", "新規入力"],
+    ["total_tokens", "トークン合計"], ["cache_read", "キャッシュから読み込み"],
+    ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"],
     ["error_count", "エラー件数"], ["retry_count", "再試行件数"],
+  ]);
+  const ROW_LABELS = new Map([
+    ["included_session_count", "対象セッション数"], ["excluded_session_count", "除外セッション数"],
+    ["available_session_count", "利用可能なセッション数"], ["period", "期間"], ["archived_inclusion", "アーカイブ済みの対象"],
+    ["input_tokens", "入力トークン"], ["output_tokens", "出力トークン"], ["total_tokens", "トークン合計"],
+    ["cache_read_tokens", "キャッシュから読み込み"], ["new_input_tokens", "新規入力"],
+    ["cache_creation_tokens", "キャッシュ書き込み"], ["cache_read_ratio", "キャッシュ読み込み比率"],
+    ["session_duration", "セッションの所要時間"], ["execution_count", "実行数"], ["model_turn_count", "モデル応答数"],
+    ["tool_call_count", "ツール呼び出し数"], ["skill_invocation_count", "スキル呼び出し数"],
+    ["subagent_start_count", "サブエージェント開始数"], ["error_count", "エラー件数"], ["retry_count", "再試行件数"],
+    ["subagent_aggregate_start_count", "サブエージェント開始数"], ["subagent_aggregate_completed_count", "サブエージェント完了数"],
+    ["subagent_aggregate_failed_count", "サブエージェント失敗数"], ["subagent_aggregate_recorded_tokens", "サブエージェントのトークン合計"],
+    ["error_session_count", "エラーのあるセッション数"], ["retry_session_count", "再試行のあるセッション数"],
+    ["recovery_relation_count", "復旧関係数"], ["sources", "取得元"], ["models", "モデル"],
+    ["source_versions", "取得元のバージョン"], ["adapter_versions", "アダプターのバージョン"],
+    ["completeness", "記録の完全性"], ["metric_availability", "指標の利用可能件数"],
+  ]);
+  const VALUE_LABELS = new Map([
+    ["invocation_count", "呼び出し回数"], ["call_count", "呼び出し回数"], ["failure_count", "失敗回数"],
+    ["start_count", "開始回数"], ["completed_count", "完了回数"], ["failed_count", "失敗回数"], ["recorded_tokens", "トークン合計"],
+    ["session_count", "セッション数"], ["available_session_count", "利用可能件数"], ["available_count", "利用可能件数"],
+    ["invoked_session_count", "呼び出しあり"], ["called_session_count", "呼び出しあり"], ["started_session_count", "開始あり"],
+    ["median", "中央値"], ["minimum", "最小値"], ["maximum", "最大値"], ["total", "合計"],
+    ["unavailable_states", "利用できない状態"], ["absolute_difference", "絶対差"], ["relative_difference", "相対差"],
+    ["relative_difference_percent", "相対差"], ["count", "件数"], ["start", "開始"], ["end", "終了"],
+    ["distribution", "内訳"], ["included_count", "対象件数"], ["direct_session_archived_count", "アーカイブ済みセッション数"],
+    ["assigned_repository_archived_count", "アーカイブ済みリポジトリのセッション数"], ["includes_archived", "アーカイブ済みを含む"],
+    ["display_name", "表示名"], ["sort_key", "並び順"],
   ]);
   const state = { generation: 0, controller: null, evidenceGeneration: 0, evidenceController: null, evidenceCursor: null, evidenceResultOrdinal: null, evidenceField: null, invoker: null };
   const sections = root.querySelector("[data-compare-sections]");
@@ -171,7 +199,7 @@
       return;
     }
     if (pair.key.endsWith("_unavailable_states")) {
-      if (pair.value === "none") { target.textContent = "なし"; return; }
+      if (pair.value === "none") { target.textContent = "今回の記録にはありません"; return; }
       const entries = pair.value.split(";");
       for (const [index, entry] of entries.entries()) {
         const match = /^([a-z_]+)=([1-9][0-9]*)$/.exec(entry);
@@ -181,7 +209,33 @@
       }
       return;
     }
-    target.textContent = pair.value;
+    const archivedBoolean = pair.key === "a_includes_archived" || pair.key === "b_includes_archived";
+    target.textContent = archivedBoolean && pair.value === "true" ? "はい"
+      : archivedBoolean && pair.value === "false" ? "いいえ"
+        : pair.value;
+  }
+
+  function rowLabel(key) {
+    return ROW_LABELS.get(key) ?? "比較項目";
+  }
+
+  function valueLabel(key) {
+    const cohort = key.startsWith("a_") ? "基準" : key.startsWith("b_") ? "比較対象" : null;
+    const structuralKey = cohort === null ? key : key.slice(2);
+    const metric = /^s[1-9][0-9]*_(.+)$/.exec(structuralKey);
+    if (metric) {
+      const label = ROW_LABELS.get(metric[1]);
+      return label ? [cohort, label].filter(Boolean).join("・") : "記録項目";
+    }
+    const direct = VALUE_LABELS.get(structuralKey) ?? ROW_LABELS.get(structuralKey);
+    if (direct) return cohort === null ? direct : `${cohort}・${direct}`;
+    for (const [suffix, label] of VALUE_LABELS) {
+      if (!structuralKey.endsWith(`_${suffix}`)) continue;
+      const coreKey = structuralKey.slice(0, -(suffix.length + 1));
+      const core = VALUE_LABELS.get(coreKey) ?? ROW_LABELS.get(coreKey);
+      if (core) return [cohort, core, label].filter(Boolean).join("・");
+    }
+    return "記録項目";
   }
 
   function renderFactState(target, token) {
@@ -235,7 +289,7 @@
     const body = element("tbody");
     for (const result of items) {
       const group = element("tr", "local-monitor-compare-result-heading");
-      const groupLabel = element("th", null, result.display_name ?? result.row_key);
+      const groupLabel = element("th", null, result.display_name ?? rowLabel(result.row_key));
       groupLabel.colSpan = 2;
       const actions = element("td", "local-monitor-compare-evidence-actions");
       for (const field of evidenceFields(result)) {
@@ -248,7 +302,7 @@
       body.append(group);
       for (const pair of result.values) {
         const row = element("tr");
-        row.append(element("th", null, pair.key));
+        row.append(element("th", null, valueLabel(pair.key)));
         const value = element("td");
         renderStoredValue(value, pair);
         row.append(value);
@@ -383,7 +437,7 @@
   const AI_STATES = Object.freeze({
     queued: "AI解釈を待っています。", running: "AIが比較を解釈しています。",
     succeeded: "AI解釈が完了しました。", zero_findings: "AIからの指摘はありませんでした。",
-    provider_failed: "AI provider で解釈できませんでした。", provider_partial: "不完全なAI結果のため表示できません。",
+    provider_failed: "AIで解釈できませんでした。", provider_partial: "不完全なAI結果のため表示できません。",
     timed_out: "AI解釈がタイムアウトしました。", canceled: "AI解釈をキャンセルしました。",
     stale_snapshot: "比較の保存期間またはスナップショットが更新されたため表示できません。",
     invalid_result: "AI結果を安全に表示できません。", invalid_evidence: "AIの根拠を確認できないため表示できません。",
@@ -470,25 +524,25 @@
     }
     aiResult.append(element("h3", null, "AIによる解釈"));
     if (result.scope && typeof result.scope === "object") {
-      const scope = element("section"); scope.append(element("h4", null, "対象範囲"));
-      for (const [key, label] of [["kind", "scope"], ["repository_id", "Repository"], ["comparison_id", "comparison"], ["anchor_id", "anchor"]]) appendAiField(scope, label, result.scope[key]);
+      const scope = element("section"); scope.append(element("h4", null, "分析対象の技術情報"));
+      for (const [key, label] of [["kind", "種類"], ["repository_id", "リポジトリID"], ["comparison_id", "比較ID"], ["anchor_id", "基準ID"]]) appendAiField(scope, label, key === "kind" && result.scope[key] === "comparison" ? "セッション比較" : result.scope[key]);
       aiResult.append(scope);
     }
     if (result.snapshot && typeof result.snapshot === "object") {
-      const snapshot = element("section"); snapshot.append(element("h4", null, "スナップショット"));
-      appendAiField(snapshot, "snapshot", result.snapshot.snapshot_id); appendAiField(snapshot, "payload SHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
+      const snapshot = element("section"); snapshot.append(element("h4", null, "記録時点の技術情報"));
+      appendAiField(snapshot, "スナップショットID", result.snapshot.snapshot_id); appendAiField(snapshot, "内容のSHA-256", result.snapshot.payload_sha256); aiResult.append(snapshot);
     }
     aiResult.append(element("h4", null, "要約"), element("p", null, result.summary));
     if (result.findings.length) aiResult.append(element("h4", null, "指摘（AIによる解釈）"));
     for (const finding of result.findings) {
       const article = element("article"); article.append(element("h5", null, String(finding.title ?? "指摘")));
-      for (const [key, label] of [["explanation", "解釈"], ["evidence_state", "根拠の状態"], ["limitation", "制約"]]) appendAiField(article, label, finding[key]);
+      appendAiField(article, "解釈", finding.explanation); appendAiField(article, "根拠の状態", ({ supported: "根拠あり", limited: "根拠に制約あり" })[finding.evidence_state] ?? finding.evidence_state); appendAiField(article, "制約", finding.limitation);
       appendAiEvidence(article, finding.evidence_refs); aiResult.append(article);
     }
     if (result.improvement_suggestions.length) aiResult.append(element("h4", null, "改善案（AIによる提案）"));
     for (const suggestion of result.improvement_suggestions) {
       const article = element("article");
-      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "予想（決定的事実ではありません）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
+      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "期待される効果（AIによる提案）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
       appendAiEvidence(article, suggestion.evidence_refs); aiResult.append(article);
     }
     if (result.limitations.length) { aiResult.append(element("h4", null, "制約")); for (const limitation of result.limitations) aiResult.append(element("p", null, String(limitation))); }
@@ -496,8 +550,8 @@
     const evidenceList = element("ul"); for (const href of acceptedEvidence) { const item = element("li"); const link = element("a", null, href); link.href = href; item.append(link); evidenceList.append(item); }
     evidence.append(evidenceList); aiResult.append(evidence);
     if (result.provenance && typeof result.provenance === "object") {
-      const provenance = element("section"); provenance.append(element("h4", null, "来歴"));
-      for (const [key, label] of [["provider", "provider"], ["model", "model"], ["configuration_sha256", "configuration"], ["prompt_template_version", "template"], ["snapshot_id", "snapshot"], ["snapshot_sha256", "snapshot SHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      const provenance = element("section"); provenance.append(element("h4", null, "分析の技術情報"));
+      for (const [key, label] of [["provider", "プロバイダー"], ["model", "モデル"], ["configuration_sha256", "設定のSHA-256"], ["prompt_template_version", "テンプレート"], ["snapshot_id", "スナップショットID"], ["snapshot_sha256", "内容のSHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
       aiResult.append(provenance);
     }
     return true;
@@ -551,7 +605,7 @@
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" },
         body: JSON.stringify({ schema_version: "local-ai-comparison-run.request.v1", repository_id: repositoryId, comparison_id: comparisonId, timeout_seconds: 60 }),
       });
-      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AI provider を利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
+      if (!response.ok) { const failure = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES).catch(() => null); aiStatus.textContent = failure?.error === "comparison_expired" ? "比較の保存期間が終了したためAI解釈を開始できません。" : failure?.error === "provider_unavailable" ? "AIを利用できません。" : failure?.error === "persistence_busy" ? "AI解釈の保存先が使用中です。" : "AI解釈を開始できませんでした。"; return; }
       const started = await readStrictJson(response, SMALL_RESPONSE_MAXIMUM_BYTES); if (!exactSet(started, ["run_id"]) || !UUID_V7.test(started.run_id ?? "")) { aiStatus.textContent = "AI解釈を開始できませんでした。"; return; }
       activeAiRun = started.run_id; restoredAiRun = started.run_id; const generation = ++aiGeneration; aiCancel.hidden = false;
       try { window.LocalMonitorV1History?.push({ analysis: activeAiRun }); } catch { /* shared Compare analysis query plumbing is optional */ }
