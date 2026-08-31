@@ -149,15 +149,20 @@ $process = Start-LocalMonitorProcess `
     -ArgumentList $arguments `
     -StandardOutputPath $stdoutPath `
     -StandardErrorPath $stderrPath
-Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
 Write-LocalMonitorLog "start process_id=$($process.Id) url=$Url mode=$stateMode sanitized_only=$($SanitizedOnly.IsPresent)"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 do {
     Start-Sleep -Milliseconds 500
+    if ($process.HasExited) {
+        Write-LocalMonitorLog "monitor_start_failed exit_code=$($process.ExitCode)"
+        Write-Error 'monitor_start_failed'
+        exit 1
+    }
     $live = Test-LocalMonitorHealth -Url $Url -Path '/health/live'
     if ($null -ne $live -and [int] $live.StatusCode -eq 200) {
         if (-not $WaitReady) {
+            Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
             Write-Output "started"
             exit 0
         }
@@ -169,6 +174,7 @@ do {
 
         $readyBody = $ready.Content | ConvertFrom-Json
         if ($readyBody.status -eq 'ready' -or $readyBody.status -eq 'degraded') {
+            Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
             Write-Output ("started {0}" -f $readyBody.status)
             exit 0
         }

@@ -1595,6 +1595,32 @@ public class LocalMonitorScriptTests
     }
 
     [Theory]
+    [InlineData("DotnetRun")]
+    [InlineData("Published")]
+    public void Start_waits_for_accepted_health_before_publishing_child_state(string mode)
+    {
+        var result = RunStartWithSyntheticChild(mode, childExited: false, timeoutSeconds: 0);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("started ready", result.Output, StringComparison.Ordinal);
+        Assert.True(result.StatePublished);
+    }
+
+    [Theory]
+    [InlineData("DotnetRun")]
+    [InlineData("Published")]
+    public void Start_reports_child_exit_without_waiting_for_timeout_or_publishing_state(string mode)
+    {
+        var result = RunStartWithSyntheticChild(mode, childExited: true, timeoutSeconds: 5);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("monitor_start_failed", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor_start_timeout", result.Error, StringComparison.Ordinal);
+        Assert.False(result.StatePublished);
+        Assert.True(result.Elapsed < TimeSpan.FromSeconds(3.5), $"Child exit took {result.Elapsed}.");
+    }
+
+    [Theory]
     [InlineData("not_ready", 2, "health_ready_not_ready")]
     [InlineData("unreachable", 1, "monitor_start_timeout")]
     public void PublishedStartWaitReadyFailsWhenReadinessIsNotAcceptedOrUnreachable(
@@ -2464,6 +2490,71 @@ public class LocalMonitorScriptTests
                 "-WaitReady",
                 "-TimeoutSeconds", timeoutSeconds);
             return (result.ExitCode, result.Output, result.Error, File.Exists(readyProbeMarker));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static (int ExitCode, string Output, string Error, bool StatePublished, TimeSpan Elapsed) RunStartWithSyntheticChild(
+        string mode,
+        bool childExited,
+        int timeoutSeconds)
+    {
+        var root = CreateTemporaryDirectory("cao-start-child-lifecycle");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var logs = Directory.CreateDirectory(Path.Combine(root, "logs")).FullName;
+            var project = Directory.CreateDirectory(Path.Combine(root, "repo")).FullName;
+            var projectPath = Path.Combine(project, "Monitor.csproj");
+            File.WriteAllText(projectPath, string.Empty);
+            var database = Path.Combine(root, "raw-store.db");
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var executable = Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe");
+            File.WriteAllText(executable, string.Empty);
+            var stateMarker = Path.Combine(root, "state-published");
+            var start = Path.Combine(scripts, "start.ps1");
+            File.Copy(ScriptPath("start.ps1"), start);
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = '{{database.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LogDirectory = '{{logs.Replace("'", "''", StringComparison.Ordinal)}}'
+                function Test-LocalMonitorPricingRegistryOverrideCount { return $true }
+                function Test-LocalMonitorSkillDiscoveryArguments { return $null }
+                function Test-LocalMonitorLoopbackUrl { return $true }
+                function Initialize-LocalMonitorRuntime { }
+                function Test-LocalMonitorHealth {
+                    param([string] $Url, [string] $Path)
+                    if (-not $script:ChildStarted) { return $null }
+                    if (Test-Path -LiteralPath '{{stateMarker.Replace("'", "''", StringComparison.Ordinal)}}') { return $null }
+                    if ($Path -eq '/health/live') { return [pscustomobject]@{ StatusCode = 200; Content = '{}' } }
+                    return [pscustomobject]@{ StatusCode = 200; Content = '{"status":"ready"}' }
+                }
+                function Test-LocalMonitorPortInUse { return $false }
+                function Get-LocalMonitorDefaultInstallRoot { return '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorRepoRoot { return '{{project.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorProjectPath { return '{{projectPath.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorPublishedExePath { return '{{executable.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Start-LocalMonitorProcess { $script:ChildStarted = $true; return [pscustomobject]@{ Id = 4242; HasExited = ${{childExited.ToString().ToLowerInvariant()}}; ExitCode = 23 } }
+                function Save-LocalMonitorState { [System.IO.File]::WriteAllText('{{stateMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'published') }
+                function Write-LocalMonitorLog { }
+                """);
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = RunPowerShellScript(
+                start,
+                "-Mode", mode,
+                "-Url", "http://127.0.0.1:4320",
+                "-DbPath", database,
+                "-InstallRoot", installRoot,
+                "-NoBrowser",
+                "-WaitReady",
+                "-TimeoutSeconds", timeoutSeconds.ToString());
+            stopwatch.Stop();
+            return (result.ExitCode, result.Output, result.Error, File.Exists(stateMarker), stopwatch.Elapsed);
         }
         finally
         {

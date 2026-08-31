@@ -213,7 +213,7 @@ public sealed class SqliteRuntimeBackupService
         if (!RecoverTransientFiles(Path.GetDirectoryName(database)!, Path.GetFileName(database))
             || !RecoverTransientFiles(Path.Combine(Path.GetDirectoryName(database)!, "runtime-backups"), Path.GetFileName(database)))
             return new(false, RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
-        var recoveryGuard = PathEntryExists(database) ? TryAcquireRecoveryGuard(database) : null;
+        var recoveryGuard = PathEntryExists(database) ? TryAcquireStartupRecoveryGuard(database) : null;
         if ((PathEntryExists(database) && recoveryGuard is null) || (!PathEntryExists(database) && (HasLiveMonitorState(database) || HasActiveSqliteSidecar(database))))
             return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         if (!RecoverInterruptedRestore(database))
@@ -3584,6 +3584,22 @@ public sealed class SqliteRuntimeBackupService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return null; }
     }
 
+    private static FileStream? TryAcquireStartupRecoveryGuard(string path)
+    {
+        try
+        {
+            if (!IsRegularControlFile(path) || HasLiveMonitorState(path)) return null;
+            var guard = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            if (!IsRegularControlFile(path) || HasLiveMonitorState(path) || !TryRemoveEmptyReadSidecars(path))
+            {
+                guard.Dispose();
+                return null;
+            }
+            return guard;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return null; }
+    }
+
     private static bool HasActiveSqliteSidecar(string path) => RestoreControlSidecars(path).Any(PathEntryExists);
 
     private static bool TryRemoveEmptyReadSidecars(string path)
@@ -3596,7 +3612,14 @@ public sealed class SqliteRuntimeBackupService
             if (PathEntryExists(journal)) return false;
             if (PathEntryExists(wal)
                 && (!IsRegularControlFile(wal) || new FileInfo(wal).Length != 0)) return false;
-            if (PathEntryExists(sharedMemory) && !IsRegularControlFile(sharedMemory)) return false;
+            if (PathEntryExists(sharedMemory)
+                && (!PathEntryExists(wal) || !IsRegularControlFile(sharedMemory) || new FileInfo(sharedMemory).Length != 32 * 1024)) return false;
+            using (var walOwnership = PathEntryExists(wal) ? TryAcquireSidecarOwnership(wal) : null)
+            using (var sharedMemoryOwnership = PathEntryExists(sharedMemory) ? TryAcquireSidecarOwnership(sharedMemory) : null)
+            {
+                if ((PathEntryExists(wal) && walOwnership is null)
+                    || (PathEntryExists(sharedMemory) && sharedMemoryOwnership is null)) return false;
+            }
             if (PathEntryExists(sharedMemory)) File.Delete(sharedMemory);
             if (PathEntryExists(wal)) File.Delete(wal);
             return !HasActiveSqliteSidecar(path);
@@ -3605,6 +3628,19 @@ public sealed class SqliteRuntimeBackupService
         {
             return false;
         }
+    }
+
+    private static FileStream? TryAcquireSidecarOwnership(string path)
+    {
+        try
+        {
+            var ownership = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            if (RuntimeBackupNativePathClassifier.Read(ownership.SafeFileHandle) == RuntimeBackupNativePathKind.RegularFile)
+                return ownership;
+            ownership.Dispose();
+            return null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return null; }
     }
 
     private static FileStream? TryAcquireRestoreLease(string path)

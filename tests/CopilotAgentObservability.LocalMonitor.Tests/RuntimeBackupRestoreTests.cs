@@ -533,6 +533,77 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_removes_proven_empty_read_sidecars_before_recovery_guard()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        Assert.False(File.Exists(temp.Target + "-wal"));
+        Assert.False(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(32767)]
+    [InlineData(32769)]
+    public void Monitor_startup_preserves_malformed_shared_memory_sidecar(int length)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[length]);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.True(File.Exists(temp.Target + "-wal"));
+        Assert.True(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
+    public void Monitor_startup_preserves_sidecars_when_shared_memory_ownership_is_unknown()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllBytes(temp.Target + "-wal", []);
+        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
+        using var unknownOwner = new FileStream(temp.Target + "-shm", FileMode.Open, FileAccess.Read, FileShare.Read);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.True(File.Exists(temp.Target + "-wal"));
+        Assert.True(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
+    public void Monitor_startup_still_rejects_a_separate_live_monitor_state()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
+        File.WriteAllText(
+            Path.Combine(temp.Root, "local-monitor.state.json"),
+            JsonSerializer.Serialize(new { process_id = Environment.ProcessId }));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+    }
+
+    [Fact]
     public void Monitor_startup_defers_exact_workspace_v2_migration_until_completion()
     {
         using var temp = new RestoreTemp();
