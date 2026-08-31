@@ -48,11 +48,26 @@ Never include credentials, paths, prompts, tool payloads, scope, snapshot, or pr
                     Content = StructuredResultInstruction
                 },
             };
-            await using var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
-            var prompt = BuildPrompt(request);
-            var content = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(content)) return LocalAiProviderOutcomeV1.Partial();
-            return LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(content));
+            var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
+            var sessionId = session.SessionId;
+            try
+            {
+                var prompt = BuildPrompt(request);
+                var content = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(content)) return LocalAiProviderOutcomeV1.Partial();
+                return LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(content));
+            }
+            finally
+            {
+                try
+                {
+                    await session.DisposeAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    await client.DeleteSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
         }
     }
 

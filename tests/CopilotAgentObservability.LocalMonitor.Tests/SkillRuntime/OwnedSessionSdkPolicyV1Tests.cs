@@ -36,6 +36,22 @@ public sealed class OwnedSessionSdkPolicyV1Tests
     }
 
     [Fact]
+    public void TryCreate_ProductOwnedClientDisablesSdkLogging()
+    {
+        CopilotClientOptions? capturedOptions = null;
+        var sentinel = new InvalidOperationException("synthetic_factory_failure");
+
+        var error = Assert.Throws<InvalidOperationException>(() => OwnedCopilotSdkClientV1.TryCreate(
+            "C:/owned",
+            options => { capturedOptions = options; throw sentinel; },
+            _ => false,
+            out _));
+
+        Assert.Same(sentinel, error);
+        Assert.Equal(CopilotLogLevel.None, Assert.IsType<CopilotClientOptions>(capturedOptions).LogLevel);
+    }
+
+    [Fact]
     public void CreateProbeConfig_RetainedRoots_UsesClosedPreCreateBoundary()
     {
         var callback = new Action<SessionEvent>(_ => { });
@@ -201,6 +217,7 @@ public sealed class OwnedSessionSdkPolicyV1Tests
             ConfigAtCreation = config;
             return Task.FromResult<IOwnedCopilotSessionV1>(Session);
         }
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

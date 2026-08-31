@@ -11,6 +11,7 @@ internal interface IOwnedCopilotClientV1 : IAsyncDisposable
     Task StartAsync(CancellationToken cancellationToken);
     Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken);
     Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken);
+    Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken);
 }
 
 internal interface IOwnedCopilotSessionV1 : IAsyncDisposable
@@ -101,6 +102,7 @@ internal sealed class OwnedCopilotSdkClientV1 : IOwnedCopilotClientV1, ICopilotS
         var client = clientFactory(new CopilotClientOptions
         {
             Mode = CopilotClientMode.Empty,
+            LogLevel = CopilotLogLevel.None,
             BaseDirectory = ownedDirectory,
             WorkingDirectory = ownedDirectory,
         });
@@ -120,6 +122,9 @@ internal sealed class OwnedCopilotSdkClientV1 : IOwnedCopilotClientV1, ICopilotS
 
     public async Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
         new OwnedCopilotSdkSessionV1(await client.CreateSessionAsync(config, cancellationToken).ConfigureAwait(false));
+
+    public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) =>
+        client.DeleteSessionAsync(sessionId, cancellationToken);
 
     async Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ICopilotSkillRuntimeClient.DiscoverSkillsAsync(
         IReadOnlyList<string> projectPaths,
