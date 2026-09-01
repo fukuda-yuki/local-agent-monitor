@@ -15,6 +15,62 @@ public sealed class ValidationRunnerContractTests
         "CopilotAgentObservability.LocalMonitor.Tests.LocalMonitorV1SessionExplorerPlaywrightTests.ComparePreviewCreatesFromTransientOrderedCohortsAndNavigatesOnlyByServerLocation";
 
     [Fact]
+    public async Task NightlyEvidenceAcceptsExactlyOneTrxStorageIdentityPerExpectedProject()
+    {
+        using var directory = new TempDirectory();
+        WriteProjectTrx(directory.Path, "config.trx", "bin/Config.Tests.dll", "Example.Config.Fact");
+        WriteProjectTrx(directory.Path, "local.trx", "bin/Local.Tests.dll", "Example.Local.Fact");
+
+        var result = await RunContractAsync(
+            "-Mode", "NightlyEvidence",
+            "-ResultsDirectory", directory.Path,
+            "-ExpectedProjectsJson", JsonSerializer.Serialize(new[]
+            {
+                "tests/Config.Tests/Config.Tests.csproj",
+                "tests/Local.Tests/Local.Tests.csproj",
+            }));
+
+        Assert.True(result.ExitCode == 0, result.Output);
+        Assert.Contains("nightly_trx_evidence=passed", result.Output, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("bare")]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    public async Task NightlyEvidenceRejectsAmbiguousOrIncompleteProjectStorage(string defect)
+    {
+        using var directory = new TempDirectory();
+        if (defect == "bare") WriteProjectTrx(directory.Path, "config.trx", "", "Example.Config.Fact");
+        else WriteProjectTrx(directory.Path, "config.trx", "bin/Config.Tests.dll", "Example.Config.Fact");
+        if (defect == "duplicate")
+            WriteProjectTrx(directory.Path, "config-copy.trx", "other/Config.Tests.dll", "Example.Config.OtherFact");
+
+        var result = await RunContractAsync(
+            "-Mode", "NightlyEvidence",
+            "-ResultsDirectory", directory.Path,
+            "-ExpectedProjectsJson", JsonSerializer.Serialize(new[]
+            {
+                "tests/Config.Tests/Config.Tests.csproj",
+                "tests/Local.Tests/Local.Tests.csproj",
+            }));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("TRX", result.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SolutionPassUsesCollisionResistantTrxPrefixAndRunnerOwnedNightlyProjectAuthority()
+    {
+        var source = File.ReadAllText(RunnerScript);
+
+        Assert.DoesNotContain("'--logger', 'trx', '--results-directory', $ResultsDirectory", source, StringComparison.Ordinal);
+        Assert.Contains("'--logger', ('trx;LogFilePrefix={0}' -f $LogFilePrefix)", source, StringComparison.Ordinal);
+        Assert.Contains("$nightlyExpectedProjects = @($testProjects.Values) + @($localProject)", source, StringComparison.Ordinal);
+        Assert.Contains("'-ExpectedProjectsJson', $serializedNightlyExpectedProjects", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task CriticalSmokeAssertionAcceptsOnlyTheExactTwoPassedIdentities()
     {
         using var directory = new TempDirectory();
@@ -772,6 +828,33 @@ public sealed class ValidationRunnerContractTests
 
         new XDocument(new XElement(ns + "TestRun", results, definitions))
             .Save(System.IO.Path.Combine(directory, "critical-smoke.trx"));
+    }
+
+    private static void WriteProjectTrx(string directory, string fileName, string storage, string fqn)
+    {
+        XNamespace ns = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
+        var testId = Guid.NewGuid().ToString();
+        var executionId = Guid.NewGuid().ToString();
+        var separator = fqn.LastIndexOf('.');
+        new XDocument(new XElement(
+            ns + "TestRun",
+            new XElement(ns + "Results", new XElement(
+                ns + "UnitTestResult",
+                new XAttribute("executionId", executionId),
+                new XAttribute("testId", testId),
+                new XAttribute("testName", fqn),
+                new XAttribute("outcome", "Passed"))),
+            new XElement(ns + "TestDefinitions", new XElement(
+                ns + "UnitTest",
+                new XAttribute("name", fqn[(separator + 1)..]),
+                new XAttribute("id", testId),
+                new XAttribute("storage", storage),
+                new XElement(ns + "Execution", new XAttribute("id", executionId)),
+                new XElement(
+                    ns + "TestMethod",
+                    new XAttribute("className", fqn[..separator]),
+                    new XAttribute("name", fqn[(separator + 1)..]))))))
+            .Save(System.IO.Path.Combine(directory, fileName));
     }
 
     private static object Row(

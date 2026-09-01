@@ -192,6 +192,9 @@ public sealed partial class RawReplayArchiveService
             ownedBuffers.Add(archiveBytes, backing);
         else
             ownedBuffers.Add(archiveBytes);
+        var canonicalizationError = CanonicalizeStoredArchiveCreatorPlatform(archiveBytes, files.Count + 1);
+        if (canonicalizationError is not null)
+            return new(false, canonicalizationError, preview, null, null, null);
         if (archiveBytes.LongLength > RawReplayLimits.MaximumArchiveBytes)
             return new(false, "archive_too_large", preview, null, null, null);
         var inspection = inspectArchive(archiveBytes);
@@ -604,7 +607,13 @@ public sealed partial class RawReplayArchiveService
         return null;
     }
 
-    private static string? ValidateStoredArchive(byte[] bytes, int expectedEntries)
+    internal static string? CanonicalizeStoredArchiveCreatorPlatform(byte[] bytes, int expectedEntries) =>
+        ValidateStoredArchive(bytes, expectedEntries, canonicalizeCreatorPlatform: true);
+
+    private static string? ValidateStoredArchive(
+        byte[] bytes,
+        int expectedEntries,
+        bool canonicalizeCreatorPlatform = false)
     {
         const uint endSignature = 0x06054b50, centralSignature = 0x02014b50, localSignature = 0x04034b50;
         var minimumOffset = Math.Max(0, bytes.Length - 65_557); var endOffset = -1;
@@ -622,6 +631,7 @@ public sealed partial class RawReplayArchiveService
             || entriesOnDisk != expectedEntries || totalEntries != expectedEntries || centralOffset > int.MaxValue || centralSize > int.MaxValue
             || (long)centralOffset + centralSize != endOffset) return "archive_invalid";
         var cursor = (int)centralOffset; var expectedLocalOffset = 0;
+        var creatorPlatformOffsets = canonicalizeCreatorPlatform ? new List<int>(expectedEntries) : null;
         for (var entryIndex = 0; entryIndex < expectedEntries; entryIndex++)
         {
             if (cursor < 0 || cursor > endOffset - 46 || BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(cursor, 4)) != centralSignature) return "archive_invalid";
@@ -629,8 +639,11 @@ public sealed partial class RawReplayArchiveService
             if (localOffset > int.MaxValue || localOffset != expectedLocalOffset || localOffset > bytes.Length - 30
                 || BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan((int)localOffset, 4)) != localSignature) return "archive_invalid";
             if (BinaryPrimitives.ReadUInt16LittleEndian(central[10..12]) != 0 || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan((int)localOffset + 8, 2)) != 0) return "compression_not_allowed";
-            if (BinaryPrimitives.ReadUInt16LittleEndian(central[4..6]) != 20 || BinaryPrimitives.ReadUInt16LittleEndian(central[6..8]) != 20
+            var versionMadeBy = BinaryPrimitives.ReadUInt16LittleEndian(central[4..6]);
+            if ((canonicalizeCreatorPlatform ? (byte)versionMadeBy != 20 : versionMadeBy != 20)
+                || BinaryPrimitives.ReadUInt16LittleEndian(central[6..8]) != 20
                 || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan((int)localOffset + 4, 2)) != 20) return "archive_invalid";
+            creatorPlatformOffsets?.Add(cursor + 5);
             if (BinaryPrimitives.ReadUInt16LittleEndian(central[12..14]) != 0
                 || BinaryPrimitives.ReadUInt16LittleEndian(central[14..16]) != 0x21
                 || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan((int)localOffset + 10, 2)) != 0
@@ -654,7 +667,10 @@ public sealed partial class RawReplayArchiveService
             if (next > endOffset) return "archive_invalid";
             cursor = (int)next;
         }
-        return cursor == endOffset && expectedLocalOffset == centralOffset ? null : "archive_invalid";
+        if (cursor != endOffset || expectedLocalOffset != centralOffset) return "archive_invalid";
+        if (creatorPlatformOffsets is not null)
+            foreach (var offset in creatorPlatformOffsets) bytes[offset] = 0;
+        return null;
     }
 
     private sealed record PreparedSnapshot(IReadOnlyList<RawReplayRecord> Records, IReadOnlyList<RawReplaySessionContent> Contents, string? ErrorCode)

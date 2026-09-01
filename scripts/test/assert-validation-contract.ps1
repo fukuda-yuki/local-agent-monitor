@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('CriticalSmoke', 'CompletionBudget', 'Manifest', 'Shard', 'Aggregate', 'Workflow', 'TheoryExpansion')]
+    [ValidateSet('CriticalSmoke', 'CompletionBudget', 'Manifest', 'Shard', 'Aggregate', 'Workflow', 'TheoryExpansion', 'NightlyEvidence')]
     [string]$Mode,
     [string]$ResultsDirectory,
     [string]$ExpectedFqns,
@@ -9,6 +9,7 @@ param(
     [string]$ManifestPath,
     [string]$ExpectedShardIds,
     [string]$ExpectedPrerequisiteProjectsJson,
+    [string]$ExpectedProjectsJson,
     [string]$ExpectedSkippedFqns,
     [string]$ShardId,
     [string]$ReceiptPath,
@@ -288,6 +289,53 @@ function Assert-ShardEvidence {
         throw "Shard receipt actual count/hash does not match TRX evidence; shard_id=$CurrentShardId."
     }
     Assert-EqualMultiset -Name "Shard row identities ($CurrentShardId)" -Expected $expected -Actual $actual
+}
+
+if ($Mode -eq 'NightlyEvidence') {
+    if ([string]::IsNullOrWhiteSpace($ExpectedProjectsJson)) {
+        throw 'Nightly expected-project authority JSON is required.'
+    }
+    $expectedProjects = @($ExpectedProjectsJson | ConvertFrom-Json -Depth 100)
+    if ($expectedProjects.Count -eq 0 -or @($expectedProjects | Where-Object {
+        $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) -or $_ -notmatch '\.csproj$'
+    }).Count -ne 0) {
+        throw 'Nightly expected-project authority must be a non-empty project path array.'
+    }
+    $expectedIdentities = @($expectedProjects | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension([string]$_) })
+    if (@($expectedIdentities | Sort-Object -Unique).Count -ne $expectedIdentities.Count) {
+        throw 'Nightly expected-project authority contains duplicate storage identities.'
+    }
+    if (-not (Test-Path -LiteralPath $ResultsDirectory -PathType Container)) {
+        throw "Nightly TRX results directory is missing; path=$ResultsDirectory."
+    }
+    $trxFiles = @(Get-ChildItem -LiteralPath $ResultsDirectory -Filter '*.trx' -File -Recurse)
+    if ($trxFiles.Count -eq 0) { throw "Nightly produced no TRX files; path=$ResultsDirectory." }
+    $observedIdentities = @(
+        foreach ($trxFile in $trxFiles) {
+            [xml]$document = Get-Content -LiteralPath $trxFile.FullName -Raw
+            $storageIdentities = @($document.SelectNodes("//*[local-name()='UnitTest']") | ForEach-Object {
+                $storage = $_.GetAttribute('storage')
+                if ([string]::IsNullOrWhiteSpace($storage)) { throw "Nightly TRX has bare project storage; file=$($trxFile.FullName)." }
+                [IO.Path]::GetFileNameWithoutExtension($storage)
+            } | Sort-Object -Unique)
+            if ($storageIdentities.Count -ne 1) {
+                throw "Nightly TRX has ambiguous project storage; file=$($trxFile.FullName) count=$($storageIdentities.Count)."
+            }
+            $storageIdentities[0]
+        }
+    )
+    foreach ($expectedIdentity in $expectedIdentities) {
+        $matches = @($observedIdentities | Where-Object { $_ -ceq $expectedIdentity })
+        if ($matches.Count -ne 1) {
+            throw "Nightly requires exactly one TRX project storage identity; project=$expectedIdentity count=$($matches.Count)."
+        }
+    }
+    $unexpected = @($observedIdentities | Where-Object { $_ -cnotin $expectedIdentities })
+    if ($unexpected.Count -ne 0) {
+        throw "Nightly TRX contains unexpected project storage identities; projects=$($unexpected -join ';')."
+    }
+    Write-Output 'nightly_trx_evidence=passed'
+    exit 0
 }
 
 if ($Mode -eq 'CompletionBudget') {
