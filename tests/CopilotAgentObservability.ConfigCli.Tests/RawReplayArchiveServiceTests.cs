@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using CopilotAgentObservability.RawReplay;
@@ -7,6 +8,55 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class RawReplayArchiveServiceTests
 {
+    [Fact]
+    public void Creator_platform_canonicalization_rewrites_only_unix_central_creator_bytes()
+    {
+        var created = Create(new RawReplayArchiveService(), Snapshot(Record(1, Payload("trace-a"))));
+        var archive = created.ArchiveBytes!.ToArray();
+        var centralOffsets = CentralEntryOffsets(archive);
+        var frozenFields = centralOffsets.Select(offset => new
+        {
+            VersionNeeded = archive.AsSpan(offset + 6, 2).ToArray(),
+            ExternalAttributes = archive.AsSpan(offset + 38, 4).ToArray(),
+            LocalOffset = BinaryPrimitives.ReadUInt32LittleEndian(archive.AsSpan(offset + 42, 4)),
+        }).ToArray();
+        foreach (var offset in centralOffsets)
+        {
+            archive[offset + 5] = 3;
+            Assert.Equal(0x0314, BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(offset + 4, 2)));
+        }
+        Assert.Equal("archive_invalid", new RawReplayArchiveService().Inspect(archive).ErrorCode);
+
+        var error = RawReplayArchiveService.CanonicalizeStoredArchiveCreatorPlatform(archive, centralOffsets.Count);
+
+        Assert.Null(error);
+        Assert.True(new RawReplayArchiveService().Inspect(archive).Success);
+        for (var index = 0; index < centralOffsets.Count; index++)
+        {
+            var offset = centralOffsets[index];
+            Assert.Equal(20, BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(offset + 4, 2)));
+            Assert.Equal(frozenFields[index].VersionNeeded, archive.AsSpan(offset + 6, 2).ToArray());
+            Assert.Equal(frozenFields[index].ExternalAttributes, archive.AsSpan(offset + 38, 4).ToArray());
+            Assert.Equal(20, BinaryPrimitives.ReadUInt16LittleEndian(
+                archive.AsSpan(checked((int)frozenFields[index].LocalOffset) + 4, 2)));
+        }
+    }
+
+    [Fact]
+    public void Creator_platform_canonicalization_fails_closed_for_malformed_central_layout()
+    {
+        var created = Create(new RawReplayArchiveService(), Snapshot(Record(1, Payload("trace-a"))));
+        var archive = created.ArchiveBytes!.ToArray();
+        var centralOffsets = CentralEntryOffsets(archive);
+        foreach (var offset in centralOffsets) archive[offset + 5] = 3;
+        archive[centralOffsets[^1]] = 0;
+
+        var error = RawReplayArchiveService.CanonicalizeStoredArchiveCreatorPlatform(archive, centralOffsets.Count);
+
+        Assert.Equal("archive_invalid", error);
+        Assert.All(centralOffsets, offset => Assert.Equal(3, archive[offset + 5]));
+    }
+
     [Fact]
     public void Create_is_deterministic_and_round_trips_exact_raw_identity_and_versions()
     {
@@ -656,6 +706,26 @@ public sealed class RawReplayArchiveServiceTests
         entry.ExternalAttributes = 0;
         using var stream = entry.Open();
         stream.Write(bytes);
+    }
+
+    private static List<int> CentralEntryOffsets(byte[] archive)
+    {
+        const uint endSignature = 0x06054b50;
+        var endOffset = archive.Length - 22;
+        Assert.Equal(endSignature, BinaryPrimitives.ReadUInt32LittleEndian(archive.AsSpan(endOffset, 4)));
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(endOffset + 10, 2));
+        var cursor = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(archive.AsSpan(endOffset + 16, 4)));
+        var offsets = new List<int>(count);
+        for (var index = 0; index < count; index++)
+        {
+            offsets.Add(cursor);
+            cursor += 46
+                + BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(cursor + 28, 2))
+                + BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(cursor + 30, 2))
+                + BinaryPrimitives.ReadUInt16LittleEndian(archive.AsSpan(cursor + 32, 2));
+        }
+        Assert.Equal(endOffset, cursor);
+        return offsets;
     }
 
     private static byte[] Rewrite(RawReplayResult result, string target, Func<byte[], byte[]> transform)

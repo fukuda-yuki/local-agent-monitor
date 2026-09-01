@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 
@@ -33,6 +34,22 @@ public sealed class OwnedSessionSdkPolicyV1Tests
         Assert.False(created);
         Assert.Null(client);
         Assert.Equal(0, factoryCalls);
+    }
+
+    [Fact]
+    public void TryCreate_ProductOwnedClientDisablesSdkLogging()
+    {
+        CopilotClientOptions? capturedOptions = null;
+        var sentinel = new InvalidOperationException("synthetic_factory_failure");
+
+        var error = Assert.Throws<InvalidOperationException>(() => OwnedCopilotSdkClientV1.TryCreate(
+            "C:/owned",
+            options => { capturedOptions = options; throw sentinel; },
+            _ => false,
+            out _));
+
+        Assert.Same(sentinel, error);
+        Assert.Equal(CopilotLogLevel.None, Assert.IsType<CopilotClientOptions>(capturedOptions).LogLevel);
     }
 
     [Fact]
@@ -150,6 +167,22 @@ public sealed class OwnedSessionSdkPolicyV1Tests
         Assert.Equal(1, client.Session.DisposeCalls);
     }
 
+    [Theory]
+    [InlineData("synthetic final content", "synthetic-effective-model")]
+    [InlineData("distinct final content", "distinct-effective-model")]
+    public void OwnedSessionFacade_FinalResponseCarriesSdkContentAndModelExactly(string content, string model)
+    {
+        var response = OwnedCopilotSdkSessionV1.ToFinalResponse(new AssistantMessageData
+        {
+            MessageId = "synthetic-message",
+            Content = content,
+            Model = model,
+        });
+
+        Assert.Equal(content, response.Content);
+        Assert.Equal(model, response.Model);
+    }
+
     private static SessionConfig BaseConfig() => new()
     {
         Tools = [],
@@ -201,6 +234,7 @@ public sealed class OwnedSessionSdkPolicyV1Tests
             ConfigAtCreation = config;
             return Task.FromResult<IOwnedCopilotSessionV1>(Session);
         }
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

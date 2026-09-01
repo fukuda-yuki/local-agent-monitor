@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
@@ -11,11 +12,23 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     Func<IOwnedCopilotClientV1?> clientFactory,
     string model) : ILocalAiProviderAdapterV1
 {
+    private const string StructuredResultInstruction = """
+Return raw JSON only: no Markdown, code fences, or surrounding prose.
+Return one closed object with exactly these root fields: summary (string), findings (array), improvement_suggestions (array), limitations (array of strings).
+Each findings item is one closed object with exactly: finding_id (non-blank string: not empty or whitespace-only), title (non-blank string: not empty or whitespace-only), explanation (non-blank string: not empty or whitespace-only), evidence_state (one of "supported" or "limited"), evidence_refs (array of 1 to 16 non-blank strings, each not empty or whitespace-only and exactly matching an identifier in the supplied evidence index), limitation (non-blank string: not empty or whitespace-only).
+Each improvement_suggestions item is one closed object with exactly: suggestion_id (non-blank string: not empty or whitespace-only), target_kind (one of "instructions", "skill", "agent", "subagent_input", or "tool_configuration"), target_label (non-blank string: not empty or whitespace-only), concrete_change (non-blank string: not empty or whitespace-only), rationale (non-blank string: not empty or whitespace-only), expected_effect (non-blank string: not empty or whitespace-only), risks_or_limitations (non-blank string: not empty or whitespace-only), evidence_refs (array of 1 to 16 non-blank strings, each not empty or whitespace-only and exactly matching an identifier in the supplied evidence index).
+Never include credentials, local filesystem paths, prompts, tool payloads, scope, snapshot, or provider metadata. Exact supplied canonical evidence-location strings, including slash-delimited locations, may appear solely as string values in evidence_refs.
+""";
+
     public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
     {
         var client = clientFactory();
         if (client is null) return LocalAiProviderOutcomeV1.Failed();
-        await using (client.ConfigureAwait(false))
+        IOwnedCopilotSessionV1? session = null;
+        string? sessionId = null;
+        LocalAiProviderOutcomeV1? outcome = null;
+        ExceptionDispatchInfo? primaryFailure = null;
+        try
         {
             await client.StartAsync(token).ConfigureAwait(false);
             var rawTool = CopilotTool.DefineTool(
@@ -37,21 +50,45 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
                 SystemMessage = new SystemMessageConfig
                 {
                     Mode = SystemMessageMode.Append,
-                    Content = "Return only one closed JSON object with exactly summary, findings, improvement_suggestions, and limitations. Never include credentials, paths, prompts, tool payloads, scope, snapshot, or provider metadata."
+                    Content = StructuredResultInstruction
                 },
             };
-            await using var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
+            session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
+            sessionId = session.SessionId;
             var prompt = BuildPrompt(request);
-            var content = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(content)) return LocalAiProviderOutcomeV1.Partial();
-            return LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(content));
+            var response = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
+            outcome = response is null || string.IsNullOrWhiteSpace(response.Content)
+                ? LocalAiProviderOutcomeV1.Partial()
+                : string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal)
+                    ? LocalAiProviderOutcomeV1.Failed()
+                    : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
         }
+        catch (Exception failure)
+        {
+            primaryFailure = ExceptionDispatchInfo.Capture(failure);
+        }
+
+        ExceptionDispatchInfo? cleanupFailure = null;
+        if (session is not null)
+        {
+            try { await session.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception failure) { cleanupFailure = ExceptionDispatchInfo.Capture(failure); }
+            try { await client.DeleteSessionAsync(sessionId!, CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception failure) { cleanupFailure ??= ExceptionDispatchInfo.Capture(failure); }
+        }
+        try { await client.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception failure) { cleanupFailure ??= ExceptionDispatchInfo.Capture(failure); }
+
+        primaryFailure?.Throw();
+        cleanupFailure?.Throw();
+        return outcome!;
     }
 
     internal static string BuildPrompt(LocalAiProviderRequestV1 request)
     {
         var builder = new StringBuilder();
         builder.AppendLine("Analyze only this immutable bounded snapshot projection and its exact evidence identifiers.");
+        builder.AppendLine(StructuredResultInstruction);
         if (request.Snapshot.ScopeKind == "repository_selection")
             builder.AppendLine("Summarize only the supplied frozen repository facts and evidence. Cite only the exact supplied canonical Session/node evidence locations; never cite a bare node ID. Do not explore, infer, or request any session outside this snapshot. Do not recalculate deterministic facts, claim effects or causality, score quality, rank or prioritize, classify improvement or regression, or invent facts. Do not state or promote AI output as a deterministic fact.");
         else if (request.Snapshot.ScopeKind == "comparison")
