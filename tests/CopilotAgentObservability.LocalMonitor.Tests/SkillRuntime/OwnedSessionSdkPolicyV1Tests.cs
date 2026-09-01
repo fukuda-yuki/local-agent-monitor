@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 
@@ -164,6 +165,20 @@ public sealed class OwnedSessionSdkPolicyV1Tests
             Assert.Equal(AgentMode.Autopilot, client.Session.Message.AgentMode);
         }
         Assert.Equal(1, client.Session.DisposeCalls);
+    }
+
+    [Fact]
+    public void OwnedSessionFacade_FinalResponseCarriesSdkContentAndModelExactly()
+    {
+        var response = OwnedCopilotSdkSessionV1.ToFinalResponse(new AssistantMessageData
+        {
+            MessageId = "synthetic-message",
+            Content = "synthetic final content",
+            Model = "synthetic-effective-model",
+        });
+
+        Assert.Equal("synthetic final content", response.Content);
+        Assert.Equal("synthetic-effective-model", response.Model);
     }
 
     private static SessionConfig BaseConfig() => new()

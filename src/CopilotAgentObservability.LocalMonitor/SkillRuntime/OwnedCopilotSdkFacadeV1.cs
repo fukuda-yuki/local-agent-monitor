@@ -183,8 +183,11 @@ internal sealed class OwnedCopilotSdkSessionV1(CopilotSession session) : IOwnedC
         var response = await session.SendAndWaitAsync(
             new MessageOptions { Prompt = prompt, AgentMode = AgentMode.Autopilot }, timeout, cancellationToken)
             .ConfigureAwait(false);
-        return response?.Data is { } data ? new(data.Content, data.Model) : null;
+        return response?.Data is { } data ? ToFinalResponse(data) : null;
     }
+
+    internal static OwnedCopilotFinalResponseV1 ToFinalResponse(AssistantMessageData data) =>
+        new(data.Content, data.Model);
 
     public async Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken)
     {
