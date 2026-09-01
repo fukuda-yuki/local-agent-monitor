@@ -535,6 +535,7 @@ public sealed class RuntimeBackupRestoreTests
     [Fact]
     public void Monitor_startup_removes_unlocked_empty_read_sidecars_before_recovery_guard()
     {
+        if (!OperatingSystem.IsWindows()) return;
         using var temp = new RestoreTemp();
         temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
         File.WriteAllBytes(temp.Target + "-wal", []);
@@ -546,6 +547,26 @@ public sealed class RuntimeBackupRestoreTests
         using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
         Assert.False(File.Exists(temp.Target + "-wal"));
         Assert.False(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
+    public void Monitor_startup_on_non_windows_preserves_empty_read_sidecars_and_fails_closed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "existing", includeRaw: false);
+        var wal = temp.Target + "-wal";
+        var sharedMemory = temp.Target + "-shm";
+        File.WriteAllBytes(wal, []);
+        File.WriteAllBytes(sharedMemory, new byte[32 * 1024]);
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.Empty(File.ReadAllBytes(wal));
+        Assert.Equal(32 * 1024, new FileInfo(sharedMemory).Length);
     }
 
     [Fact]
@@ -726,6 +747,7 @@ public sealed class RuntimeBackupRestoreTests
     [Fact]
     public void Monitor_startup_does_not_follow_a_sidecar_reparse_substitution()
     {
+        if (!OperatingSystem.IsWindows()) return;
         using var temp = new RestoreTemp();
         temp.CreateDatabase(temp.Target, "current", includeRaw: false);
         File.WriteAllBytes(temp.Target + "-wal", []);
@@ -747,55 +769,6 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
         Assert.True(File.Exists(target));
         Assert.True(new FileInfo(temp.Target + "-wal").LinkTarget is not null);
-        Assert.True(File.Exists(temp.Target + "-shm"));
-    }
-
-    [Fact]
-    public void Monitor_startup_on_unix_rejects_a_replaced_sidecar_identity()
-    {
-        if (OperatingSystem.IsWindows()) return;
-        using var temp = new RestoreTemp();
-        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
-        File.WriteAllBytes(temp.Target + "-wal", []);
-        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
-        var displacedWal = temp.Target + "-wal-displaced";
-        var replacement = new byte[] { 1, 2, 3, 4 };
-        var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
-        {
-            if (checkpoint != SqliteRuntimeBackupService.BeforeEmptyReadSidecarDeleteCheckpoint) return;
-            File.Move(temp.Target + "-wal", displacedWal);
-            File.WriteAllBytes(temp.Target + "-wal", replacement);
-        });
-
-        var initialization = service.InitializeForMonitor(temp.Target);
-
-        Assert.False(initialization.Result.Success);
-        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
-        Assert.Equal(replacement, File.ReadAllBytes(temp.Target + "-wal"));
-        Assert.True(File.Exists(displacedWal));
-        Assert.True(File.Exists(temp.Target + "-shm"));
-    }
-
-    [Fact]
-    public void Monitor_startup_on_unix_revalidates_sidecar_length_before_deletion()
-    {
-        if (OperatingSystem.IsWindows()) return;
-        using var temp = new RestoreTemp();
-        temp.CreateDatabase(temp.Target, "current", includeRaw: false);
-        File.WriteAllBytes(temp.Target + "-wal", []);
-        File.WriteAllBytes(temp.Target + "-shm", new byte[32 * 1024]);
-        var replacement = new byte[] { 1, 2, 3, 4 };
-        var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
-        {
-            if (checkpoint == SqliteRuntimeBackupService.BeforeEmptyReadSidecarDeleteCheckpoint)
-                File.WriteAllBytes(temp.Target + "-wal", replacement);
-        });
-
-        var initialization = service.InitializeForMonitor(temp.Target);
-
-        Assert.False(initialization.Result.Success);
-        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, initialization.Result.ErrorCode);
-        Assert.Equal(replacement, File.ReadAllBytes(temp.Target + "-wal"));
         Assert.True(File.Exists(temp.Target + "-shm"));
     }
 

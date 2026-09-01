@@ -3623,13 +3623,8 @@ public sealed class SqliteRuntimeBackupService
             if (hasWal && (!IsRegularControlFile(wal) || new FileInfo(wal).Length != 0)) return false;
             if (hasSharedMemory
                 && (!hasWal || !IsRegularControlFile(sharedMemory) || new FileInfo(sharedMemory).Length != 32 * 1024)) return false;
+            if (!OperatingSystem.IsWindows() && hasWal) return false;
             checkpoint?.Invoke(BeforeEmptyReadSidecarOwnershipCheckpoint);
-            if (!OperatingSystem.IsWindows())
-            {
-                checkpoint?.Invoke(BeforeEmptyReadSidecarDeleteCheckpoint);
-                if (hasWal && !TryNormalizeEmptyReadSidecarsWithSqlite(path)) return false;
-                return !HasActiveSqliteSidecar(path);
-            }
             using (var walOwnership = hasWal ? TryAcquireSidecarOwnership(wal, expectedLength: 0) : null)
             using (var sharedMemoryOwnership = hasSharedMemory ? TryAcquireSidecarOwnership(sharedMemory, expectedLength: 32 * 1024) : null)
             {
@@ -3641,22 +3636,6 @@ public sealed class SqliteRuntimeBackupService
             return !HasActiveSqliteSidecar(path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-        {
-            return false;
-        }
-    }
-
-    private bool TryNormalizeEmptyReadSidecarsWithSqlite(string path)
-    {
-        try
-        {
-            using var connection = Open(path, SqliteOpenMode.ReadWrite);
-            using var wal = connection.CreateCommand();
-            wal.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-            using var reader = wal.ExecuteReader();
-            return reader.Read() && reader.GetInt32(0) == 0 && !reader.Read();
-        }
-        catch (Exception exception) when (exception is SqliteException or InvalidOperationException || IsIo(exception))
         {
             return false;
         }
