@@ -602,7 +602,8 @@
         || !FACT_STATES.has(timing.state)
         || !timestamp(timing.started_at) || !timestamp(timing.ended_at)
         || timing.duration_ms !== null && !count(timing.duration_ms)
-        || timing.state === "recorded" && (timing.started_at === null || timing.ended_at === null || timing.duration_ms === null)
+        || timing.state === "recorded" && (timing.started_at === null
+          || (timing.ended_at === null) !== (timing.duration_ms === null))
         || timing.ended_at !== null && timing.started_at === null
         || timing.started_at !== null && timing.ended_at !== null
           && timing.ended_at < timing.started_at

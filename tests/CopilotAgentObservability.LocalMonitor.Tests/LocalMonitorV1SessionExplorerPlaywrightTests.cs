@@ -692,6 +692,36 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
     [Fact]
     [Trait("ValidationLane", "Nightly")]
+    public async Task CompletedAndActiveRecordedTimingRenderTogetherWithoutInventingActiveDuration()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var document = JsonNode.Parse(await TwoSessionsAsync())!.AsObject();
+        document["items"]![0]!["status"] = "completed";
+        var active = document["items"]![1]!;
+        active["status"] = "active";
+        active["timing"]!["ended_at"] = null;
+        active["timing"]!["duration_ms"] = null;
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route =>
+            route.FulfillAsync(Json(Canonical(document))));
+
+        await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(2);
+        var activeRow = page.Locator($"[data-session-id='{SecondSessionId}']");
+        await Expect(activeRow.Locator("[data-session-status]")).ToHaveTextAsync("実行中");
+        await Expect(activeRow.Locator("[data-session-started] time"))
+            .ToHaveAttributeAsync("datetime", "2026-01-01T00:00:00.0000000+00:00");
+        await Expect(activeRow.Locator("[data-session-started] small")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#session-explorer-status")).Not.ToContainTextAsync("読み込めませんでした");
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task LongRepositoryNameKeepsTheCompareActionVisibleAndKeyboardReachableAt1366()
     {
         var displayName = new string('長', 200);
@@ -2507,6 +2537,10 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         reversedTiming["items"]![0]!["timing"]!["started_at"] = "2026-01-02T00:00:00.0000001+00:00";
         reversedTiming["items"]![0]!["timing"]!["ended_at"] = "2026-01-02T00:00:00.0000000+00:00";
         reversedTiming["items"]![0]!["timing"]!["duration_ms"] = 0;
+        var missingDuration = JsonNode.Parse(golden)!.AsObject();
+        missingDuration["items"]![0]!["timing"]!["duration_ms"] = null;
+        var durationWithoutEnd = JsonNode.Parse(golden)!.AsObject();
+        durationWithoutEnd["items"]![0]!["timing"]!["ended_at"] = null;
         var contradictoryTokens = JsonNode.Parse(golden)!.AsObject();
         contradictoryTokens["items"]![0]!["tokens"]!["input"]!["value"] = 100;
         contradictoryTokens["items"]![0]!["tokens"]!["cache_read"]!["value"] = 101;
@@ -2525,6 +2559,8 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
                 3 => Canonical(invalidCursor),
                 4 => Canonical(reordered),
                 5 => Canonical(reversedTiming),
+                6 => Canonical(missingDuration),
+                7 => Canonical(durationWithoutEnd),
                 _ => Canonical(contradictoryTokens),
             };
             return route.FulfillAsync(Json(body));
@@ -2549,7 +2585,13 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(0);
         await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("読み込めませんでした");
-        Assert.Equal(6, calls);
+        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("読み込めませんでした");
+        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("読み込めませんでした");
+        Assert.Equal(8, calls);
     }
 
     [Fact]
