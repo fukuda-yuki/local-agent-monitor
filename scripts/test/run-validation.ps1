@@ -71,6 +71,8 @@ $testProjects = [ordered]@{
     's09' = 'tests/CopilotAgentObservability.InstructionFindings.Tests/CopilotAgentObservability.InstructionFindings.Tests.csproj'
 }
 $localProject = 'tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj'
+$nightlyExpectedProjects = @($testProjects.Values) + @($localProject)
+$serializedNightlyExpectedProjects = ConvertTo-Json -InputObject $nightlyExpectedProjects -Compress
 $localShardSelectors = [ordered]@{
     's02' = @(
         '.Tests.Local', '.Tests.Generic', '.Tests.Sanitized', '.Tests.Proposal', '.Tests.Playwright')
@@ -189,11 +191,11 @@ function Assert-PhaseBudget {
 }
 
 function Invoke-TestPass {
-    param([string]$Target, [string]$Filter, [string]$ResultsDirectory)
+    param([string]$Target, [string]$Filter, [string]$ResultsDirectory, [string]$LogFilePrefix)
     New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
     Invoke-NativeCommand -FilePath 'dotnet' -Arguments @(
         'test', $Target, '--no-build', '--filter', $Filter,
-        '--logger', 'trx', '--results-directory', $ResultsDirectory)
+        '--logger', ('trx;LogFilePrefix={0}' -f $LogFilePrefix), '--results-directory', $ResultsDirectory)
 }
 
 function Install-PlaywrightChromium {
@@ -820,10 +822,10 @@ Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
 Invoke-NativeCommand -FilePath 'dotnet' -Arguments @('build', $solution)
 
 if ($Lane -eq 'Completion' -and [string]::IsNullOrWhiteSpace($Phase)) {
-    Invoke-TestPass -Target $solution -Filter $completionFastFilter -ResultsDirectory (Join-Path $resultsRoot 'fast')
+    Invoke-TestPass -Target $solution -Filter $completionFastFilter -ResultsDirectory (Join-Path $resultsRoot 'fast') -LogFilePrefix 'completion-fast'
     Install-PlaywrightChromium
     $criticalResults = Join-Path $resultsRoot 'critical-smoke'
-    Invoke-TestPass -Target $solution -Filter $criticalSmokeFilter -ResultsDirectory $criticalResults
+    Invoke-TestPass -Target $solution -Filter $criticalSmokeFilter -ResultsDirectory $criticalResults -LogFilePrefix 'completion-critical-smoke'
     Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
         '-NoProfile', '-File', $validationContract, '-Mode', 'CriticalSmoke',
         '-ResultsDirectory', $criticalResults, '-ExpectedFqns', ($criticalSmokeExpectedFqns -join ';'))
@@ -832,7 +834,11 @@ if ($Lane -eq 'Completion' -and [string]::IsNullOrWhiteSpace($Phase)) {
         '-ElapsedSeconds', $phaseStopwatch.Elapsed.TotalSeconds.ToString('R', [Globalization.CultureInfo]::InvariantCulture))
 } else {
     Install-PlaywrightChromium -WithDeps:($Partition -eq 'Linux')
-    Invoke-TestPass -Target $solution -Filter $nightlyFilter -ResultsDirectory (Join-Path $resultsRoot 'nightly')
+    $nightlyResults = Join-Path $resultsRoot 'nightly'
+    Invoke-TestPass -Target $solution -Filter $nightlyFilter -ResultsDirectory $nightlyResults -LogFilePrefix ("nightly-{0}" -f $partitionToken)
+    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+        '-NoProfile', '-File', $validationContract, '-Mode', 'NightlyEvidence',
+        '-ResultsDirectory', $nightlyResults, '-ExpectedProjectsJson', $serializedNightlyExpectedProjects)
 }
 
 Write-Output "validation_lane=$Lane"
