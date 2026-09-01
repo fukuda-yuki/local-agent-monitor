@@ -67,10 +67,12 @@ Never include credentials, paths, prompts, tool payloads, scope, snapshot, or pr
             try
             {
                 var prompt = BuildPrompt(request);
-                var content = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
-                outcome = string.IsNullOrWhiteSpace(content)
+                var response = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
+                outcome = response is null || string.IsNullOrWhiteSpace(response.Content)
                     ? LocalAiProviderOutcomeV1.Partial()
-                    : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(content));
+                    : string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal)
+                        ? LocalAiProviderOutcomeV1.Failed()
+                        : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
             }
             catch (Exception primaryFailure)
             {

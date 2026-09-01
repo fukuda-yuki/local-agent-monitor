@@ -20,7 +20,7 @@ internal interface IOwnedCopilotSessionV1 : IAsyncDisposable
     Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken);
     Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken);
-    async Task<string?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+    async Task<OwnedCopilotFinalResponseV1?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
     {
         await SendAndWaitAsync(prompt, timeout, cancellationToken).ConfigureAwait(false);
         return null;
@@ -28,6 +28,8 @@ internal interface IOwnedCopilotSessionV1 : IAsyncDisposable
     Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken) =>
         Task.FromResult<OwnedSkillCommandPromptV1?>(null);
 }
+
+internal sealed record OwnedCopilotFinalResponseV1(string? Content, string? Model);
 
 internal sealed record OwnedSkillCommandPromptV1(string Prompt);
 
@@ -59,7 +61,7 @@ internal sealed class DiagnosticOwnedCopilotSessionV1(
         OwnedSessionDiagnosticObservationV1.Notify(observer, OwnedSessionDiagnosticEventV1.SendPending);
         return inner.SendAndWaitAsync(prompt, timeout, cancellationToken);
     }
-    public Task<string?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+    public Task<OwnedCopilotFinalResponseV1?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
         inner.SendAndReadFinalContentAsync(prompt, timeout, cancellationToken);
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
@@ -176,12 +178,12 @@ internal sealed class OwnedCopilotSdkSessionV1(CopilotSession session) : IOwnedC
             new MessageOptions { Prompt = prompt, AgentMode = AgentMode.Autopilot }, timeout, cancellationToken)
             .ConfigureAwait(false);
 
-    public async Task<string?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+    public async Task<OwnedCopilotFinalResponseV1?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var response = await session.SendAndWaitAsync(
             new MessageOptions { Prompt = prompt, AgentMode = AgentMode.Autopilot }, timeout, cancellationToken)
             .ConfigureAwait(false);
-        return response?.Data?.Content;
+        return response?.Data is { } data ? new(data.Content, data.Model) : null;
     }
 
     public async Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken)
