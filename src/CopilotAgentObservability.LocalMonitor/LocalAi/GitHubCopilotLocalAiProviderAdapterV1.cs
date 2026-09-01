@@ -24,7 +24,11 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
     {
         var client = clientFactory();
         if (client is null) return LocalAiProviderOutcomeV1.Failed();
-        await using (client.ConfigureAwait(false))
+        IOwnedCopilotSessionV1? session = null;
+        string? sessionId = null;
+        LocalAiProviderOutcomeV1? outcome = null;
+        ExceptionDispatchInfo? primaryFailure = null;
+        try
         {
             await client.StartAsync(token).ConfigureAwait(false);
             var rawTool = CopilotTool.DefineTool(
@@ -49,46 +53,35 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
                     Content = StructuredResultInstruction
                 },
             };
-            var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
-            var sessionId = session.SessionId;
-            async Task CleanupSessionAsync()
-            {
-                try
-                {
-                    await session.DisposeAsync().ConfigureAwait(false);
-                }
-                finally
-                {
-                    await client.DeleteSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-                }
-            }
-
-            LocalAiProviderOutcomeV1 outcome;
-            try
-            {
-                var prompt = BuildPrompt(request);
-                var response = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
-                outcome = response is null || string.IsNullOrWhiteSpace(response.Content)
-                    ? LocalAiProviderOutcomeV1.Partial()
-                    : string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal)
-                        ? LocalAiProviderOutcomeV1.Failed()
-                        : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
-            }
-            catch (Exception primaryFailure)
-            {
-                try
-                {
-                    await CleanupSessionAsync().ConfigureAwait(false);
-                }
-                catch
-                {
-                    ExceptionDispatchInfo.Capture(primaryFailure).Throw();
-                }
-                throw;
-            }
-            await CleanupSessionAsync().ConfigureAwait(false);
-            return outcome;
+            session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
+            sessionId = session.SessionId;
+            var prompt = BuildPrompt(request);
+            var response = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
+            outcome = response is null || string.IsNullOrWhiteSpace(response.Content)
+                ? LocalAiProviderOutcomeV1.Partial()
+                : string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal)
+                    ? LocalAiProviderOutcomeV1.Failed()
+                    : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
         }
+        catch (Exception failure)
+        {
+            primaryFailure = ExceptionDispatchInfo.Capture(failure);
+        }
+
+        ExceptionDispatchInfo? cleanupFailure = null;
+        if (session is not null)
+        {
+            try { await session.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception failure) { cleanupFailure = ExceptionDispatchInfo.Capture(failure); }
+            try { await client.DeleteSessionAsync(sessionId!, CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception failure) { cleanupFailure ??= ExceptionDispatchInfo.Capture(failure); }
+        }
+        try { await client.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception failure) { cleanupFailure ??= ExceptionDispatchInfo.Capture(failure); }
+
+        primaryFailure?.Throw();
+        cleanupFailure?.Throw();
+        return outcome!;
     }
 
     internal static string BuildPrompt(LocalAiProviderRequestV1 request)

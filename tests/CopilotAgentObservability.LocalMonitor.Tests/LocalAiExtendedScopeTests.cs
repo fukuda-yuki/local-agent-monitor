@@ -82,6 +82,49 @@ public sealed class LocalAiExtendedScopeTests
         Assert.True(client.SessionMarkerPresent);
     }
 
+    [Theory]
+    [InlineData(ProviderBehavior.Exception, typeof(InvalidOperationException), "synthetic_provider_failure")]
+    [InlineData(ProviderBehavior.Timeout, typeof(TimeoutException), "synthetic_timeout")]
+    [InlineData(ProviderBehavior.Cancellation, typeof(OperationCanceledException), null)]
+    public async Task ProviderSession_ClientDisposeFailurePreservesPrimaryFailure(
+        ProviderBehavior behavior,
+        Type expectedType,
+        string? expectedMessage)
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior, failClientDispose: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        using var cancellation = new CancellationTokenSource();
+        if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
+
+        var error = await Record.ExceptionAsync(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token));
+
+        Assert.IsType(expectedType, error);
+        if (expectedMessage is not null) Assert.Equal(expectedMessage, error!.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.Equal(1, client.DisposeCalls);
+        Assert.False(client.SessionMarkerPresent);
+    }
+
+    [Fact]
+    public async Task ProviderSession_ClientDisposeFailureCannotReturnComplete()
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, ProviderBehavior.Complete, failClientDispose: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
+
+        Assert.Equal("synthetic_client_cleanup_failure", error.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.Equal(1, client.DisposeCalls);
+        Assert.False(client.SessionMarkerPresent);
+    }
+
     [Fact]
     public async Task ProviderSession_MatchingEffectiveModelReturnsCompleteWithRequestedModel()
     {
@@ -316,9 +359,11 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
     private sealed class ProviderClient(
         List<string> events,
         ProviderBehavior behavior,
-        bool failDelete = false) : IOwnedCopilotClientV1
+        bool failDelete = false,
+        bool failClientDispose = false) : IOwnedCopilotClientV1
     {
         public int DeleteCalls { get; private set; }
+        public int DisposeCalls { get; private set; }
         public string? DeletedSessionId { get; private set; }
         public bool DeleteTokenCanBeCanceled { get; private set; }
         public bool SessionMarkerPresent { get; private set; } = true;
@@ -342,7 +387,14 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
             SessionMarkerPresent = false;
             return Task.CompletedTask;
         }
-        public ValueTask DisposeAsync() { events.Add("client.dispose"); return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            events.Add("client.dispose");
+            return failClientDispose
+                ? ValueTask.FromException(new InvalidOperationException("synthetic_client_cleanup_failure"))
+                : ValueTask.CompletedTask;
+        }
     }
 
     private sealed class ProviderSession(List<string> events, ProviderBehavior behavior) : IOwnedCopilotSessionV1
