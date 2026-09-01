@@ -236,6 +236,7 @@ public sealed class SettingsAiReadinessRouteTests
         public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) => status(cancellationToken);
         public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
             Task.FromResult(session ?? throw new NotSupportedException());
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
         public ValueTask DisposeAsync()
         {
             DisposeCalls++;

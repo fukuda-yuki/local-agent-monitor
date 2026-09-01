@@ -1,5 +1,8 @@
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -8,6 +11,50 @@ public sealed class LocalAiExtendedScopeTests
     private const string RepositoryId = "018f0000-0000-7000-8000-000000000001";
     private const string ComparisonId = "018f0000-0000-7000-8000-000000000002";
     private const string SnapshotId = "018f0000-0000-7000-8000-000000000003";
+
+    [Theory]
+    [InlineData(ProviderBehavior.Complete)]
+    [InlineData(ProviderBehavior.Partial)]
+    [InlineData(ProviderBehavior.Exception)]
+    [InlineData(ProviderBehavior.Timeout)]
+    [InlineData(ProviderBehavior.Cancellation)]
+    public async Task ProviderSession_IsDisposedThenDeletedExactlyOnceBeforeClientDisposal(
+        ProviderBehavior behavior)
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        using var cancellation = new CancellationTokenSource();
+        if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
+
+        if (behavior is ProviderBehavior.Complete or ProviderBehavior.Partial)
+            _ = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token);
+        else
+            _ = await Assert.ThrowsAnyAsync<Exception>(async () =>
+                await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token));
+
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.Equal("synthetic-session", client.DeletedSessionId);
+        Assert.False(client.DeleteTokenCanBeCanceled);
+        Assert.False(client.SessionMarkerPresent);
+    }
+
+    [Fact]
+    public async Task ProviderSession_DeleteFailureCannotReturnComplete()
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, ProviderBehavior.Complete, failDelete: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
+
+        Assert.Equal("synthetic_cleanup_failure", error.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.True(client.SessionMarkerPresent);
+    }
 
     [Fact]
     public void RepositoryRunRequest_RequiresClosedVersionedSnapshotReceipt()
@@ -202,4 +249,55 @@ Never include credentials, paths, prompts, tool payloads, scope, snapshot, or pr
     {public ValueTask<CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshot> ReadAsync(CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeRequest request,CancellationToken token)=>ValueTask.FromException<CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshot>(new CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotException(CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",new Exception()));}
     private sealed class NoHistoricalEvidence:CopilotAgentObservability.LocalMonitor.Analysis.IHistoricalEvidenceSnapshotSourceV1
     {public ValueTask<CopilotAgentObservability.LocalMonitor.Analysis.IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(CopilotAgentObservability.LocalMonitor.Analysis.HistoricalEvidenceSelectionV1 selection,CancellationToken token)=>throw new NotSupportedException();}
+
+    public enum ProviderBehavior { Complete, Partial, Exception, Timeout, Cancellation }
+
+    private sealed class ProviderClient(
+        List<string> events,
+        ProviderBehavior behavior,
+        bool failDelete = false) : IOwnedCopilotClientV1
+    {
+        public int DeleteCalls { get; private set; }
+        public string? DeletedSessionId { get; private set; }
+        public bool DeleteTokenCanBeCanceled { get; private set; }
+        public bool SessionMarkerPresent { get; private set; } = true;
+
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<CopilotRuntimeStatusObservationV1?>(null);
+        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
+            Task.FromResult<IOwnedCopilotSessionV1>(new ProviderSession(events, behavior));
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken)
+        {
+            DeleteCalls++;
+            DeletedSessionId = sessionId;
+            DeleteTokenCanBeCanceled = cancellationToken.CanBeCanceled;
+            events.Add("session.delete");
+            if (failDelete) return Task.FromException(new InvalidOperationException("synthetic_cleanup_failure"));
+            SessionMarkerPresent = false;
+            return Task.CompletedTask;
+        }
+        public ValueTask DisposeAsync() { events.Add("client.dispose"); return ValueTask.CompletedTask; }
+    }
+
+    private sealed class ProviderSession(List<string> events, ProviderBehavior behavior) : IOwnedCopilotSessionV1
+    {
+        public string SessionId => "synthetic-session";
+        public Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CopilotDiscoveredSkillFactV1>?>(null);
+        public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task<string?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+            behavior switch
+            {
+                ProviderBehavior.Complete => Task.FromResult<string?>("synthetic_complete_marker"),
+                ProviderBehavior.Partial => Task.FromResult<string?>(null),
+                ProviderBehavior.Exception => Task.FromException<string?>(new InvalidOperationException("synthetic_provider_failure")),
+                ProviderBehavior.Timeout => Task.FromException<string?>(new TimeoutException("synthetic_timeout")),
+                ProviderBehavior.Cancellation => Task.FromException<string?>(new OperationCanceledException(cancellationToken)),
+                _ => throw new InvalidOperationException(),
+            };
+        public ValueTask DisposeAsync() { events.Add("session.dispose"); return ValueTask.CompletedTask; }
+    }
 }

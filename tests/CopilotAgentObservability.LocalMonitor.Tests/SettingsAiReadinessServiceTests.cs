@@ -178,6 +178,7 @@ public sealed class SettingsAiReadinessServiceTests
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public async Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) { StatusCalls++; return await status(cancellationToken); }
         public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("Readiness must not create an SDK session.");
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("Readiness must not delete an SDK session.");
         public ValueTask DisposeAsync()
         {
             DisposeCalls++;
