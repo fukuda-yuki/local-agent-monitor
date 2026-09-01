@@ -248,7 +248,8 @@ internal static class LocalWorkspaceProjectionStore
                       AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
                         OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
                   WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) END
-              WHERE a.kind IN ('tool','subagent','error','retry');
+              WHERE a.kind IN ('tool','subagent','error','retry')
+                AND a.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             UPDATE local_workspace_session_activity SET count=NULL
               WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND state<>'recorded';
             INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)

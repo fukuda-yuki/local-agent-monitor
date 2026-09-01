@@ -154,6 +154,35 @@ public sealed class RetentionCleanupWorkerTests
     }
 
     [Fact]
+    public async Task Worker_LongFutureDueWakeReevaluatesUntilExactExpiry()
+    {
+        using var db = NewDb(); var (store, time, item) = Setup(db.Path); var due = time.GetUtcNow() + TimeSpan.FromDays(90);
+        ExecuteAt(db.Path, "UPDATE retention_items SET state='expiring',read_denied_at=NULL,queued_at=NULL,expires_at=$at WHERE item_id=$id", item, due);
+        var adapter = new StrictAdapter(RetentionStoreKind.RawRecord); var worker = new RetentionCleanupWorker(new RetentionCleanupCoordinator(store, Registry(adapter), time), time);
+
+        await worker.StartAsync(); await DrainAsync(); Assert.Equal(0, adapter.Calls);
+        time.Advance(TimeSpan.FromDays(89)); await DrainAsync(); Assert.Equal(0, adapter.Calls);
+        time.Advance(TimeSpan.FromDays(1));
+        await adapter.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(1, adapter.Calls);
+        await adapter.Completed.Task; await worker.StopAsync(); await DrainAsync();
+    }
+
+    [Fact]
+    public async Task Worker_LongFutureDueWakeStopsWithoutFaulting()
+    {
+        using var db = NewDb(); var (store, time, item) = Setup(db.Path); var adapter = new StrictAdapter(RetentionStoreKind.RawRecord);
+        ExecuteAt(db.Path, "UPDATE retention_items SET state='expiring',read_denied_at=NULL,queued_at=NULL,expires_at=$at WHERE item_id=$id", item, time.GetUtcNow() + TimeSpan.FromDays(90));
+        var worker = new RetentionCleanupWorker(new RetentionCleanupCoordinator(store, Registry(adapter), time), time);
+
+        await worker.StartAsync(); await DrainAsync();
+        await worker.StopAsync();
+
+        Assert.Equal(0, adapter.Calls);
+    }
+
+    [Fact]
     public async Task Worker_StopCancelsFutureDueWake()
     {
         using var db = NewDb(); var (store, time, item) = Setup(db.Path); var adapter = new StrictAdapter(RetentionStoreKind.RawRecord);

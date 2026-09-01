@@ -492,6 +492,35 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             """));
     }
 
+    [Fact]
+    public void TargetedRefreshPreservesUnrequestedOtelToolActivity()
+    {
+        using var connection = OpenOtelToolAdmissionFixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", duplicateSpanOwner: false);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000002','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:01:00.0000000+00:00','not_captured','2026-08-24T00:01:00.0000000+00:00','2026-08-24T00:01:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000020','0198f5b8-0c00-7000-8000-000000000002','claude-code','native-run-b',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000021','0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000020','claude-code','cccccccccccccccccccccccccccccccc','otel-exact','cccccccccccccccccccccccccccccccc/dddddddddddddddd','otel.span','2026-08-24T00:01:00.0000000+00:00','not_captured');
+            INSERT INTO raw_records VALUES(2,'otlp','cccccccccccccccccccccccccccccccc','2026-08-24T00:01:00.0000000+00:00','{}','{}',1,NULL);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,status,start_time,end_time)
+              VALUES(2,'cccccccccccccccccccccccccccccccc','dddddddddddddddd',NULL,0,'execute_tool','tool_call','Read','ok','2026-08-24T00:01:00.0000000+00:00','2026-08-24T00:01:01.0000000+00:00');
+            """);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000002"], DateTimeOffset.Parse("2026-08-25T00:00:01Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["recorded:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, """
+            SELECT state||':'||COALESCE(CAST(count AS TEXT),'null')
+            FROM local_workspace_session_activity
+            WHERE session_id='0198f5b8-0c00-7000-8000-000000000001' AND kind='tool';
+            """));
+    }
+
     [Theory]
     [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "bbbbbbbbbbbbbbbb")]
     [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "BBBBBBBBBBBBBBBB")]
