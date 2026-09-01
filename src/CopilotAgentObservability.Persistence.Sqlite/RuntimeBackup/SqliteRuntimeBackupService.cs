@@ -3623,34 +3623,20 @@ public sealed class SqliteRuntimeBackupService
             if (hasWal && (!IsRegularControlFile(wal) || new FileInfo(wal).Length != 0)) return false;
             if (hasSharedMemory
                 && (!hasWal || !IsRegularControlFile(sharedMemory) || new FileInfo(sharedMemory).Length != 32 * 1024)) return false;
-            if (!OperatingSystem.IsWindows() && (hasWal || hasSharedMemory)) return false;
             checkpoint?.Invoke(BeforeEmptyReadSidecarOwnershipCheckpoint);
+            if (!OperatingSystem.IsWindows())
+            {
+                checkpoint?.Invoke(BeforeEmptyReadSidecarDeleteCheckpoint);
+                if (hasWal && !TryNormalizeEmptyReadSidecarsWithSqlite(path)) return false;
+                return !HasActiveSqliteSidecar(path);
+            }
             using (var walOwnership = hasWal ? TryAcquireSidecarOwnership(wal, expectedLength: 0) : null)
             using (var sharedMemoryOwnership = hasSharedMemory ? TryAcquireSidecarOwnership(sharedMemory, expectedLength: 32 * 1024) : null)
             {
                 if ((hasWal && walOwnership is null) || (hasSharedMemory && sharedMemoryOwnership is null)) return false;
-                var walIdentity = walOwnership is not null && !OperatingSystem.IsWindows()
-                    ? ReadUnixSidecarIdentity(walOwnership.SafeFileHandle)
-                    : null;
-                var sharedMemoryIdentity = sharedMemoryOwnership is not null && !OperatingSystem.IsWindows()
-                    ? ReadUnixSidecarIdentity(sharedMemoryOwnership.SafeFileHandle)
-                    : null;
-                if (!OperatingSystem.IsWindows()
-                    && ((walOwnership is not null && walIdentity is null)
-                        || (sharedMemoryOwnership is not null && sharedMemoryIdentity is null))) return false;
                 checkpoint?.Invoke(BeforeEmptyReadSidecarDeleteCheckpoint);
-                if (OperatingSystem.IsWindows())
-                {
-                    if (sharedMemoryOwnership is not null && !TryMarkOwnedSidecarForDeletion(sharedMemoryOwnership)) return false;
-                    if (walOwnership is not null && !TryMarkOwnedSidecarForDeletion(walOwnership)) return false;
-                }
-                else
-                {
-                    if ((sharedMemoryOwnership is not null && !HasCurrentUnixSidecarIdentity(sharedMemory, sharedMemoryIdentity!.Value, expectedLength: 32 * 1024))
-                        || (walOwnership is not null && !HasCurrentUnixSidecarIdentity(wal, walIdentity!.Value, expectedLength: 0))) return false;
-                    if (sharedMemoryOwnership is not null) File.Delete(sharedMemory);
-                    if (walOwnership is not null) File.Delete(wal);
-                }
+                if (sharedMemoryOwnership is not null && !TryMarkOwnedSidecarForDeletion(sharedMemoryOwnership)) return false;
+                if (walOwnership is not null && !TryMarkOwnedSidecarForDeletion(walOwnership)) return false;
             }
             return !HasActiveSqliteSidecar(path);
         }
@@ -3660,13 +3646,27 @@ public sealed class SqliteRuntimeBackupService
         }
     }
 
+    private bool TryNormalizeEmptyReadSidecarsWithSqlite(string path)
+    {
+        try
+        {
+            using var connection = Open(path, SqliteOpenMode.ReadWrite);
+            using var wal = connection.CreateCommand();
+            wal.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            using var reader = wal.ExecuteReader();
+            return reader.Read() && reader.GetInt32(0) == 0 && !reader.Read();
+        }
+        catch (Exception exception) when (exception is SqliteException or InvalidOperationException || IsIo(exception))
+        {
+            return false;
+        }
+    }
+
     private static FileStream? TryAcquireSidecarOwnership(string path, long expectedLength)
     {
         try
         {
-            var ownership = OperatingSystem.IsWindows()
-                ? OpenWindowsSidecarOwnership(path)
-                : OpenUnixSidecarOwnership(path);
+            var ownership = OpenWindowsSidecarOwnership(path);
             if (ownership is null) return null;
             if (RuntimeBackupNativePathClassifier.Read(ownership.SafeFileHandle) == RuntimeBackupNativePathKind.RegularFile
                 && ownership.Length == expectedLength)
@@ -3694,64 +3694,6 @@ public sealed class SqliteRuntimeBackupService
         }
         return new FileStream(handle, FileAccess.ReadWrite);
     }
-
-    private static FileStream? OpenUnixSidecarOwnership(string path)
-    {
-        var descriptor = OperatingSystem.IsLinux()
-            ? OpenLinuxSidecar(path, 2 | 0x20000 | 0x80000)
-            : OperatingSystem.IsMacOS()
-                ? OpenMacOsSidecar(path, 2 | 0x0100 | 0x01000000)
-                : -1;
-        return descriptor < 0
-            ? null
-            : new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle((IntPtr)descriptor, ownsHandle: true), FileAccess.ReadWrite);
-    }
-
-    private static UnixSidecarIdentity? ReadUnixSidecarIdentity(Microsoft.Win32.SafeHandles.SafeFileHandle handle)
-    {
-        var buffer = new byte[256];
-        if (OperatingSystem.IsLinux())
-        {
-            if (StatLinuxSidecar(handle.DangerousGetHandle().ToInt32(), string.Empty, 0x1000, 0x07ff, buffer) != 0) return null;
-            return new(
-                ((ulong)BitConverter.ToUInt32(buffer, 136) << 32) | BitConverter.ToUInt32(buffer, 140),
-                BitConverter.ToUInt64(buffer, 32));
-        }
-        if (OperatingSystem.IsMacOS())
-        {
-            if (StatMacOsSidecar(handle.DangerousGetHandle().ToInt32(), buffer) != 0) return null;
-            return new(BitConverter.ToUInt32(buffer, 0), BitConverter.ToUInt64(buffer, 8));
-        }
-        return null;
-    }
-
-    private static bool HasCurrentUnixSidecarIdentity(string path, UnixSidecarIdentity expected, long expectedLength)
-    {
-        using var current = OpenUnixSidecarOwnership(path);
-        return current is not null
-            && RuntimeBackupNativePathClassifier.Read(current.SafeFileHandle) == RuntimeBackupNativePathKind.RegularFile
-            && current.Length == expectedLength
-            && ReadUnixSidecarIdentity(current.SafeFileHandle) == expected;
-    }
-
-    private readonly record struct UnixSidecarIdentity(ulong Device, ulong File);
-
-    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    private static extern int OpenLinuxSidecar([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
-
-    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
-    private static extern int StatLinuxSidecar(
-        int directoryFileDescriptor,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-        int flags,
-        uint mask,
-        [Out] byte[] buffer);
-
-    [DllImport("libSystem.B.dylib", EntryPoint = "open", SetLastError = true)]
-    private static extern int OpenMacOsSidecar([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
-
-    [DllImport("libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
-    private static extern int StatMacOsSidecar(int fileDescriptor, [Out] byte[] buffer);
 
     private static bool TryMarkOwnedSidecarForDeletion(FileStream ownership)
     {
