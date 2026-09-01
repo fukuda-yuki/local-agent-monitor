@@ -3623,7 +3623,7 @@ public sealed class SqliteRuntimeBackupService
             if (hasWal && (!IsRegularControlFile(wal) || new FileInfo(wal).Length != 0)) return false;
             if (hasSharedMemory
                 && (!hasWal || !IsRegularControlFile(sharedMemory) || new FileInfo(sharedMemory).Length != 32 * 1024)) return false;
-            if (!OperatingSystem.IsWindows() && (hasWal || hasSharedMemory)) return false;
+            if (!OperatingSystem.IsWindows() && hasWal) return false;
             checkpoint?.Invoke(BeforeEmptyReadSidecarOwnershipCheckpoint);
             using (var walOwnership = hasWal ? TryAcquireSidecarOwnership(wal, expectedLength: 0) : null)
             using (var sharedMemoryOwnership = hasSharedMemory ? TryAcquireSidecarOwnership(sharedMemory, expectedLength: 32 * 1024) : null)

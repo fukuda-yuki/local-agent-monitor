@@ -899,6 +899,16 @@ and rejects malformed, unknown, future, or dependency-invalid component-version
 vectors without requiring every component to exist. Existing owning stores then
 run their canonical migrations, creating exact alert-engine v2 when absent or
 applying the exact v1-to-v2 upgrade that preserves every v1 canonical byte.
+On Windows only, while that lease is held and no live monitor owns the database,
+startup may remove an exact pair consisting of a regular zero-byte `-wal` and a
+regular 32 KiB `-shm` by retaining no-follow delete handles, revalidating each
+owned identity and exact length on its handle, and deleting those identities
+through the handles. On Linux and macOS, pathname unlink cannot prove the same
+identity and held-owner guarantee; any `-wal` or `-shm` is therefore unowned,
+preserved, and fails startup closed. An incomplete, nonregular, nonempty,
+malformed, reparse-bearing, competing-owned, or otherwise unproved sidecar
+shape is likewise preserved and fails closed on every platform. A database
+with no sidecars remains eligible for ordinary startup on every platform.
 Phase two adds and validates `runtime_backup` v1 and then `pricing` v1 before
 the HTTP host is built. The two
 final ensures share one transaction so a current executable cannot leave a
