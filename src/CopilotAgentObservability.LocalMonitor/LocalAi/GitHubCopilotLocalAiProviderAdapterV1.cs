@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
@@ -50,14 +51,7 @@ Never include credentials, paths, prompts, tool payloads, scope, snapshot, or pr
             };
             var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
             var sessionId = session.SessionId;
-            try
-            {
-                var prompt = BuildPrompt(request);
-                var content = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(content)) return LocalAiProviderOutcomeV1.Partial();
-                return LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(content));
-            }
-            finally
+            async Task CleanupSessionAsync()
             {
                 try
                 {
@@ -68,6 +62,30 @@ Never include credentials, paths, prompts, tool payloads, scope, snapshot, or pr
                     await client.DeleteSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
                 }
             }
+
+            LocalAiProviderOutcomeV1 outcome;
+            try
+            {
+                var prompt = BuildPrompt(request);
+                var content = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
+                outcome = string.IsNullOrWhiteSpace(content)
+                    ? LocalAiProviderOutcomeV1.Partial()
+                    : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(content));
+            }
+            catch (Exception primaryFailure)
+            {
+                try
+                {
+                    await CleanupSessionAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+                }
+                throw;
+            }
+            await CleanupSessionAsync().ConfigureAwait(false);
+            return outcome;
         }
     }
 
