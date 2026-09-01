@@ -55,12 +55,21 @@ public sealed class LocalAiExtendedScopeTests
     [Fact]
     public void ProviderPrompt_ConstrainsRepositoryAndComparisonInterpretation()
     {
+        const string structuredResultInstruction = """
+Return raw JSON only: no Markdown, code fences, or surrounding prose.
+Return one closed object with exactly these root fields: summary (string), findings (array), improvement_suggestions (array), limitations (array of strings).
+Each findings item is one closed object with exactly: finding_id (non-empty string), title (non-empty string), explanation (non-empty string), evidence_state (one of "supported" or "limited"), evidence_refs (array of 1 to 16 non-empty strings, each exactly matching an identifier in the supplied evidence index), limitation (non-empty string).
+Each improvement_suggestions item is one closed object with exactly: suggestion_id (non-empty string), target_kind (one of "instructions", "skill", "agent", "subagent_input", or "tool_configuration"), target_label (non-empty string), concrete_change (non-empty string), rationale (non-empty string), expected_effect (non-empty string), risks_or_limitations (non-empty string), evidence_refs (array of 1 to 16 non-empty strings, each exactly matching an identifier in the supplied evidence index).
+Never include credentials, paths, prompts, tool payloads, scope, snapshot, or provider metadata.
+""";
         var comparison=ProviderRequest("comparison");
         var comparisonPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(comparison);
+        Assert.Contains(structuredResultInstruction,comparisonPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
         Assert.Contains("stored observed differences",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Cite only the exact supplied evidence locations",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state an effect verdict",comparisonPrompt,StringComparison.Ordinal);
         var repositoryPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("repository_selection"));
+        Assert.Contains(structuredResultInstruction,repositoryPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
         Assert.Contains("Do not explore",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("never cite a bare node ID",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state or promote AI output as a deterministic fact",repositoryPrompt,StringComparison.Ordinal);

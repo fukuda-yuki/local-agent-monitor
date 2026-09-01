@@ -11,6 +11,14 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     Func<IOwnedCopilotClientV1?> clientFactory,
     string model) : ILocalAiProviderAdapterV1
 {
+    private const string StructuredResultInstruction = """
+Return raw JSON only: no Markdown, code fences, or surrounding prose.
+Return one closed object with exactly these root fields: summary (string), findings (array), improvement_suggestions (array), limitations (array of strings).
+Each findings item is one closed object with exactly: finding_id (non-empty string), title (non-empty string), explanation (non-empty string), evidence_state (one of "supported" or "limited"), evidence_refs (array of 1 to 16 non-empty strings, each exactly matching an identifier in the supplied evidence index), limitation (non-empty string).
+Each improvement_suggestions item is one closed object with exactly: suggestion_id (non-empty string), target_kind (one of "instructions", "skill", "agent", "subagent_input", or "tool_configuration"), target_label (non-empty string), concrete_change (non-empty string), rationale (non-empty string), expected_effect (non-empty string), risks_or_limitations (non-empty string), evidence_refs (array of 1 to 16 non-empty strings, each exactly matching an identifier in the supplied evidence index).
+Never include credentials, paths, prompts, tool payloads, scope, snapshot, or provider metadata.
+""";
+
     public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
     {
         var client = clientFactory();
@@ -37,7 +45,7 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
                 SystemMessage = new SystemMessageConfig
                 {
                     Mode = SystemMessageMode.Append,
-                    Content = "Return only one closed JSON object with exactly summary, findings, improvement_suggestions, and limitations. Never include credentials, paths, prompts, tool payloads, scope, snapshot, or provider metadata."
+                    Content = StructuredResultInstruction
                 },
             };
             await using var session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
@@ -52,6 +60,7 @@ internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     {
         var builder = new StringBuilder();
         builder.AppendLine("Analyze only this immutable bounded snapshot projection and its exact evidence identifiers.");
+        builder.AppendLine(StructuredResultInstruction);
         if (request.Snapshot.ScopeKind == "repository_selection")
             builder.AppendLine("Summarize only the supplied frozen repository facts and evidence. Cite only the exact supplied canonical Session/node evidence locations; never cite a bare node ID. Do not explore, infer, or request any session outside this snapshot. Do not recalculate deterministic facts, claim effects or causality, score quality, rank or prioritize, classify improvement or regression, or invent facts. Do not state or promote AI output as a deterministic fact.");
         else if (request.Snapshot.ScopeKind == "comparison")
