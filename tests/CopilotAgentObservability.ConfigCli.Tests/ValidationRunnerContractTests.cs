@@ -45,6 +45,8 @@ public sealed class ValidationRunnerContractTests
         else WriteProjectTrx(directory.Path, "config.trx", "bin/Config.Tests.dll", "Example.Config.Fact");
         if (defect == "duplicate")
             WriteProjectTrx(directory.Path, "config-copy.trx", "other/Config.Tests.dll", "Example.Config.OtherFact");
+        if (defect != "missing")
+            WriteProjectTrx(directory.Path, "local.trx", "bin/Local.Tests.dll", "Example.Local.Fact");
 
         var result = await RunContractAsync(
             "-Mode", "NightlyEvidence",
