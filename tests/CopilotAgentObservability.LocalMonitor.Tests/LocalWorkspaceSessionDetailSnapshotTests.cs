@@ -815,6 +815,41 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task SummaryUsesInformativeLlmTokensWhenTheHigherAuthorityRunObservationIsEmpty()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string runId = "018f0000-0000-7000-8000-000000000010";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, runId,
+            "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                UPDATE monitor_spans
+                SET operation='chat',category='llm_call',input_tokens=100,output_tokens=20
+                WHERE raw_record_id=1 AND span_ordinal=0;
+                """);
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+        }
+
+        var summary = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+
+        var execution = Assert.Single(summary.Detail.Executions,
+            value => value.SourceIdentity == runId);
+        Assert.Equal("llm_span", execution.Tokens.Authority);
+        Assert.Equal("recorded", execution.Tokens.Input.State);
+        Assert.Equal(100, execution.Tokens.Input.Value);
+        Assert.Equal("recorded", execution.Tokens.Output.State);
+        Assert.Equal(20, execution.Tokens.Output.Value);
+        Assert.Equal("not_observed", execution.Tokens.Total.State);
+        Assert.Null(execution.Tokens.Total.Value);
+    }
+
+    [Fact]
     public async Task UnlinkedSameTraceOtelRowsDoNotExpandTheCanonicalRevisionInput()
     {
         using var temp = new MonitorTempDirectory();

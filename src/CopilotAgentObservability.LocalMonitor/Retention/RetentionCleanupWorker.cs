@@ -5,6 +5,7 @@ namespace CopilotAgentObservability.LocalMonitor.Retention;
 
 internal sealed class RetentionCleanupWorker : IHostedService
 {
+    private static readonly TimeSpan MaximumTimerDelay = TimeSpan.FromMilliseconds(uint.MaxValue - 1L);
     private readonly RetentionCleanupCoordinator? coordinator;
     private readonly TimeProvider time;
     private readonly SemaphoreSlim wake = new(0, 1);
@@ -107,6 +108,6 @@ internal sealed class RetentionCleanupWorker : IHostedService
         scheduledDue = candidate;
         cancellation = new CancellationTokenSource();
         var delay = candidate.Value - time.GetUtcNow();
-        dueWake = Task.Delay(delay > TimeSpan.Zero ? delay : TimeSpan.Zero, time, cancellation.Token);
+        dueWake = Task.Delay(delay > MaximumTimerDelay ? MaximumTimerDelay : delay > TimeSpan.Zero ? delay : TimeSpan.Zero, time, cancellation.Token);
     }
 }
