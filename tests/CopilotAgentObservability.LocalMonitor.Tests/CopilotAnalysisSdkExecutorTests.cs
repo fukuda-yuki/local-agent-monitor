@@ -891,6 +891,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
             return Task.FromResult<IOwnedCopilotSessionV1>(session);
         }
         public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> DiscoverSkillsAsync(IReadOnlyList<string> projectPaths, IReadOnlyList<string> skillDirectories, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
         public ValueTask DisposeAsync() { DisposeCalls++; order.Add("client.dispose"); return ValueTask.CompletedTask; }
     }
 

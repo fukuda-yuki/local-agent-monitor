@@ -1,5 +1,8 @@
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -8,6 +11,109 @@ public sealed class LocalAiExtendedScopeTests
     private const string RepositoryId = "018f0000-0000-7000-8000-000000000001";
     private const string ComparisonId = "018f0000-0000-7000-8000-000000000002";
     private const string SnapshotId = "018f0000-0000-7000-8000-000000000003";
+    private const string CanonicalEvidenceLocation = "/sessions/018f0000-0000-7000-8000-000000000001?node=node-11111111111111111111111111111111";
+
+    [Theory]
+    [InlineData(ProviderBehavior.Complete)]
+    [InlineData(ProviderBehavior.Partial)]
+    [InlineData(ProviderBehavior.Exception)]
+    [InlineData(ProviderBehavior.Timeout)]
+    [InlineData(ProviderBehavior.Cancellation)]
+    public async Task ProviderSession_IsDisposedThenDeletedExactlyOnceBeforeClientDisposal(
+        ProviderBehavior behavior)
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        using var cancellation = new CancellationTokenSource();
+        if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
+
+        if (behavior is ProviderBehavior.Complete or ProviderBehavior.Partial)
+            _ = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token);
+        else
+            _ = await Assert.ThrowsAnyAsync<Exception>(async () =>
+                await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token));
+
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.Equal("synthetic-session", client.DeletedSessionId);
+        Assert.False(client.DeleteTokenCanBeCanceled);
+        Assert.False(client.SessionMarkerPresent);
+    }
+
+    [Fact]
+    public async Task ProviderSession_DeleteFailureCannotReturnComplete()
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, ProviderBehavior.Complete, failDelete: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
+
+        Assert.Equal("synthetic_cleanup_failure", error.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.True(client.SessionMarkerPresent);
+    }
+
+    [Theory]
+    [InlineData(ProviderBehavior.Exception, typeof(InvalidOperationException), "synthetic_provider_failure")]
+    [InlineData(ProviderBehavior.Timeout, typeof(TimeoutException), "synthetic_timeout")]
+    [InlineData(ProviderBehavior.Cancellation, typeof(OperationCanceledException), null)]
+    public async Task ProviderSession_DeleteFailurePreservesPrimaryFailure(
+        ProviderBehavior behavior,
+        Type expectedType,
+        string? expectedMessage)
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior, failDelete: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        using var cancellation = new CancellationTokenSource();
+        if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
+
+        var error = await Record.ExceptionAsync(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token));
+
+        Assert.IsType(expectedType, error);
+        if (expectedMessage is not null) Assert.Equal(expectedMessage, error!.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.True(client.SessionMarkerPresent);
+    }
+
+    [Fact]
+    public async Task ProviderSession_MatchingEffectiveModelReturnsCompleteWithRequestedModel()
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, ProviderBehavior.Complete);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+
+        var outcome = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None);
+
+        Assert.Equal(LocalAiProviderOutcomeKindV1.Complete, outcome.Kind);
+        Assert.Equal("synthetic-model", client.RequestedModel);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+    }
+
+    [Theory]
+    [InlineData(ProviderBehavior.MismatchedModel)]
+    [InlineData(ProviderBehavior.CaseMismatchedModel)]
+    [InlineData(ProviderBehavior.MissingModel)]
+    public async Task ProviderSession_UnverifiedEffectiveModelFailsAndCleansUp(ProviderBehavior behavior)
+    {
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+
+        var outcome = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None);
+
+        Assert.Equal(LocalAiProviderOutcomeKindV1.Failed, outcome.Kind);
+        Assert.Null(outcome.ResultJson);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(1, client.DeleteCalls);
+        Assert.False(client.SessionMarkerPresent);
+    }
 
     [Fact]
     public void RepositoryRunRequest_RequiresClosedVersionedSnapshotReceipt()
@@ -55,12 +161,23 @@ public sealed class LocalAiExtendedScopeTests
     [Fact]
     public void ProviderPrompt_ConstrainsRepositoryAndComparisonInterpretation()
     {
+        const string structuredResultInstruction = """
+Return raw JSON only: no Markdown, code fences, or surrounding prose.
+Return one closed object with exactly these root fields: summary (string), findings (array), improvement_suggestions (array), limitations (array of strings).
+Each findings item is one closed object with exactly: finding_id (non-blank string: not empty or whitespace-only), title (non-blank string: not empty or whitespace-only), explanation (non-blank string: not empty or whitespace-only), evidence_state (one of "supported" or "limited"), evidence_refs (array of 1 to 16 non-blank strings, each not empty or whitespace-only and exactly matching an identifier in the supplied evidence index), limitation (non-blank string: not empty or whitespace-only).
+Each improvement_suggestions item is one closed object with exactly: suggestion_id (non-blank string: not empty or whitespace-only), target_kind (one of "instructions", "skill", "agent", "subagent_input", or "tool_configuration"), target_label (non-blank string: not empty or whitespace-only), concrete_change (non-blank string: not empty or whitespace-only), rationale (non-blank string: not empty or whitespace-only), expected_effect (non-blank string: not empty or whitespace-only), risks_or_limitations (non-blank string: not empty or whitespace-only), evidence_refs (array of 1 to 16 non-blank strings, each not empty or whitespace-only and exactly matching an identifier in the supplied evidence index).
+Never include credentials, local filesystem paths, prompts, tool payloads, scope, snapshot, or provider metadata. Exact supplied canonical evidence-location strings, including slash-delimited locations, may appear solely as string values in evidence_refs.
+""";
         var comparison=ProviderRequest("comparison");
         var comparisonPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(comparison);
+        Assert.Contains(structuredResultInstruction,comparisonPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
+        Assert.Contains(CanonicalEvidenceLocation,comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("stored observed differences",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Cite only the exact supplied evidence locations",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state an effect verdict",comparisonPrompt,StringComparison.Ordinal);
         var repositoryPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("repository_selection"));
+        Assert.Contains(structuredResultInstruction,repositoryPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
+        Assert.Contains(CanonicalEvidenceLocation,repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not explore",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("never cite a bare node ID",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state or promote AI output as a deterministic fact",repositoryPrompt,StringComparison.Ordinal);
@@ -72,7 +189,7 @@ public sealed class LocalAiExtendedScopeTests
     private static LocalAiProviderRequestV1 ProviderRequest(string scope)
     {
         var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,scope,null,null,
-            scope=="comparison"?ComparisonId:RepositoryId,"revision","{}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),
+            scope=="comparison"?ComparisonId:RepositoryId,"revision","{}"u8.ToArray(),Encoding.UTF8.GetBytes($$"""{"evidence_refs":["{{CanonicalEvidenceLocation}}"]}"""),new string('a',64),new HashSet<string>{CanonicalEvidenceLocation},
             RepositoryId:RepositoryId,ComparisonId:scope=="comparison"?ComparisonId:null);
         var run=new LocalAiRunStatusV1(SnapshotId,"running",scope,null,null,null,RepositoryId:RepositoryId,ComparisonId:snapshot.ComparisonId);
         return new(snapshot,run,new LocalAiRawReadCapabilityV1([],static (_,_)=>ValueTask.FromResult(Array.Empty<byte>())),null,[]);
@@ -193,4 +310,62 @@ public sealed class LocalAiExtendedScopeTests
     {public ValueTask<CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshot> ReadAsync(CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeRequest request,CancellationToken token)=>ValueTask.FromException<CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshot>(new CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotException(CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",new Exception()));}
     private sealed class NoHistoricalEvidence:CopilotAgentObservability.LocalMonitor.Analysis.IHistoricalEvidenceSnapshotSourceV1
     {public ValueTask<CopilotAgentObservability.LocalMonitor.Analysis.IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(CopilotAgentObservability.LocalMonitor.Analysis.HistoricalEvidenceSelectionV1 selection,CancellationToken token)=>throw new NotSupportedException();}
+
+    public enum ProviderBehavior { Complete, Partial, Exception, Timeout, Cancellation, MismatchedModel, CaseMismatchedModel, MissingModel }
+
+    private sealed class ProviderClient(
+        List<string> events,
+        ProviderBehavior behavior,
+        bool failDelete = false) : IOwnedCopilotClientV1
+    {
+        public int DeleteCalls { get; private set; }
+        public string? DeletedSessionId { get; private set; }
+        public bool DeleteTokenCanBeCanceled { get; private set; }
+        public bool SessionMarkerPresent { get; private set; } = true;
+        public string? RequestedModel { get; private set; }
+
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<CopilotRuntimeStatusObservationV1?>(null);
+        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken)
+        {
+            RequestedModel = config.Model;
+            return Task.FromResult<IOwnedCopilotSessionV1>(new ProviderSession(events, behavior));
+        }
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken)
+        {
+            DeleteCalls++;
+            DeletedSessionId = sessionId;
+            DeleteTokenCanBeCanceled = cancellationToken.CanBeCanceled;
+            events.Add("session.delete");
+            if (failDelete) return Task.FromException(new InvalidOperationException("synthetic_cleanup_failure"));
+            SessionMarkerPresent = false;
+            return Task.CompletedTask;
+        }
+        public ValueTask DisposeAsync() { events.Add("client.dispose"); return ValueTask.CompletedTask; }
+    }
+
+    private sealed class ProviderSession(List<string> events, ProviderBehavior behavior) : IOwnedCopilotSessionV1
+    {
+        public string SessionId => "synthetic-session";
+        public Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CopilotDiscoveredSkillFactV1>?>(null);
+        public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task<OwnedCopilotFinalResponseV1?> SendAndReadFinalContentAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+            behavior switch
+            {
+                ProviderBehavior.Complete => Task.FromResult<OwnedCopilotFinalResponseV1?>(new("synthetic_complete_marker", "synthetic-model")),
+                ProviderBehavior.Partial => Task.FromResult<OwnedCopilotFinalResponseV1?>(null),
+                ProviderBehavior.MismatchedModel => Task.FromResult<OwnedCopilotFinalResponseV1?>(new("synthetic_complete_marker", "different-model")),
+                ProviderBehavior.CaseMismatchedModel => Task.FromResult<OwnedCopilotFinalResponseV1?>(new("synthetic_complete_marker", "SYNTHETIC-MODEL")),
+                ProviderBehavior.MissingModel => Task.FromResult<OwnedCopilotFinalResponseV1?>(new("synthetic_complete_marker", null)),
+                ProviderBehavior.Exception => Task.FromException<OwnedCopilotFinalResponseV1?>(new InvalidOperationException("synthetic_provider_failure")),
+                ProviderBehavior.Timeout => Task.FromException<OwnedCopilotFinalResponseV1?>(new TimeoutException("synthetic_timeout")),
+                ProviderBehavior.Cancellation => Task.FromException<OwnedCopilotFinalResponseV1?>(new OperationCanceledException(cancellationToken)),
+                _ => throw new InvalidOperationException(),
+            };
+        public ValueTask DisposeAsync() { events.Add("session.dispose"); return ValueTask.CompletedTask; }
+    }
 }
