@@ -1903,7 +1903,7 @@ public sealed class SetupApplyTests
             ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000121");
             FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000122");
             EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000123");
-            TargetPath = Path.Combine(Platform.LocalApplicationData, "canonical-settings.json");
+            TargetPath = Platform.CombinePath(Platform.LocalApplicationData, "canonical-settings.json");
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
 
@@ -2063,7 +2063,7 @@ public sealed class SetupApplyTests
             FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000102");
             EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000103");
             ReverseTargetOrder = reverseTargetOrder;
-            TargetPath = Path.Combine(Platform.LocalApplicationData, "settings.json");
+            TargetPath = Platform.CombinePath(Platform.LocalApplicationData, "settings.json");
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
@@ -2223,14 +2223,14 @@ public sealed class SetupApplyTests
         public void SeedExactBackup(Guid recordId)
         {
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             var backupPath = Paths.GetBackup(ChangeSetId, recordId);
             if (recordId == FileRecordId)
             {
                 var step = new AtomicFileSetupStep(Platform);
                 step.CreateOrValidateBackup(
                     backupPath,
-                    step.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath));
+                    step.Capture(Platform.GetDirectoryName(TargetPath), TargetPath));
                 return;
             }
 
@@ -2243,7 +2243,7 @@ public sealed class SetupApplyTests
         public IReadOnlyList<SetupJournalTarget> ExpectedJournalTargets()
         {
             var fileStep = new AtomicFileSetupStep(Platform);
-            var fileCapture = fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath);
+            var fileCapture = fileStep.Capture(Platform.GetDirectoryName(TargetPath), TargetPath);
             var environmentStep = new UserEnvironmentSetupStep(Platform);
             var environmentCapture = environmentStep.Capture(["ENV_A", "ENV_B"]);
             IReadOnlyList<SetupJournalTarget> targets =
@@ -2429,7 +2429,7 @@ public sealed class SetupApplyTests
                     Guid.Parse("00000000-0000-7000-8000-000000000152"),
                     Guid.Parse("00000000-0000-7000-8000-000000000153"),
                 ];
-            TargetPaths = RecordIds.Select((_, index) => Path.Combine(
+            TargetPaths = RecordIds.Select((_, index) => Platform.CombinePath(
                 Platform.LocalApplicationData,
                 index == 0 ? "tagged-settings.json" : "tagged-settings-insiders.json")).ToArray();
             var firstPrior = Encoding.UTF8.GetBytes(

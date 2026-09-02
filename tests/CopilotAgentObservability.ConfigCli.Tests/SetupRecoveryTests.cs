@@ -4857,7 +4857,7 @@ public sealed class SetupRecoveryTests
             Platform = new SetupTestPlatform(new DateTimeOffset(2026, 7, 13, 3, 4, 5, TimeSpan.Zero));
             Paths = new SetupRuntimePaths(Platform);
             ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000900");
-            TargetPath = Path.Combine(Platform.LocalApplicationData, "terminal-evidence.json");
+            TargetPath = Platform.CombinePath(Platform.LocalApplicationData, "terminal-evidence.json");
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
@@ -5028,9 +5028,9 @@ public sealed class SetupRecoveryTests
             Platform.SeedUserEnvironment("ENV_B", "old-b");
             var environmentBackup = environmentStep.Capture(["ENV_A", "ENV_B", "ENV_NOOP"]);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
-            var fileBackup = fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath);
+            var fileBackup = fileStep.Capture(Platform.GetDirectoryName(TargetPath), TargetPath);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             environmentStep.CreateOrValidateBackup(
                 Paths.GetBackup(ChangeSetId, environmentRecordId), environmentBackup);
             fileStep.CreateOrValidateBackup(Paths.GetBackup(ChangeSetId, fileRecordId), fileBackup);
@@ -5107,9 +5107,9 @@ public sealed class SetupRecoveryTests
             Platform.SeedUserEnvironment("ENV_B", "old-b");
             var environmentBackup = environmentStep.Capture(["ENV_A", "ENV_B", "ENV_NOOP"]);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old-file"));
-            var fileBackup = fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath);
+            var fileBackup = fileStep.Capture(Platform.GetDirectoryName(TargetPath), TargetPath);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             environmentStep.CreateOrValidateBackup(
                 Paths.GetBackup(ChangeSetId, environmentRecordId), environmentBackup);
             fileStep.CreateOrValidateBackup(Paths.GetBackup(ChangeSetId, fileRecordId), fileBackup);
@@ -5347,7 +5347,7 @@ public sealed class SetupRecoveryTests
         {
             var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000911");
             var recordId = Guid.Parse("00000000-0000-7000-8000-000000000912");
-            var targetPath = Path.Combine(Platform.LocalApplicationData, "later-mixed.json");
+            var targetPath = Platform.CombinePath(Platform.LocalApplicationData, "later-mixed.json");
             Platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("old-later"));
             var previousHash = SetupHash.File(true, Encoding.UTF8.GetBytes("old-later"));
             var desiredHash = SetupHash.File(true, Encoding.UTF8.GetBytes("new-later"));
@@ -5395,10 +5395,10 @@ public sealed class SetupRecoveryTests
             var fileStep = new AtomicFileSetupStep(Platform);
             using var setupLock = AcquireLock();
             ledgerStore.PersistPlannedChangeSet(setupLock, plan, plannedLater);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, changeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, changeSetId.ToString("D")));
             fileStep.CreateOrValidateBackup(
                 Paths.GetBackup(changeSetId, recordId),
-                fileStep.Capture(Path.GetDirectoryName(targetPath)!, targetPath));
+                fileStep.Capture(Platform.GetDirectoryName(targetPath), targetPath));
             journalStore.CreatePrepared(
                 setupLock,
                 changeSetId,
@@ -5719,7 +5719,7 @@ public sealed class SetupRecoveryTests
                 .Select(index => Guid.Parse($"00000000-0000-7000-8000-{502 + index:D12}"))
                 .ToArray();
             TargetPaths = Enumerable.Range(0, fileTargetCount)
-                .Select(index => Path.Combine(
+                .Select(index => Platform.CombinePath(
                     Platform.LocalApplicationData,
                     index == 0 ? "settings.json" : $"settings-{index}.json"))
                 .ToArray();
@@ -5904,9 +5904,9 @@ public sealed class SetupRecoveryTests
             Assert.True(setupLock.Acquired);
 
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, seed.ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, seed.ChangeSetId.ToString("D")));
             fileStep.CreateBackup(Paths.GetBackup(seed.ChangeSetId, seed.RecordId),
-                fileStep.Capture(Path.GetDirectoryName(seed.TargetPath)!, seed.TargetPath));
+                fileStep.Capture(Platform.GetDirectoryName(seed.TargetPath), seed.TargetPath));
             journalStore.CreatePrepared(
                 setupLock.Lock!,
                 seed.ChangeSetId,
@@ -5951,9 +5951,9 @@ public sealed class SetupRecoveryTests
             using var setupLock = SetupLock.TryAcquire(Platform, Paths);
             Assert.True(setupLock.Acquired);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             fileStep.CreateBackup(Paths.GetBackup(ChangeSetId, FileRecordId),
-                fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath));
+                fileStep.Capture(Platform.GetDirectoryName(TargetPath), TargetPath));
             journalStore.CreatePrepared(
                 setupLock.Lock!,
                 ChangeSetId,
@@ -5975,7 +5975,7 @@ public sealed class SetupRecoveryTests
             DateTimeOffset createdAt,
             string fileName)
         {
-            var targetPath = Path.Combine(Platform.LocalApplicationData, fileName + ".json");
+            var targetPath = Platform.CombinePath(Platform.LocalApplicationData, fileName + ".json");
             Platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("old"));
             var plan = new SetupPrivatePlan(
                 1,
@@ -6200,14 +6200,14 @@ public sealed class SetupRecoveryTests
             using var setupLock = SetupLock.TryAcquire(Platform, Paths);
             Assert.True(setupLock.Acquired);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             var journalTargets = new List<SetupJournalTarget>();
             for (var index = 0; index < Plan.Targets.Count; index++)
             {
                 var target = Plan.Targets[index];
                 fileStep.CreateBackup(
                     Paths.GetBackup(ChangeSetId, target.RecordId),
-                    fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation));
+                    fileStep.Capture(Platform.GetDirectoryName(target.TargetLocation), target.TargetLocation));
                 journalTargets.Add(new SetupJournalTarget(
                     target.RecordId,
                     target.TargetKind,
@@ -6364,14 +6364,14 @@ public sealed class SetupRecoveryTests
             var fileStep = new AtomicFileSetupStep(Platform);
             using var setupLock = AcquireLock();
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             var journalTargets = new List<SetupJournalTarget>();
             for (var index = 0; index < Plan.Targets.Count; index++)
             {
                 var target = Plan.Targets[index];
                 fileStep.CreateBackup(
                     Paths.GetBackup(ChangeSetId, target.RecordId),
-                    fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation));
+                    fileStep.Capture(Platform.GetDirectoryName(target.TargetLocation), target.TargetLocation));
                 journalTargets.Add(new SetupJournalTarget(
                     target.RecordId,
                     target.TargetKind,
@@ -6459,10 +6459,10 @@ public sealed class SetupRecoveryTests
             var fileStep = new AtomicFileSetupStep(Platform);
             using var setupLock = AcquireLock();
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             fileStep.CreateBackup(
                 Paths.GetBackup(ChangeSetId, FileRecordId),
-                fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath));
+                fileStep.Capture(Platform.GetDirectoryName(TargetPath), TargetPath));
             journalStore.CreatePrepared(
                 setupLock,
                 ChangeSetId,
@@ -6513,10 +6513,10 @@ public sealed class SetupRecoveryTests
             var fileStep = new AtomicFileSetupStep(Platform);
             using var setupLock = AcquireLock();
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             fileStep.CreateBackup(
                 Paths.GetBackup(ChangeSetId, FileRecordId),
-                fileStep.Capture(Path.GetDirectoryName(TargetPath)!, TargetPath));
+                fileStep.Capture(Platform.GetDirectoryName(TargetPath), TargetPath));
             journalStore.CreatePrepared(
                 setupLock,
                 ChangeSetId,
@@ -6656,7 +6656,7 @@ public sealed class SetupRecoveryTests
             ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000901");
             FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000902");
             EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000903");
-            TargetPath = Path.Combine(Platform.LocalApplicationData, "producer-settings.json");
+            TargetPath = Platform.CombinePath(Platform.LocalApplicationData, "producer-settings.json");
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
             Platform.SeedFile(TargetPath, Encoding.UTF8.GetBytes("old"));
@@ -7166,7 +7166,7 @@ public sealed class SetupRecoveryTests
             Assert.True(setupLock.Acquired);
             var capture = environmentStep.Capture(["ENV_A", "ENV_B"]);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             environmentStep.CreateBackup(Paths.GetBackup(ChangeSetId, RecordId), capture);
             var changedStep = new SetupJournalStep(
                 "ENV_A",
@@ -7246,7 +7246,7 @@ public sealed class SetupRecoveryTests
             Assert.True(setupLock.Acquired);
             var capture = environmentStep.Capture(["ENV_A", "ENV_B"]);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             environmentStep.CreateBackup(Paths.GetBackup(ChangeSetId, RecordId), capture);
             journalStore.CreatePrepared(setupLock.Lock!, ChangeSetId, SetupJournalOperation.Apply,
                 [new SetupJournalTarget(RecordId, SetupTargetKind.Env,
@@ -7268,7 +7268,7 @@ public sealed class SetupRecoveryTests
             Assert.True(setupLock.Acquired);
             var previous = environmentStep.Capture(["ENV_A", "ENV_B"]);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             environmentStep.CreateBackup(Paths.GetBackup(ChangeSetId, RecordId), previous);
             Platform.SeedUserEnvironment("ENV_A", StateValue(desiredState, prior: false));
             if (secondMemberChanged)
@@ -7407,7 +7407,7 @@ public sealed class SetupRecoveryTests
             planStore.Delete(setupLock.Lock!, ChangeSetId);
             planStore.Create(setupLock.Lock!, forgedPlan);
             Platform.SeedDirectory(Paths.Backups);
-            Platform.SeedDirectory(Path.Combine(Paths.Backups, ChangeSetId.ToString("D")));
+            Platform.SeedDirectory(Platform.CombinePath(Paths.Backups, ChangeSetId.ToString("D")));
             environmentStep.CreateBackup(Paths.GetBackup(ChangeSetId, RecordId), previous);
             Platform.SeedUserEnvironment("ENV_A", "desired-a");
             var desired = environmentStep.Capture(["ENV_A", "ENV_B"]);
