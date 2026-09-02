@@ -263,6 +263,28 @@ public sealed class RawReplayArchiveServiceTests
     }
 
     [Fact]
+    public void Mutation_helpers_emit_canonical_creator_platform_and_external_attributes()
+    {
+        var created = Create(new RawReplayArchiveService(), Snapshot(Record(1, Payload("trace-a"))));
+        var mutations = new[]
+        {
+            RewriteManifest(created, text => text.Replace("raw-local-replay", "sanitized-evidence", StringComparison.Ordinal)),
+            RewriteRecord(created, bytes => bytes),
+            AddStoredEntry(created, "../escape.json", "{}\n"u8.ToArray()),
+            RewriteCompressed(created),
+        };
+
+        foreach (var archive in mutations)
+        {
+            foreach (var offset in CentralEntryOffsets(archive))
+            {
+                Assert.Equal(0, archive[offset + 5]);
+                Assert.Equal(0U, BinaryPrimitives.ReadUInt32LittleEndian(archive.AsSpan(offset + 38, 4)));
+            }
+        }
+    }
+
+    [Fact]
     public void Inspector_rejects_manifest_metadata_that_disagrees_with_canonical_members()
     {
         var service = new RawReplayArchiveService();
@@ -696,7 +718,7 @@ public sealed class RawReplayArchiveServiceTests
             WriteStored(archive, "records/record-000001.json", recordBytes);
             WriteStored(archive, "records/record-000002.json", recordBytes);
         }
-        return output.ToArray();
+        return CanonicalMutationArchive(output, 3);
     }
 
     private static void WriteStored(ZipArchive archive, string path, byte[] bytes)
@@ -738,12 +760,13 @@ public sealed class RawReplayArchiveServiceTests
             {
                 var copy = archive.CreateEntry(entry.FullName, CompressionLevel.NoCompression);
                 copy.LastWriteTime = entry.LastWriteTime;
+                copy.ExternalAttributes = 0;
                 using var source = entry.Open(); using var buffer = new MemoryStream(); source.CopyTo(buffer);
                 var bytes = entry.FullName == target ? transform(buffer.ToArray()) : buffer.ToArray();
                 using var destination = copy.Open(); destination.Write(bytes);
             }
         }
-        return output.ToArray();
+        return CanonicalMutationArchive(output, input.Entries.Count);
     }
 
     private static byte[] AddStoredEntry(RawReplayResult result, string path, byte[] bytes)
@@ -754,13 +777,17 @@ public sealed class RawReplayArchiveServiceTests
             using var input = new ZipArchive(new MemoryStream(result.ArchiveBytes!), ZipArchiveMode.Read);
             foreach (var entry in input.Entries)
             {
-                var copy = archive.CreateEntry(entry.FullName, CompressionLevel.NoCompression); copy.LastWriteTime = entry.LastWriteTime;
+                var copy = archive.CreateEntry(entry.FullName, CompressionLevel.NoCompression);
+                copy.LastWriteTime = entry.LastWriteTime;
+                copy.ExternalAttributes = 0;
                 using var source = entry.Open(); using var destination = copy.Open(); source.CopyTo(destination);
             }
-            var added = archive.CreateEntry(path, CompressionLevel.NoCompression); added.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            var added = archive.CreateEntry(path, CompressionLevel.NoCompression);
+            added.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            added.ExternalAttributes = 0;
             using var stream = added.Open(); stream.Write(bytes);
         }
-        return output.ToArray();
+        return CanonicalMutationArchive(output, 3);
     }
 
     private static byte[] RewriteCompressed(RawReplayResult result)
@@ -780,7 +807,22 @@ public sealed class RawReplayArchiveServiceTests
                 source.CopyTo(destination);
             }
         }
-        return output.ToArray();
+        return CanonicalMutationArchive(output, input.Entries.Count, validateStored: false);
+    }
+
+    private static byte[] CanonicalMutationArchive(MemoryStream output, int entryCount, bool validateStored = true)
+    {
+        var bytes = output.ToArray();
+        foreach (var offset in CentralEntryOffsets(bytes))
+        {
+            bytes[offset + 5] = 0;
+        }
+        Assert.Equal(entryCount, CentralEntryOffsets(bytes).Count);
+        if (validateStored)
+        {
+            Assert.Null(RawReplayArchiveService.CanonicalizeStoredArchiveCreatorPlatform(bytes, entryCount));
+        }
+        return bytes;
     }
 
     private sealed class Provider(RawReplaySnapshot snapshot) : IRawReplaySnapshotProvider

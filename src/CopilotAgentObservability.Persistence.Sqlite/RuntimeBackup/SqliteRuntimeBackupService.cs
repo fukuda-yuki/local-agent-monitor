@@ -294,18 +294,13 @@ public sealed class SqliteRuntimeBackupService
 
     private RuntimeBackupPreflightResult CompleteMonitorInitializationWithLease(string database)
     {
-        var preparation = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
-        if (!preparation.Success || !PathEntryExists(database)) return preparation;
+        if (!PathEntryExists(database))
+            return new(true, null, new Dictionary<string, int>(), []);
+        var preparation = PreflightForMigration(database, immutableReadOnly: false);
+        if (!preparation.Success) return preparation;
         EnsureCurrentBackupTail(database);
-        if (!TryRemoveEmptyReadSidecars(database))
-            return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         checkpoint?.Invoke(CatalogAfterMonitorTailCheckpoint);
-        using var guard = TryAcquireRecoveryGuard(database);
-        if (guard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
-        var result = PreflightForMigration(database, immutableReadOnly: false);
-        return TryRemoveEmptyReadSidecars(database)
-            ? result
-            : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+        return PreflightForMigration(database, immutableReadOnly: false);
     }
 
     private RuntimeBackupPreflightResult InitializeWithLease(string database)

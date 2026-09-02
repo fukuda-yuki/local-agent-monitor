@@ -533,6 +533,32 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_completion_accepts_sidecars_created_by_owner_migrations_under_the_same_lease()
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Target))
+            temp.Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        var initialization = service.InitializeForMonitor(temp.Target);
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        using var ownerMigration = temp.Open(temp.Target);
+        temp.Execute(ownerMigration, "PRAGMA journal_mode=WAL;");
+        using (var transaction = ownerMigration.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(ownerMigration, transaction);
+            SqliteSessionStore.InitializeSchema(ownerMigration, transaction, temp.Clock.GetUtcNow());
+            transaction.Commit();
+        }
+        Assert.True(File.Exists(temp.Target + "-wal"));
+        Assert.True(File.Exists(temp.Target + "-shm"));
+
+        var completed = service.CompleteMonitorInitialization(lease);
+
+        Assert.True(completed.Success, completed.ErrorCode);
+    }
+
+    [Fact]
     public void Monitor_startup_removes_unlocked_empty_read_sidecars_before_recovery_guard()
     {
         if (!OperatingSystem.IsWindows()) return;

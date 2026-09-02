@@ -952,7 +952,7 @@ public sealed class SetupStatusProjectorTests
         var paths = new SetupRuntimePaths(platform);
         var changeSetId = Guid.Parse("00000000-0000-7000-8000-000000000682");
         var recordId = Guid.Parse("00000000-0000-7000-8000-000000000683");
-        var targetPath = Path.Combine(platform.LocalApplicationData, "binding-settings.json");
+        var targetPath = platform.CombinePath(platform.LocalApplicationData, "binding-settings.json");
         platform.SeedDirectory("C:\\");
         platform.SeedDirectory(platform.LocalApplicationData);
         platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("previous"));
@@ -1560,7 +1560,7 @@ public sealed class SetupStatusProjectorTests
                 else
                 {
                     var fileStep = new AtomicFileSetupStep(Platform);
-                    var capture = fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation);
+                    var capture = fileStep.Capture(Platform.GetDirectoryName(target.TargetLocation), target.TargetLocation);
                     fileStep.CreateBackup(Paths.GetBackup(ChangeSetId, target.RecordId), capture);
                     journalTargets.Add(new SetupJournalTarget(
                         target.RecordId,

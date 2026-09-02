@@ -2494,7 +2494,7 @@ public sealed class SetupCommandDispatcherTests
         var planStore = new SetupPlanStore(platform, paths);
         var ledgerStore = new SetupLedgerStore(platform, paths, planStore);
         var journalStore = new SetupTransactionJournalStore(platform, paths);
-        var targetPath = Path.Combine(platform.LocalApplicationData, "dispatcher-settings.json");
+        var targetPath = platform.CombinePath(platform.LocalApplicationData, "dispatcher-settings.json");
         platform.SeedDirectory("C:\\");
         platform.SeedDirectory(platform.LocalApplicationData);
         platform.SeedFile(targetPath, Encoding.UTF8.GetBytes("old-file"));

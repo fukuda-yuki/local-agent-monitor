@@ -49,6 +49,7 @@ $resultsRoot = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $phaseStopwatch = if ($Lane -eq 'Completion') { [System.Diagnostics.Stopwatch]::StartNew() } else { $null }
 $phaseBudgetSeconds = 1800
 $phaseFinalizationReserveSeconds = 5
+$nightlyProjectTimeoutSeconds = 2700
 
 $operatorOnlyExclusion = 'Issue158Lane!=WindowsOwnedSession&Issue158Lane!=LinuxExt4CurrentFile'
 $completionFastFilter = "ValidationLane!=Nightly&ValidationLane!=CriticalSmoke&$operatorOnlyExclusion"
@@ -112,6 +113,241 @@ function Invoke-NativeCommand {
     if ($LASTEXITCODE -ne 0) {
         throw "Command '$FilePath' failed with exit code $LASTEXITCODE."
     }
+}
+
+function Get-ProcessTreeSnapshot {
+    param([Parameter(Mandatory)][int]$RootProcessId)
+    $parentById = @{}
+    $complete = $true
+    $errors = [Collections.Generic.List[string]]::new()
+    try {
+        if ($IsWindows) {
+            foreach ($item in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+                $parentById[[int]$item.ProcessId] = [int]$item.ParentProcessId
+            }
+        } else {
+            $enumerationErrors = @()
+            $directories = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction SilentlyContinue -ErrorVariable enumerationErrors |
+                Where-Object Name -Match '^\d+$')
+            if ($enumerationErrors.Count -ne 0) {
+                $complete = $false
+                $errors.Add('Unable to enumerate every /proc process directory.')
+            }
+            foreach ($directory in $directories) {
+                $processId = [int]$directory.Name
+                try {
+                    $stat = Get-Content -LiteralPath (Join-Path $directory.FullName 'stat') -Raw -ErrorAction Stop
+                    if ($stat -notmatch '^\d+\s+\(.*\)\s+\S\s+(\d+)\s+') {
+                        throw 'Process stat did not contain a parent identity.'
+                    }
+                    $parentById[$processId] = [int]$Matches[1]
+                } catch {
+                    try {
+                        $current = [Diagnostics.Process]::GetProcessById($processId)
+                        $current.Dispose()
+                        $complete = $false
+                        $errors.Add("Unable to read a live /proc identity; process_id=$processId.")
+                    } catch { }
+                }
+            }
+        }
+    } catch {
+        $complete = $false
+        $errors.Add($_.Exception.Message)
+    }
+    $pending = [Collections.Generic.Queue[int]]::new()
+    $pending.Enqueue($RootProcessId)
+    $visited = [Collections.Generic.HashSet[int]]::new()
+    $snapshot = [Collections.Generic.List[object]]::new()
+    while ($pending.Count -ne 0) {
+        $processId = $pending.Dequeue()
+        if (-not $visited.Add($processId)) { continue }
+        try {
+            $current = [Diagnostics.Process]::GetProcessById($processId)
+            $snapshot.Add([pscustomobject]@{
+                Id = $processId
+                StartTimeUtcTicks = $current.StartTime.ToUniversalTime().Ticks
+            })
+            $current.Dispose()
+        } catch {
+            try {
+                $stillLive = [Diagnostics.Process]::GetProcessById($processId)
+                $stillLive.Dispose()
+                $complete = $false
+                $errors.Add("Unable to capture a live process identity; process_id=$processId.")
+            } catch { }
+        }
+        foreach ($entry in $parentById.GetEnumerator()) {
+            if ([int]$entry.Value -eq $processId) { $pending.Enqueue([int]$entry.Key) }
+        }
+    }
+    return [pscustomobject]@{
+        Complete = $complete
+        Error = if ($errors.Count -eq 0) { $null } else { $errors -join ' ' }
+        Processes = @($snapshot)
+    }
+}
+
+function Get-ProcessIdentityProbe {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [scriptblock]$ProcessLookup = { param([int]$Id) [Diagnostics.Process]::GetProcessById($Id) })
+    try {
+        $current = & $ProcessLookup $ProcessId
+    } catch {
+        return [pscustomobject]@{
+            Exists = $false; IdentityReadable = $false
+            StartTimeUtcTicks = $null; Error = $null
+        }
+    }
+    $identityErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Stop'
+        $startTimeProperty = $current.GetType().GetProperty('StartTime')
+        if ($null -eq $startTimeProperty) { throw 'Process identity does not expose StartTime.' }
+        $startTime = $startTimeProperty.GetValue($current)
+        return [pscustomobject]@{
+            Exists = $true; IdentityReadable = $true
+            StartTimeUtcTicks = $startTime.ToUniversalTime().Ticks; Error = $null
+        }
+    } catch {
+        $identityErrors = [Collections.Generic.List[string]]::new()
+        $identityException = $_.Exception
+        while ($null -ne $identityException) {
+            if (-not [string]::IsNullOrWhiteSpace($identityException.Message)) {
+                $identityErrors.Add($identityException.Message)
+            }
+            $identityException = $identityException.InnerException
+        }
+        return [pscustomobject]@{
+            Exists = $true; IdentityReadable = $false
+            StartTimeUtcTicks = $null; Error = $identityErrors -join ' '
+        }
+    } finally {
+        $ErrorActionPreference = $identityErrorPreference
+        $current.Dispose()
+    }
+}
+
+function Wait-ProcessTreeExit {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Snapshot,
+        [Parameter(Mandatory)][int]$TimeoutMilliseconds,
+        [scriptblock]$ProcessProbe = { param([int]$ProcessId) Get-ProcessIdentityProbe -ProcessId $ProcessId })
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $errors = [Collections.Generic.List[string]]::new()
+        $running = @(
+            foreach ($entry in $Snapshot) {
+                try {
+                    $probe = & $ProcessProbe ([int]$entry.Id)
+                } catch {
+                    $probe = [pscustomobject]@{
+                        Exists = $true; IdentityReadable = $false
+                        StartTimeUtcTicks = $null; Error = $_.Exception.Message
+                    }
+                }
+                if (-not [bool]$probe.Exists) { continue }
+                if (-not [bool]$probe.IdentityReadable) {
+                    $errors.Add("Process identity remains live but unreadable; process_id=$($entry.Id) error=$($probe.Error).")
+                    $entry
+                    continue
+                }
+                if ([long]$probe.StartTimeUtcTicks -eq [long]$entry.StartTimeUtcTicks) { $entry }
+            }
+        )
+        if ($running.Count -eq 0) {
+            return [pscustomobject]@{ Exited = $true; Complete = $true; Error = $null }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    return [pscustomobject]@{
+        Exited = $false
+        Complete = $errors.Count -eq 0
+        Error = if ($errors.Count -eq 0) { $null } else { $errors -join ' ' }
+    }
+}
+
+function Invoke-BoundedCommand {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][int]$TimeoutMilliseconds)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $repoRoot
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "Unable to start command '$FilePath'." }
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $processExited = $process.WaitForExit($TimeoutMilliseconds)
+        $timedOut = -not $processExited
+        $capturedTree = @()
+        $snapshotComplete = $true
+        $snapshotError = $null
+        $processTreeExited = $processExited
+        if ($timedOut) {
+            try {
+                $snapshot = Get-ProcessTreeSnapshot -RootProcessId $process.Id
+                $capturedTree = @($snapshot.Processes)
+                $snapshotComplete = [bool]$snapshot.Complete
+                $snapshotError = [string]$snapshot.Error
+            } catch {
+                $snapshotComplete = $false
+                $snapshotError = $_.Exception.Message
+            }
+            try { $process.Kill($true) }
+            catch { Write-Warning "Unable to terminate timed-out process tree: $($_.Exception.Message)" }
+            $processExited = $process.WaitForExit(10000)
+            $treeExit = Wait-ProcessTreeExit -Snapshot $capturedTree -TimeoutMilliseconds 10000
+            if (-not $treeExit.Complete -and -not [string]::IsNullOrWhiteSpace([string]$treeExit.Error)) {
+                $snapshotError = @($snapshotError, [string]$treeExit.Error |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ' '
+            }
+            $processTreeExited = $snapshotComplete -and $capturedTree.Count -ne 0 -and
+                $processExited -and $treeExit.Complete -and $treeExit.Exited
+        } else {
+            $process.WaitForExit()
+            $capturedTree = @([pscustomobject]@{ Id = $process.Id; StartTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks })
+        }
+        return [pscustomobject]@{
+            ExitCode = if ($timedOut -or -not $processExited -or -not $processTreeExited) { -1 } else { $process.ExitCode }
+            TimedOut = $timedOut
+            ProcessExited = $processExited
+            ProcessTreeExited = $processTreeExited
+            CapturedProcessCount = $capturedTree.Count
+            SnapshotComplete = $snapshotComplete
+            SnapshotError = $snapshotError
+            ElapsedSeconds = $stopwatch.Elapsed.TotalSeconds
+            Output = ''
+        }
+    }
+    finally { $process.Dispose() }
+}
+
+function Write-NightlyProjectReceipt {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [Parameter(Mandatory)][object]$Result)
+    $identity = [IO.Path]::GetFileNameWithoutExtension($ProjectPath)
+    Write-ImmutableJson -Path $Path -Value ([ordered]@{
+        schemaVersion = 1
+        projectPath = $ProjectPath
+        projectIdentity = $identity
+        status = if ($Result.TimedOut) { 'timeout' } elseif ($Result.ExitCode -eq 0) { 'success' } else { 'failure' }
+        exitCode = $Result.ExitCode
+        timedOut = $Result.TimedOut
+        processExited = $Result.ProcessExited
+        processTreeExited = $Result.ProcessTreeExited
+        capturedProcessCount = $Result.CapturedProcessCount
+        snapshotComplete = $Result.SnapshotComplete
+        snapshotError = $Result.SnapshotError
+        elapsedSeconds = $Result.ElapsedSeconds
+    })
 }
 
 function Get-RemainingMilliseconds {
@@ -203,6 +439,39 @@ function Install-PlaywrightChromium {
     $arguments = @($playwrightInstaller)
     if ($WithDeps) { $arguments += '-WithDeps' }
     Invoke-NativeCommand -FilePath 'pwsh' -Arguments $arguments
+}
+
+function Invoke-NightlyValidation {
+    param(
+        [Parameter(Mandatory)][string]$ResultsDirectory,
+        [Parameter(Mandatory)][string]$CommandFilePath,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$CommandArgumentPrefix)
+    New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
+    foreach ($projectPath in $nightlyExpectedProjects) {
+        $projectIdentity = [IO.Path]::GetFileNameWithoutExtension($projectPath)
+        $receiptPath = Join-Path $ResultsDirectory "receipt-$projectIdentity.json"
+        $result = $null
+        try {
+            $arguments = @($CommandArgumentPrefix) + @(
+                'test', (Join-Path $repoRoot $projectPath), '--no-build', '--filter', $nightlyFilter,
+                '--logger', ('trx;LogFilePrefix={0}' -f "nightly-$partitionToken-$projectIdentity"),
+                '--results-directory', $ResultsDirectory)
+            $result = Invoke-BoundedCommand -FilePath $CommandFilePath -Arguments $arguments `
+                -TimeoutMilliseconds ($nightlyProjectTimeoutSeconds * 1000)
+        }
+        catch {
+            Write-Warning "Nightly project command failed before terminal evidence; project=$projectPath error=$($_.Exception.Message)"
+            $result = [pscustomobject]@{
+                ExitCode = -1; TimedOut = $false; ProcessExited = $false; ProcessTreeExited = $false
+                CapturedProcessCount = 0; SnapshotComplete = $false; SnapshotError = $_.Exception.Message
+                ElapsedSeconds = 0; Output = ''
+            }
+        }
+        Write-NightlyProjectReceipt -Path $receiptPath -ProjectPath $projectPath -Result $result
+    }
+    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+        '-NoProfile', '-File', $validationContract, '-Mode', 'NightlyEvidence',
+        '-ResultsDirectory', $ResultsDirectory, '-ExpectedProjectsJson', $serializedNightlyExpectedProjects)
 }
 
 function Get-AuthorityDigest {
@@ -835,10 +1104,7 @@ if ($Lane -eq 'Completion' -and [string]::IsNullOrWhiteSpace($Phase)) {
 } else {
     Install-PlaywrightChromium -WithDeps:($Partition -eq 'Linux')
     $nightlyResults = Join-Path $resultsRoot 'nightly'
-    Invoke-TestPass -Target $solution -Filter $nightlyFilter -ResultsDirectory $nightlyResults -LogFilePrefix ("nightly-{0}" -f $partitionToken)
-    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
-        '-NoProfile', '-File', $validationContract, '-Mode', 'NightlyEvidence',
-        '-ResultsDirectory', $nightlyResults, '-ExpectedProjectsJson', $serializedNightlyExpectedProjects)
+    Invoke-NightlyValidation -ResultsDirectory $nightlyResults -CommandFilePath 'dotnet' -CommandArgumentPrefix @()
 }
 
 Write-Output "validation_lane=$Lane"

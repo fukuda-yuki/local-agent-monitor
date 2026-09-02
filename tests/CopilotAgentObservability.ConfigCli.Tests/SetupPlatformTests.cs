@@ -885,6 +885,24 @@ public sealed class SetupPlatformTests
         first!.Dispose();
     }
 
+    [Theory]
+    [InlineData((int)SetupPathStyle.Windows, "C:\\root", "child", "C:\\root\\child")]
+    [InlineData((int)SetupPathStyle.Unix, "/root", "child", "/root/child")]
+    public void TestPlatform_CombinePathUsesConfiguredSemanticsInsteadOfHostSemantics(
+        int pathStyleValue,
+        string root,
+        string child,
+        string expected)
+    {
+        var platform = new SetupTestPlatform(
+            DateTimeOffset.UnixEpoch,
+            localApplicationData: root,
+            pathStyle: (SetupPathStyle)pathStyleValue);
+
+        Assert.Equal(expected, platform.CombinePath(root, child));
+        Assert.Equal(root, platform.GetDirectoryName(expected));
+    }
+
     [Fact]
     public void TestPlatform_UnixPathsAndLocksUseOneCaseSensitiveComparer()
     {

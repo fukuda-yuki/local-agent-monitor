@@ -50,6 +50,23 @@ internal sealed class SetupTestPlatform : ISetupPlatform
 
     public SetupPathStyle PathStyle { get; }
 
+    public string CombinePath(params string[] components)
+    {
+        var separator = PathStyle == SetupPathStyle.Windows ? '\\' : '/';
+        return string.Join(separator, components.Select((component, index) => index == 0
+            ? component.TrimEnd('\\', '/')
+            : component.Trim('\\', '/')));
+    }
+
+    public string GetDirectoryName(string path)
+    {
+        var separator = PathStyle == SetupPathStyle.Windows ? '\\' : '/';
+        var offset = path.LastIndexOf(separator);
+        return offset == 0 || PathStyle == SetupPathStyle.Windows && offset == 2 && path[1] == ':'
+            ? path[..(offset + 1)]
+            : path[..offset];
+    }
+
     public ISetupFileSystem FileSystem { get; }
 
     public ISetupUserEnvironment UserEnvironment { get; }

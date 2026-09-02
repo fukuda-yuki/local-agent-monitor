@@ -1353,7 +1353,7 @@ public sealed class SetupCompensationTests
             ChangeSetId = Guid.Parse("00000000-0000-7000-8000-000000000201");
             FileRecordId = Guid.Parse("00000000-0000-7000-8000-000000000202");
             EnvironmentRecordId = Guid.Parse("00000000-0000-7000-8000-000000000203");
-            TargetPath = Path.Combine(Platform.LocalApplicationData, "settings.json");
+            TargetPath = Platform.CombinePath(Platform.LocalApplicationData, "settings.json");
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);
             var priorBytes = tagged

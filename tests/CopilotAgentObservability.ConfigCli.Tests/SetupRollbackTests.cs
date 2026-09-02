@@ -1962,7 +1962,7 @@ public sealed class SetupRollbackTests
                 .Select(index => Guid.Parse($"00000000-0000-7000-8000-{602 + index:000000000000}"))
                 .ToArray();
             TargetPaths = Enumerable.Range(0, fileCount)
-                .Select(index => Path.Combine(Platform.LocalApplicationData, $"settings-{index}.json"))
+                .Select(index => Platform.CombinePath(Platform.LocalApplicationData, $"settings-{index}.json"))
                 .ToArray();
             Platform.SeedDirectory("C:\\");
             Platform.SeedDirectory(Platform.LocalApplicationData);

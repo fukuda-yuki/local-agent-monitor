@@ -904,12 +904,16 @@ startup may remove an exact pair consisting of a regular zero-byte `-wal` and a
 regular 32 KiB `-shm` by retaining no-follow delete handles, revalidating each
 owned identity and exact length on its handle, and deleting those identities
 through the handles. On Linux and macOS, pathname unlink cannot prove the same
-identity and held-owner guarantee; any `-wal` or `-shm` is therefore unowned,
-preserved, and fails startup closed. An incomplete, nonregular, nonempty,
+identity and held-owner guarantee. Any `-wal` or `-shm` present during phase one
+is therefore unowned, preserved, and fails startup closed. An incomplete,
+nonregular, nonempty,
 malformed, reparse-bearing, competing-owned, or otherwise unproved sidecar
 shape is likewise preserved and fails closed on every platform. A database
 with no sidecars remains eligible for ordinary startup on every platform.
-Phase two adds and validates `runtime_backup` v1 and then `pricing` v1 before
+After phase one succeeds, canonical owner migrations and phase two remain under
+the same restore lease. Phase two does not repeat phase-one recovery or
+reclassify sidecars created by those owner migrations as external state. It
+adds and validates `runtime_backup` v1 and then `pricing` v1 before
 the HTTP host is built. The two
 final ensures share one transaction so a current executable cannot leave a
 runtime-backup-only installed database. This sequencing does not replace or
