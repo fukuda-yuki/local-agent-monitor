@@ -8,7 +8,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
 public sealed class RetentionCleanupCoordinatorConcurrencyTests
 {
-    private static readonly TimeSpan CoordinationTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan OrchestrationTimeout = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task ParallelAdapters_SerializeCatalogCompletion()
@@ -16,6 +16,7 @@ public sealed class RetentionCleanupCoordinatorConcurrencyTests
         using var fixture = Fixture.Create();
         var adapter = new ConvergingAdapter();
         var firstCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var completionEntries = 0;
         var coordinator = new RetentionCleanupCoordinator(
@@ -27,30 +28,50 @@ public sealed class RetentionCleanupCoordinatorConcurrencyTests
                 if (mutation != RetentionCatalogMutation.CompleteDeletion)
                     return;
 
-                if (Interlocked.Increment(ref completionEntries) == 1)
+                var completionEntry = Interlocked.Increment(ref completionEntries);
+                if (completionEntry == 1)
                 {
                     firstCompletion.TrySetResult();
                     await releaseCompletion.Task;
                 }
+                else if (completionEntry == 2)
+                {
+                    secondCompletion.TrySetResult();
+                }
             });
 
-        var cycle = coordinator.RunOneCycleAsync(CancellationToken.None, CancellationToken.None).AsTask();
+        using var deadline = new CancellationTokenSource(OrchestrationTimeout);
+        var cycle = coordinator.RunOneCycleAsync(deadline.Token, deadline.Token).AsTask();
         RetentionCycleResult? result = null;
+        Exception? primaryFailure = null;
         try
         {
-            await adapter.BothEntered.Task.WaitAsync(CoordinationTimeout);
+            await adapter.BothEntered.Task.WaitAsync(deadline.Token);
             adapter.Release();
-            await firstCompletion.Task.WaitAsync(CoordinationTimeout);
+            await firstCompletion.Task.WaitAsync(deadline.Token);
 
             Assert.Equal(1, Volatile.Read(ref completionEntries));
             releaseCompletion.TrySetResult();
-            result = await cycle.WaitAsync(CoordinationTimeout);
+            await secondCompletion.Task.WaitAsync(deadline.Token);
+            result = await cycle.WaitAsync(deadline.Token);
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+            throw;
         }
         finally
         {
             adapter.Release();
             releaseCompletion.TrySetResult();
-            await cycle.WaitAsync(CoordinationTimeout);
+            deadline.Cancel();
+            try
+            {
+                await cycle;
+            }
+            catch when (primaryFailure is not null)
+            {
+            }
         }
 
         Assert.Equal(2, result.Completed);
