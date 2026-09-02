@@ -49,6 +49,7 @@ $resultsRoot = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $phaseStopwatch = if ($Lane -eq 'Completion') { [System.Diagnostics.Stopwatch]::StartNew() } else { $null }
 $phaseBudgetSeconds = 1800
 $phaseFinalizationReserveSeconds = 5
+$nightlyProjectTimeoutSeconds = 2700
 
 $operatorOnlyExclusion = 'Issue158Lane!=WindowsOwnedSession&Issue158Lane!=LinuxExt4CurrentFile'
 $completionFastFilter = "ValidationLane!=Nightly&ValidationLane!=CriticalSmoke&$operatorOnlyExclusion"
@@ -112,6 +113,59 @@ function Invoke-NativeCommand {
     if ($LASTEXITCODE -ne 0) {
         throw "Command '$FilePath' failed with exit code $LASTEXITCODE."
     }
+}
+
+function Invoke-BoundedCommand {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][int]$TimeoutMilliseconds)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $repoRoot
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "Unable to start command '$FilePath'." }
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $processExited = $process.WaitForExit($TimeoutMilliseconds)
+        $timedOut = -not $processExited
+        if ($timedOut) {
+            try { $process.Kill($true) }
+            catch { Write-Warning "Unable to terminate timed-out process tree: $($_.Exception.Message)" }
+            $processExited = $process.WaitForExit(10000)
+        } else {
+            $process.WaitForExit()
+        }
+        return [pscustomobject]@{
+            ExitCode = if ($timedOut -or -not $processExited) { -1 } else { $process.ExitCode }
+            TimedOut = $timedOut
+            ProcessExited = $processExited
+            ElapsedSeconds = $stopwatch.Elapsed.TotalSeconds
+            Output = ''
+        }
+    }
+    finally { $process.Dispose() }
+}
+
+function Write-NightlyProjectReceipt {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [Parameter(Mandatory)][object]$Result)
+    $identity = [IO.Path]::GetFileNameWithoutExtension($ProjectPath)
+    Write-ImmutableJson -Path $Path -Value ([ordered]@{
+        schemaVersion = 1
+        projectPath = $ProjectPath
+        projectIdentity = $identity
+        status = if ($Result.TimedOut) { 'timeout' } elseif ($Result.ExitCode -eq 0) { 'success' } else { 'failure' }
+        exitCode = $Result.ExitCode
+        timedOut = $Result.TimedOut
+        processExited = $Result.ProcessExited
+        elapsedSeconds = $Result.ElapsedSeconds
+    })
 }
 
 function Get-RemainingMilliseconds {
@@ -203,6 +257,34 @@ function Install-PlaywrightChromium {
     $arguments = @($playwrightInstaller)
     if ($WithDeps) { $arguments += '-WithDeps' }
     Invoke-NativeCommand -FilePath 'pwsh' -Arguments $arguments
+}
+
+function Invoke-NightlyValidation {
+    param([Parameter(Mandatory)][string]$ResultsDirectory)
+    New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
+    foreach ($projectPath in $nightlyExpectedProjects) {
+        $projectIdentity = [IO.Path]::GetFileNameWithoutExtension($projectPath)
+        $receiptPath = Join-Path $ResultsDirectory "receipt-$projectIdentity.json"
+        $result = $null
+        try {
+            $result = Invoke-BoundedCommand -FilePath 'dotnet' -Arguments @(
+                'test', (Join-Path $repoRoot $projectPath), '--no-build', '--filter', $nightlyFilter,
+                '--logger', ('trx;LogFilePrefix={0}' -f "nightly-$partitionToken-$projectIdentity"),
+                '--results-directory', $ResultsDirectory) `
+                -TimeoutMilliseconds ($nightlyProjectTimeoutSeconds * 1000)
+        }
+        catch {
+            Write-Warning "Nightly project command failed before terminal evidence; project=$projectPath error=$($_.Exception.Message)"
+            $result = [pscustomobject]@{
+                ExitCode = -1; TimedOut = $false; ProcessExited = $false
+                ElapsedSeconds = 0; Output = ''
+            }
+        }
+        Write-NightlyProjectReceipt -Path $receiptPath -ProjectPath $projectPath -Result $result
+    }
+    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
+        '-NoProfile', '-File', $validationContract, '-Mode', 'NightlyEvidence',
+        '-ResultsDirectory', $ResultsDirectory, '-ExpectedProjectsJson', $serializedNightlyExpectedProjects)
 }
 
 function Get-AuthorityDigest {
@@ -835,10 +917,7 @@ if ($Lane -eq 'Completion' -and [string]::IsNullOrWhiteSpace($Phase)) {
 } else {
     Install-PlaywrightChromium -WithDeps:($Partition -eq 'Linux')
     $nightlyResults = Join-Path $resultsRoot 'nightly'
-    Invoke-TestPass -Target $solution -Filter $nightlyFilter -ResultsDirectory $nightlyResults -LogFilePrefix ("nightly-{0}" -f $partitionToken)
-    Invoke-NativeCommand -FilePath 'pwsh' -Arguments @(
-        '-NoProfile', '-File', $validationContract, '-Mode', 'NightlyEvidence',
-        '-ResultsDirectory', $nightlyResults, '-ExpectedProjectsJson', $serializedNightlyExpectedProjects)
+    Invoke-NightlyValidation -ResultsDirectory $nightlyResults
 }
 
 Write-Output "validation_lane=$Lane"

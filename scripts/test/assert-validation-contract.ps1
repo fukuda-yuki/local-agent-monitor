@@ -308,6 +308,31 @@ if ($Mode -eq 'NightlyEvidence') {
     if (-not (Test-Path -LiteralPath $ResultsDirectory -PathType Container)) {
         throw "Nightly TRX results directory is missing; path=$ResultsDirectory."
     }
+    $receiptFiles = @(Get-ChildItem -LiteralPath $ResultsDirectory -Filter 'receipt-*.json' -File)
+    foreach ($expectedProject in $expectedProjects) {
+        $expectedIdentity = [IO.Path]::GetFileNameWithoutExtension([string]$expectedProject)
+        $matches = @($receiptFiles | Where-Object Name -ceq "receipt-$expectedIdentity.json")
+        if ($matches.Count -ne 1) {
+            throw "Nightly requires exactly one project receipt; project=$expectedProject count=$($matches.Count)."
+        }
+        $receipt = Get-Content -LiteralPath $matches[0].FullName -Raw | ConvertFrom-Json -Depth 100
+        if ([string]$receipt.projectPath -cne [string]$expectedProject -or
+            [string]$receipt.projectIdentity -cne $expectedIdentity) {
+            throw "Nightly project receipt identity is invalid; project=$expectedProject."
+        }
+        if ([string]$receipt.status -ne 'success' -or
+            [int]$receipt.exitCode -ne 0 -or
+            [bool]$receipt.timedOut -or
+            -not [bool]$receipt.processExited) {
+            throw "Nightly project did not complete successfully; project=$expectedProject status=$($receipt.status) exit_code=$($receipt.exitCode) timed_out=$($receipt.timedOut) process_exited=$($receipt.processExited)."
+        }
+    }
+    $unexpectedReceipts = @($receiptFiles | Where-Object {
+        $_.BaseName.Substring('receipt-'.Length) -cnotin $expectedIdentities
+    })
+    if ($unexpectedReceipts.Count -ne 0) {
+        throw "Nightly contains unexpected project receipts; receipts=$($unexpectedReceipts.Name -join ';')."
+    }
     $trxFiles = @(Get-ChildItem -LiteralPath $ResultsDirectory -Filter '*.trx' -File -Recurse)
     if ($trxFiles.Count -eq 0) { throw "Nightly produced no TRX files; path=$ResultsDirectory." }
     $observedIdentities = @(
@@ -327,7 +352,10 @@ if ($Mode -eq 'NightlyEvidence') {
     foreach ($expectedIdentity in $expectedIdentities) {
         $matches = @($observedIdentities | Where-Object { $_ -ceq $expectedIdentity })
         if ($matches.Count -ne 1) {
-            throw "Nightly requires exactly one TRX project storage identity; project=$expectedIdentity count=$($matches.Count)."
+            $expectedProject = @($expectedProjects | Where-Object {
+                [IO.Path]::GetFileNameWithoutExtension([string]$_) -ceq $expectedIdentity
+            })[0]
+            throw "Nightly requires exactly one TRX project storage identity; project=$expectedProject count=$($matches.Count)."
         }
     }
     $unexpected = @($observedIdentities | Where-Object { $_ -cnotin $expectedIdentities })
