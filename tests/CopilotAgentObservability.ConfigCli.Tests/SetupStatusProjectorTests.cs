@@ -1560,7 +1560,7 @@ public sealed class SetupStatusProjectorTests
                 else
                 {
                     var fileStep = new AtomicFileSetupStep(Platform);
-                    var capture = fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation);
+                    var capture = fileStep.Capture(Platform.GetDirectoryName(target.TargetLocation), target.TargetLocation);
                     fileStep.CreateBackup(Paths.GetBackup(ChangeSetId, target.RecordId), capture);
                     journalTargets.Add(new SetupJournalTarget(
                         target.RecordId,

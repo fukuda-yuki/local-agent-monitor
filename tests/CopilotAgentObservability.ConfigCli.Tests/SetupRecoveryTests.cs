@@ -5719,7 +5719,7 @@ public sealed class SetupRecoveryTests
                 .Select(index => Guid.Parse($"00000000-0000-7000-8000-{502 + index:D12}"))
                 .ToArray();
             TargetPaths = Enumerable.Range(0, fileTargetCount)
-                .Select(index => Path.Combine(
+                .Select(index => Platform.CombinePath(
                     Platform.LocalApplicationData,
                     index == 0 ? "settings.json" : $"settings-{index}.json"))
                 .ToArray();
@@ -6207,7 +6207,7 @@ public sealed class SetupRecoveryTests
                 var target = Plan.Targets[index];
                 fileStep.CreateBackup(
                     Paths.GetBackup(ChangeSetId, target.RecordId),
-                    fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation));
+                    fileStep.Capture(Platform.GetDirectoryName(target.TargetLocation), target.TargetLocation));
                 journalTargets.Add(new SetupJournalTarget(
                     target.RecordId,
                     target.TargetKind,
@@ -6371,7 +6371,7 @@ public sealed class SetupRecoveryTests
                 var target = Plan.Targets[index];
                 fileStep.CreateBackup(
                     Paths.GetBackup(ChangeSetId, target.RecordId),
-                    fileStep.Capture(Path.GetDirectoryName(target.TargetLocation)!, target.TargetLocation));
+                    fileStep.Capture(Platform.GetDirectoryName(target.TargetLocation), target.TargetLocation));
                 journalTargets.Add(new SetupJournalTarget(
                     target.RecordId,
                     target.TargetKind,
