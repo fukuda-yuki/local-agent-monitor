@@ -118,19 +118,42 @@ function Invoke-NativeCommand {
 function Get-ProcessTreeSnapshot {
     param([Parameter(Mandatory)][int]$RootProcessId)
     $parentById = @{}
-    if ($IsWindows) {
-        foreach ($item in @(Get-CimInstance Win32_Process)) {
-            $parentById[[int]$item.ProcessId] = [int]$item.ParentProcessId
-        }
-    } else {
-        foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction SilentlyContinue | Where-Object Name -Match '^\d+$')) {
-            try {
-                $stat = Get-Content -LiteralPath (Join-Path $directory.FullName 'stat') -Raw -ErrorAction Stop
-                if ($stat -match '^\d+\s+\(.*\)\s+\S\s+(\d+)\s+') {
-                    $parentById[[int]$directory.Name] = [int]$Matches[1]
+    $complete = $true
+    $errors = [Collections.Generic.List[string]]::new()
+    try {
+        if ($IsWindows) {
+            foreach ($item in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+                $parentById[[int]$item.ProcessId] = [int]$item.ParentProcessId
+            }
+        } else {
+            $enumerationErrors = @()
+            $directories = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction SilentlyContinue -ErrorVariable enumerationErrors |
+                Where-Object Name -Match '^\d+$')
+            if ($enumerationErrors.Count -ne 0) {
+                $complete = $false
+                $errors.Add('Unable to enumerate every /proc process directory.')
+            }
+            foreach ($directory in $directories) {
+                $processId = [int]$directory.Name
+                try {
+                    $stat = Get-Content -LiteralPath (Join-Path $directory.FullName 'stat') -Raw -ErrorAction Stop
+                    if ($stat -notmatch '^\d+\s+\(.*\)\s+\S\s+(\d+)\s+') {
+                        throw 'Process stat did not contain a parent identity.'
+                    }
+                    $parentById[$processId] = [int]$Matches[1]
+                } catch {
+                    try {
+                        $current = [Diagnostics.Process]::GetProcessById($processId)
+                        $current.Dispose()
+                        $complete = $false
+                        $errors.Add("Unable to read a live /proc identity; process_id=$processId.")
+                    } catch { }
                 }
-            } catch { }
+            }
         }
+    } catch {
+        $complete = $false
+        $errors.Add($_.Exception.Message)
     }
     $pending = [Collections.Generic.Queue[int]]::new()
     $pending.Enqueue($RootProcessId)
@@ -146,12 +169,23 @@ function Get-ProcessTreeSnapshot {
                 StartTimeUtcTicks = $current.StartTime.ToUniversalTime().Ticks
             })
             $current.Dispose()
-        } catch { }
+        } catch {
+            try {
+                $stillLive = [Diagnostics.Process]::GetProcessById($processId)
+                $stillLive.Dispose()
+                $complete = $false
+                $errors.Add("Unable to capture a live process identity; process_id=$processId.")
+            } catch { }
+        }
         foreach ($entry in $parentById.GetEnumerator()) {
             if ([int]$entry.Value -eq $processId) { $pending.Enqueue([int]$entry.Key) }
         }
     }
-    return @($snapshot)
+    return [pscustomobject]@{
+        Complete = $complete
+        Error = if ($errors.Count -eq 0) { $null } else { $errors -join ' ' }
+        Processes = @($snapshot)
+    }
 }
 
 function Wait-ProcessTreeExit {
@@ -194,13 +228,24 @@ function Invoke-BoundedCommand {
         $processExited = $process.WaitForExit($TimeoutMilliseconds)
         $timedOut = -not $processExited
         $capturedTree = @()
+        $snapshotComplete = $true
+        $snapshotError = $null
         $processTreeExited = $processExited
         if ($timedOut) {
-            $capturedTree = @(Get-ProcessTreeSnapshot -RootProcessId $process.Id)
+            try {
+                $snapshot = Get-ProcessTreeSnapshot -RootProcessId $process.Id
+                $capturedTree = @($snapshot.Processes)
+                $snapshotComplete = [bool]$snapshot.Complete
+                $snapshotError = [string]$snapshot.Error
+            } catch {
+                $snapshotComplete = $false
+                $snapshotError = $_.Exception.Message
+            }
             try { $process.Kill($true) }
             catch { Write-Warning "Unable to terminate timed-out process tree: $($_.Exception.Message)" }
             $processExited = $process.WaitForExit(10000)
-            $processTreeExited = Wait-ProcessTreeExit -Snapshot $capturedTree -TimeoutMilliseconds 10000
+            $capturedTreeExited = Wait-ProcessTreeExit -Snapshot $capturedTree -TimeoutMilliseconds 10000
+            $processTreeExited = $snapshotComplete -and $capturedTree.Count -ne 0 -and $processExited -and $capturedTreeExited
         } else {
             $process.WaitForExit()
             $capturedTree = @([pscustomobject]@{ Id = $process.Id; StartTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks })
@@ -211,6 +256,8 @@ function Invoke-BoundedCommand {
             ProcessExited = $processExited
             ProcessTreeExited = $processTreeExited
             CapturedProcessCount = $capturedTree.Count
+            SnapshotComplete = $snapshotComplete
+            SnapshotError = $snapshotError
             ElapsedSeconds = $stopwatch.Elapsed.TotalSeconds
             Output = ''
         }
@@ -234,6 +281,8 @@ function Write-NightlyProjectReceipt {
         processExited = $Result.ProcessExited
         processTreeExited = $Result.ProcessTreeExited
         capturedProcessCount = $Result.CapturedProcessCount
+        snapshotComplete = $Result.SnapshotComplete
+        snapshotError = $Result.SnapshotError
         elapsedSeconds = $Result.ElapsedSeconds
     })
 }
@@ -351,7 +400,7 @@ function Invoke-NightlyValidation {
             Write-Warning "Nightly project command failed before terminal evidence; project=$projectPath error=$($_.Exception.Message)"
             $result = [pscustomobject]@{
                 ExitCode = -1; TimedOut = $false; ProcessExited = $false; ProcessTreeExited = $false
-                CapturedProcessCount = 0
+                CapturedProcessCount = 0; SnapshotComplete = $false; SnapshotError = $_.Exception.Message
                 ElapsedSeconds = 0; Output = ''
             }
         }

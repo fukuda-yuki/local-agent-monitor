@@ -325,8 +325,9 @@ if ($Mode -eq 'NightlyEvidence') {
             [bool]$receipt.timedOut -or
             -not [bool]$receipt.processExited -or
             -not [bool]$receipt.processTreeExited -or
+            -not [bool]$receipt.snapshotComplete -or
             [int]$receipt.capturedProcessCount -lt 1) {
-            throw "Nightly project did not complete successfully; project=$expectedProject status=$($receipt.status) exit_code=$($receipt.exitCode) timed_out=$($receipt.timedOut) process_exited=$($receipt.processExited) process_tree_exited=$($receipt.processTreeExited)."
+            throw "Nightly project did not complete successfully; project=$expectedProject status=$($receipt.status) exit_code=$($receipt.exitCode) timed_out=$($receipt.timedOut) process_exited=$($receipt.processExited) process_tree_exited=$($receipt.processTreeExited) snapshot_complete=$($receipt.snapshotComplete) snapshot_error=$($receipt.snapshotError)."
         }
     }
     $unexpectedReceipts = @($receiptFiles | Where-Object {

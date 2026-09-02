@@ -719,6 +719,46 @@ public sealed class ValidationRunnerContractTests
     }
 
     [Fact]
+    public async Task NightlyTimeoutStillKillsTreeWhenSnapshotProviderThrowsAndFailsClosed()
+    {
+        using var directory = new TempDirectory();
+        var marker = Path.Combine(directory.Path, "descendant-survived.txt");
+        var receipt = Path.Combine(directory.Path, "receipt-Example.Tests.json");
+        var command = """
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
+            foreach ($name in @('Wait-ProcessTreeExit', 'Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
+                $function = $ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                }, $true)
+                if ($null -eq $function) { throw "Runner function was not found: $name" }
+                Invoke-Expression $function.Extent.Text
+            }
+            function Get-ProcessTreeSnapshot { throw 'synthetic snapshot provider failure' }
+            $repoRoot = (Get-Location).Path
+            $child = "Start-Sleep -Seconds 2; [IO.File]::WriteAllText('$($env:VALIDATION_TEST_ARG_1.Replace("'", "''"))', 'survived')"
+            $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
+            $parent = "Start-Process pwsh -ArgumentList @('-NoProfile','-EncodedCommand','$encodedChild'); Start-Sleep -Seconds 30"
+            $result = Invoke-BoundedCommand -FilePath 'pwsh' -Arguments @('-NoProfile', '-Command', $parent) -TimeoutMilliseconds 500
+            if (-not $result.TimedOut -or $result.SnapshotComplete -or $result.ProcessTreeExited) { throw 'Snapshot failure was not fail-closed.' }
+            if ($result.SnapshotError -notlike '*synthetic snapshot provider failure*') { throw 'Snapshot error was not retained.' }
+            Start-Sleep -Seconds 3
+            if (Test-Path -LiteralPath $env:VALIDATION_TEST_ARG_1) { throw 'Snapshot failure prevented process-tree kill.' }
+            Write-NightlyProjectReceipt -Path $env:VALIDATION_TEST_ARG_2 -ProjectPath 'tests/Example.Tests/Example.Tests.csproj' -Result $result
+            """;
+
+        var result = await RunPowerShellCommandAsync(command, RunnerScript, marker, receipt);
+
+        Assert.True(result.ExitCode == 0, result.Output);
+        var evidence = JsonNode.Parse(await File.ReadAllTextAsync(receipt))!.AsObject();
+        Assert.False(evidence["snapshotComplete"]!.GetValue<bool>());
+        Assert.False(evidence["processTreeExited"]!.GetValue<bool>());
+        Assert.Contains("synthetic snapshot provider failure", evidence["snapshotError"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task NightlyProjectNormalCompletionPublishesProjectIdentifiableReceipt()
     {
         using var directory = new TempDirectory();
@@ -822,6 +862,60 @@ public sealed class ValidationRunnerContractTests
         Assert.Equal("timeout", first["status"]!.GetValue<string>());
         Assert.Equal("tests/First.Tests/First.Tests.csproj", first["projectPath"]!.GetValue<string>());
         Assert.True(first["processTreeExited"]!.GetValue<bool>());
+        Assert.Equal("success", second["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task NightlyRunnerFinalizesLaterProjectAfterCommandStartException()
+    {
+        using var directory = new TempDirectory();
+        var secondProjectMarker = Path.Combine(directory.Path, "second-project-attempted.txt");
+        var command = """
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
+            foreach ($name in @('Write-ImmutableJson', 'Write-NightlyProjectReceipt', 'Invoke-NativeCommand', 'Invoke-NightlyValidation')) {
+                $function = $ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                }, $true)
+                if ($null -eq $function) { throw "Runner function was not found: $name" }
+                Invoke-Expression $function.Extent.Text
+            }
+            function Invoke-BoundedCommand {
+                param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutMilliseconds)
+                $projectPath = $Arguments | Where-Object { $_ -like '*.csproj' } | Select-Object -First 1
+                if ($projectPath -like '*First.Tests.csproj') { throw 'synthetic command start failure' }
+                [IO.File]::WriteAllText($env:VALIDATION_TEST_ARG_3, $projectPath)
+                return [pscustomobject]@{
+                    ExitCode = 0; TimedOut = $false; ProcessExited = $true; ProcessTreeExited = $true
+                    CapturedProcessCount = 1; SnapshotComplete = $true; SnapshotError = $null
+                    ElapsedSeconds = 0; Output = ''
+                }
+            }
+            $repoRoot = (Get-Location).Path
+            $nightlyExpectedProjects = @('tests/First.Tests/First.Tests.csproj', 'tests/Second.Tests/Second.Tests.csproj')
+            $serializedNightlyExpectedProjects = ConvertTo-Json -InputObject $nightlyExpectedProjects -Compress
+            $nightlyFilter = 'Issue158Lane!=operator'
+            $partitionToken = 'test'
+            $nightlyProjectTimeoutSeconds = 1
+            $validationContract = $env:VALIDATION_TEST_ARG_1
+            try {
+                Invoke-NightlyValidation -ResultsDirectory $env:VALIDATION_TEST_ARG_2 -CommandFilePath 'synthetic-dotnet' -CommandArgumentPrefix @()
+            } catch { }
+            exit 0
+            """;
+        var results = Path.Combine(directory.Path, "results");
+
+        var result = await RunPowerShellCommandAsync(command, RunnerScript, ContractScript, results, secondProjectMarker);
+
+        Assert.True(result.ExitCode == 0, result.Output);
+        Assert.Contains("Second.Tests.csproj", await File.ReadAllTextAsync(secondProjectMarker), StringComparison.Ordinal);
+        var first = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(results, "receipt-First.Tests.json")))!.AsObject();
+        var second = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(results, "receipt-Second.Tests.json")))!.AsObject();
+        Assert.Equal("failure", first["status"]!.GetValue<string>());
+        Assert.False(first["snapshotComplete"]!.GetValue<bool>());
+        Assert.Contains("synthetic command start failure", first["snapshotError"]!.GetValue<string>());
         Assert.Equal("success", second["status"]!.GetValue<string>());
     }
 
@@ -1144,6 +1238,8 @@ public sealed class ValidationRunnerContractTests
                 processExited,
                 processTreeExited = processTreeExited ?? processExited,
                 capturedProcessCount = 1,
+                snapshotComplete = true,
+                snapshotError = (string?)null,
             }));
     }
 
