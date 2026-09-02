@@ -688,7 +688,7 @@ public sealed class ValidationRunnerContractTests
             $tokens = $null
             $errors = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
-            foreach ($name in @('Get-ProcessTreeSnapshot', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
+            foreach ($name in @('Get-ProcessTreeSnapshot', 'Get-ProcessIdentityProbe', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
                 $function = $ast.Find({
                     param($node)
                     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -728,7 +728,7 @@ public sealed class ValidationRunnerContractTests
             $tokens = $null
             $errors = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
-            foreach ($name in @('Wait-ProcessTreeExit', 'Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
+            foreach ($name in @('Get-ProcessIdentityProbe', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
                 $function = $ast.Find({
                     param($node)
                     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -792,6 +792,40 @@ public sealed class ValidationRunnerContractTests
     }
 
     [Fact]
+    public async Task ProcessIdentityClassifierKeepsSuccessfulLookupLiveWhenIdentityReadThrows()
+    {
+        var command = """
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
+            $function = $ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ProcessIdentityProbe'
+            }, $true)
+            if ($null -eq $function) { throw 'Get-ProcessIdentityProbe was not found.' }
+            Invoke-Expression $function.Extent.Text
+            Add-Type -TypeDefinition @'
+            using System;
+            public sealed class ValidationThrowingProcessIdentity : IDisposable
+            {
+                public DateTime StartTime => throw new InvalidOperationException("synthetic identity access denied");
+                public void Dispose() { }
+            }
+            '@
+            $global:validationFakeProcess = [ValidationThrowingProcessIdentity]::new()
+            $lookup = { param([int]$ProcessId) $global:validationFakeProcess }
+            $result = Get-ProcessIdentityProbe -ProcessId 12345 -ProcessLookup $lookup
+            if (-not $result.Exists) { throw 'Successful lookup was misclassified as vanished after identity read failure.' }
+            if ($result.IdentityReadable) { throw 'Throwing identity accessor was reported readable.' }
+            if ($result.Error -notlike '*synthetic identity access denied*') { throw 'Identity read error was not retained.' }
+            """;
+
+        var result = await RunPowerShellCommandAsync(command, RunnerScript);
+
+        Assert.True(result.ExitCode == 0, result.Output);
+    }
+
+    [Fact]
     public async Task NightlyProjectNormalCompletionPublishesProjectIdentifiableReceipt()
     {
         using var directory = new TempDirectory();
@@ -845,7 +879,7 @@ public sealed class ValidationRunnerContractTests
             $errors = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
             foreach ($name in @(
-                'Get-ProcessTreeSnapshot', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand',
+                'Get-ProcessTreeSnapshot', 'Get-ProcessIdentityProbe', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand',
                 'Write-ImmutableJson', 'Write-NightlyProjectReceipt', 'Invoke-NativeCommand',
                 'Invoke-NightlyValidation')) {
                 $function = $ast.Find({

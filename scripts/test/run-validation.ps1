@@ -188,34 +188,52 @@ function Get-ProcessTreeSnapshot {
     }
 }
 
+function Get-ProcessIdentityProbe {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [scriptblock]$ProcessLookup = { param([int]$Id) [Diagnostics.Process]::GetProcessById($Id) })
+    try {
+        $current = & $ProcessLookup $ProcessId
+    } catch {
+        return [pscustomobject]@{
+            Exists = $false; IdentityReadable = $false
+            StartTimeUtcTicks = $null; Error = $null
+        }
+    }
+    $identityErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Stop'
+        $startTimeProperty = $current.GetType().GetProperty('StartTime')
+        if ($null -eq $startTimeProperty) { throw 'Process identity does not expose StartTime.' }
+        $startTime = $startTimeProperty.GetValue($current)
+        return [pscustomobject]@{
+            Exists = $true; IdentityReadable = $true
+            StartTimeUtcTicks = $startTime.ToUniversalTime().Ticks; Error = $null
+        }
+    } catch {
+        $identityErrors = [Collections.Generic.List[string]]::new()
+        $identityException = $_.Exception
+        while ($null -ne $identityException) {
+            if (-not [string]::IsNullOrWhiteSpace($identityException.Message)) {
+                $identityErrors.Add($identityException.Message)
+            }
+            $identityException = $identityException.InnerException
+        }
+        return [pscustomobject]@{
+            Exists = $true; IdentityReadable = $false
+            StartTimeUtcTicks = $null; Error = $identityErrors -join ' '
+        }
+    } finally {
+        $ErrorActionPreference = $identityErrorPreference
+        $current.Dispose()
+    }
+}
+
 function Wait-ProcessTreeExit {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Snapshot,
         [Parameter(Mandatory)][int]$TimeoutMilliseconds,
-        [scriptblock]$ProcessProbe = {
-            param([int]$ProcessId)
-            try {
-                $current = [Diagnostics.Process]::GetProcessById($ProcessId)
-            } catch {
-                return [pscustomobject]@{
-                    Exists = $false; IdentityReadable = $false
-                    StartTimeUtcTicks = $null; Error = $null
-                }
-            }
-            try {
-                return [pscustomobject]@{
-                    Exists = $true; IdentityReadable = $true
-                    StartTimeUtcTicks = $current.StartTime.ToUniversalTime().Ticks; Error = $null
-                }
-            } catch {
-                return [pscustomobject]@{
-                    Exists = $true; IdentityReadable = $false
-                    StartTimeUtcTicks = $null; Error = $_.Exception.Message
-                }
-            } finally {
-                $current.Dispose()
-            }
-        })
+        [scriptblock]$ProcessProbe = { param([int]$ProcessId) Get-ProcessIdentityProbe -ProcessId $ProcessId })
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     do {
         $errors = [Collections.Generic.List[string]]::new()
