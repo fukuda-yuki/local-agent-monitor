@@ -376,8 +376,8 @@ public sealed class GitHubCopilotSetupAdapterTests
         platform.SeedDirectory(platform.LocalApplicationData);
         var recordBId = Guid.Parse("00000000-0000-7000-8000-000000000202");
         var recordAId = Guid.Parse("00000000-0000-7000-8000-000000000201");
-        var recordBPath = Path.Combine(platform.LocalApplicationData, "forwarding-b.json");
-        var recordAPath = Path.Combine(platform.LocalApplicationData, "forwarding-a.json");
+        var recordBPath = platform.CombinePath(platform.LocalApplicationData, "forwarding-b.json");
+        var recordAPath = platform.CombinePath(platform.LocalApplicationData, "forwarding-a.json");
         var priorB = Encoding.UTF8.GetBytes(
             "{\n  \"unrelated\": \"" + markerB + "\",\n  \"github.copilot.chat.otel.enabled\": false,\n}\n");
         var priorA = Encoding.UTF8.GetBytes(
