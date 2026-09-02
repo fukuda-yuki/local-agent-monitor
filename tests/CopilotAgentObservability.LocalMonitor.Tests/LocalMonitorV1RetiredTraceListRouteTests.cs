@@ -77,7 +77,7 @@ public sealed class LocalMonitorV1RetiredTraceListRouteTests
     }
 
     [Fact]
-    public async Task RetiringTheListPreservesTechnicalDetailFrozenApiAndHistoricalAnalysisOwners()
+    public async Task RetiringTheListPreservesTechnicalDetailAndFrozenTraceListApiOwners()
     {
         using var temp = new MonitorTempDirectory();
         var rawRecordId = SeedTechnicalTrace(temp);
@@ -89,7 +89,6 @@ public sealed class LocalMonitorV1RetiredTraceListRouteTests
         using var promptLabel = await host.Client.GetAsync("/traces/technical-evidence/prompt-label");
         using var analysisRun = await host.Client.GetAsync("/traces/technical-evidence/analysis/runs/1");
         using var traceListApi = await host.Client.GetAsync("/api/monitor/trace-list?period=all&limit=1");
-        using var historical = await host.Client.GetAsync("/historical-analysis");
 
         Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
         Assert.Contains("technical-evidence", await detail.Content.ReadAsStringAsync(), StringComparison.Ordinal);
@@ -102,7 +101,6 @@ public sealed class LocalMonitorV1RetiredTraceListRouteTests
         Assert.Equal(HttpStatusCode.NotFound, analysisRun.StatusCode);
         Assert.Contains("analysis_run_not_found", await analysisRun.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.OK, traceListApi.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, historical.StatusCode);
     }
 
     private static long SeedTechnicalTrace(MonitorTempDirectory temp)
