@@ -759,6 +759,39 @@ public sealed class ValidationRunnerContractTests
     }
 
     [Fact]
+    public async Task ProcessTreePollTreatsLiveUnreadableIdentityAsUnresolved()
+    {
+        var command = """
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
+            $function = $ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Wait-ProcessTreeExit'
+            }, $true)
+            if ($null -eq $function) { throw 'Wait-ProcessTreeExit was not found.' }
+            Invoke-Expression $function.Extent.Text
+            $snapshot = @([pscustomobject]@{ Id = 12345; StartTimeUtcTicks = 67890 })
+            $probe = {
+                param([int]$ProcessId)
+                [pscustomobject]@{
+                    Exists = $true
+                    IdentityReadable = $false
+                    StartTimeUtcTicks = $null
+                    Error = 'synthetic live identity access denied'
+                }
+            }
+            $result = Wait-ProcessTreeExit -Snapshot $snapshot -TimeoutMilliseconds 100 -ProcessProbe $probe
+            if ($result.Exited -or $result.Complete) { throw 'A live process with unreadable identity was reported exited.' }
+            if ($result.Error -notlike '*synthetic live identity access denied*') { throw 'Unreadable live identity error was not retained.' }
+            """;
+
+        var result = await RunPowerShellCommandAsync(command, RunnerScript);
+
+        Assert.True(result.ExitCode == 0, result.Output);
+    }
+
+    [Fact]
     public async Task NightlyProjectNormalCompletionPublishesProjectIdentifiableReceipt()
     {
         using var directory = new TempDirectory();

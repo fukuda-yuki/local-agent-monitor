@@ -191,23 +191,63 @@ function Get-ProcessTreeSnapshot {
 function Wait-ProcessTreeExit {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Snapshot,
-        [Parameter(Mandatory)][int]$TimeoutMilliseconds)
+        [Parameter(Mandatory)][int]$TimeoutMilliseconds,
+        [scriptblock]$ProcessProbe = {
+            param([int]$ProcessId)
+            try {
+                $current = [Diagnostics.Process]::GetProcessById($ProcessId)
+            } catch {
+                return [pscustomobject]@{
+                    Exists = $false; IdentityReadable = $false
+                    StartTimeUtcTicks = $null; Error = $null
+                }
+            }
+            try {
+                return [pscustomobject]@{
+                    Exists = $true; IdentityReadable = $true
+                    StartTimeUtcTicks = $current.StartTime.ToUniversalTime().Ticks; Error = $null
+                }
+            } catch {
+                return [pscustomobject]@{
+                    Exists = $true; IdentityReadable = $false
+                    StartTimeUtcTicks = $null; Error = $_.Exception.Message
+                }
+            } finally {
+                $current.Dispose()
+            }
+        })
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     do {
+        $errors = [Collections.Generic.List[string]]::new()
         $running = @(
             foreach ($entry in $Snapshot) {
                 try {
-                    $current = [Diagnostics.Process]::GetProcessById([int]$entry.Id)
-                    $sameProcess = $current.StartTime.ToUniversalTime().Ticks -eq [long]$entry.StartTimeUtcTicks
-                    $current.Dispose()
-                    if ($sameProcess) { $entry }
-                } catch { }
+                    $probe = & $ProcessProbe ([int]$entry.Id)
+                } catch {
+                    $probe = [pscustomobject]@{
+                        Exists = $true; IdentityReadable = $false
+                        StartTimeUtcTicks = $null; Error = $_.Exception.Message
+                    }
+                }
+                if (-not [bool]$probe.Exists) { continue }
+                if (-not [bool]$probe.IdentityReadable) {
+                    $errors.Add("Process identity remains live but unreadable; process_id=$($entry.Id) error=$($probe.Error).")
+                    $entry
+                    continue
+                }
+                if ([long]$probe.StartTimeUtcTicks -eq [long]$entry.StartTimeUtcTicks) { $entry }
             }
         )
-        if ($running.Count -eq 0) { return $true }
+        if ($running.Count -eq 0) {
+            return [pscustomobject]@{ Exited = $true; Complete = $true; Error = $null }
+        }
         Start-Sleep -Milliseconds 50
     } while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
-    return $false
+    return [pscustomobject]@{
+        Exited = $false
+        Complete = $errors.Count -eq 0
+        Error = if ($errors.Count -eq 0) { $null } else { $errors -join ' ' }
+    }
 }
 
 function Invoke-BoundedCommand {
@@ -244,8 +284,13 @@ function Invoke-BoundedCommand {
             try { $process.Kill($true) }
             catch { Write-Warning "Unable to terminate timed-out process tree: $($_.Exception.Message)" }
             $processExited = $process.WaitForExit(10000)
-            $capturedTreeExited = Wait-ProcessTreeExit -Snapshot $capturedTree -TimeoutMilliseconds 10000
-            $processTreeExited = $snapshotComplete -and $capturedTree.Count -ne 0 -and $processExited -and $capturedTreeExited
+            $treeExit = Wait-ProcessTreeExit -Snapshot $capturedTree -TimeoutMilliseconds 10000
+            if (-not $treeExit.Complete -and -not [string]::IsNullOrWhiteSpace([string]$treeExit.Error)) {
+                $snapshotError = @($snapshotError, [string]$treeExit.Error |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ' '
+            }
+            $processTreeExited = $snapshotComplete -and $capturedTree.Count -ne 0 -and
+                $processExited -and $treeExit.Complete -and $treeExit.Exited
         } else {
             $process.WaitForExit()
             $capturedTree = @([pscustomobject]@{ Id = $process.Id; StartTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks })
