@@ -298,7 +298,30 @@ internal sealed class RunningMonitorHost(
                 .Select(method => (method, endpoint.RoutePattern.RawText ?? string.Empty)) ?? [])
             .ToArray();
 
+    public IReadOnlyList<(string Method, string Pattern)> RouteMethodsOwnedBy(params Type[] owners) =>
+        ((Microsoft.AspNetCore.Routing.IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<Microsoft.AspNetCore.Routing.RouteEndpoint>()
+            .Where(endpoint => owners.Any(owner =>
+                IsDeclaredWithin(endpoint.RequestDelegate?.Method.DeclaringType, owner)
+                || endpoint.Metadata.OfType<System.Reflection.MethodInfo>()
+                    .Any(method => IsDeclaredWithin(method.DeclaringType, owner))))
+            .SelectMany(endpoint => endpoint.Metadata
+                .GetMetadata<Microsoft.AspNetCore.Routing.IHttpMethodMetadata>()?
+                .HttpMethods
+                .Select(method => (method, endpoint.RoutePattern.RawText ?? string.Empty)) ?? [])
+            .ToArray();
+
     public string Url { get; } = url;
+
+    private static bool IsDeclaredWithin(Type? candidate, Type owner)
+    {
+        for (var current = candidate; current is not null; current = current.DeclaringType)
+        {
+            if (current == owner) return true;
+        }
+        return false;
+    }
 
     public async ValueTask DisposeAsync()
     {
