@@ -212,21 +212,6 @@ public sealed class SanitizedOnlyHostCompositionTests
             $"/sessions/{Guid.CreateVersion7()}/events/{Guid.CreateVersion7()}/content");
         await AssertJsonAsync(sessionRawFallback, HttpStatusCode.NotFound, UnsupportedEndpoint);
 
-        foreach (var path in new[]
-        {
-            "/traces/1/raw",
-            "/traces/trace-id/prompt-label",
-            "/traces/trace-id/spans/span-id/detail",
-            "/traces/trace-id/analysis/runs/1",
-        })
-        {
-            using var technicalRawFallback = await host.Client.GetAsync(path);
-            await AssertJsonAsync(
-                technicalRawFallback,
-                HttpStatusCode.NotFound,
-                UnsupportedEndpoint);
-        }
-
         using var analysisStart = await host.Client.PostAsync(
             "/traces/trace-id/analysis",
             new StringContent("{}"));
@@ -248,6 +233,36 @@ public sealed class SanitizedOnlyHostCompositionTests
             HttpStatusCode.Forbidden,
             """{"error":"sanitized_only_denied"}""");
         Assert.True(rawReplay.Headers.CacheControl?.NoStore);
+    }
+
+    [Fact]
+    public async Task RawHumanGetAndHeadRemainEmptyNoStoreNotFoundWithoutContentType()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            sanitizedOnly: true,
+            testOptions: QuietHost());
+
+        foreach (var path in new[]
+        {
+            "/traces/1/raw",
+            "/traces/trace-id/prompt-label",
+            "/traces/trace-id/spans/span-id/detail",
+            "/traces/trace-id/analysis/runs/1",
+        })
+        {
+            foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
+            {
+                using var response = await host.Client.SendAsync(new HttpRequestMessage(method, path));
+                var body = await response.Content.ReadAsByteArrayAsync();
+
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+                Assert.True(body.Length == 0, $"{method} {path} returned {body.Length} bytes.");
+                Assert.True(response.Headers.CacheControl?.NoStore);
+                Assert.Null(response.Content.Headers.ContentType);
+            }
+        }
     }
 
     [Theory]
