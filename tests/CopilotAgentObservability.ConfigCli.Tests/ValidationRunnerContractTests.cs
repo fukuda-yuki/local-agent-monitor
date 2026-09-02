@@ -112,6 +112,33 @@ public sealed class ValidationRunnerContractTests
     }
 
     [Fact]
+    public async Task NightlyEvidenceRejectsReceiptWhenRootExitedButCapturedDescendantDidNot()
+    {
+        using var directory = new TempDirectory();
+        WriteProjectTrx(directory.Path, "config.trx", "bin/Config.Tests.dll", "Example.Config.Fact");
+        WriteNightlyReceipt(
+            directory.Path,
+            "tests/Config.Tests/Config.Tests.csproj",
+            "success",
+            0,
+            false,
+            true,
+            processTreeExited: false);
+
+        var result = await RunContractAsync(
+            "-Mode", "NightlyEvidence",
+            "-ResultsDirectory", directory.Path,
+            "-ExpectedProjectsJson", JsonSerializer.Serialize(new[]
+            {
+                "tests/Config.Tests/Config.Tests.csproj",
+            }));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("tests/Config.Tests/Config.Tests.csproj", result.Output, StringComparison.Ordinal);
+        Assert.Contains("process_tree_exited=False", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SolutionPassUsesCollisionResistantTrxPrefixAndRunnerOwnedNightlyProjectAuthority()
     {
         var source = File.ReadAllText(RunnerScript);
@@ -546,6 +573,10 @@ public sealed class ValidationRunnerContractTests
         Assert.Contains("receipt-$projectIdentity.json", nightly, StringComparison.Ordinal);
         Assert.Contains("nightly-$partitionToken-$projectIdentity", nightly, StringComparison.Ordinal);
         Assert.DoesNotContain("Invoke-TestPass -Target $solution -Filter $nightlyFilter", nightly, StringComparison.Ordinal);
+        Assert.Contains(
+            "Invoke-NightlyValidation -ResultsDirectory $nightlyResults -CommandFilePath 'dotnet' -CommandArgumentPrefix @()",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -657,7 +688,7 @@ public sealed class ValidationRunnerContractTests
             $tokens = $null
             $errors = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
-            foreach ($name in @('Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
+            foreach ($name in @('Get-ProcessTreeSnapshot', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand', 'Write-ImmutableJson', 'Write-NightlyProjectReceipt')) {
                 $function = $ast.Find({
                     param($node)
                     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -670,11 +701,11 @@ public sealed class ValidationRunnerContractTests
             $parent = "Start-Process pwsh -ArgumentList @('-NoProfile','-Command',`"$child`"); Start-Sleep -Seconds 30"
             $stopwatch = [Diagnostics.Stopwatch]::StartNew()
             $result = Invoke-BoundedCommand -FilePath 'pwsh' -Arguments @('-NoProfile', '-Command', $parent) -TimeoutMilliseconds 500
-            Write-NightlyProjectReceipt -Path $env:VALIDATION_TEST_ARG_2 -ProjectPath 'tests/Example.Tests/Example.Tests.csproj' -Result $result
-            if (-not $result.TimedOut -or -not $result.ProcessExited) { throw 'Timed-out process tree did not terminalize.' }
-            if ($stopwatch.Elapsed.TotalSeconds -gt 1.5) { throw "Timeout publication waited for pipe EOF; elapsed=$($stopwatch.Elapsed.TotalSeconds)." }
+            if (-not $result.TimedOut -or -not $result.ProcessTreeExited -or $result.CapturedProcessCount -lt 2) { throw 'Timed-out process tree did not terminalize.' }
+            if ($stopwatch.Elapsed.TotalSeconds -gt 5) { throw "Timeout publication waited for pipe EOF; elapsed=$($stopwatch.Elapsed.TotalSeconds)." }
             Start-Sleep -Seconds 3
             if (Test-Path -LiteralPath $env:VALIDATION_TEST_ARG_1) { throw 'Timed-out descendant process survived.' }
+            Write-NightlyProjectReceipt -Path $env:VALIDATION_TEST_ARG_2 -ProjectPath 'tests/Example.Tests/Example.Tests.csproj' -Result $result
             """;
 
         var result = await RunPowerShellCommandAsync(command, RunnerScript, marker, receipt);
@@ -684,7 +715,7 @@ public sealed class ValidationRunnerContractTests
         Assert.Equal("tests/Example.Tests/Example.Tests.csproj", evidence["projectPath"]!.GetValue<string>());
         Assert.Equal("timeout", evidence["status"]!.GetValue<string>());
         Assert.True(evidence["timedOut"]!.GetValue<bool>());
-        Assert.True(evidence["processExited"]!.GetValue<bool>());
+        Assert.True(evidence["processTreeExited"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -716,7 +747,82 @@ public sealed class ValidationRunnerContractTests
         Assert.Equal("success", evidence["status"]!.GetValue<string>());
         Assert.Equal(0, evidence["exitCode"]!.GetValue<int>());
         Assert.False(evidence["timedOut"]!.GetValue<bool>());
-        Assert.True(evidence["processExited"]!.GetValue<bool>());
+        Assert.True(evidence["processTreeExited"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task NightlyRunnerTimesOutNamedProjectThenAttemptsAndFinalizesNextProject()
+    {
+        using var directory = new TempDirectory();
+        var fakeDotnet = Path.Combine(directory.Path, "fake-dotnet.ps1");
+        var descendantMarker = Path.Combine(directory.Path, "descendant-survived.txt");
+        var secondProjectMarker = Path.Combine(directory.Path, "second-project-attempted.txt");
+        await File.WriteAllTextAsync(fakeDotnet, """
+            $projectPath = $args[1]
+            if ($projectPath -like '*First.Tests.csproj') {
+                $child = "Start-Sleep -Seconds 2; [IO.File]::WriteAllText('$($env:VALIDATION_DESCENDANT_MARKER.Replace("'", "''"))', 'survived')"
+                Start-Process pwsh -ArgumentList @('-NoProfile', '-Command', $child)
+                Start-Sleep -Seconds 30
+            }
+            [IO.File]::WriteAllText($env:VALIDATION_SECOND_PROJECT_MARKER, $projectPath)
+            exit 0
+            """);
+        var command = """
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:VALIDATION_TEST_ARG_0, [ref]$tokens, [ref]$errors)
+            foreach ($name in @(
+                'Get-ProcessTreeSnapshot', 'Wait-ProcessTreeExit', 'Invoke-BoundedCommand',
+                'Write-ImmutableJson', 'Write-NightlyProjectReceipt', 'Invoke-NativeCommand',
+                'Invoke-NightlyValidation')) {
+                $function = $ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                }, $true)
+                if ($null -eq $function) { throw "Runner function was not found: $name" }
+                Invoke-Expression $function.Extent.Text
+            }
+            $repoRoot = (Get-Location).Path
+            $nightlyExpectedProjects = @('tests/First.Tests/First.Tests.csproj', 'tests/Second.Tests/Second.Tests.csproj')
+            $serializedNightlyExpectedProjects = ConvertTo-Json -InputObject $nightlyExpectedProjects -Compress
+            $nightlyFilter = 'Issue158Lane!=operator'
+            $partitionToken = 'test'
+            $nightlyProjectTimeoutSeconds = 1
+            $validationContract = $env:VALIDATION_TEST_ARG_2
+            $env:VALIDATION_DESCENDANT_MARKER = $env:VALIDATION_TEST_ARG_4
+            $env:VALIDATION_SECOND_PROJECT_MARKER = $env:VALIDATION_TEST_ARG_5
+            $contractFailed = $false
+            try {
+                Invoke-NightlyValidation -ResultsDirectory $env:VALIDATION_TEST_ARG_3 `
+                    -CommandFilePath 'pwsh' `
+                    -CommandArgumentPrefix @('-NoProfile', '-File', $env:VALIDATION_TEST_ARG_1)
+            }
+            catch {
+                $contractFailed = $true
+            }
+            if (-not $contractFailed) { throw 'Timed-out project evidence was accepted.' }
+            """;
+        var results = Path.Combine(directory.Path, "results");
+
+        var result = await RunPowerShellCommandAsync(
+            command,
+            RunnerScript,
+            fakeDotnet,
+            ContractScript,
+            results,
+            descendantMarker,
+            secondProjectMarker);
+
+        Assert.True(result.ExitCode == 0, result.Output);
+        Assert.False(File.Exists(descendantMarker));
+        Assert.Contains("Second.Tests.csproj", await File.ReadAllTextAsync(secondProjectMarker), StringComparison.Ordinal);
+        var first = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(results, "receipt-First.Tests.json")))!.AsObject();
+        var second = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(results, "receipt-Second.Tests.json")))!.AsObject();
+        Assert.Contains("tests/First.Tests/First.Tests.csproj", result.Output, StringComparison.Ordinal);
+        Assert.Equal("timeout", first["status"]!.GetValue<string>());
+        Assert.Equal("tests/First.Tests/First.Tests.csproj", first["projectPath"]!.GetValue<string>());
+        Assert.True(first["processTreeExited"]!.GetValue<bool>());
+        Assert.Equal("success", second["status"]!.GetValue<string>());
     }
 
     [Fact]
@@ -1021,7 +1127,8 @@ public sealed class ValidationRunnerContractTests
         string status,
         int exitCode,
         bool timedOut,
-        bool processExited)
+        bool processExited,
+        bool? processTreeExited = null)
     {
         var identity = Path.GetFileNameWithoutExtension(projectPath);
         File.WriteAllText(
@@ -1035,6 +1142,8 @@ public sealed class ValidationRunnerContractTests
                 exitCode,
                 timedOut,
                 processExited,
+                processTreeExited = processTreeExited ?? processExited,
+                capturedProcessCount = 1,
             }));
     }
 

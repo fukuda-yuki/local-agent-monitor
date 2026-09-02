@@ -115,6 +115,67 @@ function Invoke-NativeCommand {
     }
 }
 
+function Get-ProcessTreeSnapshot {
+    param([Parameter(Mandatory)][int]$RootProcessId)
+    $parentById = @{}
+    if ($IsWindows) {
+        foreach ($item in @(Get-CimInstance Win32_Process)) {
+            $parentById[[int]$item.ProcessId] = [int]$item.ParentProcessId
+        }
+    } else {
+        foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction SilentlyContinue | Where-Object Name -Match '^\d+$')) {
+            try {
+                $stat = Get-Content -LiteralPath (Join-Path $directory.FullName 'stat') -Raw -ErrorAction Stop
+                if ($stat -match '^\d+\s+\(.*\)\s+\S\s+(\d+)\s+') {
+                    $parentById[[int]$directory.Name] = [int]$Matches[1]
+                }
+            } catch { }
+        }
+    }
+    $pending = [Collections.Generic.Queue[int]]::new()
+    $pending.Enqueue($RootProcessId)
+    $visited = [Collections.Generic.HashSet[int]]::new()
+    $snapshot = [Collections.Generic.List[object]]::new()
+    while ($pending.Count -ne 0) {
+        $processId = $pending.Dequeue()
+        if (-not $visited.Add($processId)) { continue }
+        try {
+            $current = [Diagnostics.Process]::GetProcessById($processId)
+            $snapshot.Add([pscustomobject]@{
+                Id = $processId
+                StartTimeUtcTicks = $current.StartTime.ToUniversalTime().Ticks
+            })
+            $current.Dispose()
+        } catch { }
+        foreach ($entry in $parentById.GetEnumerator()) {
+            if ([int]$entry.Value -eq $processId) { $pending.Enqueue([int]$entry.Key) }
+        }
+    }
+    return @($snapshot)
+}
+
+function Wait-ProcessTreeExit {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Snapshot,
+        [Parameter(Mandatory)][int]$TimeoutMilliseconds)
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $running = @(
+            foreach ($entry in $Snapshot) {
+                try {
+                    $current = [Diagnostics.Process]::GetProcessById([int]$entry.Id)
+                    $sameProcess = $current.StartTime.ToUniversalTime().Ticks -eq [long]$entry.StartTimeUtcTicks
+                    $current.Dispose()
+                    if ($sameProcess) { $entry }
+                } catch { }
+            }
+        )
+        if ($running.Count -eq 0) { return $true }
+        Start-Sleep -Milliseconds 50
+    } while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    return $false
+}
+
 function Invoke-BoundedCommand {
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -132,17 +193,24 @@ function Invoke-BoundedCommand {
     try {
         $processExited = $process.WaitForExit($TimeoutMilliseconds)
         $timedOut = -not $processExited
+        $capturedTree = @()
+        $processTreeExited = $processExited
         if ($timedOut) {
+            $capturedTree = @(Get-ProcessTreeSnapshot -RootProcessId $process.Id)
             try { $process.Kill($true) }
             catch { Write-Warning "Unable to terminate timed-out process tree: $($_.Exception.Message)" }
             $processExited = $process.WaitForExit(10000)
+            $processTreeExited = Wait-ProcessTreeExit -Snapshot $capturedTree -TimeoutMilliseconds 10000
         } else {
             $process.WaitForExit()
+            $capturedTree = @([pscustomobject]@{ Id = $process.Id; StartTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks })
         }
         return [pscustomobject]@{
-            ExitCode = if ($timedOut -or -not $processExited) { -1 } else { $process.ExitCode }
+            ExitCode = if ($timedOut -or -not $processExited -or -not $processTreeExited) { -1 } else { $process.ExitCode }
             TimedOut = $timedOut
             ProcessExited = $processExited
+            ProcessTreeExited = $processTreeExited
+            CapturedProcessCount = $capturedTree.Count
             ElapsedSeconds = $stopwatch.Elapsed.TotalSeconds
             Output = ''
         }
@@ -164,6 +232,8 @@ function Write-NightlyProjectReceipt {
         exitCode = $Result.ExitCode
         timedOut = $Result.TimedOut
         processExited = $Result.ProcessExited
+        processTreeExited = $Result.ProcessTreeExited
+        capturedProcessCount = $Result.CapturedProcessCount
         elapsedSeconds = $Result.ElapsedSeconds
     })
 }
@@ -260,23 +330,28 @@ function Install-PlaywrightChromium {
 }
 
 function Invoke-NightlyValidation {
-    param([Parameter(Mandatory)][string]$ResultsDirectory)
+    param(
+        [Parameter(Mandatory)][string]$ResultsDirectory,
+        [Parameter(Mandatory)][string]$CommandFilePath,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$CommandArgumentPrefix)
     New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
     foreach ($projectPath in $nightlyExpectedProjects) {
         $projectIdentity = [IO.Path]::GetFileNameWithoutExtension($projectPath)
         $receiptPath = Join-Path $ResultsDirectory "receipt-$projectIdentity.json"
         $result = $null
         try {
-            $result = Invoke-BoundedCommand -FilePath 'dotnet' -Arguments @(
+            $arguments = @($CommandArgumentPrefix) + @(
                 'test', (Join-Path $repoRoot $projectPath), '--no-build', '--filter', $nightlyFilter,
                 '--logger', ('trx;LogFilePrefix={0}' -f "nightly-$partitionToken-$projectIdentity"),
-                '--results-directory', $ResultsDirectory) `
+                '--results-directory', $ResultsDirectory)
+            $result = Invoke-BoundedCommand -FilePath $CommandFilePath -Arguments $arguments `
                 -TimeoutMilliseconds ($nightlyProjectTimeoutSeconds * 1000)
         }
         catch {
             Write-Warning "Nightly project command failed before terminal evidence; project=$projectPath error=$($_.Exception.Message)"
             $result = [pscustomobject]@{
-                ExitCode = -1; TimedOut = $false; ProcessExited = $false
+                ExitCode = -1; TimedOut = $false; ProcessExited = $false; ProcessTreeExited = $false
+                CapturedProcessCount = 0
                 ElapsedSeconds = 0; Output = ''
             }
         }
@@ -917,7 +992,7 @@ if ($Lane -eq 'Completion' -and [string]::IsNullOrWhiteSpace($Phase)) {
 } else {
     Install-PlaywrightChromium -WithDeps:($Partition -eq 'Linux')
     $nightlyResults = Join-Path $resultsRoot 'nightly'
-    Invoke-NightlyValidation -ResultsDirectory $nightlyResults
+    Invoke-NightlyValidation -ResultsDirectory $nightlyResults -CommandFilePath 'dotnet' -CommandArgumentPrefix @()
 }
 
 Write-Output "validation_lane=$Lane"
