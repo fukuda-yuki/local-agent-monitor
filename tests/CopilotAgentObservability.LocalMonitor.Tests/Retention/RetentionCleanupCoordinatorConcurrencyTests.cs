@@ -16,9 +16,11 @@ public sealed class RetentionCleanupCoordinatorConcurrencyTests
         using var fixture = Fixture.Create();
         var adapter = new ConvergingAdapter();
         var firstCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCompletionWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var completionEntries = 0;
+        var pendingCompletionWaiters = 0;
         var coordinator = new RetentionCleanupCoordinator(
             fixture.Catalog,
             Registry(adapter),
@@ -38,6 +40,14 @@ public sealed class RetentionCleanupCoordinatorConcurrencyTests
                 {
                     secondCompletion.TrySetResult();
                 }
+            },
+            (mutation, acquiredSynchronously) =>
+            {
+                if (mutation != RetentionCatalogMutation.CompleteDeletion || acquiredSynchronously)
+                    return;
+
+                if (Interlocked.Increment(ref pendingCompletionWaiters) == 1)
+                    secondCompletionWaiting.TrySetResult();
             });
 
         using var deadline = new CancellationTokenSource(OrchestrationTimeout);
@@ -49,8 +59,10 @@ public sealed class RetentionCleanupCoordinatorConcurrencyTests
             await adapter.BothEntered.Task.WaitAsync(deadline.Token);
             adapter.Release();
             await firstCompletion.Task.WaitAsync(deadline.Token);
+            await secondCompletionWaiting.Task.WaitAsync(deadline.Token);
 
             Assert.Equal(1, Volatile.Read(ref completionEntries));
+            Assert.Equal(1, Volatile.Read(ref pendingCompletionWaiters));
             releaseCompletion.TrySetResult();
             await secondCompletion.Task.WaitAsync(deadline.Token);
             result = await cycle.WaitAsync(deadline.Token);
@@ -76,6 +88,7 @@ public sealed class RetentionCleanupCoordinatorConcurrencyTests
 
         Assert.Equal(2, result.Completed);
         Assert.Equal(2, Volatile.Read(ref completionEntries));
+        Assert.Equal(1, Volatile.Read(ref pendingCompletionWaiters));
         Assert.Equal(2, adapter.Calls);
     }
 

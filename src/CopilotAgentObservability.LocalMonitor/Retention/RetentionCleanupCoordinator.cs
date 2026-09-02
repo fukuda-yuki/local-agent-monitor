@@ -10,6 +10,7 @@ internal sealed class RetentionCleanupCoordinator
     private readonly RetentionSqliteMaintenance maintenance;
     private readonly TimeProvider time;
     private readonly Func<RetentionCatalogMutation, ValueTask>? catalogCheckpoint;
+    private readonly Action<RetentionCatalogMutation, bool>? catalogWaitCheckpoint;
     // Two consumers may finish adapters together. Catalog writes stay serialized
     // because Complete() is an unmapped write transaction; adapter deletes stay parallel.
     private readonly SemaphoreSlim catalogWrites = new(1, 1);
@@ -22,13 +23,15 @@ internal sealed class RetentionCleanupCoordinator
         RetentionCatalogStore? catalog,
         RetentionAdapterRegistry? adapters,
         TimeProvider? timeProvider,
-        Func<RetentionCatalogMutation, ValueTask>? catalogCheckpoint)
+        Func<RetentionCatalogMutation, ValueTask>? catalogCheckpoint,
+        Action<RetentionCatalogMutation, bool>? catalogWaitCheckpoint = null)
     {
         this.catalog = catalog;
         this.adapters = adapters;
         time = timeProvider ?? TimeProvider.System;
         maintenance = catalog is null ? new RetentionSqliteMaintenance() : new RetentionSqliteMaintenance(catalog);
         this.catalogCheckpoint = catalogCheckpoint;
+        this.catalogWaitCheckpoint = catalogWaitCheckpoint;
     }
 
     internal ValueTask<RetentionCycleResult> RunOneCycleAsync(CancellationToken stopScanningToken, CancellationToken drainToken) => RunCoreAsync(stopScanningToken, drainToken);
@@ -170,7 +173,9 @@ internal sealed class RetentionCleanupCoordinator
 
     private async ValueTask<T> CatalogAsync<T>(RetentionCatalogMutation mutation, Func<ValueTask<T>> operation)
     {
-        await catalogWrites.WaitAsync().ConfigureAwait(false);
+        var acquisition = catalogWrites.WaitAsync();
+        catalogWaitCheckpoint?.Invoke(mutation, acquisition.IsCompletedSuccessfully);
+        await acquisition.ConfigureAwait(false);
         try
         {
             if (catalogCheckpoint is not null)
