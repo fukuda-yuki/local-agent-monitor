@@ -1,4 +1,6 @@
 param(
+    [AllowEmptyString()]
+    [string] $RuntimeRoot,
     [string] $Url = 'http://127.0.0.1:4320',
     [string] $DbPath,
     [string] $InstallRoot,
@@ -13,7 +15,19 @@ param(
     [int] $TimeoutSeconds = 30
 )
 
+$runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
+$runtimeRootOverride = $RuntimeRoot
 . "$PSScriptRoot\common.ps1"
+
+if ($runtimeRootSupplied) {
+    try {
+        Set-LocalMonitorRuntimeRoot -RuntimeRoot $runtimeRootOverride
+    }
+    catch {
+        Write-Error 'runtime_root_invalid'
+        exit 1
+    }
+}
 
 function Remove-LocalMonitorStateForStartedProcess {
     param($Process)

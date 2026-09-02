@@ -20,6 +20,37 @@ $script:UserEnvironmentVariables = @(
     'OTEL_RESOURCE_ATTRIBUTES'
 )
 
+function Set-LocalMonitorRuntimeRoot {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $RuntimeRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RuntimeRoot) -or -not [System.IO.Path]::IsPathFullyQualified($RuntimeRoot)) {
+        throw 'runtime_root_invalid'
+    }
+
+    try {
+        $resolvedRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
+        $resolvedDefaultInstallRoot = Join-Path $resolvedRuntimeRoot 'app'
+        $resolvedDefaultDbPath = Join-Path $resolvedRuntimeRoot 'raw-store.db'
+        $resolvedLogDirectory = Join-Path $resolvedRuntimeRoot 'logs'
+        $resolvedStatePath = Join-Path $resolvedRuntimeRoot 'local-monitor.state.json'
+        $resolvedPidPath = Join-Path $resolvedRuntimeRoot 'local-monitor.pid'
+    }
+    catch {
+        throw 'runtime_root_invalid'
+    }
+
+    $script:RuntimeRoot = $resolvedRuntimeRoot
+    $script:DefaultInstallRoot = $resolvedDefaultInstallRoot
+    $script:DefaultDbPath = $resolvedDefaultDbPath
+    $script:LogDirectory = $resolvedLogDirectory
+    $script:StatePath = $resolvedStatePath
+    $script:PidPath = $resolvedPidPath
+}
+
 function Get-LocalMonitorDefaultInstallRoot {
     return $script:DefaultInstallRoot
 }

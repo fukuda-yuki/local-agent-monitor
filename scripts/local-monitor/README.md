@@ -110,6 +110,18 @@ Start immediately without registering startup:
 .\scripts\start.ps1 -Mode Published
 ```
 
+For one-shot isolated operation, pass the same non-empty absolute runtime root
+to all three lifecycle commands. This relocates the default app, database,
+logs, state, and PID paths for those invocations only; it is not persisted in
+the startup task:
+
+```powershell
+$runtimeRoot = 'C:\private\local-monitor-isolated'
+.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot
+.\scripts\status.ps1 -RuntimeRoot $runtimeRoot
+.\scripts\stop.ps1 -RuntimeRoot $runtimeRoot -Force
+```
+
 Uninstall keeps DB and logs by default:
 
 ```powershell

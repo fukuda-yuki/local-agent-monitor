@@ -105,6 +105,81 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void LifecycleScriptsShareExplicitRuntimeRootWithoutChangingNormalUserRuntimeFiles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var runtimeRoot = CreateTemporaryDirectory("cao-runtime-root-tests");
+        var normalRuntimeRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CopilotAgentObservability",
+            "LocalMonitor");
+        var normalRuntimeFingerprint = RuntimeFileFingerprint(normalRuntimeRoot);
+        try
+        {
+            var start = RunPowerShellScript(
+                ScriptPath("start.ps1"),
+                "-RuntimeRoot", runtimeRoot,
+                "-InstallRoot", Path.Combine(runtimeRoot, "app"),
+                "-Mode", "Published",
+                "-TimeoutSeconds", "1");
+
+            Assert.Equal(1, start.ExitCode);
+            Assert.Empty(start.Output);
+            Assert.Contains("published_app_not_installed", start.Error, StringComparison.Ordinal);
+            Assert.DoesNotContain(normalRuntimeRoot, start.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.True(Directory.Exists(Path.Combine(runtimeRoot, "logs")), "Start did not use the disposable log root.");
+            Assert.NotEmpty(Directory.GetFiles(Path.Combine(runtimeRoot, "logs"), "wrapper-*.log"));
+
+            File.WriteAllText(
+                Path.Combine(runtimeRoot, "local-monitor.state.json"),
+                "{\"process_id\":2147483647,\"url\":\"http://127.0.0.1:4320\"}");
+            File.WriteAllText(Path.Combine(runtimeRoot, "local-monitor.pid"), "2147483647");
+
+            var status = RunPowerShellScript(ScriptPath("status.ps1"), "-RuntimeRoot", runtimeRoot);
+
+            Assert.Equal(1, status.ExitCode);
+            Assert.Contains($"DB path: {Path.Combine(runtimeRoot, "raw-store.db")}", status.Output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"log path: {Path.Combine(runtimeRoot, "logs")}", status.Output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"install root: {Path.Combine(runtimeRoot, "app")}", status.Output, StringComparison.OrdinalIgnoreCase);
+
+            var stop = RunPowerShellScript(ScriptPath("stop.ps1"), "-RuntimeRoot", runtimeRoot);
+
+            Assert.Equal(0, stop.ExitCode);
+            Assert.Equal("not_running\n", stop.Output.Replace("\r\n", "\n", StringComparison.Ordinal));
+            Assert.False(File.Exists(Path.Combine(runtimeRoot, "local-monitor.state.json")));
+            Assert.False(File.Exists(Path.Combine(runtimeRoot, "local-monitor.pid")));
+            Assert.Equal(normalRuntimeFingerprint, RuntimeFileFingerprint(normalRuntimeRoot));
+        }
+        finally
+        {
+            Directory.Delete(runtimeRoot, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("start.ps1", "")]
+    [InlineData("stop.ps1", "   ")]
+    [InlineData("status.ps1", "relative-root")]
+    public void LifecycleScriptsRejectInvalidExplicitRuntimeRootWithoutDisclosingIt(string script, string runtimeRoot)
+    {
+        var arguments = new List<string> { "-RuntimeRoot", runtimeRoot };
+        if (script == "start.ps1")
+        {
+            arguments.AddRange(["-InstallRoot", Path.GetFullPath(Path.Combine(Path.GetTempPath(), "cao-runtime-root-invalid-app"))]);
+        }
+        var result = RunPowerShellScript(ScriptPath(script), [.. arguments]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Contains("runtime_root_invalid", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("relative-root", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PackageReleaseScriptDefinesSelfContainedWindowsZipLayout()
     {
         var package = File.ReadAllText(ScriptPath("package-release.ps1"));
@@ -2800,6 +2875,29 @@ public class LocalMonitorScriptTests
         var path = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static string RuntimeFileFingerprint(string runtimeRoot)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var path in new[]
+                 {
+                     Path.Combine(runtimeRoot, "local-monitor.state.json"),
+                     Path.Combine(runtimeRoot, "local-monitor.pid"),
+                 }.Concat(Directory.Exists(Path.Combine(runtimeRoot, "logs"))
+                     ? Directory.EnumerateFiles(Path.Combine(runtimeRoot, "logs"), "*", SearchOption.AllDirectories)
+                     : []))
+        {
+            var relativePath = Path.GetRelativePath(runtimeRoot, path);
+            hash.AppendData(Encoding.UTF8.GetBytes(relativePath));
+            if (File.Exists(path))
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                hash.AppendData(SHA256.HashData(stream));
+            }
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private sealed record ProcessResult(int ExitCode, byte[] StandardOutputBytes, byte[] StandardErrorBytes)

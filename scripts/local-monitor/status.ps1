@@ -1,9 +1,23 @@
 param(
+    [AllowEmptyString()]
+    [string] $RuntimeRoot,
     [string] $TaskName = 'CopilotAgentObservability LocalMonitor',
     [string] $InstallRoot
 )
 
+$runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
+$runtimeRootOverride = $RuntimeRoot
 . "$PSScriptRoot\common.ps1"
+
+if ($runtimeRootSupplied) {
+    try {
+        Set-LocalMonitorRuntimeRoot -RuntimeRoot $runtimeRootOverride
+    }
+    catch {
+        Write-Error 'runtime_root_invalid'
+        exit 1
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-LocalMonitorDefaultInstallRoot

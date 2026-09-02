@@ -1,9 +1,23 @@
 param(
+    [AllowEmptyString()]
+    [string] $RuntimeRoot,
     [int] $TimeoutSeconds = 10,
     [switch] $Force
 )
 
+$runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
+$runtimeRootOverride = $RuntimeRoot
 . "$PSScriptRoot\common.ps1"
+
+if ($runtimeRootSupplied) {
+    try {
+        Set-LocalMonitorRuntimeRoot -RuntimeRoot $runtimeRootOverride
+    }
+    catch {
+        Write-Error 'runtime_root_invalid'
+        exit 1
+    }
+}
 
 $state = Get-LocalMonitorState
 if ($null -eq $state) {
