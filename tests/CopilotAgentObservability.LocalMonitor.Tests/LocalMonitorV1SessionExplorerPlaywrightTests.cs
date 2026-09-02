@@ -764,7 +764,15 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
+        var navigationUrls = new List<string>();
         var requestUrls = new List<string>();
+        page.FrameNavigated += (_, frame) =>
+        {
+            if (frame == page.MainFrame)
+            {
+                navigationUrls.Add(frame.Url);
+            }
+        };
         page.Request += (_, request) => requestUrls.Add(request.Url);
         await page.RouteAsync("**/local-monitor-explorer.js", route => route.FulfillAsync(new RouteFulfillOptions
         {
@@ -774,16 +782,47 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         }));
 
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        navigationUrls.Clear();
+        requestUrls.Clear();
+
+        void AssertSafeExplorerNavigation(string url)
+        {
+            var navigation = new Uri(url);
+            Assert.Equal(host.Url, navigation.GetLeftPart(UriPartial.Authority));
+            Assert.Equal("/sessions", navigation.AbsolutePath);
+            Assert.True(navigation.Query is "" or "?", $"Unexpected Explorer query in {url}.");
+            Assert.True(string.IsNullOrEmpty(navigation.Fragment), $"Unexpected Explorer fragment in {url}.");
+        }
+
         await page.Locator("#session-search").FillAsync("transient-sensitive-query");
         await page.Locator("#session-model").FillAsync("transient-sensitive-model");
         await page.Locator("#session-search").PressAsync("Enter");
+        await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        var searchEnterNavigationUrls = navigationUrls.ToArray();
+        var searchEnterRequestUrls = requestUrls.ToArray();
+
+        navigationUrls.Clear();
+        requestUrls.Clear();
+        await page.Locator("#session-search").FillAsync("transient-sensitive-query");
+        await page.Locator("#session-model").FillAsync("transient-sensitive-model");
         await page.Locator("#session-explorer-filters button[type='submit']").PressAsync("Enter");
         await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        var submitButtonEnterNavigationUrls = navigationUrls.ToArray();
+        var submitButtonEnterRequestUrls = requestUrls.ToArray();
 
-        Assert.Equal(host.Url + "/sessions", page.Url);
-        Assert.DoesNotContain(requestUrls, url => Uri.UnescapeDataString(url)
-            .Contains("transient-sensitive", StringComparison.Ordinal));
-        Assert.DoesNotContain(requestUrls, url => url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
+        foreach (var submitNavigationUrls in new[] { searchEnterNavigationUrls, submitButtonEnterNavigationUrls })
+        {
+            Assert.NotEmpty(submitNavigationUrls);
+            Assert.All(submitNavigationUrls, AssertSafeExplorerNavigation);
+        }
+
+        foreach (var submitRequestUrls in new[] { searchEnterRequestUrls, submitButtonEnterRequestUrls })
+        {
+            Assert.DoesNotContain(submitRequestUrls, url => Uri.UnescapeDataString(url)
+                .Contains("transient-sensitive", StringComparison.Ordinal));
+            Assert.DoesNotContain(submitRequestUrls, url => new Uri(url).AbsolutePath
+                .Equals("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
