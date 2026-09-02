@@ -1187,7 +1187,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
+        var context = await browser.NewContextAsync(new BrowserNewContextOptions { TimezoneId = "Asia/Tokyo" });
+        var page = await context.NewPageAsync();
         var fixture = "summary-empty.json";
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route => route.FulfillAsync(new RouteFulfillOptions
         {
