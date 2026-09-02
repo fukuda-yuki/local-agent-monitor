@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.Telemetry.Repositories;
 using Microsoft.AspNetCore.Builder;
@@ -29,6 +30,10 @@ public sealed class LocalRepositoryRouteTests
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
 
+        var repositoryRoutes = host.RouteMethodsOwnedBy(
+            typeof(LocalMonitorV1CollectionRoutes),
+            typeof(LocalRepositoryRoutes));
+
         Assert.Equal(
             [
                 ("GET", "/api/local-monitor/v1/repositories"),
@@ -39,7 +44,8 @@ public sealed class LocalRepositoryRouteTests
                 ("POST", "/api/local-monitor/v1/session-repository-actions"),
                 ("GET", "/api/local-monitor/v1/sessions/{sessionId}/repository-assignment"),
             ],
-            host.RouteMethods.Where(static item => item.Pattern.StartsWith("/api/local-monitor/v1", StringComparison.Ordinal)).ToArray());
+            repositoryRoutes);
+        Assert.Contains(("GET", "/api/local-monitor/v1/settings/runtime"), host.RouteMethods);
     }
 
     [Fact]
