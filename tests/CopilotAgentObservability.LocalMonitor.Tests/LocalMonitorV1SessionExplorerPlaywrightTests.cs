@@ -151,6 +151,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             PreviewRow("018f0000-0000-7000-8000-000000000012", "not_observed", Array.Empty<string>(), "source_unsupported", Array.Empty<string>(), "not_captured"),
             PreviewRow("018f0000-0000-7000-8000-000000000013", "capture_gap", Array.Empty<string>(), "certification_pending", new[] { "pending-model" }, "expired_pending_deletion"),
             PreviewRow("018f0000-0000-7000-8000-000000000014", "redacted", Array.Empty<string>(), "expired", Array.Empty<string>(), "available"),
+            PreviewRow("018f0000-0000-7000-8000-000000000015", "recorded", new[] { "vscode" }, "source_unsupported", Array.Empty<string>(), "available"),
         };
         var preview = JsonSerializer.Serialize(new { schema_version = "local-ai-repository-preview.response.v1", snapshot_id = "018f0000-0000-7000-8000-000000000020", payload_sha256 = hash, expires_at = "2026-08-31T12:00:00.0000000+00:00", included = rows, excluded = Array.Empty<object>(), truncated = false });
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
@@ -167,16 +168,22 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(content).ToContainTextAsync("<img src=x onerror=alert(1)>");
         await Expect(content).ToContainTextAsync("pending-model");
         Assert.Equal(0, await content.Locator("img").CountAsync());
-        foreach (var (state, count) in new[] { ("not-observed", 1), ("unsupported", 1), ("capture-gap", 1), ("certification-pending", 1), ("raw-not-captured", 2), ("raw-expired", 2) })
+        foreach (var (state, count) in new[] { ("not-observed", 1), ("unsupported", 2), ("capture-gap", 1), ("certification-pending", 1), ("raw-not-captured", 2), ("raw-expired", 2) })
         {
             await Expect(content.Locator($"[data-fact-state='{state}'] .fact-state-primary")).ToHaveCountAsync(count);
         }
         await Expect(content.Locator("[data-fact-state='not-observed'] p")).ToContainTextAsync("実際に使われなかったとは断定できません");
-        await Expect(content.Locator("[data-fact-state='unsupported'] p")).ToContainTextAsync("取得元:");
+        await Expect(content.Locator("[data-fact-state='unsupported'] p")).ToHaveTextAsync(new[]
+        {
+            "取得元: 取得元を確認できません。この項目は取得元で記録されません。",
+            "取得元: vscode。この項目は取得元で記録されません。",
+        });
         await Expect(content.Locator("[data-fact-state='capture-gap'] p")).ToContainTextAsync("記録が一部欠けています");
         await Expect(content.Locator("[data-fact-state='raw-not-captured'] p").First).ToContainTextAsync("記録されていません");
         await Expect(content.Locator("[data-fact-state='raw-expired'] p").First).ToContainTextAsync("保存期間");
         await Expect(content.Locator(".fact-state-primary", new() { HasText = "0件" })).ToHaveCountAsync(0);
+        await Expect(content.Locator("span p")).ToHaveCountAsync(0);
+        await Expect(content.GetByText("取得元: vscode。この項目は取得元で記録されません。", new() { Exact = true })).ToBeVisibleAsync();
         foreach (var rawToken in new[] { "not_observed", "source_unsupported", "capture_gap", "certification_pending", "not_captured", "expired_pending_deletion", "redacted" })
         {
             await Expect(content).Not.ToContainTextAsync(rawToken);
