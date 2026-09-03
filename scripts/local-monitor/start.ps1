@@ -1,6 +1,4 @@
 param(
-    [AllowEmptyString()]
-    [string] $RuntimeRoot,
     [string] $Url = 'http://127.0.0.1:4320',
     [string] $DbPath,
     [string] $InstallRoot,
@@ -12,7 +10,9 @@ param(
     [string[]] $SkillDiscoveryDirectory = @(),
     [switch] $NoBrowser = $true,
     [switch] $WaitReady = $true,
-    [int] $TimeoutSeconds = 30
+    [int] $TimeoutSeconds = 30,
+    [AllowEmptyString()]
+    [string] $RuntimeRoot
 )
 
 $runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
@@ -94,6 +94,20 @@ if ([string]::IsNullOrWhiteSpace($DbPath)) {
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-LocalMonitorDefaultInstallRoot
 }
+if ($runtimeRootSupplied) {
+    try {
+        $DbPath = [System.IO.Path]::GetFullPath($DbPath)
+        $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+    }
+    catch {
+        Write-Error 'runtime_state_mismatch'
+        exit 1
+    }
+}
+
+$expectedStateMode = if ($Mode -eq 'DotnetRun') { 'dotnet-run' } else { 'published' }
+$expectedRepoRoot = if ($Mode -eq 'DotnetRun') { Get-LocalMonitorRepoRoot } else { '' }
+$expectedExecutablePath = if ($Mode -eq 'DotnetRun') { 'dotnet' } else { Get-LocalMonitorPublishedExePath -InstallRoot $InstallRoot }
 
 if (-not (Test-LocalMonitorLoopbackUrl -Url $Url)) {
     Write-Error 'non_loopback_url'
@@ -104,6 +118,21 @@ Initialize-LocalMonitorRuntime -DbPath $DbPath
 
 $live = Test-LocalMonitorHealth -Url $Url -Path '/health/live'
 if ($null -ne $live -and [int] $live.StatusCode -eq 200) {
+    if ($runtimeRootSupplied) {
+        $existingState = Get-LocalMonitorState
+        if (-not (Test-LocalMonitorExplicitRuntimeState `
+            -State $existingState `
+            -ExpectedUrl $Url `
+            -ExpectedDbPath $DbPath `
+            -ExpectedInstallRoot $InstallRoot `
+            -ExpectedMode $expectedStateMode `
+            -ExpectedRepoRoot $expectedRepoRoot `
+            -ExpectedExecutablePath $expectedExecutablePath `
+            -RequireRunning)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+    }
     if ($WaitReady) {
         $readyDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {

@@ -1,8 +1,8 @@
 param(
-    [AllowEmptyString()]
-    [string] $RuntimeRoot,
     [string] $TaskName = 'CopilotAgentObservability LocalMonitor',
-    [string] $InstallRoot
+    [string] $InstallRoot,
+    [AllowEmptyString()]
+    [string] $RuntimeRoot
 )
 
 $runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
@@ -23,7 +23,12 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-LocalMonitorDefaultInstallRoot
 }
 
+$stateFileExists = Test-Path -LiteralPath $script:StatePath
 $state = Get-LocalMonitorState
+if ($runtimeRootSupplied -and $stateFileExists -and -not (Test-LocalMonitorExplicitRuntimeState -State $state)) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
 $url = [string] (Get-LocalMonitorStateValue -State $state -Name 'url' -DefaultValue $script:DefaultUrl)
 $dbPath = [string] (Get-LocalMonitorStateValue -State $state -Name 'db_path' -DefaultValue $script:DefaultDbPath)
 $stateInstallRoot = [string] (Get-LocalMonitorStateValue -State $state -Name 'install_root' -DefaultValue $InstallRoot)
@@ -37,8 +42,12 @@ if ($null -ne $processId) {
     $processRunning = Test-LocalMonitorProcess -ProcessId ([int] $processId)
 }
 
-$live = Test-LocalMonitorHealth -Url $url -Path '/health/live'
-$ready = Test-LocalMonitorHealth -Url $url -Path '/health/ready'
+$live = $null
+$ready = $null
+if (-not $runtimeRootSupplied -or $stateFileExists) {
+    $live = Test-LocalMonitorHealth -Url $url -Path '/health/live'
+    $ready = Test-LocalMonitorHealth -Url $url -Path '/health/ready'
+}
 $readyStatus = 'unknown'
 $degradedReasons = @()
 $projectionLag = $null

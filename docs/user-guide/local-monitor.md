@@ -114,6 +114,11 @@ Task Scheduler 登録もしません。
 既定の app、DB、logs、state、PID の場所をその実行だけ切り替え、Task Scheduler には
 保存されません。
 
+明示 root では state、PID、process、URL、DB / install path、mode、repository、
+executable identity が一致する場合だけ稼働中と判定します。不一致は process を停止せず
+state も削除せず `runtime_state_mismatch` で終了します。state がない場合、`status.ps1`
+は通常ユーザー領域の既定 URL を probe しません。
+
 ```powershell
 $runtimeRoot = 'C:\private\local-monitor-isolated'
 .\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot

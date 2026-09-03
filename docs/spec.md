@@ -1272,6 +1272,14 @@ sanitized. The canonical contract is
 
 Publicly documented interfaces are:
 
+For the one-shot `-RuntimeRoot` lifecycle interface, a healthy endpoint is
+owned only when the same root has parseable state plus a matching PID file,
+process identity, loopback URL, canonical DB/install paths, mode, repository,
+and executable identity. A mismatch fails as `runtime_state_mismatch` without
+probing further, stopping the process, or deleting state. Status does not probe
+the default URL when explicit-root state is absent, and explicit-root stop
+terminates the validated owned process tree.
+
 - Config CLI command names, arguments, CSV / JSON output shape。
 - Config CLI configuration setup commands and `setup.v1` JSON result:
   `setup plan --adapter github-copilot --target <vscode|cli|app-sdk|all>`,

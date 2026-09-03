@@ -1,8 +1,8 @@
 param(
-    [AllowEmptyString()]
-    [string] $RuntimeRoot,
     [int] $TimeoutSeconds = 10,
-    [switch] $Force
+    [switch] $Force,
+    [AllowEmptyString()]
+    [string] $RuntimeRoot
 )
 
 $runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
@@ -19,12 +19,21 @@ if ($runtimeRootSupplied) {
     }
 }
 
+$stateFileExists = Test-Path -LiteralPath $script:StatePath
 $state = Get-LocalMonitorState
 if ($null -eq $state) {
+    if ($runtimeRootSupplied -and $stateFileExists) {
+        Write-Error 'runtime_state_mismatch'
+        exit 1
+    }
     Write-Output "not_running"
     exit 0
 }
 
+if ($runtimeRootSupplied -and -not (Test-LocalMonitorExplicitRuntimeState -State $state)) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
 $processId = [int] $state.process_id
 if (-not (Test-LocalMonitorProcess -ProcessId $processId)) {
     Remove-LocalMonitorState
@@ -36,6 +45,25 @@ $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
 if ($null -eq $process) {
     Remove-LocalMonitorState
     Write-Output "not_running"
+    exit 0
+}
+
+if ($runtimeRootSupplied) {
+    try {
+        $process.Kill($true)
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            Write-Error 'stop_timeout'
+            exit 1
+        }
+    }
+    catch {
+        Write-Error 'stop_failed'
+        exit 1
+    }
+
+    Remove-LocalMonitorState
+    Write-LocalMonitorLog "stop process_id=$processId"
+    Write-Output "stopped"
     exit 0
 }
 

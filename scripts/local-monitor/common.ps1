@@ -647,6 +647,109 @@ function Get-LocalMonitorStateValue {
     return $property.Value
 }
 
+function Test-LocalMonitorExplicitRuntimeState {
+    param(
+        $State,
+        [string] $ExpectedUrl,
+        [string] $ExpectedDbPath,
+        [string] $ExpectedInstallRoot,
+        [string] $ExpectedMode,
+        [string] $ExpectedRepoRoot,
+        [string] $ExpectedExecutablePath,
+        [switch] $RequireRunning
+    )
+
+    if ($null -eq $State -or -not (Test-Path -LiteralPath $script:PidPath -PathType Leaf)) {
+        return $false
+    }
+
+    $processId = 0
+    $pidFileProcessId = 0
+    try {
+        $pidFileValue = Get-Content -Raw -LiteralPath $script:PidPath -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    if (-not [int]::TryParse([string] (Get-LocalMonitorStateValue -State $State -Name 'process_id'), [ref] $processId) `
+        -or $processId -le 0 `
+        -or -not [int]::TryParse($pidFileValue, [ref] $pidFileProcessId) `
+        -or $pidFileProcessId -ne $processId) {
+        return $false
+    }
+
+    $url = [string] (Get-LocalMonitorStateValue -State $State -Name 'url')
+    $dbPath = [string] (Get-LocalMonitorStateValue -State $State -Name 'db_path')
+    $installRoot = [string] (Get-LocalMonitorStateValue -State $State -Name 'install_root')
+    $mode = [string] (Get-LocalMonitorStateValue -State $State -Name 'mode')
+    $repoRoot = [string] (Get-LocalMonitorStateValue -State $State -Name 'repo_root')
+    $executablePath = [string] (Get-LocalMonitorStateValue -State $State -Name 'executable_path')
+    if ([string]::IsNullOrWhiteSpace($url) `
+        -or -not (Test-LocalMonitorLoopbackUrl -Url $url) `
+        -or [string]::IsNullOrWhiteSpace($dbPath) `
+        -or [string]::IsNullOrWhiteSpace($installRoot) `
+        -or -not [System.IO.Path]::IsPathFullyQualified($dbPath) `
+        -or -not [System.IO.Path]::IsPathFullyQualified($installRoot)) {
+        return $false
+    }
+
+    try {
+        $canonicalDbPath = [System.IO.Path]::GetFullPath($dbPath)
+        $canonicalInstallRoot = [System.IO.Path]::GetFullPath($installRoot)
+    }
+    catch {
+        return $false
+    }
+    if (-not $dbPath.Equals($canonicalDbPath, [System.StringComparison]::OrdinalIgnoreCase) `
+        -or -not $installRoot.Equals($canonicalInstallRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $dbPath = $canonicalDbPath
+    $installRoot = $canonicalInstallRoot
+
+    if ($mode -eq 'dotnet-run') {
+        if ($repoRoot -cne (Get-LocalMonitorRepoRoot) -or $executablePath -cne 'dotnet') {
+            return $false
+        }
+    }
+    elseif ($mode -eq 'published') {
+        $expectedPublishedExecutable = Get-LocalMonitorPublishedExePath -InstallRoot $installRoot
+        if ($repoRoot -cne '' -or -not $executablePath.Equals($expectedPublishedExecutable, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    else {
+        return $false
+    }
+
+    $expectedPairs = @(
+        @{ Key = 'ExpectedUrl'; Actual = $url; Expected = $ExpectedUrl; Path = $false },
+        @{ Key = 'ExpectedDbPath'; Actual = $dbPath; Expected = $ExpectedDbPath; Path = $true },
+        @{ Key = 'ExpectedInstallRoot'; Actual = $installRoot; Expected = $ExpectedInstallRoot; Path = $true },
+        @{ Key = 'ExpectedMode'; Actual = $mode; Expected = $ExpectedMode; Path = $false },
+        @{ Key = 'ExpectedRepoRoot'; Actual = $repoRoot; Expected = $ExpectedRepoRoot; Path = $true },
+        @{ Key = 'ExpectedExecutablePath'; Actual = $executablePath; Expected = $ExpectedExecutablePath; Path = $mode -eq 'published' }
+    )
+    foreach ($pair in $expectedPairs) {
+        if (-not $PSBoundParameters.ContainsKey($pair.Key)) {
+            continue
+        }
+        $expected = [string] $pair.Expected
+        if ($pair.Path -and -not [string]::IsNullOrEmpty($expected)) {
+            try { $expected = [System.IO.Path]::GetFullPath($expected) } catch { return $false }
+        }
+        if (-not ([string] $pair.Actual).Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return -not $RequireRunning
+    }
+    return Test-LocalMonitorProcess -ProcessId $processId
+}
+
 function Remove-LocalMonitorState {
     Remove-Item -LiteralPath $script:StatePath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $script:PidPath -ErrorAction SilentlyContinue
