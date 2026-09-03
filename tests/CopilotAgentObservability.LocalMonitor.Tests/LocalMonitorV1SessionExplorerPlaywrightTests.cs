@@ -142,6 +142,65 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
     [Fact]
     [Trait("ValidationLane", "Nightly")]
+    public async Task RepositoryAiPreviewUsesSharedFactStatesWithoutFlatteningRecordedValuesOrHostileText()
+    {
+        var hash = new string('a', 64);
+        var rows = new[]
+        {
+            PreviewRow("018f0000-0000-7000-8000-000000000011", "recorded", new[] { "vscode" }, "recorded", new[] { "<img src=x onerror=alert(1)>" }, "available"),
+            PreviewRow("018f0000-0000-7000-8000-000000000012", "not_observed", Array.Empty<string>(), "source_unsupported", Array.Empty<string>(), "not_captured"),
+            PreviewRow("018f0000-0000-7000-8000-000000000013", "capture_gap", Array.Empty<string>(), "certification_pending", new[] { "pending-model" }, "expired_pending_deletion"),
+            PreviewRow("018f0000-0000-7000-8000-000000000014", "redacted", Array.Empty<string>(), "expired", Array.Empty<string>(), "available"),
+        };
+        var preview = JsonSerializer.Serialize(new { schema_version = "local-ai-repository-preview.response.v1", snapshot_id = "018f0000-0000-7000-8000-000000000020", payload_sha256 = hash, expires_at = "2026-08-31T12:00:00.0000000+00:00", included = rows, excluded = Array.Empty<object>(), truncated = false });
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(Json("""{"readiness_state":"ready"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/repository-preview", route => route.FulfillAsync(Json(preview)));
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await page.Locator("#session-ai-open").ClickAsync(); await page.Locator("#session-ai-preview").ClickAsync();
+
+        var content = page.Locator("#session-ai-preview-content");
+        await Expect(content).ToContainTextAsync("vscode");
+        await Expect(content).ToContainTextAsync("<img src=x onerror=alert(1)>");
+        await Expect(content).ToContainTextAsync("pending-model");
+        Assert.Equal(0, await content.Locator("img").CountAsync());
+        foreach (var (state, count) in new[] { ("not-observed", 1), ("unsupported", 1), ("capture-gap", 1), ("certification-pending", 1), ("raw-not-captured", 2), ("raw-expired", 2) })
+        {
+            await Expect(content.Locator($"[data-fact-state='{state}'] .fact-state-primary")).ToHaveCountAsync(count);
+        }
+        await Expect(content.Locator("[data-fact-state='not-observed'] p")).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(content.Locator("[data-fact-state='unsupported'] p")).ToContainTextAsync("取得元:");
+        await Expect(content.Locator("[data-fact-state='capture-gap'] p")).ToContainTextAsync("記録が一部欠けています");
+        await Expect(content.Locator("[data-fact-state='raw-not-captured'] p").First).ToContainTextAsync("記録されていません");
+        await Expect(content.Locator("[data-fact-state='raw-expired'] p").First).ToContainTextAsync("保存期間");
+        await Expect(content.Locator(".fact-state-primary", new() { HasText = "0件" })).ToHaveCountAsync(0);
+        foreach (var rawToken in new[] { "not_observed", "source_unsupported", "capture_gap", "certification_pending", "not_captured", "expired_pending_deletion", "redacted" })
+        {
+            await Expect(content).Not.ToContainTextAsync(rawToken);
+        }
+
+        object PreviewRow(string sessionId, string sourceState, string[] sourceValues, string modelState, string[] modelValues, string contentState) => new
+        {
+            session_id = sessionId,
+            session_archive_state = "active",
+            session_archive_revision = 7,
+            repository_archive_state = "active",
+            repository_archive_revision = 9,
+            archive_exclusion_reason = (string?)null,
+            source = new { state = sourceState, values = sourceValues },
+            model = new { state = modelState, values = modelValues },
+            completeness = "full",
+            content_state = contentState,
+            workspace_revision = hash,
+            truncated = false,
+        };
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Nightly")]
     public async Task RepositoryAiRendersClosedResultAndOnlyCanonicalEvidenceAsAnExactLink()
     {
         const string runId = "018f0000-0000-7000-8000-000000000021";
@@ -165,8 +224,12 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(previewContent.GetByRole(AriaRole.Heading, new() { Name = "除外項目の技術情報 1件", Exact = true })).ToBeVisibleAsync();
         await Expect(previewContent).ToContainTextAsync($"セッションID: {SessionId}");
         await Expect(previewContent).ToContainTextAsync($"ワークスペースのSHA-256: {hash}");
-        await Expect(previewContent).ToContainTextAsync("内容は記録されていません / 記録が一部欠けています / 必要な記録がそろっています");
-        await Expect(previewContent).ToContainTextAsync("記録が一部欠けています / 内訳を表示できません / ライフサイクルまたは入力の記録が一部欠けています");
+        await Expect(previewContent).ToContainTextAsync("内容は記録されていません");
+        await Expect(previewContent).ToContainTextAsync("記録された形式を安全に確認できません");
+        await Expect(previewContent).ToContainTextAsync("記録が表示可能な範囲を超えています");
+        await Expect(previewContent).ToContainTextAsync("記録された値に整合しない項目があります");
+        await Expect(previewContent).ToContainTextAsync("必要な記録がそろっています");
+        await Expect(previewContent).ToContainTextAsync("ライフサイクルまたは入力の記録が一部欠けています");
         await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("セッションがアーカイブ済みのため除外されました");
         await page.Locator("#session-ai-start").ClickAsync();
         var renderedResult = page.Locator("#session-ai-result");
