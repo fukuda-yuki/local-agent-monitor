@@ -1221,8 +1221,25 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-overview-time]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("今回の記録にはありません");
-        foreach (var name in new[] { "input", "output", "cache-read", "new-input", "coverage" })
+        foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
             await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("今回の記録にはありません");
+        var overviewCoverage = page.Locator("[data-session-overview] .local-monitor-session-coverage");
+        var fixedCoverage = page.Locator("[data-session-fixed-coverage]");
+        foreach (var coverage in new[] { overviewCoverage, fixedCoverage })
+        {
+            Assert.False(await coverage.EvaluateAsync<bool>("node => Boolean(node.querySelector('span p'))"));
+            var instruction = coverage.Locator("li", new() { HasText = "指示:" });
+            await Expect(instruction).ToContainTextAsync("今回の記録にはありません");
+            await Expect(instruction).ToContainTextAsync("実際に使われなかったとは断定できません");
+            await Expect(instruction.Locator("p")).ToHaveCountAsync(1);
+            await Expect(instruction).Not.ToContainTextAsync("0件");
+            await Expect(instruction).Not.ToContainTextAsync("not_observed");
+
+            var skill = coverage.Locator("li", new() { HasText = "スキル:" });
+            await Expect(skill).ToContainTextAsync("0件");
+            await Expect(skill).ToContainTextAsync("対象の記録範囲は完了しています");
+            await Expect(skill).Not.ToContainTextAsync("complete_zero");
+        }
 
         fixture = "summary-nonrecorded-evidence.json";
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
