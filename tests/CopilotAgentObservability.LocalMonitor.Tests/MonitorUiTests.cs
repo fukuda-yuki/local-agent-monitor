@@ -297,7 +297,12 @@ public class MonitorUiTests
         await using var host = await StartHostAsync(temp);
 
         var script = await host.Client.GetStringAsync("/monitor-diagnostics.js");
+        var diagnostics = await host.Client.GetStringAsync("/diagnostics");
 
+        Assert.Contains("/local-monitor-v1-shared.js", diagnostics, StringComparison.Ordinal);
+        Assert.True(
+            diagnostics.IndexOf("/local-monitor-v1-shared.js", StringComparison.Ordinal)
+            < diagnostics.IndexOf("/monitor-diagnostics.js", StringComparison.Ordinal));
         Assert.Contains("/api/monitor/source-diagnostics${query}", script);
         Assert.Contains("sourceDiagnosticsPageSize = 50", script);
         Assert.Contains("maximumSourceDiagnosticsPages = 200", script);

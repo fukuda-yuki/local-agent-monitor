@@ -26,6 +26,7 @@ public sealed class SourceDiagnosticsPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
+        Assert.True(await page.EvaluateAsync<bool>("() => typeof window.LocalMonitorV1FactState?.render === 'function'"));
         await Expect(page.Locator("#source-diagnostics-rows tr")).ToHaveCountAsync(1);
         await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("実際に診断対象がなかったとは断定できません");
@@ -64,8 +65,8 @@ public sealed class SourceDiagnosticsPlaywrightTests
         var table = page.Locator("#source-diagnostics-rows");
         foreach (var expected in new[]
         {
-            "対応済み", "対応済み（未知フィールドあり）", "未対応のバージョン", "スキーマ変更を検出",
-            "認識済みレコードの欠落を検出", "アダプターエラー", "未知フィールドがあります",
+            "対応済み", "対応済み（未知フィールドあり）", "この取得元では記録できません", "記録が一部欠けています",
+            "認識済みレコードの欠落を検出しました", "未知フィールドがあります",
             "payload を解析できませんでした", "アダプター処理に失敗しました", "対応は不要です",
             "未知フィールドを確認してください", "sanitized なアダプター診断を確認してください",
         })
@@ -73,7 +74,12 @@ public sealed class SourceDiagnosticsPlaywrightTests
             await Expect(table).ToContainTextAsync(expected);
         }
         await Expect(table.Locator("details summary").First).ToHaveTextAsync("技術情報");
+        await Expect(table.Locator("span > details, span > p")).ToHaveCountAsync(0);
+        await Expect(table.Locator("tr").First.Locator("td").Nth(4)).ToContainTextAsync("0件");
+        await Expect(table.Locator("tr").First.Locator("td").Nth(4)).ToContainTextAsync("追加の互換性理由はありません");
+        await Expect(table.Locator("code").First).Not.ToBeVisibleAsync();
         await table.Locator("details summary").First.PressAsync("Enter");
+        await Expect(table.Locator("code").First).ToBeVisibleAsync();
         await Expect(table).ToContainTextAsync("supported");
         await Expect(table).ToContainTextAsync("adapter_exception");
         await Expect(table).ToContainTextAsync("hostile <img src=x onerror=alert(1)>");
@@ -81,10 +87,14 @@ public sealed class SourceDiagnosticsPlaywrightTests
         await Expect(table).ToContainTextAsync("1");
         await Expect(table).ToContainTextAsync("2");
         await Expect(table).ToContainTextAsync("3");
+        await Expect(table.Locator("tr").Nth(1).Locator("td").Last.Locator("span").Nth(0)).ToHaveTextAsync("1");
+        await Expect(table.Locator("tr").Nth(1).Locator("td").Last.Locator("span").Nth(1)).ToHaveTextAsync("2");
+        await Expect(table.Locator("tr").Nth(1).Locator("td").Last.Locator("span").Nth(2)).ToHaveTextAsync("3");
+        await Expect(table).ToContainTextAsync("今回の記録にはありません");
     }
 
     [Fact]
-    public async Task Diagnostics_RejectsUnknownSourceDiagnosticEnumInsteadOfRenderingItAsALabel()
+    public async Task Diagnostics_RejectsAnInconsistentSourceDiagnosticTupleWithoutPartialDom()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(
@@ -97,13 +107,13 @@ public sealed class SourceDiagnosticsPlaywrightTests
         await page.RouteAsync("**/api/monitor/source-diagnostics?limit=50", route => route.FulfillAsync(new()
         {
             ContentType = "application/json",
-            Body = "{\"items\":[{\"observation_id\":\"obs-unknown\",\"source_surface\":\"claude-code\",\"source_application_version\":\"1\",\"source_adapter\":\"otel\",\"adapter_version\":\"1\",\"compatibility_state\":\"future_state\",\"reason_codes\":[],\"next_action\":\"none\",\"unknown_span_count\":0,\"unknown_event_count\":0,\"unknown_attribute_count\":0,\"observed_at\":\"2026-01-01T00:00:00Z\"}],\"next_cursor\":null}",
+            Body = "{\"items\":[{\"observation_id\":\"obs-unknown\",\"source_surface\":\"claude-code\",\"source_application_version\":\"1\",\"source_adapter\":\"otel\",\"adapter_version\":\"1\",\"compatibility_state\":\"supported\",\"reason_codes\":[\"unknown_fields_observed\"],\"next_action\":\"review_unknown_fields\",\"unknown_span_count\":0,\"unknown_event_count\":0,\"unknown_attribute_count\":0,\"observed_at\":\"2026-01-01T00:00:00Z\"}],\"next_cursor\":null}",
         }));
 
         await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
         await Expect(page.Locator("#source-diagnostics-rows")).ToHaveTextAsync("ソース互換性の診断を読み込めませんでした。");
-        await Expect(page.Locator("#source-diagnostics-rows")).Not.ToContainTextAsync("future_state");
+        await Expect(page.Locator("#source-diagnostics-rows tr")).ToHaveCountAsync(1);
     }
 
     [Fact]
