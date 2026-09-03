@@ -311,6 +311,11 @@
   const format = value => value.toLocaleString("ja-JP");
   const renderFact = (target, value) => window.LocalMonitorV1FactState.renderSessionCollection(target,
     { state: value.state, count: value.state === "recorded" ? BigInt(value.count ?? value.value) : null });
+  const renderCoverageFact = (target, item) => {
+    if (item.state === "recorded") target.textContent = "記録済み";
+    else if (item.state === "complete_zero") renderFact(target, { state: "recorded", count: 0 });
+    else renderFact(target, { state: item.state, count: null });
+  };
 
   function namedFact(title, value, dataName) {
     const card = tokenMetric(title, value);
@@ -1027,7 +1032,11 @@
     if (session.timing.state === "recorded") time.textContent = timingLabel(session);
     else renderFact(time, { state: session.timing.state, count: null });
     overview.append(sourceRow, timeRow);
-    const coverage = el("ul"); for (const item of session.capture.coverage) coverage.append(el("li", null, `${SIGNAL_LABELS[item.signal_family]}: ${stateLabel(item.state)}`));
+    const coverage = el("ul", "local-monitor-session-coverage");
+    for (const item of session.capture.coverage) {
+      const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
+      renderCoverageFact(row.appendChild(el("span")), item); coverage.append(row);
+    }
     overview.append(el("h3", null, "取得範囲"), coverage);
     const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `リビジョン ${summary.workspace_revision}`));
     const referenceLabels = { native_session_ids: "取得元のセッションID", trace_ids: "トレースID" }; for (const [key, values] of Object.entries(summary.technical_references)) for (const value of values) technical.append(el("p", null, `${referenceLabels[key]}: ${value}`)); overview.append(technical);
@@ -1110,9 +1119,7 @@
     for (const item of session.capture.coverage) {
       const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
       const factTarget = row.appendChild(el("span"));
-      if (item.state === "recorded") factTarget.textContent = "記録済み";
-      else if (item.state === "complete_zero") factTarget.textContent = "0件（完全）";
-      else renderFact(factTarget, { state: item.state, count: null });
+      renderCoverageFact(factTarget, item);
       coverageList.append(row);
     }
     coverageCard.append(coverageList);

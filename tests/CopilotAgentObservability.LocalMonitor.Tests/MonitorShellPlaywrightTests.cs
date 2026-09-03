@@ -544,6 +544,39 @@ public class MonitorShellPlaywrightTests
     }
 
     [Fact]
+    public async Task Shell_UnifiedSettings_EmptySourceDiagnosticsUsesSharedNotObservedPresentation()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/source-diagnostics?limit=1", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = "{\"items\":[],\"next_cursor\":null}",
+        }));
+
+        await page.GotoAsync($"{host.Url}/sessions?settings=receiver", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        foreach (var section in new[] { "receiver", "diagnostics" })
+        {
+            if (section == "diagnostics")
+                await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
+            var source = page.Locator($"[data-settings-{section}-source]");
+            await Expect(source.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
+            await Expect(source).ToContainTextAsync("今回の記録にはありません");
+            await Expect(source).ToContainTextAsync("実際に使われなかったとは断定できません");
+            await Expect(source).Not.ToContainTextAsync("not_observed");
+            await Expect(source).Not.ToContainTextAsync("0件");
+            Assert.False(await source.EvaluateAsync<bool>("node => Boolean(node.querySelector('p p'))"));
+            Assert.False(await source.EvaluateAsync<bool>("node => Boolean(node.querySelector('button button, a a, button a, a button'))"));
+        }
+    }
+
+    [Fact]
     public async Task Shell_UnifiedSettings_UsesExactOwnerTransportsWithoutRenderingHostileFields()
     {
         const string archivedSession = "01890f65-4c31-7f42-8a7d-111111111111";

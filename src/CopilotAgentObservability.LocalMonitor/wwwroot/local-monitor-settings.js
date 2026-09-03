@@ -76,6 +76,14 @@
     return node;
   }
 
+  function factCard(title, text) {
+    const node = element("section", "local-monitor-settings-card");
+    const value = element("div", null, text);
+    value.dataset.settingsSourceSummary = "";
+    node.append(element("h4", null, title), value);
+    return node;
+  }
+
   function buildSection(token, title) {
     const section = element("section", "local-monitor-settings-section");
     section.dataset.settingsSection = token;
@@ -99,7 +107,7 @@
       health.dataset.settingsReceiverHealth = "";
       const projection = card("投影", "投影状態を確認しています。");
       projection.dataset.settingsReceiverProjection = "";
-      const source = card("記録範囲", "取得元の状態を確認しています。");
+      const source = factCard("記録範囲", "取得元の状態を確認しています。");
       source.dataset.settingsReceiverSource = "";
       const runtime = card("稼働情報", "稼働情報を確認しています。");
       runtime.dataset.settingsReceiverRuntime = "";
@@ -140,7 +148,7 @@
       health.dataset.settingsDiagnosticsHealth = "";
       const projection = card("投影", "投影状態を確認しています。");
       projection.dataset.settingsDiagnosticsProjection = "";
-      const source = card("取得元", "取得元の状態を確認しています。");
+      const source = factCard("取得元", "取得元の状態を確認しています。");
       source.dataset.settingsDiagnosticsSource = "";
       const repositories = card("リポジトリ", "リポジトリ状態を確認しています。");
       repositories.dataset.settingsDiagnosticsRepositories = "";
@@ -464,15 +472,15 @@
 
   async function loadSourceSummary(generation) {
     const target = !owned.get("receiver")?.hidden
-      ? owned.get("receiver").querySelector("[data-settings-receiver-source] p")
-      : owned.get("diagnostics")?.querySelector("[data-settings-diagnostics-source] p");
+      ? owned.get("receiver").querySelector("[data-settings-receiver-source] [data-settings-source-summary]")
+      : owned.get("diagnostics")?.querySelector("[data-settings-diagnostics-source] [data-settings-source-summary]");
     try {
       const response = await fetch("/api/monitor/source-diagnostics?limit=1", { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error();
       const value = await response.json();
       if (!exact(value, ["items", "next_cursor"]) || !Array.isArray(value.items) || value.items.length > 1
           || value.next_cursor !== null && !count(value.next_cursor)) throw new Error();
-      let text = "今回の記録にはありません。";
+      let text = null;
       if (value.items.length === 1) {
         const item = value.items[0];
         const keys = ["observation_id", "ingest_batch_id", "source_surface", "source_application_version", "source_adapter", "adapter_version",
@@ -483,7 +491,10 @@
             || !count(item.unknown_attribute_count)) throw new Error();
         text = item.compatibility_state === "supported" ? "取得元の互換性を確認済みです。" : "取得元の互換性に注意が必要です。";
       }
-      if (generation === requestGeneration && target) target.textContent = text;
+      if (generation === requestGeneration && target) {
+        if (text === null) window.LocalMonitorV1FactState.render(target, { state: "not_observed" });
+        else target.textContent = text;
+      }
     } catch { if (generation === requestGeneration && target) target.textContent = "取得元の状態を読み込めませんでした。"; }
   }
 
