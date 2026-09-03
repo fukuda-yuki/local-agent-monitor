@@ -740,8 +740,8 @@ public sealed class DoctorUiPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         await RouteSourcesAsync(page);
-        await page.RouteAsync("**/api/doctor/ui/v1/sessions/*", route => route.FulfillAsync(new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"store_unavailable\"}" }));
-        await page.RouteAsync("**/api/doctor/ui/v1/source-diagnostics/*", route => route.FulfillAsync(new() { ContentType = "application/json", Body = "{}" }));
+        await page.RouteAsync("**/api/doctor/ui/v1/sessions/*", route => route.FulfillAsync(new() { Status = 503, ContentType = "application/json", Body = "{\"error\":\"evidence_not_found\"}" }));
+        await page.RouteAsync("**/api/doctor/ui/v1/source-diagnostics/*", route => route.FulfillAsync(new() { Status = 404, ContentType = "application/json", Body = "{\"error\":\"store_unavailable\"}" }));
 
         await page.GotoAsync($"{host.Url}/diagnostics?session_id=failed&observation_id=invalid", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 

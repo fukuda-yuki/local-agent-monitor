@@ -521,9 +521,16 @@
 
   async function requestDoctor(url, options) {
     const response = await fetch(url, { cache: "no-store", ...options });
-    const payload = await response.json();
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      error.doctorStatus = response.status;
+      throw error;
+    }
     if (!response.ok) {
       const error = new Error("doctor request failed");
+      error.doctorStatus = response.status;
       error.doctorPayload = payload;
       throw error;
     }
@@ -579,7 +586,7 @@
         doctorSessionTarget.hidden = false;
         document.getElementById("doctor-session-target-heading")?.focus();
       } catch (error) {
-        const state = error?.doctorPayload?.error === "evidence_not_found"
+        const state = error?.doctorStatus === 404 && error?.doctorPayload?.error === "evidence_not_found"
           ? missingFactPresentation("指定した Session の記録")
           : valueLine("Session の記録を読み込めませんでした。", false);
         renderExactSummary(doctorSessionTargetSummary, [["状態", state]]);
@@ -605,7 +612,7 @@
         doctorSourceTarget.hidden = false;
         document.getElementById("doctor-source-target-heading")?.focus();
       } catch (error) {
-        const state = error?.doctorPayload?.error === "evidence_not_found"
+        const state = error?.doctorStatus === 404 && error?.doctorPayload?.error === "evidence_not_found"
           ? missingFactPresentation("指定したソース診断の記録")
           : valueLine("ソース診断の記録を読み込めませんでした。", false);
         renderExactSummary(doctorSourceTargetSummary, [["状態", state]]);
