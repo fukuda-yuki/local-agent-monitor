@@ -6,8 +6,7 @@ Copilot Agent Observability のクイックスタートガイドです。
 Local Monitor v1 の採用済み Repository/Session-first IA は
 [製品定義](specifications/interfaces/local-monitor-v1-product-definition.md) と
 [IA 仕様](specifications/interfaces/local-monitor-v1-ia.md) を参照してください。
-このクイックスタートの起動・収集手順は凍結済み ingest contract に基づき、画面の
-統合後説明は #148 が更新します。
+リポジトリからセッションを探し、詳細確認や比較まで AI なしで利用できます。
 
 ## 1. Local Ingestion Monitor を起動してリアルタイム観測を開始する（推奨）
 
@@ -33,8 +32,10 @@ code .
 
 **ステップ C — 初回トレース（First Trace）の受領を確認する：**
 
-VS Code 上で Copilot Chat に質問を送信し、ブラウザの `http://127.0.0.1:4320/`（概要）および `/traces`（トレース一覧）に最初のトレースが表示されることを確認します。  
+VS Code 上で Copilot Chat に質問を送信し、ブラウザの `http://127.0.0.1:4320/` でリポジトリを開き、Session Explorer の行からセッション詳細へ進んで、実行内容が反映されたことを確認します。リポジトリが見つからない場合は「すべてのセッション」または「リポジトリ未設定のセッション」を開きます。
 ※ 設定スクリプト等の出力で `success: true` が表示されても、それは静的な設定完了を意味します。実際に画面へトレースが反映されて初めてセットアップ完了となります。
+
+複数のセッションを比べる場合は、リポジトリの Explorer で「比較を作成」→「基準」と「比較対象」を選択→「比較を確認」→確認画面の「比較を作成」と進みます。AI の設定は不要です。
 
 詳細は [Local Ingestion Monitor ユーザーガイド](user-guide/local-monitor.md) を参照してください。
 
