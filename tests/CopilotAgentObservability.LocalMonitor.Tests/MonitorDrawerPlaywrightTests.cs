@@ -38,7 +38,7 @@ public class MonitorDrawerPlaywrightTests
         // Open via the standing header button; boundary copy is visible.
         await page.Locator("#copilot-open").ClickAsync();
         await Expect(page.Locator("#copilot-drawer")).ToBeVisibleAsync();
-        await Expect(page.Locator(".drawer-boundary")).ToHaveTextAsync("ローカル SDK 経由 · raw はローカルから出ません");
+        await Expect(page.Locator(".drawer-boundary")).ToHaveTextAsync("明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します");
         await Expect(page.Locator("#flow-card")).ToHaveClassAsync(new System.Text.RegularExpressions.Regex("dimmed-behind-drawer"));
 
         // First run: focus-based analysis, findings appear.
