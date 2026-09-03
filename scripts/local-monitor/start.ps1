@@ -128,9 +128,19 @@ if ($runtimeRootSupplied) {
             exit 1
         }
         $existingRuntimeProcess = Get-Process -Id ([int] $existingRuntimeState.process_id) -ErrorAction SilentlyContinue
-        if ($null -ne $existingRuntimeProcess -and -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $existingRuntimeState)) {
-            Write-Error 'runtime_state_mismatch'
-            exit 1
+        if ($null -ne $existingRuntimeProcess) {
+            if (-not (Test-LocalMonitorExplicitRuntimeState `
+                    -State $existingRuntimeState `
+                    -ExpectedUrl $Url `
+                    -ExpectedDbPath $DbPath `
+                    -ExpectedInstallRoot $InstallRoot `
+                    -ExpectedMode $expectedStateMode `
+                    -ExpectedRepoRoot $expectedRepoRoot `
+                    -ExpectedExecutablePath $expectedExecutablePath) `
+                -or -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $existingRuntimeState)) {
+                Write-Error 'runtime_state_mismatch'
+                exit 1
+            }
         }
     }
 }

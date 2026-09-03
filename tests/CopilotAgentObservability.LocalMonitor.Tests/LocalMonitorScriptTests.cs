@@ -191,6 +191,72 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public async Task ExplicitRuntimeRootRejectsDifferentRequestedIdentityBeforeSideEffects()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var runtimeRoot = CreateTemporaryDirectory("cao-runtime-identity-tests");
+        Process? wrapperA = null;
+        Process? monitorA = null;
+        Process? wrapperB = null;
+        Process? monitorB = null;
+        try
+        {
+            var portA = GetFreeTcpPort();
+            var portB = GetFreeTcpPort();
+            while (portB == portA) portB = GetFreeTcpPort();
+            var urlA = $"http://127.0.0.1:{portA}";
+            var urlB = $"http://127.0.0.1:{portB}";
+            var dbA = Path.Combine(runtimeRoot, "a", "monitor.db");
+            var dbB = Path.Combine(runtimeRoot, "b", "monitor.db");
+            var startA = StartPowerShellScript(
+                ScriptPath("start.ps1"), "-RuntimeRoot", runtimeRoot, "-Url", urlA,
+                "-DbPath", dbA, "-Mode", "DotnetRun", "-NoBrowser", "-WaitReady", "-TimeoutSeconds", "60");
+            wrapperA = startA.Process;
+            await WaitForRuntimeReady(runtimeRoot, urlA, TimeSpan.FromSeconds(60));
+            monitorA = CaptureOwnedRuntimeProcess(runtimeRoot, wrapperA, urlA, dbA);
+            var stateBefore = File.ReadAllBytes(Path.Combine(runtimeRoot, "local-monitor.state.json"));
+            var pidBefore = File.ReadAllBytes(Path.Combine(runtimeRoot, "local-monitor.pid"));
+            var runtimeBefore = RuntimeFileFingerprint(runtimeRoot);
+
+            var startB = StartPowerShellScript(
+                ScriptPath("start.ps1"), "-RuntimeRoot", runtimeRoot, "-Url", urlB,
+                "-DbPath", dbB, "-Mode", "DotnetRun", "-NoBrowser", "-WaitReady", "-TimeoutSeconds", "60");
+            wrapperB = startB.Process;
+            var exited = await WaitForExit(startB.Process, TimeSpan.FromSeconds(10));
+            if (!exited)
+            {
+                await WaitForRuntimeReady(runtimeRoot, urlB, TimeSpan.FromSeconds(60));
+                await WaitForRuntimeProcessChange(runtimeRoot, monitorA.Id, TimeSpan.FromSeconds(15));
+                monitorB = CaptureOwnedRuntimeProcess(runtimeRoot, wrapperB, urlB, dbB);
+            }
+
+            Assert.True(exited, "The conflicting start launched a second monitor instead of failing closed.");
+            var resultB = await CompletePowerShellScript(startB, TimeSpan.FromSeconds(15));
+            Assert.Equal(1, resultB.ExitCode);
+            Assert.Contains("runtime_state_mismatch", resultB.Error, StringComparison.Ordinal);
+            Assert.False(File.Exists(dbB));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(dbB)!));
+            Assert.False(await CanConnect(portB));
+            Assert.False(monitorA.HasExited);
+            Assert.True(await CanConnect(portA));
+            Assert.Equal(stateBefore, File.ReadAllBytes(Path.Combine(runtimeRoot, "local-monitor.state.json")));
+            Assert.Equal(pidBefore, File.ReadAllBytes(Path.Combine(runtimeRoot, "local-monitor.pid")));
+            Assert.Equal(runtimeBefore, RuntimeFileFingerprint(runtimeRoot));
+        }
+        finally
+        {
+            KillKnownProcessTree(monitorB);
+            KillKnownProcessTree(wrapperB);
+            if (monitorA is not null && !monitorA.HasExited)
+                RunPowerShellScript(ScriptPath("stop.ps1"), "-RuntimeRoot", runtimeRoot, "-Force");
+            KillKnownProcessTree(monitorA);
+            KillKnownProcessTree(wrapperA);
+            Directory.Delete(runtimeRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LifecycleScriptsPreserveExistingPositionalParameterBindings()
     {
         var start = RunPowerShellScript(ScriptPath("start.ps1"), "https://example.invalid");
@@ -3267,7 +3333,7 @@ public class LocalMonitorScriptTests
         return (exitCode, output, error);
     }
 
-    private static Process CaptureOwnedRuntimeProcess(string runtimeRoot, Process wrapper, string url)
+    private static Process CaptureOwnedRuntimeProcess(string runtimeRoot, Process wrapper, string url, string? dbPath = null)
     {
         var statePath = Path.Combine(runtimeRoot, "local-monitor.state.json");
         using var state = JsonDocument.Parse(File.ReadAllText(statePath));
@@ -3286,7 +3352,7 @@ public class LocalMonitorScriptTests
         Assert.Equal(LocalMonitorProjectPath, Path.GetFullPath(native[2]), ignoreCase: true);
         Assert.Equal("--", native[3]);
         Assert.Single(native, value => value == "--db");
-        Assert.Equal(Path.GetFullPath(Path.Combine(runtimeRoot, "raw-store.db")), Path.GetFullPath(native[Array.IndexOf(native, "--db") + 1]), ignoreCase: true);
+        Assert.Equal(Path.GetFullPath(dbPath ?? Path.Combine(runtimeRoot, "raw-store.db")), Path.GetFullPath(native[Array.IndexOf(native, "--db") + 1]), ignoreCase: true);
         Assert.Single(native, value => value == "--url");
         Assert.Equal(url, native[Array.IndexOf(native, "--url") + 1]);
         return Process.GetProcessById(processId);
@@ -3305,6 +3371,38 @@ public class LocalMonitorScriptTests
         }
         catch (InvalidOperationException) { }
         finally { process.Dispose(); }
+    }
+
+    private static async Task<bool> WaitForExit(Process process, TimeSpan timeout)
+    {
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        try { await process.WaitForExitAsync(timeoutSource.Token); return true; }
+        catch (OperationCanceledException) { return false; }
+    }
+
+    private static async Task WaitForRuntimeProcessChange(string runtimeRoot, int previousProcessId, TimeSpan timeout)
+    {
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        while (!timeoutSource.IsCancellationRequested)
+        {
+            try
+            {
+                using var state = JsonDocument.Parse(File.ReadAllText(Path.Combine(runtimeRoot, "local-monitor.state.json")));
+                if (state.RootElement.GetProperty("process_id").GetInt32() != previousProcessId) return;
+            }
+            catch (IOException) { }
+            catch (JsonException) { }
+            await Task.Delay(100, timeoutSource.Token);
+        }
+        throw new TimeoutException("The conflicting monitor did not publish its test-owned process identity.");
+    }
+
+    private static async Task<bool> CanConnect(int port)
+    {
+        using var client = new System.Net.Sockets.TcpClient();
+        using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        try { await client.ConnectAsync("127.0.0.1", port, timeoutSource.Token); return true; }
+        catch (Exception exception) when (exception is System.Net.Sockets.SocketException or OperationCanceledException) { return false; }
     }
 
     private static string[] SplitWindowsCommandLine(string commandLine)
