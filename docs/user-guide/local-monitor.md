@@ -739,10 +739,6 @@ server に永続化されることはありません。
 ドロワーには「明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します」という
 データ境界の表示が常にあります。`--sanitized-only` では画面、ボタン、ドロワーを登録しません。
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor Copilot 解析ドロワー" src="../assets/screenshots/local-monitor-copilot-drawer.png">
-</p>
-
 ### サニタイズ済み証拠の取り込み
 
 `/sanitized-import` では、出力されたサニタイズ済みエビデンス bundle（.zip）を選択し、厳密な archive / checksum /
