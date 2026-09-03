@@ -560,6 +560,17 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ImmutableCompareRendersNineSectionsRowsEvidenceAndResponsiveTableWithoutRecompute()
     {
+        static bool IsExactNextPageQuery(string query)
+        {
+            var parameters = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(query);
+            return parameters.TryGetValue("after", out var after)
+                && after.Count == 1
+                && after[0] == "cursor-one";
+        }
+
+        Assert.False(IsExactNextPageQuery("?not_after=cursor-one"));
+        Assert.False(IsExactNextPageQuery("?after=cursor-one-suffix"));
+        Assert.False(IsExactNextPageQuery("?after=cursor-one&after=cursor-one"));
         var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
         var values = read["results"]![0]!["values"]!.AsArray();
         values.Add(new JsonObject { ["key"] = "zero", ["value"] = "0" });
@@ -581,7 +592,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
             {
                 var query = new Uri(route.Request.Url).Query;
                 rowQueries.Add(query);
-                if (query.Contains("after=cursor-one", StringComparison.Ordinal)) nextPageObserved.TrySetResult();
+                if (IsExactNextPageQuery(query)) nextPageObserved.TrySetResult();
                 var rows = JsonNode.Parse(Golden("local-monitor-comparison-rows.response.json").GetAwaiter().GetResult())!.AsObject();
                 rows["items"]![0]!["display_name"] = "表示ツール";
                 rows["items"]![0]!["values"]![0]!["value"] = "stored-display-name";
@@ -648,7 +659,8 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Contains(rowQueries, query => query.Contains("family=tool&q=synthetic", StringComparison.Ordinal));
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "次のページ" }).ClickAsync();
         await nextPageObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Contains(rowQueries, query => query.Contains("after=cursor-one", StringComparison.Ordinal));
+        await Expect(toolSection.Locator("tbody > tr")).ToHaveCountAsync(2);
+        Assert.Contains(rowQueries, IsExactNextPageQuery);
 
         var evidenceButton = page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true });
         await evidenceButton.ClickAsync();
