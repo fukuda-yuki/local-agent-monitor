@@ -1041,8 +1041,15 @@
     overview.append(el("h3", null, "最初の指示"));
     if (session.instruction.state === "recorded") overview.append(el("p", null, session.instruction.label));
     else { const instruction = overview.appendChild(el("div")); instruction.dataset.sessionInstructionFact = ""; renderFact(instruction, { state: session.instruction.state, count: null }); }
-    overview.append(el("p", null, session.instruction.additional_count === null
-      ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
+    if (session.instruction.additional_count === null) {
+      const additionalInstruction = overview.appendChild(el("div"));
+      additionalInstruction.dataset.sessionAdditionalInstructionFact = "";
+      renderFact(additionalInstruction, { state: "not_observed", count: null });
+      additionalInstruction.prepend(document.createTextNode("追加の指示 "));
+    } else {
+      const additionalInstruction = overview.appendChild(el("p", null, `追加の指示 ${format(session.instruction.additional_count)}件`));
+      additionalInstruction.dataset.sessionAdditionalInstructionCount = "";
+    }
     overview.append(el("p", null, `状態 ${STATUS_LABELS[session.status]} · 実行 ${format(summary.executions.length)}件`));
     const sourceRow = el("p"); sourceRow.append(document.createTextNode("取得元 ")); const source = sourceRow.appendChild(el("span")); source.dataset.sessionOverviewSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");

@@ -137,10 +137,18 @@ public sealed class DoctorUiPlaywrightTests
         await Expect(page.Locator("#doctor-live")).ToHaveTextAsync("Doctor の状態を読み込めませんでした。");
         await Expect(page.Locator("#doctor-result-heading")).ToBeFocusedAsync();
         await Expect(page.Locator("#doctor-actions button:visible")).ToHaveCountAsync(1);
+        var resultFields = page.Locator("#doctor-current-state, #doctor-severity, #doctor-result-source, #doctor-next-action, #doctor-retryability, #doctor-lifecycle");
+        await Expect(resultFields.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(6);
+        Assert.All(await resultFields.AllTextContentsAsync(), text =>
+        {
+            Assert.DoesNotContain("読み込んでいます", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("—", text, StringComparison.Ordinal);
+        });
 
         await page.Locator("#doctor-primary-action").PressAsync("Enter");
 
         await Expect(page.Locator("#doctor-source option")).ToHaveCountAsync(3);
+        await Expect(resultFields.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(6);
         Assert.Equal(2, attempts);
     }
 
