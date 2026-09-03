@@ -572,13 +572,16 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync(new BrowserNewPageOptions { ViewportSize = new ViewportSize { Width = 1366, Height = 768 } });
         var rowQueries = new List<string>();
+        var nextPageObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route =>
             route.FulfillAsync(Json("{\"readiness_state\":\"unconfigured\"}")));
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}**", route =>
         {
             if (route.Request.Url.Contains("/rows?", StringComparison.Ordinal))
             {
-                rowQueries.Add(new Uri(route.Request.Url).Query);
+                var query = new Uri(route.Request.Url).Query;
+                rowQueries.Add(query);
+                if (query.Contains("after=cursor-one", StringComparison.Ordinal)) nextPageObserved.TrySetResult();
                 var rows = JsonNode.Parse(Golden("local-monitor-comparison-rows.response.json").GetAwaiter().GetResult())!.AsObject();
                 rows["items"]![0]!["display_name"] = "表示ツール";
                 rows["items"]![0]!["values"]![0]!["value"] = "stored-display-name";
@@ -644,6 +647,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "検索" }).ClickAsync();
         Assert.Contains(rowQueries, query => query.Contains("family=tool&q=synthetic", StringComparison.Ordinal));
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "次のページ" }).ClickAsync();
+        await nextPageObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Contains(rowQueries, query => query.Contains("after=cursor-one", StringComparison.Ordinal));
 
         var evidenceButton = page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true });
