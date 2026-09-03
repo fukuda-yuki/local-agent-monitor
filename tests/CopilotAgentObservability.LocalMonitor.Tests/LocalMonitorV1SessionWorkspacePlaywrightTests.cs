@@ -1223,6 +1223,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("今回の記録にはありません");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
             await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("今回の記録にはありません");
+        var additionalInstruction = page.Locator("[data-session-additional-instruction-fact]");
+        await Expect(additionalInstruction).ToHaveAttributeAsync("data-fact-state", "not-observed");
+        await Expect(additionalInstruction).ToContainTextAsync("今回の記録にはありません");
+        await Expect(additionalInstruction).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(additionalInstruction).Not.ToContainTextAsync("0件");
+        await Expect(additionalInstruction).Not.ToContainTextAsync("not_observed");
         var overviewCoverage = page.Locator("[data-session-overview] .local-monitor-session-coverage");
         var fixedCoverage = page.Locator("[data-session-fixed-coverage]");
         foreach (var coverage in new[] { overviewCoverage, fixedCoverage })
@@ -1258,6 +1264,11 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("日時不明のセッション");
         await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("日時不明のセッション");
         await Expect(page.Locator("[data-session-context-content] strong")).ToHaveTextAsync("日時不明のセッション");
+
+        fixture = "summary-full.json";
+        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("[data-session-additional-instruction-count]")).ToHaveTextAsync("追加の指示 0件");
+        await Expect(page.Locator("[data-session-additional-instruction-fact]")).ToHaveCountAsync(0);
     }
 
     [Theory]

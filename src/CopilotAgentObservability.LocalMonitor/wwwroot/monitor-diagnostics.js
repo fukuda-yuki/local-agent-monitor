@@ -657,6 +657,7 @@
       announceDoctor("Doctor のソース一覧を読み込みました。", false);
     } catch {
       doctorSourceState.textContent = "ソース一覧を読み込めませんでした。";
+      resetDoctorResult();
       doctorFailure(loadDoctorSources);
     }
   }
