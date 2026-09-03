@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using GitHub.Copilot;
@@ -218,6 +219,8 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         Assert.Contains("stored observed differences",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Cite only the exact supplied evidence locations",comparisonPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state an effect verdict",comparisonPrompt,StringComparison.Ordinal);
+        Assert.Contains("Dynamic metric availability is not individually addressable",comparisonPrompt,StringComparison.Ordinal);
+        Assert.Contains("must not solely ground a finding or suggestion or be cited through another location",comparisonPrompt,StringComparison.Ordinal);
         var repositoryPrompt=GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("repository_selection"));
         Assert.Contains(structuredResultInstruction,repositoryPrompt.ReplaceLineEndings("\n"),StringComparison.Ordinal);
         Assert.Contains(CanonicalEvidenceLocation,repositoryPrompt,StringComparison.Ordinal);
@@ -225,8 +228,10 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         Assert.Contains("never cite a bare node ID",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("Do not state or promote AI output as a deterministic fact",repositoryPrompt,StringComparison.Ordinal);
         Assert.DoesNotContain("only canonical node IDs",repositoryPrompt,StringComparison.Ordinal);
+        Assert.DoesNotContain("Dynamic metric availability is not individually addressable",repositoryPrompt,StringComparison.Ordinal);
         Assert.Contains("only canonical node IDs",GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("session")),StringComparison.Ordinal);
         Assert.Contains("only canonical node IDs",GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("node")),StringComparison.Ordinal);
+        Assert.DoesNotContain("Dynamic metric availability is not individually addressable",GitHubCopilotLocalAiProviderAdapterV1.BuildPrompt(ProviderRequest("session")),StringComparison.Ordinal);
     }
 
     private static LocalAiProviderRequestV1 ProviderRequest(string scope)
@@ -264,6 +269,65 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         Assert.Contains(Convert.ToBase64String("fact-a"u8),text,StringComparison.Ordinal);
         Assert.Contains(Convert.ToBase64String("receipt"u8),text,StringComparison.Ordinal);
         Assert.Contains(Convert.ToBase64String("result"u8),text,StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ComparisonProjection_ExcludesOnlyMetricAvailabilityEvidenceFromAiAddressability()
+    {
+        var metric=LocalComparisonStoredResult.Create(ComparisonId,1,9,"condition","metric_availability",[new("dynamic.metric","recorded")]);
+        var wrongSection=LocalComparisonStoredResult.Create(ComparisonId,2,8,"condition","metric_availability",[new("value","1")]);
+        var wrongKind=LocalComparisonStoredResult.Create(ComparisonId,3,9,"scalar","metric_availability",[new("value","1")]);
+        var wrongKey=LocalComparisonStoredResult.Create(ComparisonId,4,9,"condition","other_condition",[new("value","1")]);
+        var metricEvidence=new LocalComparisonStoredEvidence(ComparisonId,1,0,"value","A",RepositoryId,"recorded","1","workspace_node","node-metric",null,null,"event-metric","revision");
+        var nearMisses=new[]{wrongSection,wrongKind,wrongKey}.Select(item=>new LocalComparisonStoredEvidence(ComparisonId,item.ResultOrdinal,0,"value","A",RepositoryId,"recorded","1","workspace_node","node-scalar",null,null,"event-scalar","revision")).ToArray();
+
+        var selected=LocalAiComparisonSnapshotAdapterV1.SelectAddressableEvidence([metric,wrongSection,wrongKind,wrongKey],[metricEvidence,..nearMisses]);
+        Assert.Equal(nearMisses,selected);
+        Assert.Equal("condition",metric.RowKind);
+        Assert.Equal("metric_availability",metric.RowKey);
+        Assert.Contains("dynamic.metric",Encoding.UTF8.GetString(metric.Payload),StringComparison.Ordinal);
+        Assert.DoesNotContain("s1_metric",Encoding.UTF8.GetString(metric.Payload),StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ComparisonProjection_FailsClosedForMissingOrDuplicateResultOrdinals()
+    {
+        var result=LocalComparisonStoredResult.Create(ComparisonId,1,1,"scalar","duration",[new("value","1")]);
+        var evidence=new LocalComparisonStoredEvidence(ComparisonId,2,0,"value","A",RepositoryId,"recorded","1",null,null,null,null,null,"revision");
+        var missing=Assert.Throws<InvalidOperationException>(()=>LocalAiComparisonSnapshotAdapterV1.SelectAddressableEvidence([result],[evidence]));
+        Assert.Equal("local_ai_comparison_evidence_result_missing",missing.Message);
+        var duplicate=Assert.Throws<InvalidOperationException>(()=>LocalAiComparisonSnapshotAdapterV1.SelectAddressableEvidence([result,result],[]));
+        Assert.Equal("local_ai_comparison_result_ordinal_duplicate",duplicate.Message);
+    }
+
+    [Fact]
+    public void ComparisonAdapter_KeepsMetricResultBytesButOmitsItsEvidenceLocationAndRef()
+    {
+        var receipt=LocalComparisonStoredResult.Create(ComparisonId,0,0,"receipt","receipt",[new("state","stored")]);
+        var metric=LocalComparisonStoredResult.Create(ComparisonId,1,9,"condition","metric_availability",[new("dynamic.metric","recorded")]);
+        var scalar=LocalComparisonStoredResult.Create(ComparisonId,2,1,"scalar","duration",[new("value","1")]);
+        const string metricNode="node-11111111111111111111111111111111", scalarNode="node-22222222222222222222222222222222";
+        var metricEvidence=new LocalComparisonStoredEvidence(ComparisonId,1,0,"value","A",RepositoryId,"recorded","1","workspace_node",metricNode,null,null,ComparisonId,"revision");
+        var scalarEvidence=new LocalComparisonStoredEvidence(ComparisonId,2,0,"value","A",RepositoryId,"recorded","1","workspace_node",scalarNode,null,null,SnapshotId,"revision");
+        var frozen=new LocalComparisonFrozenSnapshot(ComparisonId,RepositoryId,DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddHours(1),"selection"u8.ToArray(),new string('a',64),new byte[32],[],[receipt,metric,scalar],[metricEvidence,scalarEvidence]);
+        var adapter=new LocalAiComparisonSnapshotAdapterV1((_,_,_)=>new(LocalComparisonReadStatus.Found,frozen));
+
+        var projection=adapter.Read(RepositoryId,ComparisonId,CancellationToken.None);
+        var payload=Encoding.UTF8.GetString(projection.PayloadCanonicalJson);
+        var index=Encoding.UTF8.GetString(projection.EvidenceIndexCanonicalJson);
+        using var payloadDocument=JsonDocument.Parse(projection.PayloadCanonicalJson);
+        using var indexDocument=JsonDocument.Parse(projection.EvidenceIndexCanonicalJson);
+        Assert.Contains(Convert.ToBase64String(metric.Payload),payload,StringComparison.Ordinal);
+        Assert.DoesNotContain(metricNode,payload,StringComparison.Ordinal);
+        Assert.DoesNotContain(metricNode,index,StringComparison.Ordinal);
+        Assert.Contains(scalarNode,payload,StringComparison.Ordinal);
+        Assert.Contains(scalarNode,index,StringComparison.Ordinal);
+        var payloadEvidence=payloadDocument.RootElement.GetProperty("evidence").EnumerateArray().ToArray();
+        Assert.Single(payloadEvidence);
+        Assert.Equal(2,payloadEvidence[0].GetProperty("result_ordinal").GetInt32());
+        var refs=indexDocument.RootElement.GetProperty("evidence_refs").EnumerateArray().Select(item=>item.GetString()).ToArray();
+        Assert.Single(refs);
+        Assert.Contains(scalarNode,refs[0],StringComparison.Ordinal);
     }
 
     [Fact]

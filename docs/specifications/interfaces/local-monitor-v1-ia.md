@@ -430,6 +430,14 @@ There are no page-level `整形 / raw` tabs.
 - bounded preview first;
 - no permanent history;
 - Compare AI receives only the deterministic comparison receipt.
+- Dynamic deterministic Compare rows with the canonical identity
+  `section_ordinal = 9`, `row_kind = condition`, and
+  `row_key = metric_availability` remain in the stored result, UI, receipt, and internal
+  AI snapshot results, but are not addressable v1 AI evidence targets. Their
+  evidence-index references and `session_location` evidence entries are
+  omitted; they are not rounded to another selector or location and cannot
+  solely ground or be cited by a finding or improvement suggestion. This does
+  not change closed result validation or introduce a dynamic selector.
 
 AI result sections:
 
