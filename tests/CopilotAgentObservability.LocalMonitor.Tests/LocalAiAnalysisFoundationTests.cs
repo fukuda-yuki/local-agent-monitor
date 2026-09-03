@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.LocalMonitor.Retention;
@@ -345,6 +346,33 @@ public sealed class LocalAiAnalysisFoundationTests
         Assert.Equal(LocalAiResultValidationCodeV1.InvalidResult, LocalAiResultValidatorV1.Validate(Result(provenanceExtra: ",\"extra\":true"), ["ev-1"]).Code);
         Assert.Equal(LocalAiResultValidationCodeV1.InvalidResult, LocalAiResultValidatorV1.Validate(Result(targetKind: "repository"), ["ev-1"]).Code);
         Assert.Equal(LocalAiResultValidationCodeV1.InvalidResult, LocalAiResultValidatorV1.Validate(Result(configurationHash: "ABC"), ["ev-1"]).Code);
+    }
+
+    [Theory]
+    [InlineData("findings")]
+    [InlineData("improvement_suggestions")]
+    public void Validator_RejectsDuplicateEvidenceRefsWithinOneResultItem(string collection)
+    {
+        var result = JsonNode.Parse(Result())!.AsObject();
+        result[collection]![0]!["evidence_refs"] = new JsonArray("ev-1", "ev-1");
+
+        Assert.Equal(
+            LocalAiResultValidationCodeV1.InvalidEvidence,
+            LocalAiResultValidatorV1.Validate(Encoding.UTF8.GetBytes(result.ToJsonString()), ["ev-1"]).Code);
+    }
+
+    [Fact]
+    public void Validator_AllowsTheSameEvidenceRefAcrossSeparateResultItems()
+    {
+        var result = JsonNode.Parse(Result())!.AsObject();
+        var findings = result["findings"]!.AsArray();
+        findings.Add(findings[0]!.DeepClone());
+        var suggestions = result["improvement_suggestions"]!.AsArray();
+        suggestions.Add(suggestions[0]!.DeepClone());
+
+        Assert.Equal(
+            LocalAiResultValidationCodeV1.Valid,
+            LocalAiResultValidatorV1.Validate(Encoding.UTF8.GetBytes(result.ToJsonString()), ["ev-1"]).Code);
     }
 
     [Fact]

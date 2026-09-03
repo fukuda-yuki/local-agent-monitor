@@ -418,6 +418,23 @@ There are no page-level `整形 / raw` tabs.
 - `過去の分析` remains in the same surface;
 - follow-up chat is not persisted.
 
+`GET /api/local-monitor/v1/ai/sessions/{sessionId}/reports` computes each
+required boolean `snapshot_changed` only by comparing the immutable saved
+snapshot with the exact current Session projection. When that projection
+cannot be constructed, the route returns HTTP `409` with the fixed JSON error
+`{"error":"projection_unavailable"}` and returns no HTTP `200` history
+payload. It does not infer either boolean value or use a stale, last-known,
+report-owned, timestamp, revision, status, or Run-fact substitute.
+
+This temporary comparison failure does not mean that history is empty or
+expired and does not delete, overwrite, invalidate, or otherwise mutate any
+durable report, result, run, snapshot, retention, or backup state. The Session
+AI surface preserves any history already loaded in page memory and, when no
+report is cached, states that the current Session record cannot be compared
+with analysis history. Once the exact current projection is available again,
+the same route returns the same durable history normally with each
+`snapshot_changed` recomputed by the exact comparison.
+
 ### Node analysis
 
 - inspector action;
@@ -430,6 +447,14 @@ There are no page-level `整形 / raw` tabs.
 - bounded preview first;
 - no permanent history;
 - Compare AI receives only the deterministic comparison receipt.
+- Dynamic deterministic Compare rows with the canonical identity
+  `section_ordinal = 9`, `row_kind = condition`, and
+  `row_key = metric_availability` remain in the stored result, UI, receipt, and internal
+  AI snapshot results, but are not addressable v1 AI evidence targets. Their
+  evidence-index references and `session_location` evidence entries are
+  omitted; they are not rounded to another selector or location and cannot
+  solely ground or be cited by a finding or improvement suggestion. This does
+  not change closed result validation or introduce a dynamic selector.
 
 AI result sections:
 
@@ -440,6 +465,8 @@ AI result sections:
 - evidence;
 - limitations;
 - provider/model/template provenance.
+
+Within each individual finding or improvement suggestion, `evidence_refs` contains 1..16 nonblank exact evidence references that are ordinal case-sensitive distinct. The same exact reference may be reused across separate findings or suggestions.
 
 AI output is never rendered as an observed timeline node.
 

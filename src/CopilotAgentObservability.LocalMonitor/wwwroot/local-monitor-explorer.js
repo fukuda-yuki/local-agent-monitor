@@ -602,7 +602,8 @@
         || !FACT_STATES.has(timing.state)
         || !timestamp(timing.started_at) || !timestamp(timing.ended_at)
         || timing.duration_ms !== null && !count(timing.duration_ms)
-        || timing.state === "recorded" && (timing.started_at === null || timing.ended_at === null || timing.duration_ms === null)
+        || timing.state === "recorded" && (timing.started_at === null
+          || (timing.ended_at === null) !== (timing.duration_ms === null))
         || timing.ended_at !== null && timing.started_at === null
         || timing.started_at !== null && timing.ended_at !== null
           && timing.ended_at < timing.started_at
@@ -753,10 +754,47 @@
 
   function renderAiMetadata(preview) {
     aiPreviewContent.replaceChildren();
-    const states = Object.freeze({ recorded: "記録済み", not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", not_captured: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", redacted: "内容は記録されていません", malformed: "記録が一部欠けています", oversized: "記録が一部欠けています", inconsistent: "内訳を表示できません", projection_invalid: "記録が一部欠けています", partial: "記録が一部欠けています", available: "内容を利用できます", expired_pending_deletion: "保存期間を過ぎたため表示できません" });
     const completenessLabels = Object.freeze({ unbound: "ネイティブセッションとの関連を確認できません", partial: "ライフサイクルまたは入力の記録が一部欠けています", rich: "内容または終了状態の記録が一部欠けています", full: "必要な記録がそろっています" });
     const exclusions = Object.freeze({ session_not_found: "セッションを確認できないため除外されました", repository_mismatch: "リポジトリが一致しないため除外されました", session_archived: "セッションがアーカイブ済みのため除外されました", repository_archived: "リポジトリがアーカイブ済みのため除外されました", projection_unavailable: "比較用データを利用できないため除外されました" });
-    const factValues = value => value === null ? null : value.values.length > 0 ? value.values : states[value.state] ?? value.state;
+    const presentations = Object.freeze({
+      not_observed: { state: "not_observed", recordedCount: null },
+      source_unsupported: { state: "unsupported", recordedCount: null, reasonText: "この項目は取得元で記録されません" },
+      capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "この項目の記録が一部欠けています" },
+      certification_pending: { state: "certification_pending", recordedCount: null, reasonText: "取得能力の検証が完了していません" },
+      not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は記録されていません" },
+      expired: { state: "raw_expired", recordedCount: null, reasonText: "この項目は保存期間を過ぎています" },
+      redacted: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は表示用に記録されていません" },
+      malformed: { state: "projection_invalid", recordedCount: null, reasonText: "記録された形式を安全に確認できません" },
+      oversized: { state: "projection_invalid", recordedCount: null, reasonText: "記録が表示可能な範囲を超えています" },
+      inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "この項目の値を確定できません" },
+      projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "この項目の記録を検証できません" },
+      expired_pending_deletion: { state: "raw_expired", recordedCount: null, reasonText: "この項目は保存期間を過ぎています" },
+    });
+    const appendFact = (item, label, fact, sourceText) => {
+      if (fact === null) return;
+      const row = element("div");
+      row.append(element("strong", null, `${label}: `));
+      if (fact.values.length > 0) row.append(document.createTextNode(fact.values.join(" / ")));
+      if (fact.state !== "recorded") {
+        if (fact.values.length > 0) row.append(document.createTextNode(" · "));
+        const target = element("div");
+        const basePresentation = presentations[fact.state];
+        const presentation = fact.state === "source_unsupported"
+          ? { ...basePresentation, sourceText }
+          : basePresentation;
+        if (!presentation) throw new TypeError("invalid preview fact state");
+        window.LocalMonitorV1FactState.render(target, presentation);
+        row.append(target);
+      }
+      item.append(row);
+    };
+    const appendContentFact = (item, state, sourceText) => {
+      if (state === null) return;
+      if (state === "available") {
+        const row = element("div"); row.append(element("strong", null, "内容: "), document.createTextNode("内容を利用できます")); item.append(row); return;
+      }
+      appendFact(item, "内容", { state, values: [] }, sourceText);
+    };
     const archiveState = value => ({ active: "有効", archived: "アーカイブ済み" })[value] ?? value;
     for (const [heading, values] of [["対象の技術情報", preview.included], ["除外項目の技術情報", preview.excluded]]) {
       const section = element("section");
@@ -764,7 +802,13 @@
       const list = element("ul");
       for (const value of values) {
         const item = element("li");
-        item.textContent = [`セッションID: ${value.session_id}`, exclusions[value.reason] ?? value.reason, `セッション ${archiveState(value.session_archive_state)} 改訂 ${value.session_archive_revision}`, `リポジトリ ${archiveState(value.repository_archive_state)} 改訂 ${value.repository_archive_revision}`, exclusions[value.archive_exclusion_reason] ?? value.archive_exclusion_reason, factValues(value.source), factValues(value.model), value.completeness === null ? null : completenessLabels[value.completeness], states[value.content_state] ?? value.content_state, value.workspace_revision === null ? null : `ワークスペースのSHA-256: ${value.workspace_revision}`, value.truncated === false ? "省略なし" : value.truncated].filter(x => x !== null && x !== undefined).flat().join(" / ");
+        item.append(element("p", null, [`セッションID: ${value.session_id}`, exclusions[value.reason] ?? value.reason, `セッション ${archiveState(value.session_archive_state)} 改訂 ${value.session_archive_revision}`, `リポジトリ ${archiveState(value.repository_archive_state)} 改訂 ${value.repository_archive_revision}`, exclusions[value.archive_exclusion_reason] ?? value.archive_exclusion_reason, value.completeness === null ? null : completenessLabels[value.completeness], value.workspace_revision === null ? null : `ワークスペースのSHA-256: ${value.workspace_revision}`, value.truncated === false ? "省略なし" : value.truncated].filter(x => x !== null && x !== undefined).join(" / ")));
+        const sourceText = value.source?.state === "recorded" && value.source.values.length > 0
+          ? value.source.values.join(" / ")
+          : "取得元を確認できません";
+        appendFact(item, "取得元", value.source, sourceText);
+        appendFact(item, "モデル", value.model, sourceText);
+        appendContentFact(item, value.content_state, sourceText);
         list.append(item);
       }
       section.append(list); aiPreviewContent.append(section);

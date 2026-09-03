@@ -109,6 +109,23 @@ Task Scheduler 登録もしません。
 今すぐ起動する場合は `start.ps1 -Mode Published` を実行します。次回ログオン時から
 自動起動したい場合だけ、別途 Task Scheduler 登録を行います。
 
+一時的に通常のユーザー領域と分離する場合は、空でない絶対パスを同じ
+`-RuntimeRoot` として `start.ps1`、`status.ps1`、`stop.ps1` に渡します。この指定は
+既定の app、DB、logs、state、PID の場所をその実行だけ切り替え、Task Scheduler には
+保存されません。
+
+明示 root では state、PID、process、URL、DB / install path、mode、repository、
+executable identity が一致する場合だけ稼働中と判定します。不一致は process を停止せず
+state も削除せず `runtime_state_mismatch` で終了します。state がない場合、`status.ps1`
+は通常ユーザー領域の既定 URL を probe しません。
+
+```powershell
+$runtimeRoot = 'C:\private\local-monitor-isolated'
+.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot
+.\scripts\status.ps1 -RuntimeRoot $runtimeRoot
+.\scripts\stop.ps1 -RuntimeRoot $runtimeRoot -Force
+```
+
 ```powershell
 .\scripts\install-startup-task.ps1 -Mode Published
 .\scripts\set-startup-task.ps1 -Action Disable
@@ -713,18 +730,14 @@ trace を開くと、パンくず・プロンプト見出し・状態ピル（�
 
 詳細画面ヘッダーの「Copilot で解析」で右からドロワーが開きます（詳細は
 [Copilot raw analysis](#copilot-raw-analysis) を参照）。観点（トークン / キャッシュ /
-エラー / 遅延 / ツール利用 / エージェントの流れ / 指示診断）を選んで実行すると、captured raw
-trace をローカルの .NET GitHub Copilot SDK で解析し、所見を表示します。所見に対しては
+エラー / 遅延 / ツール利用 / エージェントの流れ / 指示診断）を選んで実行すると、所見を表示します。
+明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します。所見に対しては
 サジェストチップまたは自由入力でチャット形式の**追い質問**ができます。追い質問は
 新規 analysis run として過去の Q&A を再送する方式（履歴再送。D045）で、会話履歴が
 server に永続化されることはありません。
 
-ドロワーには「ローカル SDK 経由 · raw はローカルから出ません」というデータ境界の
-表示が常にあります。`--sanitized-only` では画面、ボタン、ドロワーを登録しません。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor Copilot 解析ドロワー" src="../assets/screenshots/local-monitor-copilot-drawer.png">
-</p>
+ドロワーには「明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します」という
+データ境界の表示が常にあります。`--sanitized-only` では画面、ボタン、ドロワーを登録しません。
 
 ### サニタイズ済み証拠の取り込み
 

@@ -319,7 +319,9 @@ internal static class LocalAiResultValidatorV1
         if (value.ValueKind != JsonValueKind.Array) return LocalAiResultValidationCodeV1.InvalidResult;
         var refs = value.EnumerateArray().ToArray();
         if (refs.Length is < 1 or > 16 || refs.Any(item => item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()))) return LocalAiResultValidationCodeV1.InvalidEvidence;
-        return evidence is null || refs.All(item => evidence.Contains(item.GetString()!, StringComparer.Ordinal)) ? LocalAiResultValidationCodeV1.Valid : LocalAiResultValidationCodeV1.InvalidEvidence;
+        var referenceValues = refs.Select(item => item.GetString()!).ToArray();
+        if (referenceValues.Distinct(StringComparer.Ordinal).Count() != referenceValues.Length) return LocalAiResultValidationCodeV1.InvalidEvidence;
+        return evidence is null || referenceValues.All(item => evidence.Contains(item, StringComparer.Ordinal)) ? LocalAiResultValidationCodeV1.Valid : LocalAiResultValidationCodeV1.InvalidEvidence;
     }
     private static bool Exact(JsonElement element, string[] expected) => element.ValueKind == JsonValueKind.Object && element.EnumerateObject().Select(x => x.Name).Order().SequenceEqual(expected.Order());
     private static bool Strings(JsonElement element, params string[] names) => names.All(name => element.GetProperty(name).ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(element.GetProperty(name).GetString()));

@@ -10,10 +10,24 @@ param(
     [string[]] $SkillDiscoveryDirectory = @(),
     [switch] $NoBrowser = $true,
     [switch] $WaitReady = $true,
-    [int] $TimeoutSeconds = 30
+    [int] $TimeoutSeconds = 30,
+    [AllowEmptyString()]
+    [string] $RuntimeRoot
 )
 
+$runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
+$runtimeRootOverride = $RuntimeRoot
 . "$PSScriptRoot\common.ps1"
+
+if ($runtimeRootSupplied) {
+    try {
+        Set-LocalMonitorRuntimeRoot -RuntimeRoot $runtimeRootOverride
+    }
+    catch {
+        Write-Error 'runtime_root_invalid'
+        exit 1
+    }
+}
 
 function Remove-LocalMonitorStateForStartedProcess {
     param($Process)
@@ -80,16 +94,76 @@ if ([string]::IsNullOrWhiteSpace($DbPath)) {
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-LocalMonitorDefaultInstallRoot
 }
+if ($runtimeRootSupplied) {
+    try {
+        $DbPath = [System.IO.Path]::GetFullPath($DbPath)
+        $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+    }
+    catch {
+        Write-Error 'runtime_state_mismatch'
+        exit 1
+    }
+}
+
+$expectedStateMode = if ($Mode -eq 'DotnetRun') { 'dotnet-run' } else { 'published' }
+$expectedRepoRoot = if ($Mode -eq 'DotnetRun') { Get-LocalMonitorRepoRoot } else { '' }
+$expectedExecutablePath = if ($Mode -eq 'DotnetRun') { 'dotnet' } else { Get-LocalMonitorPublishedExePath -InstallRoot $InstallRoot }
 
 if (-not (Test-LocalMonitorLoopbackUrl -Url $Url)) {
     Write-Error 'non_loopback_url'
     exit 1
 }
 
+if ($runtimeRootSupplied) {
+    $existingStateFile = Test-Path -LiteralPath $script:StatePath -PathType Leaf
+    $existingPidFile = Test-Path -LiteralPath $script:PidPath -PathType Leaf
+    if (($existingStateFile -and -not $existingPidFile) -or ($existingPidFile -and -not $existingStateFile)) {
+        Write-Error 'runtime_state_mismatch'
+        exit 1
+    }
+    if ($existingStateFile) {
+        $existingRuntimeState = Get-LocalMonitorState
+        if (-not (Test-LocalMonitorExplicitRuntimeState -State $existingRuntimeState)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+        $existingRuntimeProcess = Get-Process -Id ([int] $existingRuntimeState.process_id) -ErrorAction SilentlyContinue
+        if ($null -ne $existingRuntimeProcess) {
+            if (-not (Test-LocalMonitorExplicitRuntimeState `
+                    -State $existingRuntimeState `
+                    -ExpectedUrl $Url `
+                    -ExpectedDbPath $DbPath `
+                    -ExpectedInstallRoot $InstallRoot `
+                    -ExpectedMode $expectedStateMode `
+                    -ExpectedRepoRoot $expectedRepoRoot `
+                    -ExpectedExecutablePath $expectedExecutablePath) `
+                -or -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $existingRuntimeState)) {
+                Write-Error 'runtime_state_mismatch'
+                exit 1
+            }
+        }
+    }
+}
+
 Initialize-LocalMonitorRuntime -DbPath $DbPath
 
 $live = Test-LocalMonitorHealth -Url $Url -Path '/health/live'
 if ($null -ne $live -and [int] $live.StatusCode -eq 200) {
+    if ($runtimeRootSupplied) {
+        $existingState = Get-LocalMonitorState
+        if (-not (Test-LocalMonitorExplicitRuntimeState `
+            -State $existingState `
+            -ExpectedUrl $Url `
+            -ExpectedDbPath $DbPath `
+            -ExpectedInstallRoot $InstallRoot `
+            -ExpectedMode $expectedStateMode `
+            -ExpectedRepoRoot $expectedRepoRoot `
+            -ExpectedExecutablePath $expectedExecutablePath) `
+            -or -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $existingState)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+    }
     if ($WaitReady) {
         $readyDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {

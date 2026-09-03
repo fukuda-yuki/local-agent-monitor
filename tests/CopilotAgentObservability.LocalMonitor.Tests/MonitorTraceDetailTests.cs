@@ -129,7 +129,7 @@ public class MonitorTraceDetailTests
         // mandatory data-boundary copy.
         Assert.Contains("id=\"copilot-drawer\"", body);
         Assert.Contains("GitHub Copilot で解析", body);
-        Assert.Contains("ローカル SDK 経由 · raw はローカルから出ません", body);
+        Assert.Contains("明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します", body);
         Assert.Contains("id=\"drawer-focus\"", body);
         Assert.Contains("value=\"tool-usage\"", body);
         Assert.Contains("value=\"agent-flow\"", body);
