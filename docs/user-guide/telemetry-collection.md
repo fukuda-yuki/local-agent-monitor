@@ -104,8 +104,9 @@ VS Code からの直接テレメトリ受信は、まだライブ環境での確
 LocalMonitor は loopback-only の単一 ASP.NET Core プロセスです。VS Code GitHub
 Copilot Chat の OTLP HTTP/protobuf を `POST /v1/traces` で直接受信し、SQLite raw
 store に永続化し、sanitized projection を生成し、ローカルブラウザ UI で取り込みの
-健全性を確認できます。既定では TraceDetail で raw body と PII をローカル画面上に
-表示できます。API と SSE は sanitized metadata のみを返します。
+健全性とセッションの実行内容を確認できます。既定では raw 内容をローカル画面上で確認できます。
+凍結済み `/api/monitor/*`、`/api/session-workspace/*` v1 と SSE は sanitized metadata を返します。
+`/api/local-monitor/v1/*` は raw 内容を含み得る人向け UI 専用 API です。
 
 仕様（正本）は次を参照してください。
 
@@ -132,11 +133,17 @@ store に永続化し、sanitized projection を生成し、ローカルブラ�
 
    `--endpoint http://127.0.0.1:<port>` で非既定の loopback port を指定できます。
 
-3. ブラウザで `http://127.0.0.1:4320/` を開きます。`/`（概要）、`/traces`
-   （トレース一覧・詳細）、`/diagnostics`（診断）の各ページと、通知専用 SSE
-   `GET /events`、readiness `GET /health/ready` / `GET /health/live`、sanitized
-   cursor API `GET /api/monitor/ingestions` / `GET /api/monitor/traces` を利用できます。
-   API と SSE は sanitized metadata のみで、raw payload や PII を含みません。
+3. 出力された環境変数を適用した shell から VS Code を起動し、Copilot Chat を実行します。
+   ブラウザで `http://127.0.0.1:4320/` のリポジトリを選び、Session Explorer からセッション詳細を開きます。
+   未割り当ての場合は「すべてのセッション」または「リポジトリ未設定のセッション」から確認できます。
+   受信状況はヘッダーから設定の「受信」、詳細調査は「診断」で確認します。
+
+   技術調査用の `/traces/{traceId}` は残りますが、旧 `/traces` 一覧は利用しません。
+   通知専用 SSE `GET /events`、`GET /health/ready` / `GET /health/live`、sanitized cursor API
+   `GET /api/monitor/ingestions` / `GET /api/monitor/traces` は引き続き利用できます。
+
+セッション調査とリポジトリ内の比較に AI は不要です。任意の AI 分析は設定で利用準備を確認し、
+明示的な実行時に選択した内容が GitHub Copilot に送信されます。
 
 raw body（tool arguments / results、sub-agent instructions / responses、system prompt）と
 PII は **既定で表示されます**（server-rendered、inert text）。trace-detail page に inline
@@ -145,7 +152,7 @@ raw-bearing route は same-origin 限定（cross-site は `403`）、`Cache-Cont
 
 - `--sanitized-only` を付けて起動すると receiver / health / machine API 専用になり、
   Razor Pages、human static assets、人向け画面、raw-local route を登録しません。
-  TraceDetail の metadata-only shell も提供しません。
+  `/api/local-monitor/v1/*` や画面ごとの metadata-only 表示も提供しません。
 - raw / PII は repository-safe artifacts には決して出力しません。raw store や一時出力
   を repository に commit しないでください。
 
