@@ -8,6 +8,42 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class DoctorUiPlaywrightTests
 {
     [Fact]
+    public async Task Diagnostics_DistinguishesLoadingFromUnselectedDoctorFactsWithoutPlaceholders()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var requested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync("**/api/doctor/ui/v1/sources", async route =>
+        {
+            requested.SetResult();
+            await release.Task;
+            await route.FulfillAsync(new RouteFulfillOptions { ContentType = "application/json", Body = SourcesJson });
+        });
+
+        await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await requested.Task;
+        var fields = page.Locator("#doctor-current-state, #doctor-severity, #doctor-result-source, #doctor-next-action, #doctor-retryability, #doctor-lifecycle");
+        await Expect(fields).ToHaveCountAsync(6);
+        await Expect(fields).ToContainTextAsync(new[] { "読み込んでいます", "読み込んでいます", "読み込んでいます", "読み込んでいます", "読み込んでいます", "読み込んでいます" });
+        Assert.All(await fields.AllTextContentsAsync(), text => Assert.DoesNotContain("—", text, StringComparison.Ordinal));
+        await Expect(page.Locator("#doctor-current-state, #doctor-severity, #doctor-result-source, #doctor-next-action, #doctor-retryability, #doctor-lifecycle").Locator("[data-fact-state]")).ToHaveCountAsync(0);
+
+        release.SetResult();
+        await Expect(page.Locator("#doctor-current-state [data-fact-state='not-observed'], #doctor-severity [data-fact-state='not-observed'], #doctor-result-source [data-fact-state='not-observed'], #doctor-next-action [data-fact-state='not-observed'], #doctor-retryability [data-fact-state='not-observed'], #doctor-lifecycle [data-fact-state='not-observed']")).ToHaveCountAsync(6);
+        await Expect(page.Locator("#doctor-current-state p")).ToContainTextAsync("判定状態をこの記録で確認できません");
+        Assert.All(await fields.AllTextContentsAsync(), text =>
+        {
+            Assert.DoesNotContain("not_observed", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("—", text, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public async Task Diagnostics_RendersCanonicalDoctorResultAndServerNavigationAsInertText()
     {
         using var temp = new MonitorTempDirectory();

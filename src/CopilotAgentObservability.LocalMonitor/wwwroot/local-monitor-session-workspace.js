@@ -349,7 +349,6 @@
   const KIND_LABELS = Object.freeze({ execution: "実行", agent: "エージェント", skill: "スキル", tool: "ツール", subagent: "サブエージェント", event: "イベント", error: "エラー", retry: "再試行", permission: "権限", unknown_relation_group: "親子関係不明" });
   const STATUS_LABELS = Object.freeze({ active: "実行中", completed: "完了", failed: "失敗", unknown: "確認できません", selected: "選択", started: "開始", deselected: "選択解除", current: "有効", stale: "更新あり", invalid: "無効", certification_pending: "安定して取得できるか未確認です", unavailable: "利用できません", allowed: "許可", denied: "拒否", asked: "確認待ち" });
   const SIGNAL_LABELS = Object.freeze({ instruction: "指示", source: "取得元", model: "モデル", version: "バージョン", timing: "時刻", tokens: "トークン", cache: "キャッシュ", skill: "スキル", tool: "ツール", subagent: "サブエージェント", error: "エラー", retry: "再試行" });
-  const stateLabel = value => ({ recorded: "記録あり", complete_zero: "今回の記録にはありません", not_observed: "今回の記録にはありません", source_unsupported: "この取得元では記録できません", capture_gap: "記録が一部欠けています", malformed: "記録が一部欠けています", oversized: "記録が一部欠けています", projection_invalid: "記録が一部欠けています", certification_pending: "安定して取得できるか未確認です", not_captured: "内容は記録されていません", redacted: "内容は記録されていません", expired: "保存期間を過ぎたため表示できません", inconsistent: "内訳を表示できません" })[value] ?? "記録が一部欠けています";
   const sourceLabel = value => SOURCES.has(value) ? window.LocalMonitorV1FactState.sessionSourceLabel(value) : value;
 
   function closeRawDialog(restoreFocus = true) {
@@ -573,8 +572,14 @@
       const section = el("section", "local-monitor-session-execution"); section.dataset.executionId = execution.execution_id;
       const toggle = el("button", "local-monitor-session-execution-toggle"); toggle.type = "button"; toggle.dataset.executionToggle = "";
       toggle.setAttribute("aria-expanded", String(memory.open));
-      const summaryFacts = [`活動 ${format(execution.child_count)}件`, timingLabel(execution), `トークン ${execution.tokens.total.state === "recorded" ? format(execution.tokens.total.value) : stateLabel(execution.tokens.total.state)}`];
-      for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) summaryFacts.push(`${label} ${execution.activity[key].state === "recorded" ? `${format(execution.activity[key].count)}件` : stateLabel(execution.activity[key].state)}`);
+      const summaryFacts = [`活動 ${format(execution.child_count)}件`, timingLabel(execution)];
+      const unavailableFacts = [];
+      if (execution.tokens.total.state === "recorded") summaryFacts.push(`トークン ${format(execution.tokens.total.value)}`);
+      else unavailableFacts.push(["tokens", "トークン", execution.tokens.total]);
+      for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) {
+        if (execution.activity[key].state === "recorded") summaryFacts.push(`${label} ${format(execution.activity[key].count)}件`);
+        else unavailableFacts.push([key, label, execution.activity[key]]);
+      }
       toggle.append(el("strong", null, `実行 ${execution.source === null ? "確認できません" : sourceLabel(execution.source)} · ${STATUS_LABELS[execution.status]}`), el("span", null, summaryFacts.join(" · ")));
       toggle.addEventListener("click", async () => {
         memory.open = !memory.open;
@@ -582,6 +587,15 @@
         renderExecutions();
       });
       section.append(toggle);
+      if (unavailableFacts.length) {
+        const facts = el("div"); facts.dataset.executionFactSummary = "";
+        for (const [key, label, fact] of unavailableFacts) {
+          const row = el("div"); row.dataset.executionFact = key; row.append(el("span", null, `${label}: `)); const presentation = row.appendChild(el("div")); renderFact(presentation, fact);
+          if (!presentation.querySelector("p")) presentation.append(el("p", null, `${label}の記録状態はまだ確定していません。`));
+          facts.append(row);
+        }
+        section.append(facts);
+      }
       if (memory.open) {
         const scroll = el("div", "local-monitor-session-execution-scroll"); scroll.dataset.executionScroll = ""; scroll.setAttribute("role", "tree"); scroll.setAttribute("aria-label", "実行タイムライン");
         scroll.append(renderNodes(execution, memory, null, 0, execution.child_count)); scroll.addEventListener("scroll", () => { memory.scrollTop = scroll.scrollTop; }); section.append(scroll);
@@ -924,7 +938,10 @@
       if (metadata.historical_snapshot_reference.state === "recorded") {
         const snapshotId = metadata.historical_snapshot_reference.value; const historical = el("button", null, "履歴スナップショットを表示"); historical.type = "button"; historical.addEventListener("click", () => readSkillContent(historical, snapshotId, false));
         const current = el("button", null, "現在のファイルを読み取る"); current.type = "button"; current.addEventListener("click", () => readSkillContent(current, snapshotId, true)); section.append(historical, current);
-      } else section.append(el("p", null, `履歴スナップショット: ${stateLabel(metadata.historical_snapshot_reference.state)}`));
+      } else {
+        const historical = el("div"); historical.dataset.historicalSnapshotFact = ""; historical.append(el("span", null, "履歴スナップショット: "));
+        renderFact(historical.appendChild(el("div")), metadata.historical_snapshot_reference); section.append(historical);
+      }
     } else if (node.kind === "subagent") {
       for (const [key, label] of [["selected", "選択"], ["started", "開始"], ["completed", "完了"], ["failed", "失敗"], ["deselected", "選択解除"]]) appendInspectorFact(section, label, metadata.lifecycle[key]);
       for (const [key, label] of [["skill", "スキル活動"], ["tool", "ツール活動"], ["subagent", "サブエージェント活動"], ["error", "エラー活動"], ["retry", "再試行活動"]]) appendInspectorFact(section, label, metadata.activity[key], "count");
@@ -1021,7 +1038,9 @@
   function renderOverview(summary) {
     const session = summary.session;
     const overview = root.querySelector("[data-session-overview]"); overview.setAttribute("aria-label", "セッションの概要"); overview.replaceChildren(el("h2", null, "セッションの概要"));
-    overview.append(el("h3", null, "最初の指示"), el("p", null, session.instruction.state === "recorded" ? session.instruction.label : stateLabel(session.instruction.state)));
+    overview.append(el("h3", null, "最初の指示"));
+    if (session.instruction.state === "recorded") overview.append(el("p", null, session.instruction.label));
+    else { const instruction = overview.appendChild(el("div")); instruction.dataset.sessionInstructionFact = ""; renderFact(instruction, { state: session.instruction.state, count: null }); }
     overview.append(el("p", null, session.instruction.additional_count === null
       ? "追加の指示 今回の記録にはありません" : `追加の指示 ${format(session.instruction.additional_count)}件`));
     overview.append(el("p", null, `状態 ${STATUS_LABELS[session.status]} · 実行 ${format(summary.executions.length)}件`));
