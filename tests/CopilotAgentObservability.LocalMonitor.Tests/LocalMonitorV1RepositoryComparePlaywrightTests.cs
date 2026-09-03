@@ -519,7 +519,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     }
 
     [Fact]
-    [Trait("ValidationLane", "CriticalSmoke")]
+    [Trait("ValidationLane", "Nightly")]
     public async Task CompareDistinguishesClosedUnavailableStateSetFromMissingAndMalformedValues()
     {
         var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
