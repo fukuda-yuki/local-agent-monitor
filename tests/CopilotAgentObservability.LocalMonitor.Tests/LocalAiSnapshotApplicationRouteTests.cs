@@ -4,6 +4,7 @@ using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.LocalAi;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.LocalAi;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
@@ -527,7 +528,17 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     [Fact]
     public async Task SessionReportsFailClosedWithoutReadingDurableHistoryAndRecoverWithExactSnapshotComparison()
     {
-        var snapshots = new RecoveringReportSnapshots(); var runs = new RecoveringReportRuns();
+        using var temp = new MonitorTempDirectory();
+        var saved = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
+        var snapshots = new RecoveringReportSnapshots();
+        var retention = new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, temp.TimeProvider), temp.TimeProvider);
+        var runs = SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath, "model-test", new string('a', 64), temp.TimeProvider, retention);
+        var queued = runs.Create(saved, 60); runs.Start(queued.RunId); var running = runs.Read(queued.RunId);
+        var result = LocalAiResultEnvelopeV1.Compose(
+            "{\"summary\":\"stable\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}"u8.ToArray(),
+            saved, running, temp.TimeProvider.GetUtcNow());
+        var completed = runs.Complete(queued.RunId, LocalAiProviderOutcomeV1.Complete(result), temp.TimeProvider.GetUtcNow());
+        var durableBefore = ReadDurableReportState(temp.DatabasePath, completed.RunId);
         var application = new LocalAiAnalysisApplicationV1(
             _ => ValueTask.FromResult(true), snapshots, runs, new Provider(LocalAiProviderOutcomeV1.Failed()));
         await using var host = await Host(application);
@@ -536,14 +547,24 @@ public sealed class LocalAiSnapshotApplicationRouteTests
 
         Assert.Equal(HttpStatusCode.Conflict, unavailable.StatusCode);
         Assert.Equal("{\"error\":\"projection_unavailable\"}", await unavailable.Content.ReadAsStringAsync());
-        Assert.Equal(0, runs.ReportReads);
-        snapshots.Available = true;
+        Assert.Equal(durableBefore, ReadDurableReportState(temp.DatabasePath, completed.RunId));
+        snapshots.Current = saved;
 
         using var recovered = await host.GetAsync($"/api/local-monitor/v1/ai/sessions/{SessionId}/reports");
         using var json = JsonDocument.Parse(await recovered.Content.ReadAsByteArrayAsync());
         Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
-        Assert.Equal(1, runs.ReportReads);
-        Assert.True(json.RootElement.GetProperty("reports")[0].GetProperty("snapshot_changed").GetBoolean());
+        var recoveredReport = Assert.Single(json.RootElement.GetProperty("reports").EnumerateArray());
+        Assert.Equal(completed.RunId, recoveredReport.GetProperty("run_id").GetString());
+        Assert.False(recoveredReport.GetProperty("snapshot_changed").GetBoolean());
+        Assert.Equal(durableBefore.ResultJsonHex, Convert.ToHexString(Encoding.UTF8.GetBytes(recoveredReport.GetProperty("result").GetRawText())));
+
+        snapshots.Current = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0) with { Revision = "revision-b" });
+        using var changed = await host.GetAsync($"/api/local-monitor/v1/ai/sessions/{SessionId}/reports");
+        using var changedJson = JsonDocument.Parse(await changed.Content.ReadAsByteArrayAsync());
+        var changedReport = Assert.Single(changedJson.RootElement.GetProperty("reports").EnumerateArray());
+        Assert.Equal(completed.RunId, changedReport.GetProperty("run_id").GetString());
+        Assert.True(changedReport.GetProperty("snapshot_changed").GetBoolean());
+        Assert.Equal(durableBefore, ReadDurableReportState(temp.DatabasePath, completed.RunId));
     }
 
     [Theory]
@@ -629,6 +650,23 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Enumerable.Range(0, events).Select(i => new LocalAiProjectionNodeV1($"node-{i}", "execution-0", null, [])).ToArray(),
         Enumerable.Range(0, spans).Select(i => $"span-{i}").ToArray());
     private static byte[] ValidResult() => "{}"u8.ToArray();
+    private static DurableReportState ReadDurableReportState(string databasePath, string runId)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()); connection.Open();
+        using var command = connection.CreateCommand(); command.CommandText = """
+            SELECT (SELECT COUNT(*) FROM local_ai_snapshots),
+                   (SELECT COUNT(*) FROM local_ai_runs),
+                   (SELECT COUNT(*) FROM local_ai_results),
+                   r.run_id,r.snapshot_id,r.result_id,s.payload_sha256,length(s.payload_json),
+                   x.result_sha256,length(x.result_json),hex(x.result_json)
+            FROM local_ai_runs r JOIN local_ai_snapshots s ON s.snapshot_id=r.snapshot_id
+              JOIN local_ai_results x ON x.result_id=r.result_id WHERE r.run_id=$run;
+            """; command.Parameters.AddWithValue("$run", runId); using var reader = command.ExecuteReader(); Assert.True(reader.Read());
+        return new(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3), reader.GetString(4), reader.GetString(5),
+            reader.GetString(6), reader.GetInt64(7), reader.GetString(8), reader.GetInt64(9), reader.GetString(10));
+    }
+    private sealed record DurableReportState(long SnapshotCount, long RunCount, long ResultCount, string RunId, string SnapshotId,
+        string ResultId, string PayloadSha256, long PayloadBytes, string ResultSha256, long ResultBytes, string ResultJsonHex);
     private static StringContent Json(string body) => new(body, Encoding.UTF8, "application/json");
     private static HttpRequestMessage Request(HttpMethod method, string path, string body)
     {
@@ -661,28 +699,12 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     }
     private sealed class RecoveringReportSnapshots : ILocalAiSnapshotProjectionServiceV1
     {
-        private readonly LocalAiSnapshotProjectionV1 snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
-        internal bool Available { get; set; }
-        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) => Available
-            ? ValueTask.FromResult(snapshot)
+        internal LocalAiSnapshotProjectionV1? Current { get; set; }
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) => Current is not null
+            ? ValueTask.FromResult(Current)
             : ValueTask.FromException<LocalAiSnapshotProjectionV1>(new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
         public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token) => throw new NotSupportedException();
-    }
-    private sealed class RecoveringReportRuns : ILocalAiRunRepositoryV1
-    {
-        internal int ReportReads { get; private set; }
-        public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256)
-        {
-            ReportReads++;
-            return new([new("018f0000-0000-7000-8000-000000000010", "succeeded", "{}"u8.ToArray(), "retained", currentPayloadSha256 != "stored")], null);
-        }
-        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout) => throw new NotSupportedException();
-        public void Start(string runId) => throw new NotSupportedException();
-        public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt) => throw new NotSupportedException();
-        public LocalAiRunStatusV1 Fail(string runId, string errorCode) => throw new NotSupportedException();
-        public LocalAiRunStatusV1 Read(string runId) => throw new NotSupportedException();
-        public bool Cancel(string runId) => throw new NotSupportedException();
     }
     private sealed class RecordingRuns : ILocalAiRunRepositoryV1
     {
