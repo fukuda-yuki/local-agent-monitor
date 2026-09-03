@@ -649,6 +649,7 @@
       doctorSource.replaceChildren(...options);
       doctorSource.value = "";
       doctorSource.disabled = false;
+      resetDoctorResult();
       const detected = payload.sources.filter(source => source.detection_state === "detected").length;
       doctorSourceState.textContent = detected === 0
         ? "検出されたソースはありません。ソースを選択して確認できます。"
