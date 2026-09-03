@@ -114,6 +114,27 @@ if (-not (Test-LocalMonitorLoopbackUrl -Url $Url)) {
     exit 1
 }
 
+if ($runtimeRootSupplied) {
+    $existingStateFile = Test-Path -LiteralPath $script:StatePath -PathType Leaf
+    $existingPidFile = Test-Path -LiteralPath $script:PidPath -PathType Leaf
+    if (($existingStateFile -and -not $existingPidFile) -or ($existingPidFile -and -not $existingStateFile)) {
+        Write-Error 'runtime_state_mismatch'
+        exit 1
+    }
+    if ($existingStateFile) {
+        $existingRuntimeState = Get-LocalMonitorState
+        if (-not (Test-LocalMonitorExplicitRuntimeState -State $existingRuntimeState)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+        $existingRuntimeProcess = Get-Process -Id ([int] $existingRuntimeState.process_id) -ErrorAction SilentlyContinue
+        if ($null -ne $existingRuntimeProcess -and -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $existingRuntimeState)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+    }
+}
+
 Initialize-LocalMonitorRuntime -DbPath $DbPath
 
 $live = Test-LocalMonitorHealth -Url $Url -Path '/health/live'
@@ -127,8 +148,8 @@ if ($null -ne $live -and [int] $live.StatusCode -eq 200) {
             -ExpectedInstallRoot $InstallRoot `
             -ExpectedMode $expectedStateMode `
             -ExpectedRepoRoot $expectedRepoRoot `
-            -ExpectedExecutablePath $expectedExecutablePath `
-            -RequireRunning)) {
+            -ExpectedExecutablePath $expectedExecutablePath) `
+            -or -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $existingState)) {
             Write-Error 'runtime_state_mismatch'
             exit 1
         }

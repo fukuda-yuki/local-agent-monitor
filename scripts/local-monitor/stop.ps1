@@ -19,7 +19,13 @@ if ($runtimeRootSupplied) {
     }
 }
 
-$stateFileExists = Test-Path -LiteralPath $script:StatePath
+$stateFileExists = Test-Path -LiteralPath $script:StatePath -PathType Leaf
+$pidFileExists = Test-Path -LiteralPath $script:PidPath -PathType Leaf
+$presenceMismatch = ($stateFileExists -and -not $pidFileExists) -or ($pidFileExists -and -not $stateFileExists)
+if ($runtimeRootSupplied -and $presenceMismatch) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
 $state = Get-LocalMonitorState
 if ($null -eq $state) {
     if ($runtimeRootSupplied -and $stateFileExists) {
@@ -35,14 +41,17 @@ if ($runtimeRootSupplied -and -not (Test-LocalMonitorExplicitRuntimeState -State
     exit 1
 }
 $processId = [int] $state.process_id
-if (-not (Test-LocalMonitorProcess -ProcessId $processId)) {
+$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+if ($runtimeRootSupplied -and $null -ne $process -and -not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $state)) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
+if ($runtimeRootSupplied -and $null -eq $process) {
     Remove-LocalMonitorState
     Write-Output "not_running"
     exit 0
 }
-
-$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-if ($null -eq $process) {
+if (-not $runtimeRootSupplied -and -not (Test-LocalMonitorProcess -ProcessId $processId)) {
     Remove-LocalMonitorState
     Write-Output "not_running"
     exit 0

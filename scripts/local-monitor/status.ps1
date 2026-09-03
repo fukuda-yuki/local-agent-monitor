@@ -23,8 +23,13 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-LocalMonitorDefaultInstallRoot
 }
 
-$stateFileExists = Test-Path -LiteralPath $script:StatePath
+$stateFileExists = Test-Path -LiteralPath $script:StatePath -PathType Leaf
+$pidFileExists = Test-Path -LiteralPath $script:PidPath -PathType Leaf
 $state = Get-LocalMonitorState
+if ($runtimeRootSupplied -and (($stateFileExists -and -not $pidFileExists) -or ($pidFileExists -and -not $stateFileExists))) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
 if ($runtimeRootSupplied -and $stateFileExists -and -not (Test-LocalMonitorExplicitRuntimeState -State $state)) {
     Write-Error 'runtime_state_mismatch'
     exit 1
@@ -39,12 +44,22 @@ $pricingRegistryOverrideState = Get-LocalMonitorTaskPricingRegistryOverrideState
 $processRunning = $false
 $processId = Get-LocalMonitorStateValue -State $state -Name 'process_id'
 if ($null -ne $processId) {
-    $processRunning = Test-LocalMonitorProcess -ProcessId ([int] $processId)
+    $process = Get-Process -Id ([int] $processId) -ErrorAction SilentlyContinue
+    if ($runtimeRootSupplied -and $null -ne $process) {
+        if (-not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $state)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+        $processRunning = $true
+    }
+    elseif (-not $runtimeRootSupplied) {
+        $processRunning = Test-LocalMonitorProcess -ProcessId ([int] $processId)
+    }
 }
 
 $live = $null
 $ready = $null
-if (-not $runtimeRootSupplied -or $stateFileExists) {
+if (-not $runtimeRootSupplied -or $processRunning) {
     $live = Test-LocalMonitorHealth -Url $url -Path '/health/live'
     $ready = Test-LocalMonitorHealth -Url $url -Path '/health/ready'
 }

@@ -118,6 +118,10 @@ public class LocalMonitorScriptTests
             "CopilotAgentObservability",
             "LocalMonitor");
         var normalRuntimeFingerprint = RuntimeFileFingerprint(normalRuntimeRoot);
+        Process? firstWrapper = null;
+        Process? firstChild = null;
+        Process? secondWrapper = null;
+        Process? secondChild = null;
         try
         {
             var port = GetFreeTcpPort();
@@ -130,8 +134,10 @@ public class LocalMonitorScriptTests
                 "-NoBrowser",
                 "-WaitReady",
                 "-TimeoutSeconds", "60");
+            firstWrapper = start.Process;
 
             await WaitForRuntimeReady(runtimeRoot, url, TimeSpan.FromSeconds(60));
+            firstChild = CaptureOwnedRuntimeProcess(runtimeRoot, firstWrapper, url);
             Assert.True(Directory.Exists(Path.Combine(runtimeRoot, "logs")), "Start did not use the disposable log root.");
             Assert.NotEmpty(Directory.GetFiles(Path.Combine(runtimeRoot, "logs"), "wrapper-*.log"));
             Assert.True(File.Exists(Path.Combine(runtimeRoot, "local-monitor.state.json")));
@@ -139,7 +145,7 @@ public class LocalMonitorScriptTests
 
             var status = RunPowerShellScript(ScriptPath("status.ps1"), "-RuntimeRoot", runtimeRoot);
 
-            Assert.Equal(0, status.ExitCode);
+            Assert.True(status.ExitCode == 0, status.Output + status.Error);
             Assert.Contains($"DB path: {Path.Combine(runtimeRoot, "raw-store.db")}", status.Output, StringComparison.OrdinalIgnoreCase);
             Assert.Contains($"log path: {Path.Combine(runtimeRoot, "logs")}", status.Output, StringComparison.OrdinalIgnoreCase);
             Assert.Contains($"install root: {Path.Combine(runtimeRoot, "app")}", status.Output, StringComparison.OrdinalIgnoreCase);
@@ -163,7 +169,9 @@ public class LocalMonitorScriptTests
                 "-NoBrowser",
                 "-WaitReady",
                 "-TimeoutSeconds", "60");
+            secondWrapper = restart.Process;
             await WaitForRuntimeReady(runtimeRoot, url, TimeSpan.FromSeconds(60));
+            secondChild = CaptureOwnedRuntimeProcess(runtimeRoot, secondWrapper, url);
             var finalStop = RunPowerShellScript(ScriptPath("stop.ps1"), "-RuntimeRoot", runtimeRoot, "-Force");
             Assert.Equal(0, finalStop.ExitCode);
             var secondStart = await CompletePowerShellScript(restart, TimeSpan.FromSeconds(15));
@@ -174,7 +182,10 @@ public class LocalMonitorScriptTests
         }
         finally
         {
-            KillRuntimeProcess(runtimeRoot);
+            KillKnownProcessTree(secondChild);
+            KillKnownProcessTree(secondWrapper);
+            KillKnownProcessTree(firstChild);
+            KillKnownProcessTree(firstWrapper);
             Directory.Delete(runtimeRoot, recursive: true);
         }
     }
@@ -256,6 +267,111 @@ public class LocalMonitorScriptTests
         }
         finally
         {
+            Directory.Delete(runtimeRoot, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("status.ps1")]
+    [InlineData("stop.ps1")]
+    public void ExplicitRuntimeRootRejectsStatePidPresenceAsymmetry(string script)
+    {
+        var runtimeRoot = CreateTemporaryDirectory("cao-runtime-root-asymmetry");
+        try
+        {
+            File.WriteAllText(Path.Combine(runtimeRoot, "local-monitor.pid"), "123");
+            var result = RunPowerShellScript(ScriptPath(script), "-RuntimeRoot", runtimeRoot);
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.Empty(result.Output);
+            Assert.Contains("runtime_state_mismatch", result.Error, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(runtimeRoot, "local-monitor.pid")));
+        }
+        finally
+        {
+            Directory.Delete(runtimeRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ExplicitRuntimeRootRejectsForeignSuperficialProcessWithoutKillingOrDeleting()
+    {
+        var runtimeRoot = CreateTemporaryDirectory("cao-runtime-root-foreign-process");
+        using var foreign = Process.Start(new ProcessStartInfo
+        {
+            FileName = PowerShellExecutablePath(),
+            ArgumentList = { "-NoProfile", "-Command", "$name='CopilotAgentObservability.LocalMonitor'; Start-Sleep -Seconds 300" },
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        }) ?? throw new InvalidOperationException("Failed to start foreign test process.");
+        try
+        {
+            WriteRuntimeState(runtimeRoot, foreign.Id, "http://127.0.0.1:4320");
+            foreach (var script in new[] { "start.ps1", "status.ps1", "stop.ps1" })
+            {
+                var arguments = new List<string> { "-RuntimeRoot", runtimeRoot };
+                if (script == "start.ps1")
+                {
+                    arguments.AddRange(["-Mode", "DotnetRun", "-TimeoutSeconds", "1"]);
+                }
+                var result = RunPowerShellScript(ScriptPath(script), [.. arguments]);
+                Assert.Equal(1, result.ExitCode);
+                Assert.Contains("runtime_state_mismatch", result.Error, StringComparison.Ordinal);
+                Assert.False(foreign.HasExited);
+                Assert.True(File.Exists(Path.Combine(runtimeRoot, "local-monitor.state.json")));
+                Assert.True(File.Exists(Path.Combine(runtimeRoot, "local-monitor.pid")));
+            }
+        }
+        finally
+        {
+            if (!foreign.HasExited)
+            {
+                foreign.Kill(entireProcessTree: true);
+                foreign.WaitForExit(10_000);
+            }
+            Directory.Delete(runtimeRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitRuntimeRootStatusDoesNotProbeStaleStateUrl()
+    {
+        var runtimeRoot = CreateTemporaryDirectory("cao-runtime-root-stale");
+        var port = GetFreeTcpPort();
+        var url = $"http://127.0.0.1:{port}";
+        using var listener = new System.Net.HttpListener();
+        listener.Prefixes.Add(url + "/");
+        listener.Start();
+        var requests = 0;
+        using var cancellation = new CancellationTokenSource();
+        var server = Task.Run(async () =>
+        {
+            try
+            {
+                var context = await listener.GetContextAsync().WaitAsync(cancellation.Token);
+                Interlocked.Increment(ref requests);
+                context.Response.StatusCode = 200;
+                context.Response.Close();
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+        try
+        {
+            WriteRuntimeState(runtimeRoot, int.MaxValue, url);
+            var result = RunPowerShellScript(ScriptPath("status.ps1"), "-RuntimeRoot", runtimeRoot);
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.Contains("running: no", result.Output, StringComparison.Ordinal);
+            Assert.Contains("health/live HTTP status: unreachable", result.Output, StringComparison.Ordinal);
+            Assert.Equal(0, Volatile.Read(ref requests));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            listener.Stop();
+            try { await server; } catch (System.Net.HttpListenerException) { }
             Directory.Delete(runtimeRoot, recursive: true);
         }
     }
@@ -3148,29 +3264,94 @@ public class LocalMonitorScriptTests
         var output = await invocation.Output.WaitAsync(timeoutSource.Token);
         var error = await invocation.Error.WaitAsync(timeoutSource.Token);
         var exitCode = invocation.Process.ExitCode;
-        invocation.Process.Dispose();
         return (exitCode, output, error);
     }
 
-    private static void KillRuntimeProcess(string runtimeRoot)
+    private static Process CaptureOwnedRuntimeProcess(string runtimeRoot, Process wrapper, string url)
     {
         var statePath = Path.Combine(runtimeRoot, "local-monitor.state.json");
-        if (!File.Exists(statePath))
-        {
-            return;
-        }
+        using var state = JsonDocument.Parse(File.ReadAllText(statePath));
+        var processId = state.RootElement.GetProperty("process_id").GetInt32();
+        var command = $"Get-CimInstance Win32_Process -Filter 'ProcessId = {processId}' | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress";
+        var result = RunBoundedProcess(PowerShellExecutablePath(), ["-NoProfile", "-Command", command], environment: null, timeout: TimeSpan.FromSeconds(15));
+        Assert.Equal(0, result.ExitCode);
+        using var cim = JsonDocument.Parse(result.StandardOutputText);
+        Assert.Equal(wrapper.Id, cim.RootElement.GetProperty("ParentProcessId").GetInt32());
+        var executable = Path.GetFullPath(cim.RootElement.GetProperty("ExecutablePath").GetString()!);
+        Assert.Equal(DotnetExecutablePath(), executable, ignoreCase: true);
+        var arguments = SplitWindowsCommandLine(cim.RootElement.GetProperty("CommandLine").GetString()!);
+        var native = arguments.Skip(1).ToArray();
+        Assert.Equal("run", native[0]);
+        Assert.Equal("--project", native[1]);
+        Assert.Equal(LocalMonitorProjectPath, Path.GetFullPath(native[2]), ignoreCase: true);
+        Assert.Equal("--", native[3]);
+        Assert.Single(native, value => value == "--db");
+        Assert.Equal(Path.GetFullPath(Path.Combine(runtimeRoot, "raw-store.db")), Path.GetFullPath(native[Array.IndexOf(native, "--db") + 1]), ignoreCase: true);
+        Assert.Single(native, value => value == "--url");
+        Assert.Equal(url, native[Array.IndexOf(native, "--url") + 1]);
+        return Process.GetProcessById(processId);
+    }
 
+    private static void KillKnownProcessTree(Process? process)
+    {
+        if (process is null) return;
         try
         {
-            using var state = JsonDocument.Parse(File.ReadAllText(statePath));
-            var processId = state.RootElement.GetProperty("process_id").GetInt32();
-            using var process = Process.GetProcessById(processId);
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit(10_000);
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(10_000);
+            }
         }
-        catch (Exception exception) when (exception is IOException or JsonException or ArgumentException or InvalidOperationException)
+        catch (InvalidOperationException) { }
+        finally { process.Dispose(); }
+    }
+
+    private static string[] SplitWindowsCommandLine(string commandLine)
+    {
+        var pointer = CommandLineToArgvW(commandLine, out var count);
+        Assert.NotEqual(IntPtr.Zero, pointer);
+        try
         {
+            return Enumerable.Range(0, count)
+                .Select(index => System.Runtime.InteropServices.Marshal.PtrToStringUni(System.Runtime.InteropServices.Marshal.ReadIntPtr(pointer, index * IntPtr.Size))!)
+                .ToArray();
         }
+        finally { LocalFree(pointer); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(string commandLine, out int argumentCount);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    private static string LocalMonitorProjectPath => Path.Combine(RepositoryRoot, "src", "CopilotAgentObservability.LocalMonitor", "CopilotAgentObservability.LocalMonitor.csproj");
+
+    private static string DotnetExecutablePath()
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        return path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(directory => Path.Combine(directory, "dotnet.exe"))
+            .Where(File.Exists)
+            .Select(Path.GetFullPath)
+            .First();
+    }
+
+    private static void WriteRuntimeState(string runtimeRoot, int processId, string url)
+    {
+        var state = new
+        {
+            process_id = processId,
+            url,
+            db_path = Path.Combine(runtimeRoot, "raw-store.db"),
+            mode = "dotnet-run",
+            repo_root = RepositoryRoot,
+            install_root = Path.Combine(runtimeRoot, "app"),
+            executable_path = "dotnet",
+        };
+        File.WriteAllText(Path.Combine(runtimeRoot, "local-monitor.state.json"), JsonSerializer.Serialize(state));
+        File.WriteAllText(Path.Combine(runtimeRoot, "local-monitor.pid"), processId.ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private sealed record ProcessResult(int ExitCode, byte[] StandardOutputBytes, byte[] StandardErrorBytes)
