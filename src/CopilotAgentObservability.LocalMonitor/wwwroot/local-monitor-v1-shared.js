@@ -2,7 +2,6 @@
   "use strict";
 
   const host = document.querySelector("[data-local-monitor-v1-host]");
-  if (!host) return;
 
   const SETTINGS = new Set(["state", "receiver", "ai", "repositories", "archive", "storage", "diagnostics"]);
   const EXPLORER_KEYS = new Set(["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope", "cursor", "mode", "analysis", "settings"]);
@@ -30,7 +29,7 @@
     "raw-deleted", "raw_read_denied", "raw-read-denied", "projection_invalid",
     "projection-invalid", "expired_pending_deletion", "expired-pending-deletion"
   ];
-  const routeKind = host.dataset.routeKind;
+  const routeKind = host?.dataset.routeKind;
 
   function requirePathArity(actual, expected) {
     if (actual !== expected) throw new TypeError("invalid primary path");

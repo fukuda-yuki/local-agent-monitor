@@ -23,10 +23,71 @@
   const doctorSourceTargetSummary = document.getElementById("doctor-source-target-summary");
   const sourceDiagnosticsPageSize = 50;
   const maximumSourceDiagnosticsPages = 200;
+  const compatibilityCatalog = Object.freeze({
+    supported: { reasons: [], action: "none", label: "対応済み" },
+    supported_with_unknown_fields: { reasons: ["unknown_fields_observed"], action: "review_unknown_fields", label: "対応済み（未知フィールドあり）" },
+    unsupported_source_version: { reasons: ["unsupported_source_version"], action: "use_compatible_source_or_update_adapter", factState: "unsupported", reason: "このバージョンは取得元の互換性契約で対応していません" },
+    schema_drift_detected: { reasons: ["schema_drift_detected"], action: "capture_fixture_and_review_mapping", factState: "capture_gap", reason: "取得元のスキーマ変更を検出したため、記録の完全性を確認できません" },
+    recognized_record_drop_detected: { reasons: ["recognized_record_drop_detected"], action: "restore_mapping_or_update_versioned_golden", factState: "capture_gap", reason: "認識済みレコードの欠落を検出しました" },
+    adapter_failure_parse: { state: "adapter_failure", reasons: ["adapter_parse_failure"], action: "validate_payload_and_protocol", factState: "capture_gap", reason: "送信データを解析できなかったため、記録が一部欠けています" },
+    adapter_failure_exception: { state: "adapter_failure", reasons: ["adapter_exception"], action: "inspect_sanitized_adapter_failure", factState: "capture_gap", reason: "アダプター処理に失敗したため、記録が一部欠けています" },
+  });
+  const compatibilityReasonLabels = {
+    unknown_fields_observed: "未知フィールドがあります",
+    unsupported_source_version: "送信元バージョンは未対応です",
+    schema_drift_detected: "スキーマ変更のため完全性を確認できません",
+    recognized_record_drop_detected: "認識済みレコードに欠落があります",
+    adapter_parse_failure: "payload を解析できませんでした",
+    adapter_exception: "アダプター処理に失敗しました",
+  };
+  const compatibilityActionLabels = {
+    none: "対応は不要です",
+    review_unknown_fields: "未知フィールドを確認してください",
+    use_compatible_source_or_update_adapter: "対応するバージョンを使用するかアダプターを更新してください",
+    capture_fixture_and_review_mapping: "fixture を取得してマッピングを確認してください",
+    restore_mapping_or_update_versioned_golden: "マッピングを復元するか versioned golden を更新してください",
+    validate_payload_and_protocol: "payload と protocol を確認してください",
+    inspect_sanitized_adapter_failure: "sanitized なアダプター診断を確認してください",
+  };
+  const doctorCatalog = Object.freeze({
+    monitor_not_installed: ["error", "after_action", "install_monitor", "Monitor がインストールされていません", "Monitor をインストールしてください"],
+    monitor_not_running: ["error", "after_action", "start_monitor", "Monitor が起動していません", "Monitor を起動してください"],
+    receiver_not_bound: ["error", "after_action", "restart_monitor", "受信ポートを利用できません", "Monitor を再起動してください"],
+    port_owned_by_foreign_process: ["error", "after_action", "free_or_change_port", "受信ポートを別のプロセスが使用しています", "ポートを解放するか変更してください"],
+    endpoint_mismatch: ["error", "after_action", "update_source_endpoint", "送信先が Monitor と一致しません", "送信元の接続先を更新してください"],
+    protocol_mismatch: ["error", "after_action", "use_http_protobuf", "送信プロトコルが一致しません", "HTTP/Protobuf を使用してください"],
+    signal_disabled: ["error", "after_action", "enable_trace_signal", "トレース送信が無効です", "トレース送信を有効にしてください"],
+    unsupported_source_version: ["error", "after_action", "use_supported_source_version", "この取得元のバージョンには対応していません", "対応する取得元バージョンを使用してください"],
+    feature_unavailable: ["error", "after_action", "use_supported_source_surface", "必要な機能をこの取得元では利用できません", "対応する取得元を使用してください"],
+    agent_restart_required: ["warning", "after_action", "restart_source_process", "取得元の再起動が必要です", "取得元のプロセスを再起動してください"],
+    endpoint_unreachable: ["error", "after_action", "verify_endpoint_reachability", "Monitor の受信先へ接続できません", "受信先への接続を確認してください"],
+    payload_rejected: ["error", "after_action", "inspect_rejected_payload", "送信データを受け付けられませんでした", "拒否された送信データの診断を確認してください"],
+    raw_persisted_projection_pending: ["warning", "automatic", "wait_for_projection", "記録済みデータの反映を待っています", "反映の完了を待ってください"],
+    projection_failed: ["error", "after_action", "open_projection_diagnostics", "記録済みデータを画面へ反映できませんでした", "反映処理の診断を確認してください"],
+    session_unbound: ["error", "after_action", "select_exact_session", "記録を Session に結び付けられません", "対象の Session を選択してください"],
+    content_capture_disabled: ["warning", "after_action", "enable_content_capture_if_desired", "内容の記録が無効です", "必要な場合は内容の記録を有効にしてください"],
+    sanitized_only_raw_unavailable: ["warning", "after_action", "restart_without_sanitized_only_if_desired", "内容は記録されていません", "必要な場合は通常モードで Monitor を再起動してください"],
+    schema_drift_detected: ["warning", "after_action", "review_source_diagnostics", "取得元のスキーマ変更を検出しました", "取得元の診断を確認してください"],
+    ready_no_real_trace: ["info", "after_action", "run_bounded_source_interaction", "接続確認のための記録がまだありません", "取得元で確認用の操作を実行してください"],
+    first_trace_ready: ["info", "none", "open_verified_trace_or_session", "最初の記録を確認できました", "確認済みの Trace または Session を開いてください"],
+  });
+  const severityLabels = Object.freeze({ error: "エラー", warning: "注意", info: "情報" });
+  const retryabilityLabels = Object.freeze({ after_action: "対応後に再確認できます", automatic: "自動的に再確認します", none: "再確認は不要です" });
+  const lifecycleLabels = Object.freeze({ active: "確認中", completed: "完了", cancelled: "キャンセル済み", expired: "有効期限切れ" });
+  const detectionLabels = Object.freeze({ detected: "検出済み", not_detected: "未検出", unavailable: "検出状態を確認できません" });
+  const setupOwnershipValues = new Set(["managed", "managed_windows", "caller_managed", "managed_cli_caller_managed_agent_sdk"]);
+  const sessionStatusLabels = Object.freeze({ active: "実行中", completed: "完了", failed: "失敗", unknown: "状態を確認できません" });
+  const completenessLabels = Object.freeze({ unbound: "Session に未接続", partial: "一部を記録", rich: "詳細を記録", full: "完全に記録" });
+  const doctorSourceLabels = Object.freeze({
+    "github-copilot-vscode": "GitHub Copilot in VS Code",
+    "github-copilot-cli": "GitHub Copilot CLI",
+    "github-copilot-app-sdk": "GitHub Copilot App/SDK",
+    "claude-code": "Claude Code",
+  });
   if (!rows) return; // Not the diagnostics page — no-op.
 
   function relativeTime(timestamp) {
-    if (!timestamp) return "—";
+    if (!timestamp) throw new Error("missing received timestamp");
     const parsed = Date.parse(timestamp);
     if (Number.isNaN(parsed)) return timestamp;
     const deltaSeconds = Math.max(0, (Date.now() - parsed) / 1000);
@@ -43,10 +104,19 @@
     return node;
   }
 
+  function contentCell(content, mono) {
+    const node = document.createElement("td");
+    if (mono) node.className = "monitor-mono";
+    if (content instanceof Node) node.append(content);
+    else node.textContent = String(content);
+    return node;
+  }
+
   function valueLine(value, mono) {
+    if (value === null || value === undefined) throw new Error("missing required diagnostic value");
     const node = document.createElement("span");
     if (mono) node.className = "monitor-mono";
-    node.textContent = value === null || value === undefined ? "—" : String(value);
+    node.textContent = String(value);
     return node;
   }
 
@@ -58,13 +128,106 @@
     return node;
   }
 
+  function technicalDisclosure(codes) {
+    const technical = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "技術情報";
+    technical.append(summary);
+    for (const code of codes) {
+      const raw = document.createElement("code");
+      raw.textContent = code;
+      technical.append(raw);
+    }
+    return technical;
+  }
+
+  function enumPresentation(code, label) {
+    if (typeof code !== "string" || typeof label !== "string") throw new Error("unknown diagnostic enum");
+    const node = document.createElement("div");
+    const primary = document.createElement("span");
+    primary.textContent = label;
+    node.append(primary, technicalDisclosure([code]));
+    return node;
+  }
+
+  function enumCell(code, label) {
+    const node = document.createElement("td");
+    node.append(enumPresentation(code, label));
+    return node;
+  }
+
+  function reasonPresentation(codes) {
+    const node = document.createElement("div");
+    if (codes.length === 0) {
+      node.append(sharedFactPresentation({
+        state: "observed_zero", recordedCount: 0, hasCompleteCoverageProof: true,
+        sourceText: "ソース互換性診断", reasonText: "追加の互換性理由はありません",
+      }));
+      return node;
+    }
+    for (const code of codes) node.append(enumPresentation(code, compatibilityReasonLabels[code]));
+    return node;
+  }
+
+  function enumLines(codes) {
+    const node = document.createElement("td");
+    node.append(reasonPresentation(codes));
+    return node;
+  }
+
+  function sharedFactPresentation(fact, codes = []) {
+    const node = document.createElement("div");
+    window.LocalMonitorV1FactState.render(node, { recordedCount: null, sourceText: null, ...fact });
+    if (codes.length > 0) node.append(technicalDisclosure(codes));
+    return node;
+  }
+
+  function missingFactPresentation(label) {
+    return sharedFactPresentation({ state: "not_observed", reasonText: `${label}をこの記録で確認できません` });
+  }
+
+  function diagnosticTuple(item) {
+    if (!item || !Array.isArray(item.reason_codes)) throw new Error("invalid source diagnostic");
+    const key = item.compatibility_state === "adapter_failure"
+      ? `adapter_failure_${item.reason_codes[0] === "adapter_parse_failure" ? "parse" : item.reason_codes[0] === "adapter_exception" ? "exception" : "unknown"}`
+      : item.compatibility_state;
+    const entry = compatibilityCatalog[key];
+    if (!entry || (entry.state ?? key) !== item.compatibility_state
+        || entry.action !== item.next_action
+        || entry.reasons.length !== item.reason_codes.length
+        || entry.reasons.some((reason, index) => reason !== item.reason_codes[index])) {
+      throw new Error("invalid source diagnostic tuple");
+    }
+    return entry;
+  }
+
+  function diagnosticStatePresentation(item, entry) {
+    if (entry.factState === "unsupported") {
+      return sharedFactPresentation({
+        state: "unsupported",
+        sourceText: item.source_surface ?? "取得元を確認できません",
+        reasonText: entry.reason,
+      }, [item.compatibility_state]);
+    }
+    if (entry.factState) {
+      return sharedFactPresentation({ state: entry.factState, reasonText: entry.reason }, [item.compatibility_state]);
+    }
+    return enumPresentation(item.compatibility_state, entry.label);
+  }
+
+  function factValueLine(value, label, mono) {
+    if (value !== null && value !== undefined) return valueLine(value, mono);
+    return missingFactPresentation(label);
+  }
+
   function sourceDiagnosticMessage(message) {
     sourceDiagnosticRows.replaceChildren();
     const row = document.createElement("tr");
     const value = document.createElement("td");
     value.colSpan = 7;
     value.className = "empty-state";
-    value.textContent = message;
+    if (message instanceof Node) value.append(message);
+    else value.textContent = message;
     row.append(value);
     sourceDiagnosticRows.append(row);
   }
@@ -112,7 +275,7 @@
       const empty = document.createElement("td");
       empty.colSpan = 5;
       empty.className = "empty-state";
-      empty.textContent = "まだ取り込みがありません。";
+      empty.append(missingFactPresentation("取り込み履歴"));
       row.append(empty);
       rows.append(row);
       return;
@@ -123,10 +286,10 @@
       const row = document.createElement("tr");
       row.append(
         cell(String(item.raw_record_id), true),
-        cell(relativeTime(item.received_at), false),
-        cell(item.source ?? "—", false),
-        cell(item.trace_id ?? "—", true),
-        cell(item.span_count === null || item.span_count === undefined ? "—" : String(item.span_count), true));
+        contentCell(item.received_at ? relativeTime(item.received_at) : missingFactPresentation("受信時刻"), false),
+        contentCell(item.source ?? missingFactPresentation("取得元"), false),
+        contentCell(item.trace_id ?? missingFactPresentation("Trace ID"), true),
+        contentCell(item.span_count ?? missingFactPresentation("Span 数"), true));
       rows.append(row);
     }
   }
@@ -143,22 +306,36 @@
     }
 
     if (items.length === 0) {
-      sourceDiagnosticMessage("ソース互換性の観測はまだありません。");
+      sourceDiagnosticMessage(missingFactPresentation("ソース互換性の診断対象"));
       return;
     }
 
-    sourceDiagnosticRows.replaceChildren();
-    for (const item of items) {
-      const row = document.createElement("tr");
-      row.append(
-        lines([item.observation_id, item.observed_at], true),
-        lines([item.source_surface, item.source_application_version], false),
-        lines([item.source_adapter, item.adapter_version], false),
-        cell(item.compatibility_state, true),
-        lines(item.reason_codes, true),
-        cell(item.next_action, true),
-        lines([item.unknown_span_count, item.unknown_event_count, item.unknown_attribute_count], true));
-      sourceDiagnosticRows.append(row);
+    try {
+      const rendered = [];
+      for (const item of items) {
+        const entry = diagnosticTuple(item);
+        const counts = [item.unknown_span_count, item.unknown_event_count, item.unknown_attribute_count];
+        if (counts.some(value => !Number.isSafeInteger(value) || value < 0)) throw new Error("invalid unknown count");
+        const row = document.createElement("tr");
+        const state = document.createElement("td");
+        state.append(diagnosticStatePresentation(item, entry));
+        row.append(
+          lines([item.observation_id, item.observed_at], true),
+          lines([], false), lines([], false), state,
+          enumLines(entry.reasons),
+          enumCell(item.next_action, compatibilityActionLabels[item.next_action]),
+          lines(counts, true));
+        row.children[1].append(
+          factValueLine(item.source_surface, "取得元", false),
+          factValueLine(item.source_application_version, "取得元バージョン", false));
+        row.children[2].append(
+          factValueLine(item.source_adapter, "Adapter", false),
+          factValueLine(item.adapter_version, "Adapter バージョン", false));
+        rendered.push(row);
+      }
+      sourceDiagnosticRows.replaceChildren(...rendered);
+    } catch {
+      sourceDiagnosticMessage("ソース互換性の診断を読み込めませんでした。");
     }
   }
 
@@ -204,10 +381,6 @@
     setCancelAction(false);
     setDoctorAction("現在の状態を確認", refreshVerification);
     announceDoctor("操作結果を確認できませんでした。現在の状態を確認してください。", true);
-  }
-
-  function display(value) {
-    return value === null || value === undefined || value === "" ? "—" : String(value);
   }
 
   function safeNavigationTarget(target, evidenceRef) {
@@ -283,16 +456,43 @@
     const evaluation = result?.evaluation;
     const primary = evaluation?.primary_state;
     const verification = result?.verification;
+    const catalog = primary ? doctorCatalog[primary.state_code] : null;
+    if (primary) {
+      if (!catalog
+        || !Array.isArray(primary.reason_codes)
+        || primary.reason_codes.length !== 1
+        || primary.reason_codes[0] !== primary.state_code
+        || primary.severity !== catalog[0]
+        || primary.retryability !== catalog[1]
+        || primary.next_action !== catalog[2]) {
+        throw new Error("invalid doctor tuple");
+      }
+    }
+    if (verification && !Object.hasOwn(lifecycleLabels, verification.state)) throw new Error("invalid doctor lifecycle");
+    const source = evaluation?.source_surface ?? envelope.source_surface;
+    if (source !== null && source !== undefined && !Object.hasOwn(doctorSourceLabels, source)) throw new Error("invalid doctor source");
+
     currentVerification = verification && envelope.verification_id
       ? { id: envelope.verification_id, revision: verification.revision, state: verification.state }
       : null;
-
-    doctorFields.state.textContent = display(primary?.state_code);
-    doctorFields.severity.textContent = display(primary?.severity);
-    doctorFields.source.textContent = display(evaluation?.source_surface ?? envelope.source_surface);
-    doctorFields.nextAction.textContent = display(primary?.next_action);
-    doctorFields.retryability.textContent = display(primary?.retryability);
-    doctorFields.lifecycle.textContent = display(verification?.state);
+    doctorFields.state.replaceChildren(primary
+      ? enumPresentation(primary.state_code, catalog[3])
+      : missingFactPresentation("Doctor の判定状態"));
+    doctorFields.nextAction.replaceChildren(primary
+      ? enumPresentation(primary.next_action, catalog[4])
+      : missingFactPresentation("次の対応"));
+    doctorFields.severity.replaceChildren(primary
+      ? enumPresentation(primary.severity, severityLabels[primary.severity])
+      : missingFactPresentation("重要度"));
+    doctorFields.source.replaceChildren(source
+      ? enumPresentation(source, doctorSourceLabels[source])
+      : missingFactPresentation("取得元"));
+    doctorFields.retryability.replaceChildren(primary
+      ? enumPresentation(primary.retryability, retryabilityLabels[primary.retryability])
+      : missingFactPresentation("再確認条件"));
+    doctorFields.lifecycle.replaceChildren(verification
+      ? enumPresentation(verification.state, lifecycleLabels[verification.state])
+      : missingFactPresentation("確認の進行状態"));
     renderEvidence(primary?.evidence_refs, payload.navigation_targets);
     renderCandidates(envelope.candidates);
 
@@ -313,14 +513,24 @@
       setCancelAction(false);
       setDoctorAction(null, null);
     }
-    announceDoctor(`Doctor の状態を更新しました: ${display(verification?.state ?? primary?.state_code)}`, true);
+    const announcement = verification
+      ? lifecycleLabels[verification.state]
+      : primary ? catalog[3] : "判定に必要な記録がありません";
+    announceDoctor(`Doctor の状態を更新しました: ${announcement}`, true);
   }
 
   async function requestDoctor(url, options) {
     const response = await fetch(url, { cache: "no-store", ...options });
-    const payload = await response.json();
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      error.doctorStatus = response.status;
+      throw error;
+    }
     if (!response.ok) {
       const error = new Error("doctor request failed");
+      error.doctorStatus = response.status;
       error.doctorPayload = payload;
       throw error;
     }
@@ -344,7 +554,11 @@
       const term = document.createElement("dt");
       const detail = document.createElement("dd");
       term.textContent = label;
-      detail.textContent = display(value);
+      if (value instanceof Node) detail.append(value);
+      else {
+        if (value === null || value === undefined || value === "") throw new Error("missing exact summary value");
+        detail.textContent = String(value);
+      }
       row.append(term, detail);
       container.append(row);
     }
@@ -362,15 +576,20 @@
       try {
         const payload = await requestDoctor(`/api/doctor/ui/v1/sessions/${encodeURIComponent(sessionId)}`);
         const session = payload?.session;
-        if (!session) throw new Error("invalid session evidence");
+        if (!session || !Object.hasOwn(sessionStatusLabels, session.status)
+            || !Object.hasOwn(completenessLabels, session.completeness)) throw new Error("invalid session evidence");
         renderExactSummary(doctorSessionTargetSummary, [
-          ["Session ID", session.session_id], ["状態", session.status],
-          ["完全性", session.completeness], ["最終確認", session.last_seen_at],
+          ["Session ID", session.session_id], ["状態", enumPresentation(session.status, sessionStatusLabels[session.status])],
+          ["完全性", enumPresentation(session.completeness, completenessLabels[session.completeness])],
+          ["最終確認", session.last_seen_at ?? missingFactPresentation("最終確認時刻")],
         ]);
         doctorSessionTarget.hidden = false;
         document.getElementById("doctor-session-target-heading")?.focus();
-      } catch {
-        renderExactSummary(doctorSessionTargetSummary, [["状態", "evidence_not_found"]]);
+      } catch (error) {
+        const state = error?.doctorStatus === 404 && error?.doctorPayload?.error === "evidence_not_found"
+          ? missingFactPresentation("指定した Session の記録")
+          : valueLine("Session の記録を読み込めませんでした。", false);
+        renderExactSummary(doctorSessionTargetSummary, [["状態", state]]);
         doctorSessionTarget.hidden = false;
       }
     }
@@ -380,15 +599,23 @@
         const observation = payload?.observation;
         const diagnostic = observation?.source_diagnostic;
         if (!diagnostic) throw new Error("invalid source evidence");
+        const entry = diagnosticTuple(diagnostic);
         renderExactSummary(doctorSourceTargetSummary, [
-          ["Observation ID", observation.observation_id], ["ソース", diagnostic.source_surface],
-          ["adapter", diagnostic.source_adapter], ["互換性", diagnostic.compatibility_state],
-          ["次の対応", diagnostic.next_action], ["観測時刻", observation.observed_at],
+          ["Observation ID", observation.observation_id],
+          ["ソース", diagnostic.source_surface ?? missingFactPresentation("取得元")],
+          ["adapter", diagnostic.source_adapter ?? missingFactPresentation("Adapter")],
+          ["互換性", diagnosticStatePresentation(diagnostic, entry)],
+          ["理由", reasonPresentation(entry.reasons)],
+          ["次の対応", enumPresentation(diagnostic.next_action, compatibilityActionLabels[diagnostic.next_action])],
+          ["観測時刻", observation.observed_at ?? missingFactPresentation("観測時刻")],
         ]);
         doctorSourceTarget.hidden = false;
         document.getElementById("doctor-source-target-heading")?.focus();
-      } catch {
-        renderExactSummary(doctorSourceTargetSummary, [["状態", "evidence_not_found"]]);
+      } catch (error) {
+        const state = error?.doctorStatus === 404 && error?.doctorPayload?.error === "evidence_not_found"
+          ? missingFactPresentation("指定したソース診断の記録")
+          : valueLine("ソース診断の記録を読み込めませんでした。", false);
+        renderExactSummary(doctorSourceTargetSummary, [["状態", state]]);
         doctorSourceTarget.hidden = false;
       }
     }
@@ -403,19 +630,23 @@
         throw new Error("invalid sources response");
       }
 
-      doctorSource.replaceChildren();
+      const options = [];
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.textContent = "ソースを選択";
-      doctorSource.append(placeholder);
+      options.push(placeholder);
       for (const source of payload.sources) {
+        if (!source || typeof source.source_id !== "string" || typeof source.display_label !== "string"
+            || !Object.hasOwn(detectionLabels, source.detection_state)
+            || !setupOwnershipValues.has(source.setup_ownership)) throw new Error("invalid source entry");
         const option = document.createElement("option");
-        option.value = String(source.source_id);
-        option.textContent = `${display(source.display_label)} — ${display(source.detection_state)}`;
-        option.dataset.detectionState = String(source.detection_state);
+        option.value = source.source_id;
+        option.textContent = `${source.display_label} — ${detectionLabels[source.detection_state]}`;
+        option.dataset.detectionState = source.detection_state;
         option.dataset.setupOwnership = String(source.setup_ownership);
-        doctorSource.append(option);
+        options.push(option);
       }
+      doctorSource.replaceChildren(...options);
       doctorSource.value = "";
       doctorSource.disabled = false;
       const detected = payload.sources.filter(source => source.detection_state === "detected").length;
@@ -507,7 +738,12 @@
 
   function resetDoctorResult() {
     currentVerification = null;
-    for (const field of Object.values(doctorFields)) field.textContent = "—";
+    for (const [name, field] of Object.entries(doctorFields)) {
+      field.replaceChildren(missingFactPresentation({
+        state: "判定状態", severity: "重要度", source: "取得元", nextAction: "次の対応",
+        retryability: "再確認条件", lifecycle: "確認の進行状態",
+      }[name]));
+    }
     renderEvidence([], []);
     renderCandidates([]);
     setCancelAction(false);
@@ -517,7 +753,7 @@
     const option = doctorSource.selectedOptions[0];
     resetDoctorResult();
     doctorSourceState.textContent = option?.value
-      ? `${option.textContent} / setup: ${option.dataset.setupOwnership}`
+      ? `${option.textContent}を確認できます。`
       : "確認するソースを選択してください。";
     setDoctorAction(option?.value ? "検証を開始" : null, option?.value ? beginVerification : null);
   });
