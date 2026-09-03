@@ -20,6 +20,37 @@ $script:UserEnvironmentVariables = @(
     'OTEL_RESOURCE_ATTRIBUTES'
 )
 
+function Set-LocalMonitorRuntimeRoot {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $RuntimeRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RuntimeRoot) -or -not [System.IO.Path]::IsPathFullyQualified($RuntimeRoot)) {
+        throw 'runtime_root_invalid'
+    }
+
+    try {
+        $resolvedRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
+        $resolvedDefaultInstallRoot = Join-Path $resolvedRuntimeRoot 'app'
+        $resolvedDefaultDbPath = Join-Path $resolvedRuntimeRoot 'raw-store.db'
+        $resolvedLogDirectory = Join-Path $resolvedRuntimeRoot 'logs'
+        $resolvedStatePath = Join-Path $resolvedRuntimeRoot 'local-monitor.state.json'
+        $resolvedPidPath = Join-Path $resolvedRuntimeRoot 'local-monitor.pid'
+    }
+    catch {
+        throw 'runtime_root_invalid'
+    }
+
+    $script:RuntimeRoot = $resolvedRuntimeRoot
+    $script:DefaultInstallRoot = $resolvedDefaultInstallRoot
+    $script:DefaultDbPath = $resolvedDefaultDbPath
+    $script:LogDirectory = $resolvedLogDirectory
+    $script:StatePath = $resolvedStatePath
+    $script:PidPath = $resolvedPidPath
+}
+
 function Get-LocalMonitorDefaultInstallRoot {
     return $script:DefaultInstallRoot
 }
@@ -614,6 +645,223 @@ function Get-LocalMonitorStateValue {
     }
 
     return $property.Value
+}
+
+function Test-LocalMonitorExplicitRuntimeState {
+    param(
+        $State,
+        [string] $ExpectedUrl,
+        [string] $ExpectedDbPath,
+        [string] $ExpectedInstallRoot,
+        [string] $ExpectedMode,
+        [string] $ExpectedRepoRoot,
+        [string] $ExpectedExecutablePath
+    )
+
+    if ($null -eq $State -or -not (Test-Path -LiteralPath $script:PidPath -PathType Leaf)) {
+        return $false
+    }
+
+    $processId = 0
+    $pidFileProcessId = 0
+    try {
+        $pidFileValue = Get-Content -Raw -LiteralPath $script:PidPath -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    if (-not [int]::TryParse([string] (Get-LocalMonitorStateValue -State $State -Name 'process_id'), [ref] $processId) `
+        -or $processId -le 0 `
+        -or -not [int]::TryParse($pidFileValue, [ref] $pidFileProcessId) `
+        -or $pidFileProcessId -ne $processId) {
+        return $false
+    }
+
+    $url = [string] (Get-LocalMonitorStateValue -State $State -Name 'url')
+    $dbPath = [string] (Get-LocalMonitorStateValue -State $State -Name 'db_path')
+    $installRoot = [string] (Get-LocalMonitorStateValue -State $State -Name 'install_root')
+    $mode = [string] (Get-LocalMonitorStateValue -State $State -Name 'mode')
+    $repoRoot = [string] (Get-LocalMonitorStateValue -State $State -Name 'repo_root')
+    $executablePath = [string] (Get-LocalMonitorStateValue -State $State -Name 'executable_path')
+    if ([string]::IsNullOrWhiteSpace($url) `
+        -or -not (Test-LocalMonitorLoopbackUrl -Url $url) `
+        -or [string]::IsNullOrWhiteSpace($dbPath) `
+        -or [string]::IsNullOrWhiteSpace($installRoot) `
+        -or -not [System.IO.Path]::IsPathFullyQualified($dbPath) `
+        -or -not [System.IO.Path]::IsPathFullyQualified($installRoot)) {
+        return $false
+    }
+
+    try {
+        $canonicalDbPath = [System.IO.Path]::GetFullPath($dbPath)
+        $canonicalInstallRoot = [System.IO.Path]::GetFullPath($installRoot)
+    }
+    catch {
+        return $false
+    }
+    if (-not $dbPath.Equals($canonicalDbPath, [System.StringComparison]::OrdinalIgnoreCase) `
+        -or -not $installRoot.Equals($canonicalInstallRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $dbPath = $canonicalDbPath
+    $installRoot = $canonicalInstallRoot
+
+    if ($mode -eq 'dotnet-run') {
+        if ($repoRoot -cne (Get-LocalMonitorRepoRoot) -or $executablePath -cne 'dotnet') {
+            return $false
+        }
+    }
+    elseif ($mode -eq 'published') {
+        $expectedPublishedExecutable = Get-LocalMonitorPublishedExePath -InstallRoot $installRoot
+        if ($repoRoot -cne '' -or -not $executablePath.Equals($expectedPublishedExecutable, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    else {
+        return $false
+    }
+
+    if ($PSBoundParameters.ContainsKey('ExpectedUrl') -and -not (Test-LocalMonitorCanonicalUrl -Actual $url -Expected $ExpectedUrl)) {
+        return $false
+    }
+
+    $expectedPairs = @(
+        @{ Key = 'ExpectedDbPath'; Actual = $dbPath; Expected = $ExpectedDbPath; Path = $true },
+        @{ Key = 'ExpectedInstallRoot'; Actual = $installRoot; Expected = $ExpectedInstallRoot; Path = $true },
+        @{ Key = 'ExpectedMode'; Actual = $mode; Expected = $ExpectedMode; Path = $false },
+        @{ Key = 'ExpectedRepoRoot'; Actual = $repoRoot; Expected = $ExpectedRepoRoot; Path = $true },
+        @{ Key = 'ExpectedExecutablePath'; Actual = $executablePath; Expected = $ExpectedExecutablePath; Path = $mode -eq 'published' }
+    )
+    foreach ($pair in $expectedPairs) {
+        if (-not $PSBoundParameters.ContainsKey($pair.Key)) {
+            continue
+        }
+        $expected = [string] $pair.Expected
+        if ($pair.Path -and -not [string]::IsNullOrEmpty($expected)) {
+            try { $expected = [System.IO.Path]::GetFullPath($expected) } catch { return $false }
+        }
+        if (-not ([string] $pair.Actual).Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-LocalMonitorCanonicalUrl {
+    param([string] $Actual, [string] $Expected)
+
+    try {
+        $actualUri = [Uri] $Actual
+        $expectedUri = [Uri] $Expected
+    }
+    catch { return $false }
+
+    return $actualUri.IsAbsoluteUri -and $expectedUri.IsAbsoluteUri `
+        -and $actualUri.Scheme.Equals('http', [System.StringComparison]::OrdinalIgnoreCase) `
+        -and $expectedUri.Scheme.Equals('http', [System.StringComparison]::OrdinalIgnoreCase) `
+        -and $actualUri.IsLoopback -and $expectedUri.IsLoopback `
+        -and $actualUri.Host.Equals($expectedUri.Host, [System.StringComparison]::OrdinalIgnoreCase) `
+        -and $actualUri.Port -eq $expectedUri.Port `
+        -and $actualUri.AbsolutePath.Equals($expectedUri.AbsolutePath, [System.StringComparison]::Ordinal) `
+        -and $actualUri.Query.Equals($expectedUri.Query, [System.StringComparison]::Ordinal) `
+        -and $actualUri.Fragment.Equals($expectedUri.Fragment, [System.StringComparison]::Ordinal) `
+        -and $actualUri.UserInfo.Equals($expectedUri.UserInfo, [System.StringComparison]::Ordinal)
+}
+
+function ConvertFrom-LocalMonitorCommandLine {
+    param([Parameter(Mandatory)][string] $CommandLine)
+
+    if ($null -eq ('LocalMonitor.NativeCommandLine' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace LocalMonitor {
+    public static class NativeCommandLine {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(string commandLine, out int argc);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+        public static string[] Split(string commandLine) {
+            int argc;
+            IntPtr argv = CommandLineToArgvW(commandLine, out argc);
+            if (argv == IntPtr.Zero || argc <= 0) return null;
+            try {
+                var values = new string[argc];
+                for (int i = 0; i < argc; i++)
+                    values[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(argv, i * IntPtr.Size));
+                return values;
+            } finally { LocalFree(argv); }
+        }
+    }
+}
+'@
+    }
+
+    try { return [LocalMonitor.NativeCommandLine]::Split($CommandLine) }
+    catch { return $null }
+}
+
+function Test-LocalMonitorArgumentValue {
+    param([string[]] $Arguments, [string] $Name, [string] $Expected, [switch] $Path, [switch] $Url)
+
+    $indexes = @()
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        if ($Arguments[$index] -ceq $Name) { $indexes += $index }
+        elseif ($Arguments[$index].StartsWith("$Name=", [System.StringComparison]::Ordinal)) { return $false }
+    }
+    if ($indexes.Count -ne 1 -or $indexes[0] + 1 -ge $Arguments.Count) { return $false }
+    $actual = $Arguments[$indexes[0] + 1]
+    if ($actual.StartsWith('--', [System.StringComparison]::Ordinal)) { return $false }
+    if ($Url) { return Test-LocalMonitorCanonicalUrl -Actual $actual -Expected $Expected }
+    if ($Path) {
+        try { $actual = [System.IO.Path]::GetFullPath($actual); $Expected = [System.IO.Path]::GetFullPath($Expected) }
+        catch { return $false }
+        return $actual.Equals($Expected, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    return $actual.Equals($Expected, [System.StringComparison]::Ordinal)
+}
+
+function Test-LocalMonitorExplicitRuntimeProcessOwnership {
+    param([Parameter(Mandatory)] $State)
+
+    $processId = [int] (Get-LocalMonitorStateValue -State $State -Name 'process_id')
+    try { $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop }
+    catch { return $false }
+    if ($null -eq $cim -or [string]::IsNullOrWhiteSpace([string] $cim.ExecutablePath) -or [string]::IsNullOrWhiteSpace([string] $cim.CommandLine)) { return $false }
+
+    $arguments = @(ConvertFrom-LocalMonitorCommandLine -CommandLine ([string] $cim.CommandLine))
+    if ($null -eq $arguments -or $arguments.Count -lt 2) { return $false }
+    $nativeArguments = @($arguments | Select-Object -Skip 1)
+    $mode = [string] (Get-LocalMonitorStateValue -State $State -Name 'mode')
+    $dbPath = [string] (Get-LocalMonitorStateValue -State $State -Name 'db_path')
+    $url = [string] (Get-LocalMonitorStateValue -State $State -Name 'url')
+    try { $actualExecutable = [System.IO.Path]::GetFullPath([string] $cim.ExecutablePath) }
+    catch { return $false }
+
+    if ($mode -eq 'dotnet-run') {
+        try { $expectedExecutable = [System.IO.Path]::GetFullPath((Get-Command dotnet.exe -ErrorAction Stop).Source) }
+        catch { return $false }
+        if (-not $actualExecutable.Equals($expectedExecutable, [System.StringComparison]::OrdinalIgnoreCase) `
+            -or $nativeArguments.Count -lt 8 `
+            -or $nativeArguments[0] -cne 'run' `
+            -or $nativeArguments[1] -cne '--project' `
+            -or $nativeArguments[3] -cne '--') { return $false }
+        try { $projectArgument = [System.IO.Path]::GetFullPath($nativeArguments[2]) }
+        catch { return $false }
+        if (-not $projectArgument.Equals((Get-LocalMonitorProjectPath), [System.StringComparison]::OrdinalIgnoreCase) `
+            -or -not (Test-LocalMonitorArgumentValue -Arguments $nativeArguments -Name '--project' -Expected (Get-LocalMonitorProjectPath) -Path)) { return $false }
+    }
+    elseif ($mode -eq 'published') {
+        $expectedExecutable = [string] (Get-LocalMonitorStateValue -State $State -Name 'executable_path')
+        try { $expectedExecutable = [System.IO.Path]::GetFullPath($expectedExecutable) }
+        catch { return $false }
+        if (-not $actualExecutable.Equals($expectedExecutable, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    else { return $false }
+
+    return (Test-LocalMonitorArgumentValue -Arguments $nativeArguments -Name '--db' -Expected $dbPath -Path) `
+        -and (Test-LocalMonitorArgumentValue -Arguments $nativeArguments -Name '--url' -Expected $url -Url)
 }
 
 function Remove-LocalMonitorState {

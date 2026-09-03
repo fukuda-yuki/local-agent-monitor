@@ -109,6 +109,23 @@ Task Scheduler 登録もしません。
 今すぐ起動する場合は `start.ps1 -Mode Published` を実行します。次回ログオン時から
 自動起動したい場合だけ、別途 Task Scheduler 登録を行います。
 
+一時的に通常のユーザー領域と分離する場合は、空でない絶対パスを同じ
+`-RuntimeRoot` として `start.ps1`、`status.ps1`、`stop.ps1` に渡します。この指定は
+既定の app、DB、logs、state、PID の場所をその実行だけ切り替え、Task Scheduler には
+保存されません。
+
+明示 root では state、PID、process、URL、DB / install path、mode、repository、
+executable identity が一致する場合だけ稼働中と判定します。不一致は process を停止せず
+state も削除せず `runtime_state_mismatch` で終了します。state がない場合、`status.ps1`
+は通常ユーザー領域の既定 URL を probe しません。
+
+```powershell
+$runtimeRoot = 'C:\private\local-monitor-isolated'
+.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot
+.\scripts\status.ps1 -RuntimeRoot $runtimeRoot
+.\scripts\stop.ps1 -RuntimeRoot $runtimeRoot -Force
+```
+
 ```powershell
 .\scripts\install-startup-task.ps1 -Mode Published
 .\scripts\set-startup-task.ps1 -Action Disable

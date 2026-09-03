@@ -1,15 +1,39 @@
 param(
     [string] $TaskName = 'CopilotAgentObservability LocalMonitor',
-    [string] $InstallRoot
+    [string] $InstallRoot,
+    [AllowEmptyString()]
+    [string] $RuntimeRoot
 )
 
+$runtimeRootSupplied = $PSBoundParameters.ContainsKey('RuntimeRoot')
+$runtimeRootOverride = $RuntimeRoot
 . "$PSScriptRoot\common.ps1"
+
+if ($runtimeRootSupplied) {
+    try {
+        Set-LocalMonitorRuntimeRoot -RuntimeRoot $runtimeRootOverride
+    }
+    catch {
+        Write-Error 'runtime_root_invalid'
+        exit 1
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-LocalMonitorDefaultInstallRoot
 }
 
+$stateFileExists = Test-Path -LiteralPath $script:StatePath -PathType Leaf
+$pidFileExists = Test-Path -LiteralPath $script:PidPath -PathType Leaf
 $state = Get-LocalMonitorState
+if ($runtimeRootSupplied -and (($stateFileExists -and -not $pidFileExists) -or ($pidFileExists -and -not $stateFileExists))) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
+if ($runtimeRootSupplied -and $stateFileExists -and -not (Test-LocalMonitorExplicitRuntimeState -State $state)) {
+    Write-Error 'runtime_state_mismatch'
+    exit 1
+}
 $url = [string] (Get-LocalMonitorStateValue -State $state -Name 'url' -DefaultValue $script:DefaultUrl)
 $dbPath = [string] (Get-LocalMonitorStateValue -State $state -Name 'db_path' -DefaultValue $script:DefaultDbPath)
 $stateInstallRoot = [string] (Get-LocalMonitorStateValue -State $state -Name 'install_root' -DefaultValue $InstallRoot)
@@ -20,11 +44,25 @@ $pricingRegistryOverrideState = Get-LocalMonitorTaskPricingRegistryOverrideState
 $processRunning = $false
 $processId = Get-LocalMonitorStateValue -State $state -Name 'process_id'
 if ($null -ne $processId) {
-    $processRunning = Test-LocalMonitorProcess -ProcessId ([int] $processId)
+    $process = Get-Process -Id ([int] $processId) -ErrorAction SilentlyContinue
+    if ($runtimeRootSupplied -and $null -ne $process) {
+        if (-not (Test-LocalMonitorExplicitRuntimeProcessOwnership -State $state)) {
+            Write-Error 'runtime_state_mismatch'
+            exit 1
+        }
+        $processRunning = $true
+    }
+    elseif (-not $runtimeRootSupplied) {
+        $processRunning = Test-LocalMonitorProcess -ProcessId ([int] $processId)
+    }
 }
 
-$live = Test-LocalMonitorHealth -Url $url -Path '/health/live'
-$ready = Test-LocalMonitorHealth -Url $url -Path '/health/ready'
+$live = $null
+$ready = $null
+if (-not $runtimeRootSupplied -or $processRunning) {
+    $live = Test-LocalMonitorHealth -Url $url -Path '/health/live'
+    $ready = Test-LocalMonitorHealth -Url $url -Path '/health/ready'
+}
 $readyStatus = 'unknown'
 $degradedReasons = @()
 $projectionLag = $null
