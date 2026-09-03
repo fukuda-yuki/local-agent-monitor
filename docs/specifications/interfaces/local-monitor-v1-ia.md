@@ -466,6 +466,8 @@ AI result sections:
 - limitations;
 - provider/model/template provenance.
 
+Within each individual finding or improvement suggestion, `evidence_refs` contains 1..16 nonblank exact evidence references that are ordinal case-sensitive distinct. The same exact reference may be reused across separate findings or suggestions.
+
 AI output is never rendered as an observed timeline node.
 
 ## 12. Unified Settings modal
