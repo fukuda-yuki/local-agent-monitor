@@ -1431,7 +1431,7 @@ server 側に会話 session 状態を持たない。
   list）を追加し、runner の prompt 組み立てで既存 focus 指示に履歴ブロック +
   追い質問を追記する。raw の取り扱い・route 境界・CSRF / same-origin /
   no-store / `--sanitized-only` 無効化は D035 のまま変更しない。
-- ドロワーには「ローカル SDK 経由 · raw はローカルから出ません」の
+- ドロワーには「明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します」の
   データ境界コピーを必須表示する。
 
 ## D046: Copilot raw analysis に指示診断（instruction-diagnosis）focus を additive に追加する

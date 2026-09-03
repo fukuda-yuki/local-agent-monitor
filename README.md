@@ -100,14 +100,14 @@ VS Code Copilot Chat からテレメトリを直接受信し、ローカル DB �
 
 ### Copilot 解析ドロワー
 
-captured raw trace をローカルの GitHub Copilot SDK で解析します。
+明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します。
 
 <p align="center">
   <img width="900" alt="Local Ingestion Monitor Copilot 解析ドロワー" src="./docs/assets/screenshots/local-monitor-copilot-drawer.png">
 </p>
 
 観点（トークン / キャッシュ / エラー / 遅延 / ツール利用 / エージェントの流れ）を選んで実行し、
-所見にチャット形式で追い質問できます。raw データはローカルから出ません。
+所見にチャット形式で追い質問できます。
 
 ### 診断
 
