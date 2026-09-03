@@ -23,6 +23,75 @@
   const doctorSourceTargetSummary = document.getElementById("doctor-source-target-summary");
   const sourceDiagnosticsPageSize = 50;
   const maximumSourceDiagnosticsPages = 200;
+  const compatibilityLabels = {
+    supported: "対応済み",
+    supported_with_unknown_fields: "対応済み（未知フィールドあり）",
+    unsupported_source_version: "未対応のバージョン",
+    schema_drift_detected: "スキーマ変更を検出",
+    recognized_record_drop_detected: "認識済みレコードの欠落を検出",
+    adapter_failure: "アダプターエラー",
+  };
+  const compatibilityReasonLabels = {
+    unknown_fields_observed: "未知フィールドがあります",
+    unsupported_source_version: "送信元バージョンは未対応です",
+    schema_drift_detected: "スキーマ変更のため完全性を確認できません",
+    recognized_record_drop_detected: "認識済みレコードに欠落があります",
+    adapter_parse_failure: "payload を解析できませんでした",
+    adapter_exception: "アダプター処理に失敗しました",
+  };
+  const compatibilityActionLabels = {
+    none: "対応は不要です",
+    review_unknown_fields: "未知フィールドを確認してください",
+    use_compatible_source_or_update_adapter: "対応するバージョンを使用するかアダプターを更新してください",
+    capture_fixture_and_review_mapping: "fixture を取得してマッピングを確認してください",
+    restore_mapping_or_update_versioned_golden: "マッピングを復元するか versioned golden を更新してください",
+    validate_payload_and_protocol: "payload と protocol を確認してください",
+    inspect_sanitized_adapter_failure: "sanitized なアダプター診断を確認してください",
+  };
+  const doctorStateLabels = {
+    monitor_not_installed: "Monitor がインストールされていません",
+    monitor_not_running: "Monitor が起動していません",
+    receiver_not_bound: "受信ポートを利用できません",
+    port_owned_by_foreign_process: "受信ポートを別のプロセスが使用しています",
+    endpoint_mismatch: "送信先が Monitor と一致しません",
+    protocol_mismatch: "送信プロトコルが一致しません",
+    signal_disabled: "トレース送信が無効です",
+    unsupported_source_version: "この取得元のバージョンには対応していません",
+    feature_unavailable: "必要な機能をこの取得元では利用できません",
+    agent_restart_required: "取得元の再起動が必要です",
+    endpoint_unreachable: "Monitor の受信先へ接続できません",
+    payload_rejected: "送信データを受け付けられませんでした",
+    raw_persisted_projection_pending: "記録済みデータの反映を待っています",
+    projection_failed: "記録済みデータを画面へ反映できませんでした",
+    session_unbound: "記録を Session に結び付けられません",
+    content_capture_disabled: "内容の記録が無効です",
+    sanitized_only_raw_unavailable: "内容は記録されていません",
+    schema_drift_detected: "取得元のスキーマ変更を検出しました",
+    ready_no_real_trace: "接続確認のための記録がまだありません",
+    first_trace_ready: "最初の記録を確認できました",
+  };
+  const doctorActionLabels = {
+    install_monitor: "Monitor をインストールしてください",
+    start_monitor: "Monitor を起動してください",
+    restart_monitor: "Monitor を再起動してください",
+    free_or_change_port: "ポートを解放するか変更してください",
+    update_source_endpoint: "送信元の接続先を更新してください",
+    use_http_protobuf: "HTTP/Protobuf を使用してください",
+    enable_trace_signal: "トレース送信を有効にしてください",
+    use_supported_source_version: "対応する取得元バージョンを使用してください",
+    use_supported_source_surface: "対応する取得元を使用してください",
+    restart_source_process: "取得元のプロセスを再起動してください",
+    verify_endpoint_reachability: "受信先への接続を確認してください",
+    inspect_rejected_payload: "拒否された送信データの診断を確認してください",
+    wait_for_projection: "反映の完了を待ってください",
+    open_projection_diagnostics: "反映処理の診断を確認してください",
+    select_exact_session: "対象の Session を選択してください",
+    enable_content_capture_if_desired: "必要な場合は内容の記録を有効にしてください",
+    restart_without_sanitized_only_if_desired: "必要な場合は通常モードで Monitor を再起動してください",
+    review_source_diagnostics: "取得元の診断を確認してください",
+    run_bounded_source_interaction: "取得元で確認用の操作を実行してください",
+    open_verified_trace_or_session: "確認済みの Trace または Session を開いてください",
+  };
   if (!rows) return; // Not the diagnostics page — no-op.
 
   function relativeTime(timestamp) {
@@ -56,6 +125,40 @@
       node.append(valueLine(value, mono));
     }
     return node;
+  }
+
+  function enumPresentation(code, labels) {
+    if (typeof code !== "string" || !Object.hasOwn(labels, code)) {
+      throw new Error("unknown diagnostic enum");
+    }
+    const node = document.createElement("span");
+    const primary = document.createElement("span");
+    primary.textContent = labels[code];
+    const technical = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "技術情報";
+    const raw = document.createElement("code");
+    raw.textContent = code;
+    technical.append(summary, raw);
+    node.append(primary, technical);
+    return node;
+  }
+
+  function enumCell(code, labels) {
+    const node = document.createElement("td");
+    node.append(enumPresentation(code, labels));
+    return node;
+  }
+
+  function enumLines(codes, labels) {
+    if (!Array.isArray(codes)) throw new Error("invalid diagnostic reasons");
+    const node = document.createElement("td");
+    for (const code of codes) node.append(enumPresentation(code, labels));
+    return node;
+  }
+
+  function setEnumPresentation(container, code, labels) {
+    container.replaceChildren(enumPresentation(code, labels));
   }
 
   function sourceDiagnosticMessage(message) {
@@ -143,22 +246,27 @@
     }
 
     if (items.length === 0) {
-      sourceDiagnosticMessage("ソース互換性の観測はまだありません。");
+      sourceDiagnosticMessage("今回の記録にはありません。この記録ではソース互換性の診断を確認できませんでした。実際に診断対象がなかったとは断定できません。");
       return;
     }
 
-    sourceDiagnosticRows.replaceChildren();
-    for (const item of items) {
-      const row = document.createElement("tr");
-      row.append(
-        lines([item.observation_id, item.observed_at], true),
-        lines([item.source_surface, item.source_application_version], false),
-        lines([item.source_adapter, item.adapter_version], false),
-        cell(item.compatibility_state, true),
-        lines(item.reason_codes, true),
-        cell(item.next_action, true),
-        lines([item.unknown_span_count, item.unknown_event_count, item.unknown_attribute_count], true));
-      sourceDiagnosticRows.append(row);
+    try {
+      const rendered = [];
+      for (const item of items) {
+        const row = document.createElement("tr");
+        row.append(
+          lines([item.observation_id, item.observed_at], true),
+          lines([item.source_surface, item.source_application_version], false),
+          lines([item.source_adapter, item.adapter_version], false),
+          enumCell(item.compatibility_state, compatibilityLabels),
+          enumLines(item.reason_codes, compatibilityReasonLabels),
+          enumCell(item.next_action, compatibilityActionLabels),
+          lines([item.unknown_span_count, item.unknown_event_count, item.unknown_attribute_count], true));
+        rendered.push(row);
+      }
+      sourceDiagnosticRows.replaceChildren(...rendered);
+    } catch {
+      sourceDiagnosticMessage("ソース互換性の診断を読み込めませんでした。");
     }
   }
 
@@ -287,10 +395,20 @@
       ? { id: envelope.verification_id, revision: verification.revision, state: verification.state }
       : null;
 
-    doctorFields.state.textContent = display(primary?.state_code);
+    if (primary) {
+      if (!Array.isArray(primary.reason_codes)
+        || primary.reason_codes.length !== 1
+        || primary.reason_codes[0] !== primary.state_code) {
+        throw new Error("invalid doctor reason");
+      }
+      setEnumPresentation(doctorFields.state, primary.state_code, doctorStateLabels);
+      setEnumPresentation(doctorFields.nextAction, primary.next_action, doctorActionLabels);
+    } else {
+      doctorFields.state.textContent = "—";
+      doctorFields.nextAction.textContent = "—";
+    }
     doctorFields.severity.textContent = display(primary?.severity);
     doctorFields.source.textContent = display(evaluation?.source_surface ?? envelope.source_surface);
-    doctorFields.nextAction.textContent = display(primary?.next_action);
     doctorFields.retryability.textContent = display(primary?.retryability);
     doctorFields.lifecycle.textContent = display(verification?.state);
     renderEvidence(primary?.evidence_refs, payload.navigation_targets);
@@ -344,7 +462,8 @@
       const term = document.createElement("dt");
       const detail = document.createElement("dd");
       term.textContent = label;
-      detail.textContent = display(value);
+      if (value instanceof Node) detail.append(value);
+      else detail.textContent = display(value);
       row.append(term, detail);
       container.append(row);
     }
@@ -382,8 +501,10 @@
         if (!diagnostic) throw new Error("invalid source evidence");
         renderExactSummary(doctorSourceTargetSummary, [
           ["Observation ID", observation.observation_id], ["ソース", diagnostic.source_surface],
-          ["adapter", diagnostic.source_adapter], ["互換性", diagnostic.compatibility_state],
-          ["次の対応", diagnostic.next_action], ["観測時刻", observation.observed_at],
+          ["adapter", diagnostic.source_adapter],
+          ["互換性", enumPresentation(diagnostic.compatibility_state, compatibilityLabels)],
+          ["次の対応", enumPresentation(diagnostic.next_action, compatibilityActionLabels)],
+          ["観測時刻", observation.observed_at],
         ]);
         doctorSourceTarget.hidden = false;
         document.getElementById("doctor-source-target-heading")?.focus();

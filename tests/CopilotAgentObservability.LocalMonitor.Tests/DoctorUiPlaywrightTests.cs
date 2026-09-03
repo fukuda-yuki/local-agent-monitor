@@ -32,10 +32,10 @@ public sealed class DoctorUiPlaywrightTests
         await page.Locator("#doctor-source").SelectOptionAsync("claude-code");
         await page.Locator("#doctor-primary-action").ClickAsync();
 
-        await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("first_trace_ready");
+        await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("最初の記録を確認できました");
         await Expect(page.Locator("#doctor-severity")).ToHaveTextAsync("info");
         await Expect(page.Locator("#doctor-result-source")).ToHaveTextAsync("claude-code");
-        await Expect(page.Locator("#doctor-next-action")).ToHaveTextAsync("open_verified_trace_or_session");
+        await Expect(page.Locator("#doctor-next-action")).ToContainTextAsync("確認済みの Trace または Session を開いてください");
         await Expect(page.Locator("#doctor-retryability")).ToHaveTextAsync("none");
         await Expect(page.Locator("#doctor-lifecycle")).ToHaveTextAsync("completed");
         await Expect(page.Locator("#doctor-evidence-list li")).ToHaveCountAsync(1);
@@ -319,7 +319,7 @@ public sealed class DoctorUiPlaywrightTests
         await page.GetByLabel("候補 evidence:one を選択").CheckAsync();
         await page.Locator("#doctor-primary-action").ClickAsync();
 
-        await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("first_trace_ready");
+        await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("最初の記録を確認できました");
         await Expect(page.Locator("#doctor-primary-action")).ToHaveTextAsync("現在の状態を確認");
         Assert.Equal(1, completePosts);
         Assert.Equal(0, statusGets);
@@ -395,18 +395,26 @@ public sealed class DoctorUiPlaywrightTests
     {
         var rows = new[]
         {
-            ("ready_no_real_trace", "info", "run_bounded_source_interaction", "after_action"),
-            ("monitor_not_running", "error", "start_monitor", "after_action"),
-            ("receiver_not_bound", "error", "restart_monitor", "after_action"),
-            ("protocol_mismatch", "error", "use_http_protobuf", "after_action"),
-            ("signal_disabled", "error", "enable_trace_signal", "after_action"),
-            ("unsupported_source_version", "error", "use_supported_source_version", "after_action"),
-            ("schema_drift_detected", "warning", "review_source_diagnostics", "after_action"),
-            ("raw_persisted_projection_pending", "warning", "wait_for_projection", "automatic"),
-            ("projection_failed", "error", "open_projection_diagnostics", "after_action"),
-            ("session_unbound", "error", "select_exact_session", "after_action"),
-            ("content_capture_disabled", "warning", "enable_content_capture_if_desired", "after_action"),
-            ("sanitized_only_raw_unavailable", "warning", "restart_without_sanitized_only_if_desired", "after_action"),
+            ("monitor_not_installed", "Monitor がインストールされていません", "install_monitor", "Monitor をインストールしてください", "error", "after_action"),
+            ("monitor_not_running", "Monitor が起動していません", "start_monitor", "Monitor を起動してください", "error", "after_action"),
+            ("receiver_not_bound", "受信ポートを利用できません", "restart_monitor", "Monitor を再起動してください", "error", "after_action"),
+            ("port_owned_by_foreign_process", "受信ポートを別のプロセスが使用しています", "free_or_change_port", "ポートを解放するか変更してください", "error", "after_action"),
+            ("endpoint_mismatch", "送信先が Monitor と一致しません", "update_source_endpoint", "送信元の接続先を更新してください", "error", "after_action"),
+            ("protocol_mismatch", "送信プロトコルが一致しません", "use_http_protobuf", "HTTP/Protobuf を使用してください", "error", "after_action"),
+            ("signal_disabled", "トレース送信が無効です", "enable_trace_signal", "トレース送信を有効にしてください", "error", "after_action"),
+            ("unsupported_source_version", "この取得元のバージョンには対応していません", "use_supported_source_version", "対応する取得元バージョンを使用してください", "error", "after_action"),
+            ("feature_unavailable", "必要な機能をこの取得元では利用できません", "use_supported_source_surface", "対応する取得元を使用してください", "error", "after_action"),
+            ("agent_restart_required", "取得元の再起動が必要です", "restart_source_process", "取得元のプロセスを再起動してください", "warning", "after_action"),
+            ("endpoint_unreachable", "Monitor の受信先へ接続できません", "verify_endpoint_reachability", "受信先への接続を確認してください", "error", "after_action"),
+            ("payload_rejected", "送信データを受け付けられませんでした", "inspect_rejected_payload", "拒否された送信データの診断を確認してください", "error", "after_action"),
+            ("raw_persisted_projection_pending", "記録済みデータの反映を待っています", "wait_for_projection", "反映の完了を待ってください", "warning", "automatic"),
+            ("projection_failed", "記録済みデータを画面へ反映できませんでした", "open_projection_diagnostics", "反映処理の診断を確認してください", "error", "after_action"),
+            ("session_unbound", "記録を Session に結び付けられません", "select_exact_session", "対象の Session を選択してください", "error", "after_action"),
+            ("content_capture_disabled", "内容の記録が無効です", "enable_content_capture_if_desired", "必要な場合は内容の記録を有効にしてください", "warning", "after_action"),
+            ("sanitized_only_raw_unavailable", "内容は記録されていません", "restart_without_sanitized_only_if_desired", "必要な場合は通常モードで Monitor を再起動してください", "warning", "after_action"),
+            ("schema_drift_detected", "取得元のスキーマ変更を検出しました", "review_source_diagnostics", "取得元の診断を確認してください", "warning", "after_action"),
+            ("ready_no_real_trace", "接続確認のための記録がまだありません", "run_bounded_source_interaction", "取得元で確認用の操作を実行してください", "info", "after_action"),
+            ("first_trace_ready", "最初の記録を確認できました", "open_verified_trace_or_session", "確認済みの Trace または Session を開いてください", "info", "none"),
         };
         using var temp = new MonitorTempDirectory();
         await using var host = await StartHostAsync(temp);
@@ -426,7 +434,7 @@ public sealed class DoctorUiPlaywrightTests
             return route.FulfillAsync(new RouteFulfillOptions
             {
                 ContentType = "application/json",
-                Body = MatrixVerificationJson(row.Item1, row.Item2, row.Item3, row.Item4, source),
+                Body = MatrixVerificationJson(row.Item1, row.Item5, row.Item3, row.Item6, source),
             });
         });
 
@@ -438,11 +446,13 @@ public sealed class DoctorUiPlaywrightTests
             await page.Locator("#doctor-source").SelectOptionAsync(source);
             await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("—");
             await page.Locator("#doctor-primary-action").ClickAsync();
-            await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync(row.Item1);
-            await Expect(page.Locator("#doctor-severity")).ToHaveTextAsync(row.Item2);
-            await Expect(page.Locator("#doctor-next-action")).ToHaveTextAsync(row.Item3);
-            await Expect(page.Locator("#doctor-retryability")).ToHaveTextAsync(row.Item4);
+            await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync(row.Item2);
+            await Expect(page.Locator("#doctor-next-action")).ToContainTextAsync(row.Item4);
             await Expect(page.Locator("#doctor-result-source")).ToHaveTextAsync(source);
+            await Expect(page.Locator("#doctor-current-state details summary")).ToHaveTextAsync("技術情報");
+            await page.Locator("#doctor-current-state details summary").PressAsync("Enter");
+            await Expect(page.Locator("#doctor-current-state code")).ToHaveTextAsync(row.Item1);
+            await Expect(page.Locator("#doctor-next-action code")).ToHaveTextAsync(row.Item3);
         }
 
         Assert.Equal(rows.Length, rowIndex);
@@ -536,7 +546,7 @@ public sealed class DoctorUiPlaywrightTests
             var body = afterRollback
                 ? CancelledVerificationJson
                     .Replace("first_trace_ready", "signal_disabled", StringComparison.Ordinal)
-                    .Replace("open_verified_trace_or_session", "review_current_setup", StringComparison.Ordinal)
+                    .Replace("open_verified_trace_or_session", "enable_trace_signal", StringComparison.Ordinal)
                 : CancelledVerificationJson;
             return route.FulfillAsync(new RouteFulfillOptions { ContentType = "application/json", Body = body });
         });
@@ -559,8 +569,8 @@ public sealed class DoctorUiPlaywrightTests
         Assert.True(afterRollback);
         Assert.Equal(1, statusGets);
         await Expect(page.Locator("#doctor-lifecycle")).ToHaveTextAsync("cancelled");
-        await Expect(page.Locator("#doctor-current-state")).ToHaveTextAsync("signal_disabled");
-        await Expect(page.Locator("#doctor-next-action")).ToHaveTextAsync("review_current_setup");
+        await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("トレース送信が無効です");
+        await Expect(page.Locator("#doctor-next-action")).ToContainTextAsync("トレース送信を有効にしてください");
     }
 
     [Fact]
@@ -593,6 +603,10 @@ public sealed class DoctorUiPlaywrightTests
         await page.Keyboard.PressAsync("Enter");
 
         await Expect(page.Locator("#doctor-result-heading")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#doctor-current-state summary")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#doctor-next-action summary")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#doctor-candidate-list input").First).ToBeFocusedAsync();
@@ -636,6 +650,9 @@ public sealed class DoctorUiPlaywrightTests
         await Expect(page.Locator("#doctor-session-target")).ToContainTextAsync(sessionId);
         await Expect(page.Locator("#doctor-session-target")).ToContainTextAsync("full");
         await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("obs:<svg/onload=alert(1)>");
+        await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("対応済み");
+        await Expect(page.Locator("#doctor-source-target details summary").First).ToHaveTextAsync("技術情報");
+        await page.Locator("#doctor-source-target details summary").First.PressAsync("Enter");
         await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("supported");
         await Expect(page.Locator("#doctor-source-target svg")).ToHaveCountAsync(0);
         var content = await page.ContentAsync();
@@ -669,7 +686,7 @@ public sealed class DoctorUiPlaywrightTests
           "adapter":"claude-code","source_surface":"claude-code","verification_id":"018f0c57-7b34-7cc3-8a13-8a90a2345678",
           "doctor":{"schema_version":"doctor.v1","success":true,"code":"verification_completed","evaluation":{
             "source_surface":"claude-code","primary_state":{"schema_version":"doctor.v1","state_code":"first_trace_ready","severity":"info",
-            "source_surface":"claude-code","evidence_refs":["ev:<b>unsafe</b>"],"reason_codes":[],"next_action":"open_verified_trace_or_session",
+            "source_surface":"claude-code","evidence_refs":["ev:<b>unsafe</b>"],"reason_codes":["first_trace_ready"],"next_action":"open_verified_trace_or_session",
             "retryability":"none","observed_at":"2026-07-21T00:00:00.0000000Z","verification_id":"018f0c57-7b34-7cc3-8a13-8a90a2345678"},
             "states":[],"missing_fact_families":[]},"verification":{"verification_id":"018f0c57-7b34-7cc3-8a13-8a90a2345678",
             "expected_source_surface":"claude-code","expected_source_adapter":"claude-code","state":"completed","revision":2,
