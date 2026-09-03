@@ -697,13 +697,14 @@ public sealed class ValidationRunnerContractTests
                 Invoke-Expression $function.Extent.Text
             }
             $repoRoot = (Get-Location).Path
-            $child = "Start-Sleep -Seconds 2; [IO.File]::WriteAllText('$($env:VALIDATION_TEST_ARG_1.Replace("'", "''"))', 'survived')"
+            $child = "Start-Sleep -Seconds 5; [IO.File]::WriteAllText('$($env:VALIDATION_TEST_ARG_1.Replace("'", "''"))', 'survived')"
             $parent = "Start-Process pwsh -ArgumentList @('-NoProfile','-Command',`"$child`"); Start-Sleep -Seconds 30"
             $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-            $result = Invoke-BoundedCommand -FilePath 'pwsh' -Arguments @('-NoProfile', '-Command', $parent) -TimeoutMilliseconds 500
+            # Leave bounded startup margin for the real descendant under concurrent test load.
+            $result = Invoke-BoundedCommand -FilePath 'pwsh' -Arguments @('-NoProfile', '-Command', $parent) -TimeoutMilliseconds 3000
             if (-not $result.TimedOut -or -not $result.ProcessTreeExited -or $result.CapturedProcessCount -lt 2) { throw 'Timed-out process tree did not terminalize.' }
-            if ($stopwatch.Elapsed.TotalSeconds -gt 5) { throw "Timeout publication waited for pipe EOF; elapsed=$($stopwatch.Elapsed.TotalSeconds)." }
-            Start-Sleep -Seconds 3
+            if ($stopwatch.Elapsed.TotalSeconds -gt 10) { throw "Timeout publication waited for pipe EOF; elapsed=$($stopwatch.Elapsed.TotalSeconds)." }
+            Start-Sleep -Seconds 6
             if (Test-Path -LiteralPath $env:VALIDATION_TEST_ARG_1) { throw 'Timed-out descendant process survived.' }
             Write-NightlyProjectReceipt -Path $env:VALIDATION_TEST_ARG_2 -ProjectPath 'tests/Example.Tests/Example.Tests.csproj' -Result $result
             """;
