@@ -37,7 +37,10 @@ public sealed class DoctorUiPlaywrightTests
 
         await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("最初の記録を確認できました");
         await Expect(page.Locator("#doctor-severity")).ToContainTextAsync("情報");
-        await Expect(page.Locator("#doctor-result-source")).ToHaveTextAsync("claude-code");
+        await Expect(page.Locator("#doctor-result-source")).ToContainTextAsync("Claude Code");
+        await Expect(page.Locator("#doctor-result-source code")).Not.ToBeVisibleAsync();
+        await page.Locator("#doctor-result-source summary").PressAsync("Enter");
+        await Expect(page.Locator("#doctor-result-source code")).ToHaveTextAsync("claude-code");
         await Expect(page.Locator("#doctor-next-action")).ToContainTextAsync("確認済みの Trace または Session を開いてください");
         await Expect(page.Locator("#doctor-retryability")).ToContainTextAsync("再確認は不要です");
         await Expect(page.Locator("#doctor-lifecycle")).ToContainTextAsync("完了");
@@ -452,7 +455,8 @@ public sealed class DoctorUiPlaywrightTests
             await page.Locator("#doctor-primary-action").ClickAsync();
             await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync(row.Item2);
             await Expect(page.Locator("#doctor-next-action")).ToContainTextAsync(row.Item4);
-            await Expect(page.Locator("#doctor-result-source")).ToHaveTextAsync(source);
+            await Expect(page.Locator("#doctor-result-source")).ToContainTextAsync(
+                source == "claude-code" ? "Claude Code" : "GitHub Copilot CLI");
             await Expect(page.Locator("#doctor-current-state details summary")).ToHaveTextAsync("技術情報");
             await Expect(page.Locator("#doctor-current-state code")).Not.ToBeVisibleAsync();
             await page.Locator("#doctor-current-state details summary").PressAsync("Enter");
@@ -467,6 +471,7 @@ public sealed class DoctorUiPlaywrightTests
     [InlineData("\"severity\":\"info\"", "\"severity\":\"warning\"")]
     [InlineData("\"retryability\":\"none\"", "\"retryability\":\"after_action\"")]
     [InlineData("open_verified_trace_or_session", "start_monitor")]
+    [InlineData("\"source_surface\":\"claude-code\"", "\"source_surface\":\"unknown-source\"")]
     public async Task Diagnostics_RejectsCrossSwappedDoctorCatalogTuplesWithoutPartialDom(string from, string to)
     {
         using var temp = new MonitorTempDirectory();
@@ -522,7 +527,7 @@ public sealed class DoctorUiPlaywrightTests
         release.SetResult();
 
         await Expect(page.Locator("#doctor-lifecycle")).ToContainTextAsync("確認中");
-        await Expect(page.Locator("#doctor-result-source")).ToHaveTextAsync("claude-code");
+        await Expect(page.Locator("#doctor-result-source")).ToContainTextAsync("Claude Code");
         await Expect(page.Locator("#doctor-source")).ToBeDisabledAsync();
         Assert.Equal(1, beginPosts);
     }
@@ -643,6 +648,8 @@ public sealed class DoctorUiPlaywrightTests
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#doctor-severity summary")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#doctor-result-source summary")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#doctor-next-action summary")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
         await page.Keyboard.PressAsync("Tab");
@@ -690,6 +697,9 @@ public sealed class DoctorUiPlaywrightTests
         await Expect(page.Locator("#doctor-session-target")).ToContainTextAsync("完全に記録");
         await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("obs:<svg/onload=alert(1)>");
         await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("対応済み");
+        await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("0件");
+        await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("追加の互換性理由はありません");
+        await Expect(page.Locator("#doctor-source-target span > details, #doctor-source-target span > p")).ToHaveCountAsync(0);
         await Expect(page.Locator("#doctor-source-target details summary").First).ToHaveTextAsync("技術情報");
         await page.Locator("#doctor-source-target details summary").First.PressAsync("Enter");
         await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("supported");

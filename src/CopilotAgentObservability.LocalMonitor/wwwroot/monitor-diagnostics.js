@@ -78,10 +78,16 @@
   const setupOwnershipValues = new Set(["managed", "managed_windows", "caller_managed", "managed_cli_caller_managed_agent_sdk"]);
   const sessionStatusLabels = Object.freeze({ active: "実行中", completed: "完了", failed: "失敗", unknown: "状態を確認できません" });
   const completenessLabels = Object.freeze({ unbound: "Session に未接続", partial: "一部を記録", rich: "詳細を記録", full: "完全に記録" });
+  const doctorSourceLabels = Object.freeze({
+    "github-copilot-vscode": "GitHub Copilot in VS Code",
+    "github-copilot-cli": "GitHub Copilot CLI",
+    "github-copilot-app-sdk": "GitHub Copilot App/SDK",
+    "claude-code": "Claude Code",
+  });
   if (!rows) return; // Not the diagnostics page — no-op.
 
   function relativeTime(timestamp) {
-    if (!timestamp) return "—";
+    if (!timestamp) throw new Error("missing received timestamp");
     const parsed = Date.parse(timestamp);
     if (Number.isNaN(parsed)) return timestamp;
     const deltaSeconds = Math.max(0, (Date.now() - parsed) / 1000);
@@ -98,10 +104,19 @@
     return node;
   }
 
+  function contentCell(content, mono) {
+    const node = document.createElement("td");
+    if (mono) node.className = "monitor-mono";
+    if (content instanceof Node) node.append(content);
+    else node.textContent = String(content);
+    return node;
+  }
+
   function valueLine(value, mono) {
+    if (value === null || value === undefined) throw new Error("missing required diagnostic value");
     const node = document.createElement("span");
     if (mono) node.className = "monitor-mono";
-    node.textContent = value === null || value === undefined ? "—" : String(value);
+    node.textContent = String(value);
     return node;
   }
 
@@ -141,8 +156,8 @@
     return node;
   }
 
-  function enumLines(codes) {
-    const node = document.createElement("td");
+  function reasonPresentation(codes) {
+    const node = document.createElement("div");
     if (codes.length === 0) {
       node.append(sharedFactPresentation({
         state: "observed_zero", recordedCount: 0, hasCompleteCoverageProof: true,
@@ -151,6 +166,12 @@
       return node;
     }
     for (const code of codes) node.append(enumPresentation(code, compatibilityReasonLabels[code]));
+    return node;
+  }
+
+  function enumLines(codes) {
+    const node = document.createElement("td");
+    node.append(reasonPresentation(codes));
     return node;
   }
 
@@ -205,7 +226,8 @@
     const value = document.createElement("td");
     value.colSpan = 7;
     value.className = "empty-state";
-    value.textContent = message;
+    if (message instanceof Node) value.append(message);
+    else value.textContent = message;
     row.append(value);
     sourceDiagnosticRows.append(row);
   }
@@ -264,10 +286,10 @@
       const row = document.createElement("tr");
       row.append(
         cell(String(item.raw_record_id), true),
-        cell(relativeTime(item.received_at), false),
-        cell(item.source ?? "—", false),
-        cell(item.trace_id ?? "—", true),
-        cell(item.span_count === null || item.span_count === undefined ? "—" : String(item.span_count), true));
+        contentCell(item.received_at ? relativeTime(item.received_at) : missingFactPresentation("受信時刻"), false),
+        contentCell(item.source ?? missingFactPresentation("取得元"), false),
+        contentCell(item.trace_id ?? missingFactPresentation("Trace ID"), true),
+        contentCell(item.span_count ?? missingFactPresentation("Span 数"), true));
       rows.append(row);
     }
   }
@@ -284,7 +306,7 @@
     }
 
     if (items.length === 0) {
-      sourceDiagnosticMessage("今回の記録にはありません。この記録ではソース互換性の診断を確認できませんでした。実際に診断対象がなかったとは断定できません。");
+      sourceDiagnosticMessage(missingFactPresentation("ソース互換性の診断対象"));
       return;
     }
 
@@ -359,10 +381,6 @@
     setCancelAction(false);
     setDoctorAction("現在の状態を確認", refreshVerification);
     announceDoctor("操作結果を確認できませんでした。現在の状態を確認してください。", true);
-  }
-
-  function display(value) {
-    return value === null || value === undefined || value === "" ? "—" : String(value);
   }
 
   function safeNavigationTarget(target, evidenceRef) {
@@ -452,7 +470,7 @@
     }
     if (verification && !Object.hasOwn(lifecycleLabels, verification.state)) throw new Error("invalid doctor lifecycle");
     const source = evaluation?.source_surface ?? envelope.source_surface;
-    if (source !== null && source !== undefined && typeof source !== "string") throw new Error("invalid doctor source");
+    if (source !== null && source !== undefined && !Object.hasOwn(doctorSourceLabels, source)) throw new Error("invalid doctor source");
 
     currentVerification = verification && envelope.verification_id
       ? { id: envelope.verification_id, revision: verification.revision, state: verification.state }
@@ -467,7 +485,7 @@
       ? enumPresentation(primary.severity, severityLabels[primary.severity])
       : missingFactPresentation("重要度"));
     doctorFields.source.replaceChildren(source
-      ? valueLine(source, false)
+      ? enumPresentation(source, doctorSourceLabels[source])
       : missingFactPresentation("取得元"));
     doctorFields.retryability.replaceChildren(primary
       ? enumPresentation(primary.retryability, retryabilityLabels[primary.retryability])
@@ -530,7 +548,10 @@
       const detail = document.createElement("dd");
       term.textContent = label;
       if (value instanceof Node) detail.append(value);
-      else detail.textContent = display(value);
+      else {
+        if (value === null || value === undefined || value === "") throw new Error("missing exact summary value");
+        detail.textContent = String(value);
+      }
       row.append(term, detail);
       container.append(row);
     }
@@ -577,7 +598,7 @@
           ["ソース", diagnostic.source_surface ?? missingFactPresentation("取得元")],
           ["adapter", diagnostic.source_adapter ?? missingFactPresentation("Adapter")],
           ["互換性", diagnosticStatePresentation(diagnostic, entry)],
-          ["理由", entry.reasons.length ? enumPresentation(entry.reasons[0], compatibilityReasonLabels[entry.reasons[0]]) : missingFactPresentation("互換性に関する追加理由")],
+          ["理由", reasonPresentation(entry.reasons)],
           ["次の対応", enumPresentation(diagnostic.next_action, compatibilityActionLabels[diagnostic.next_action])],
           ["観測時刻", observation.observed_at ?? missingFactPresentation("観測時刻")],
         ]);

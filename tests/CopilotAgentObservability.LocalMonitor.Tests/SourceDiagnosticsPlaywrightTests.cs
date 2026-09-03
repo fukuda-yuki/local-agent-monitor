@@ -29,7 +29,35 @@ public sealed class SourceDiagnosticsPlaywrightTests
         Assert.True(await page.EvaluateAsync<bool>("() => typeof window.LocalMonitorV1FactState?.render === 'function'"));
         await Expect(page.Locator("#source-diagnostics-rows tr")).ToHaveCountAsync(1);
         await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("今回の記録にはありません");
-        await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("実際に診断対象がなかったとは断定できません");
+        await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(page.Locator("#source-diagnostics-rows [data-fact-state='not-observed']")).ToHaveCountAsync(1);
+    }
+
+    [Fact]
+    public async Task Diagnostics_IngestionHistoryUsesSharedAbsenceForEveryNullableFact()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/ingestions?limit=50", route => route.FulfillAsync(new()
+        {
+            ContentType = "application/json",
+            Body = "{\"items\":[{\"raw_record_id\":1,\"received_at\":null,\"source\":null,\"trace_id\":null,\"span_count\":null}]}",
+        }));
+
+        await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var row = page.Locator("#ingestion-history-rows tr");
+        await Expect(row.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(4);
+        await Expect(row).Not.ToContainTextAsync("—");
+        await Expect(row).ToContainTextAsync("受信時刻をこの記録で確認できません");
+        await Expect(row).ToContainTextAsync("取得元をこの記録で確認できません");
+        await Expect(row).ToContainTextAsync("Trace IDをこの記録で確認できません");
+        await Expect(row).ToContainTextAsync("Span 数をこの記録で確認できません");
     }
 
     [Fact]
