@@ -17,6 +17,26 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     private const string AiLatestRunId = "018f0000-0000-7000-8000-000000000073";
 
     [Fact]
+    public async Task UnavailableSessionHistoryIsNotEmptyAndRecoveryPreservesTheDurableReport()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var projectionAvailable = false;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page);
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => projectionAvailable
+            ? r.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("preserved history")}},"snapshot_changed":true}],"next_cursor":"Y3Vyc29y"}"""))
+            : r.FulfillAsync(new() { Status = 409, ContentType = "application/json", Body = "{\"error\":\"projection_unavailable\"}" }));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        var action = page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" });
+        await action.ClickAsync(); await Expect(dialog).ToContainTextAsync("現在のセッション記録を分析履歴と比較できません"); await Expect(dialog).Not.ToContainTextAsync("まだ分析はありません");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "閉じる" }).ClickAsync(); projectionAvailable = true; await action.ClickAsync();
+        await Expect(dialog).ToContainTextAsync("preserved history"); await Expect(dialog).ToContainTextAsync("前回の分析後に記録が更新されています"); await Expect(dialog.GetByRole(AriaRole.Button, new() { Name = AiRunId })).ToHaveCountAsync(1);
+        projectionAvailable = false; await dialog.GetByRole(AriaRole.Button, new() { Name = "さらに読み込む" }).ClickAsync();
+        await Expect(dialog).ToContainTextAsync("preserved history"); await Expect(dialog.GetByRole(AriaRole.Button, new() { Name = AiRunId })).ToHaveCountAsync(1);
+    }
+
+    [Fact]
     public async Task ExactRunningSessionAnalysisResumesPollingAndReachesItsTerminalReport()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var context = await browser.NewContextAsync(); await context.AddInitScriptAsync("window.setTimeout = fn => { queueMicrotask(fn); return 1; };"); var page = await context.NewPageAsync();

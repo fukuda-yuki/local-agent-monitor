@@ -524,6 +524,28 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         Assert.Equal(1, application.NodeStarts);
     }
 
+    [Fact]
+    public async Task SessionReportsFailClosedWithoutReadingDurableHistoryAndRecoverWithExactSnapshotComparison()
+    {
+        var snapshots = new RecoveringReportSnapshots(); var runs = new RecoveringReportRuns();
+        var application = new LocalAiAnalysisApplicationV1(
+            _ => ValueTask.FromResult(true), snapshots, runs, new Provider(LocalAiProviderOutcomeV1.Failed()));
+        await using var host = await Host(application);
+
+        using var unavailable = await host.GetAsync($"/api/local-monitor/v1/ai/sessions/{SessionId}/reports");
+
+        Assert.Equal(HttpStatusCode.Conflict, unavailable.StatusCode);
+        Assert.Equal("{\"error\":\"projection_unavailable\"}", await unavailable.Content.ReadAsStringAsync());
+        Assert.Equal(0, runs.ReportReads);
+        snapshots.Available = true;
+
+        using var recovered = await host.GetAsync($"/api/local-monitor/v1/ai/sessions/{SessionId}/reports");
+        using var json = JsonDocument.Parse(await recovered.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
+        Assert.Equal(1, runs.ReportReads);
+        Assert.True(json.RootElement.GetProperty("reports")[0].GetProperty("snapshot_changed").GetBoolean());
+    }
+
     [Theory]
     [InlineData("invalid_request", HttpStatusCode.BadRequest)]
     [InlineData("local_ai_node_relation_invalid", HttpStatusCode.InternalServerError)]
@@ -636,6 +658,31 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) { Reads++; throw new Xunit.Sdk.XunitException("must not read"); }
         public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) { Reads++; throw new Xunit.Sdk.XunitException("must not read"); }
         public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token) => ValueTask.FromResult(true);
+    }
+    private sealed class RecoveringReportSnapshots : ILocalAiSnapshotProjectionServiceV1
+    {
+        private readonly LocalAiSnapshotProjectionV1 snapshot = LocalAiSnapshotProjectionBuilderV1.BuildSession(ProjectionInput(1, 1, 0));
+        internal bool Available { get; set; }
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadSessionAsync(string sessionId, CancellationToken token) => Available
+            ? ValueTask.FromResult(snapshot)
+            : ValueTask.FromException<LocalAiSnapshotProjectionV1>(new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
+        public ValueTask<LocalAiSnapshotProjectionV1> ReadNodeAsync(string sessionId, string nodeId, CancellationToken token) => throw new NotSupportedException();
+        public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 snapshot, CancellationToken token) => throw new NotSupportedException();
+    }
+    private sealed class RecoveringReportRuns : ILocalAiRunRepositoryV1
+    {
+        internal int ReportReads { get; private set; }
+        public LocalAiReportPageResponseV1 Reports(string sessionId, int? limit, string? cursor, string currentPayloadSha256)
+        {
+            ReportReads++;
+            return new([new("018f0000-0000-7000-8000-000000000010", "succeeded", "{}"u8.ToArray(), "retained", currentPayloadSha256 != "stored")], null);
+        }
+        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout) => throw new NotSupportedException();
+        public void Start(string runId) => throw new NotSupportedException();
+        public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt) => throw new NotSupportedException();
+        public LocalAiRunStatusV1 Fail(string runId, string errorCode) => throw new NotSupportedException();
+        public LocalAiRunStatusV1 Read(string runId) => throw new NotSupportedException();
+        public bool Cancel(string runId) => throw new NotSupportedException();
     }
     private sealed class RecordingRuns : ILocalAiRunRepositoryV1
     {

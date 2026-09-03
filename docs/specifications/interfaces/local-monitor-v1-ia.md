@@ -418,6 +418,23 @@ There are no page-level `整形 / raw` tabs.
 - `過去の分析` remains in the same surface;
 - follow-up chat is not persisted.
 
+`GET /api/local-monitor/v1/ai/sessions/{sessionId}/reports` computes each
+required boolean `snapshot_changed` only by comparing the immutable saved
+snapshot with the exact current Session projection. When that projection
+cannot be constructed, the route returns HTTP `409` with the fixed JSON error
+`{"error":"projection_unavailable"}` and returns no HTTP `200` history
+payload. It does not infer either boolean value or use a stale, last-known,
+report-owned, timestamp, revision, status, or Run-fact substitute.
+
+This temporary comparison failure does not mean that history is empty or
+expired and does not delete, overwrite, invalidate, or otherwise mutate any
+durable report, result, run, snapshot, retention, or backup state. The Session
+AI surface preserves any history already loaded in page memory and, when no
+report is cached, states that the current Session record cannot be compared
+with analysis history. Once the exact current projection is available again,
+the same route returns the same durable history normally with each
+`snapshot_changed` recomputed by the exact comparison.
+
 ### Node analysis
 
 - inspector action;

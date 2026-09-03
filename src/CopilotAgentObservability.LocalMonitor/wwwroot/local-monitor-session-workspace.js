@@ -737,7 +737,14 @@
 
   async function readSessionReports(cursor = null, open = false, generation = null) {
     const url = new URL(`/api/local-monitor/v1/ai/sessions/${root.dataset.sessionId}/reports`, location.origin); url.searchParams.set("limit", "20"); if (cursor) url.searchParams.set("cursor", cursor);
-    const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); if (!response.ok) return;
+    const response = await fetch(url, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!response.ok) {
+      if (response.status === 409) {
+        const error = await response.json().catch(() => null);
+        if (error?.error === "projection_unavailable") return "projection_unavailable";
+      }
+      return false;
+    }
     const page = await response.json(); if (!currentRouteGeneration(generation)) return false;
     sessionReports = cursor ? [...sessionReports, ...(page.reports ?? [])] : page.reports ?? []; sessionReportCursor = page.next_cursor ?? null;
     const history = document.querySelector("[data-session-ai-history]"); history.replaceChildren();
@@ -826,8 +833,11 @@
 
   async function openSessionAi(invoker) {
     showSessionDialog(invoker);
-    if (!sessionReports.length) await readSessionReports(null, false);
-    if (sessionReports[0]) showSessionReport(sessionReports[0]); else document.querySelector("[data-session-ai-status]").textContent = "まだ分析はありません";
+    const reportsState = !sessionReports.length ? await readSessionReports(null, false) : true;
+    if (sessionReports[0]) showSessionReport(sessionReports[0]);
+    else document.querySelector("[data-session-ai-status]").textContent = reportsState === "projection_unavailable"
+      ? "現在のセッション記録を分析履歴と比較できません"
+      : "まだ分析はありません";
   }
 
   async function startSessionAi() {
