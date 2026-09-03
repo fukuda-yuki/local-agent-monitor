@@ -520,6 +520,44 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
     [Fact]
     [Trait("ValidationLane", "CriticalSmoke")]
+    public async Task CompareDistinguishesClosedUnavailableStateSetFromMissingAndMalformedValues()
+    {
+        var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
+        read["results"]![0]!["values"] = new JsonArray(
+            new JsonObject { ["key"] = "a_total_unavailable_states", ["value"] = "none" },
+            new JsonObject { ["key"] = "b_total_unavailable_states", ["value"] = "not_observed=2" },
+            new JsonObject { ["key"] = "absolute_difference", ["value"] = "not_available" },
+            new JsonObject { ["key"] = "total_unavailable_states", ["value"] = "not_observed=0" });
+
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(read.ToJsonString()));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        var cells = page.Locator(".local-monitor-compare-table").First.Locator("tbody > tr").First.Locator(":scope > th, :scope > td");
+        var closedZero = cells.Nth(1).Locator(".local-monitor-compare-fact > span:nth-child(2)");
+        var unavailableCount = cells.Nth(2).Locator(".local-monitor-compare-fact > span:nth-child(2)");
+        var missingDifference = cells.Nth(3).Locator(".local-monitor-compare-fact > span:nth-child(2)");
+        var malformed = cells.Nth(0).Locator(".local-monitor-compare-fact > span:nth-child(2)");
+
+        await Expect(closedZero).ToHaveAttributeAsync("data-fact-state", "observed-zero");
+        await Expect(closedZero.Locator(".fact-state-primary")).ToHaveTextAsync("0件");
+        await Expect(closedZero.Locator("p")).ToHaveTextAsync("取得元: 保存済み比較。保存時点で明示的に 0 です。");
+        await Expect(unavailableCount.Locator("[data-fact-state]")).ToHaveAttributeAsync("data-fact-state", "not-observed");
+        await Expect(unavailableCount).ToContainTextAsync("今回の記録にはありません");
+        await Expect(unavailableCount).ToContainTextAsync("（2件）");
+        await Expect(missingDifference).ToHaveAttributeAsync("data-fact-state", "not-observed");
+        await Expect(missingDifference).Not.ToContainTextAsync("0件");
+        await Expect(malformed).ToHaveAttributeAsync("data-fact-state", "projection-invalid");
+        await Expect(malformed).Not.ToContainTextAsync("not_observed");
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "CriticalSmoke")]
     public async Task ImmutableCompareRendersNineSectionsRowsEvidenceAndResponsiveTableWithoutRecompute()
     {
         var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();

@@ -208,7 +208,7 @@
       return;
     }
     if (pair.key.endsWith("_unavailable_states")) {
-      if (pair.value === "none") { target.textContent = "今回の記録にはありません"; return; }
+      if (pair.value === "none") { renderFactState(target, "explicit_zero"); return; }
       const entries = pair.value.split(";");
       for (const [index, entry] of entries.entries()) {
         const match = /^([a-z_]+)=([1-9][0-9]*)$/.exec(entry);
