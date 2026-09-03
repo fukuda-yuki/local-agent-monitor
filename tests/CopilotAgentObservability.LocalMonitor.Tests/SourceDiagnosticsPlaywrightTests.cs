@@ -8,6 +8,34 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SourceDiagnosticsPlaywrightTests
 {
     [Fact]
+    public async Task Diagnostics_EmptyIngestionHistoryUsesSharedHonestAbsence()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp, testOptions: new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/monitor/ingestions?limit=50", route => route.FulfillAsync(new()
+        {
+            ContentType = "application/json",
+            Body = "{\"items\":[]}",
+        }));
+
+        await page.GotoAsync($"{host.Url}/diagnostics", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var row = page.Locator("#ingestion-history-rows tr");
+        await Expect(row.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
+        await Expect(row).ToContainTextAsync("今回の記録にはありません");
+        await Expect(row.Locator("p")).ToContainTextAsync("取り込み履歴をこの記録で確認できません");
+        await Expect(row).Not.ToContainTextAsync("0件");
+        await Expect(row).Not.ToContainTextAsync("まだ取り込みがありません");
+        await Expect(row.Locator("td > div > p")).ToHaveCountAsync(1);
+        await Expect(row.Locator("span > p, span > details")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
     public async Task Diagnostics_ShowsEmptySourceDiagnosticsView()
     {
         using var temp = new MonitorTempDirectory();

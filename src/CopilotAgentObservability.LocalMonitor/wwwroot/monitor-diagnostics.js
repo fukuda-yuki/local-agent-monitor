@@ -275,7 +275,7 @@
       const empty = document.createElement("td");
       empty.colSpan = 5;
       empty.className = "empty-state";
-      empty.textContent = "まだ取り込みがありません。";
+      empty.append(missingFactPresentation("取り込み履歴"));
       row.append(empty);
       rows.append(row);
       return;
