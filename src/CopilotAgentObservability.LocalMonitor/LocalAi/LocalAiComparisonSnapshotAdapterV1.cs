@@ -31,7 +31,8 @@ internal sealed class LocalAiComparisonSnapshotAdapterV1 : ILocalAiComparisonSna
         if (read.Status == LocalComparisonReadStatus.PersistenceBusy) throw new LocalAiScopeSnapshotException("persistence_busy");
         var snapshot = read.Snapshot ?? throw new LocalAiScopeSnapshotException("comparison_not_found");
         var receipt = snapshot.Results.Single(static item => item.ResultOrdinal == 0);
-        var evidenceRefs = snapshot.Evidence.Select(item => LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(
+        var addressableEvidence = SelectAddressableEvidence(snapshot.Results, snapshot.Evidence);
+        var evidenceRefs = addressableEvidence.Select(item => LocalMonitorV1CanonicalUrlBuilder.BuildSessionEvidence(
                 item.SessionId,
                 item.SourceKind == "session_run" ? item.SourceIdentity : item.SourceKind == "workspace_node" ? item.EventId : null,
                 item.SourceKind == "workspace_node" ? item.SourceIdentity : null))
@@ -54,7 +55,7 @@ internal sealed class LocalAiComparisonSnapshotAdapterV1 : ILocalAiComparisonSna
             results = snapshot.Results.Where(static item => item.ResultOrdinal != 0).OrderBy(static item => item.ResultOrdinal)
                 .Select(static item => new { result_ordinal=item.ResultOrdinal, section_ordinal=item.SectionOrdinal,
                     row_kind=item.RowKind, row_key=item.RowKey,payload=Convert.ToBase64String(item.Payload),payload_sha256=item.PayloadSha256, values=item.Values }).ToArray(),
-            evidence = snapshot.Evidence.OrderBy(static item => item.ResultOrdinal).ThenBy(static item => item.EvidenceOrdinal)
+            evidence = addressableEvidence.OrderBy(static item => item.ResultOrdinal).ThenBy(static item => item.EvidenceOrdinal)
                 .Select(item => new { result_ordinal=item.ResultOrdinal, evidence_ordinal=item.EvidenceOrdinal,
                     field_key=item.FieldKey, cohort=item.Cohort, session_id=item.SessionId, state=item.AvailabilityState,
                     consumed_value=item.ConsumedValue, consumed_revision=item.RevisionSha256,
@@ -67,6 +68,25 @@ internal sealed class LocalAiComparisonSnapshotAdapterV1 : ILocalAiComparisonSna
         return new(Guid.CreateVersion7().ToString(), "comparison", null, null, comparisonId, receipt.PayloadSha256,
             payload, index, Convert.ToHexStringLower(SHA256.HashData(payload)), evidenceRefs.ToHashSet(StringComparer.Ordinal),
             RepositoryId:repositoryId, ComparisonId:comparisonId, ExpiresAt:snapshot.ExpiresAt);
+    }
+
+    internal static LocalComparisonStoredEvidence[] SelectAddressableEvidence(
+        IReadOnlyList<LocalComparisonStoredResult> results,
+        IReadOnlyList<LocalComparisonStoredEvidence> evidence)
+    {
+        var byOrdinal = new Dictionary<int, LocalComparisonStoredResult>(results.Count);
+        foreach (var result in results)
+            if (!byOrdinal.TryAdd(result.ResultOrdinal, result))
+                throw new InvalidOperationException("local_ai_comparison_result_ordinal_duplicate");
+        var selected = new List<LocalComparisonStoredEvidence>(evidence.Count);
+        foreach (var item in evidence)
+        {
+            if (!byOrdinal.TryGetValue(item.ResultOrdinal, out var result))
+                throw new InvalidOperationException("local_ai_comparison_evidence_result_missing");
+            if (result is not { SectionOrdinal: 9, RowKind: "condition", RowKey: "metric_availability" })
+                selected.Add(item);
+        }
+        return [.. selected];
     }
 
     internal static byte[] ComposePayloadForTest(byte[] selection,byte[] fact,byte[] receipt,byte[] result)=>
