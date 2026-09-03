@@ -544,7 +544,7 @@ public class MonitorShellPlaywrightTests
     }
 
     [Fact]
-    public async Task Shell_UnifiedSettings_EmptySourceDiagnosticsUsesSharedNotObservedPresentation()
+    public async Task Shell_UnifiedSettings_SourceDiagnosticsTransitionsClearStaleSharedState()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await StartReadyHostAsync(temp);
@@ -552,28 +552,48 @@ public class MonitorShellPlaywrightTests
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
+        var sourceResponse = "empty";
         await page.RouteAsync("**/api/monitor/source-diagnostics?limit=1", route => route.FulfillAsync(new()
         {
-            Status = 200,
+            Status = sourceResponse == "error" ? 503 : 200,
             ContentType = "application/json",
-            Body = "{\"items\":[],\"next_cursor\":null}",
+            Body = sourceResponse == "supported"
+                ? "{\"items\":[{\"observation_id\":\"observation-1\",\"ingest_batch_id\":\"batch-1\",\"source_surface\":\"claude-code\",\"source_application_version\":null,\"source_adapter\":\"claude-code-otel\",\"adapter_version\":\"1\",\"schema_fingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"inventory_hash\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compatibility_state\":\"supported\",\"reason_codes\":[],\"unknown_span_count\":0,\"unknown_event_count\":0,\"unknown_attribute_count\":0,\"observed_at\":\"2026-08-30T01:00:00.0000000+00:00\",\"next_action\":\"none\"}],\"next_cursor\":null}"
+                : "{\"items\":[],\"next_cursor\":null}",
         }));
 
         await page.GotoAsync($"{host.Url}/sessions?settings=receiver", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        foreach (var section in new[] { "receiver", "diagnostics" })
-        {
-            if (section == "diagnostics")
-                await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
-            var source = page.Locator($"[data-settings-{section}-source]");
-            await Expect(source.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
-            await Expect(source).ToContainTextAsync("今回の記録にはありません");
-            await Expect(source).ToContainTextAsync("実際に使われなかったとは断定できません");
-            await Expect(source).Not.ToContainTextAsync("not_observed");
-            await Expect(source).Not.ToContainTextAsync("0件");
-            Assert.False(await source.EvaluateAsync<bool>("node => Boolean(node.querySelector('p p'))"));
-            Assert.False(await source.EvaluateAsync<bool>("node => Boolean(node.querySelector('button button, a a, button a, a button'))"));
-        }
+        var receiver = page.Locator("[data-settings-receiver-source]");
+        await Expect(receiver.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
+        await Expect(receiver).ToContainTextAsync("今回の記録にはありません");
+        await Expect(receiver).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(receiver).Not.ToContainTextAsync("not_observed");
+        await Expect(receiver).Not.ToContainTextAsync("0件");
+        Assert.False(await receiver.EvaluateAsync<bool>("node => Boolean(node.querySelector('p p, button button, a a, button a, a button'))"));
+
+        sourceResponse = "supported";
+        await page.Locator("[data-settings-navigation='state']").ClickAsync();
+        await page.Locator("[data-settings-navigation='receiver']").ClickAsync();
+        await Expect(receiver).ToContainTextAsync("取得元の互換性を確認済みです。");
+        await Expect(receiver.Locator("[data-fact-state]")).ToHaveCountAsync(0);
+        await Expect(receiver).Not.ToContainTextAsync("今回の記録にはありません");
+
+        sourceResponse = "empty";
+        await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
+        var diagnostics = page.Locator("[data-settings-diagnostics-source]");
+        await Expect(diagnostics.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
+
+        await page.Locator("[data-settings-navigation='state']").ClickAsync();
+        await page.Locator("[data-settings-navigation='receiver']").ClickAsync();
+        await Expect(receiver.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
+
+        sourceResponse = "error";
+        await page.Locator("[data-settings-navigation='state']").ClickAsync();
+        await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
+        await Expect(diagnostics).ToContainTextAsync("取得元の状態を読み込めませんでした。");
+        await Expect(diagnostics.Locator("[data-fact-state]")).ToHaveCountAsync(0);
+        await Expect(diagnostics).Not.ToContainTextAsync("今回の記録にはありません");
     }
 
     [Fact]

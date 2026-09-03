@@ -493,9 +493,17 @@
       }
       if (generation === requestGeneration && target) {
         if (text === null) window.LocalMonitorV1FactState.render(target, { state: "not_observed" });
-        else target.textContent = text;
+        else {
+          delete target.dataset.factState;
+          target.textContent = text;
+        }
       }
-    } catch { if (generation === requestGeneration && target) target.textContent = "取得元の状態を読み込めませんでした。"; }
+    } catch {
+      if (generation === requestGeneration && target) {
+        delete target.dataset.factState;
+        target.textContent = "取得元の状態を読み込めませんでした。";
+      }
+    }
   }
 
   async function loadStorageSummary(generation) {

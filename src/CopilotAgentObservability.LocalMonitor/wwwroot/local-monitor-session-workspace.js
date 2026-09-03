@@ -1035,7 +1035,7 @@
     const coverage = el("ul", "local-monitor-session-coverage");
     for (const item of session.capture.coverage) {
       const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
-      renderCoverageFact(row.appendChild(el("span")), item); coverage.append(row);
+      renderCoverageFact(row.appendChild(el("div")), item); coverage.append(row);
     }
     overview.append(el("h3", null, "取得範囲"), coverage);
     const technical = el("details"); technical.append(el("summary", null, "技術情報"), el("p", null, `リビジョン ${summary.workspace_revision}`));
@@ -1118,7 +1118,7 @@
     const coverageList = el("ul", "local-monitor-session-coverage");
     for (const item of session.capture.coverage) {
       const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
-      const factTarget = row.appendChild(el("span"));
+      const factTarget = row.appendChild(el("div"));
       renderCoverageFact(factTarget, item);
       coverageList.append(row);
     }
