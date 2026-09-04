@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json.Serialization;
 
 namespace CopilotAgentObservability.RawReplay;
@@ -208,8 +209,32 @@ public sealed class RawReplaySnapshotLease : IAsyncDisposable
         internal void Move()
         {
             if (Interlocked.Exchange(ref used, 1) != 0) return;
-            File.Move(stagedPath, outputPath, overwrite: false);
+            if (!OperatingSystem.IsLinux())
+            {
+                File.Move(stagedPath, outputPath, overwrite: false);
+                return;
+            }
+            try
+            {
+                const int currentDirectory = -100;
+                const uint noReplace = 1;
+                // File.Move's Unix existence check and rename are not atomic.
+                if (RenameAt2(currentDirectory, stagedPath, currentDirectory, outputPath, noReplace) != 0)
+                    throw new IOException("Atomic raw replay publication failed.");
+            }
+            catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+            {
+                throw new IOException("Atomic raw replay publication is unavailable.", exception);
+            }
         }
+
+        [DllImport("libc", EntryPoint = "renameat2", SetLastError = true)]
+        private static extern int RenameAt2(
+            int oldDirectory,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string oldPath,
+            int newDirectory,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath,
+            uint flags);
     }
 }
 
