@@ -276,7 +276,11 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             command.Transaction = transaction;
             command.CommandText = """
                 WITH ranked AS (
-                  SELECT *,row_number() OVER(PARTITION BY session_id,execution_id ORDER BY authority_rank,authority,source_identity) ordinal
+                  SELECT *,row_number() OVER(PARTITION BY session_id,execution_id ORDER BY
+                    CASE WHEN input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL
+                               AND reasoning_tokens IS NULL AND cache_read_tokens IS NULL AND cache_creation_tokens IS NULL
+                         THEN 1 ELSE 0 END,
+                    authority_rank,source_identity COLLATE BINARY) ordinal
                   FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))), selected AS (SELECT * FROM ranked WHERE ordinal=1)
                 SELECT session_id,execution_id,authority,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens
                 FROM selected ORDER BY session_id,execution_id;

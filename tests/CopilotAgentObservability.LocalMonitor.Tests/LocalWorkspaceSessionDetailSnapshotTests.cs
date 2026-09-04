@@ -847,6 +847,18 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal(20, execution.Tokens.Output.Value);
         Assert.Equal("not_observed", execution.Tokens.Total.State);
         Assert.Null(execution.Tokens.Total.Value);
+
+        var session = Assert.IsType<LocalWorkspaceProjectionRow>(summary.Session.Session);
+        Assert.Equal("mixed", session.Tokens.Authority);
+        Assert.Equal("capture_gap", session.Tokens.State);
+        Assert.Equal(1, session.Tokens.AvailableExecutionCount);
+        Assert.Equal(2, session.Tokens.TotalExecutionCount);
+        Assert.Equal("capture_gap", session.Tokens.Input.State);
+        Assert.Null(session.Tokens.Input.Value);
+        Assert.Equal("capture_gap", session.Tokens.Output.State);
+        Assert.Null(session.Tokens.Output.Value);
+        Assert.Equal("not_observed", session.Tokens.Total.State);
+        Assert.Null(session.Tokens.Total.Value);
     }
 
     [Fact]

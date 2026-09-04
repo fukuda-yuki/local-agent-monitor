@@ -27,6 +27,7 @@
   let rawContentGeneration = 0;
   let aiReady = false;
   let sessionAiInvoker = null;
+  let pendingSessionAiFocus = null;
   let sessionReports = [];
   let sessionReportCursor = null;
   let nodeTranscript = [];
@@ -157,7 +158,8 @@
         || !Array.isArray(detail.parent_path) || detail.parent_path.length > 4096 || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
         || new Set(detail.parent_path.map(item => item.node_id)).size !== detail.parent_path.length
         || detail.parent_path.some(item => item.node_id === nodeId)
-        || detail.parent_path.length > 0 && (detail.parent_path[0].node_id !== detail.execution.node_id || detail.parent_path[0].kind !== "execution")
+        || detail.parent_path.length > 0 && !(detail.parent_path[0].node_id === detail.execution.node_id && detail.parent_path[0].kind === "execution"
+          || detail.parent_path[0].kind === "unknown_relation_group" && detail.parent_path[0].relationship_authority === "unknown")
         || detail.parent_path.some((item, index) => index === 0 ? item.parent_node_id !== null : item.parent_node_id !== detail.parent_path[index - 1].node_id)
         || (detail.parent_path.length ? detail.node.parent_node_id !== detail.parent_path.at(-1).node_id : detail.node.parent_node_id !== null)
         || !exact(detail.related, ["retry", "recovery", "children"])
@@ -574,8 +576,11 @@
       toggle.setAttribute("aria-expanded", String(memory.open));
       const summaryFacts = [`活動 ${format(execution.child_count)}件`, timingLabel(execution)];
       const unavailableFacts = [];
-      if (execution.tokens.total.state === "recorded") summaryFacts.push(`トークン ${format(execution.tokens.total.value)}`);
-      else unavailableFacts.push(["tokens", "トークン", execution.tokens.total]);
+      for (const [key, label] of [["total", "トークン合計"], ["input", "入力トークン"], ["output", "出力トークン"]]) {
+        const fact = execution.tokens[key];
+        if (fact.state === "recorded") summaryFacts.push(`${label} ${format(fact.value)}`);
+        else unavailableFacts.push([key === "total" ? "tokens" : key, label, fact]);
+      }
       for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) {
         if (execution.activity[key].state === "recorded") summaryFacts.push(`${label} ${format(execution.activity[key].count)}件`);
         else unavailableFacts.push([key, label, execution.activity[key]]);
@@ -787,6 +792,7 @@
   async function findExactSessionReport(runId) { return (await readExactSessionReport(runId)).report; }
 
   function showSessionDialog(invoker) {
+    pendingSessionAiFocus = null;
     sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); if (!dialog.open) dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
   }
 
@@ -974,9 +980,9 @@
     throwIfRequestSuperseded(generation, current);
     executionId = detail.execution.execution_id;
     const memory = executionMemory(executionId);
-    const path = (detail.parent_path ?? []).filter(parent => ["exact", "explicit"].includes(parent.relationship_authority));
+    const path = detail.parent_path.filter(parent => parent.node_id !== detail.execution.node_id);
     if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation, current)) return false;
-    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
+    for (const parent of path) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
     throwIfRequestSuperseded(generation, current);
     state.selectedExecutionId = executionId; state.selectedNodeId = nodeId; memory.open = true;
     for (const parent of path) memory.expanded.add(parent.node_id);
@@ -1001,6 +1007,7 @@
   }
 
   async function applyRoute(route) {
+    pendingSessionAiFocus = null;
     const generation = ++routeGeneration;
     try {
       if (!state.summary) return;
@@ -1181,7 +1188,12 @@
   async function checkAiReadiness() {
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); const value = response.ok ? await response.json() : null;
-      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady; if (aiReady) { ensureSelectedNodeAiStart(); await readSessionReports(null, false); }
+      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady;
+      const pending = pendingSessionAiFocus; pendingSessionAiFocus = null;
+      const route = window.LocalMonitorV1History.current();
+      if (aiReady && pending?.invoker === action && action.isConnected && pending.generation === routeGeneration
+        && !route.analysis && !route.execution && !route.node && !sessionAiDialog.open) action.focus();
+      if (aiReady) { ensureSelectedNodeAiStart(); await readSessionReports(null, false); }
     } catch { aiReady = false; }
   }
 
@@ -1206,7 +1218,14 @@
     const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   const sessionAiDialog = document.querySelector("[data-session-ai-dialog]");
-  function closeSessionAi(restoreFocus = true) { if (sessionAiDialog.open) sessionAiDialog.close(); activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; if (restoreFocus) sessionAiInvoker?.focus(); }
+  document.addEventListener("focusin", () => { pendingSessionAiFocus = null; });
+  function closeSessionAi(restoreFocus = true) {
+    pendingSessionAiFocus = null;
+    if (sessionAiDialog.open) sessionAiDialog.close();
+    activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true;
+    if (restoreFocus && sessionAiInvoker?.hidden) pendingSessionAiFocus = { invoker: sessionAiInvoker, generation: routeGeneration };
+    else if (restoreFocus) sessionAiInvoker?.focus();
+  }
   document.querySelector("[data-session-ai-open]")?.addEventListener("click", event => openSessionAi(event.currentTarget));
   document.querySelector("[data-session-ai-close]")?.addEventListener("click", () => closeSessionAi());
   document.querySelector("[data-session-ai-regenerate]")?.addEventListener("click", startSessionAi);

@@ -561,6 +561,33 @@ public sealed class LocalMonitorV1HumanRouteTests
     }
 
     [Theory]
+    [InlineData("node=node-a8a773d6614d5030f505ff195b452dd6", 200, "")]
+    [InlineData("execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6", 200, "")]
+    [InlineData("execution=8a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6", 404, "node_not_found")]
+    [InlineData("node=node-11111111111111111111111111111111", 404, "node_not_found")]
+    [InlineData("execution=018f0000-0000-7000-8000-000000000099&node=node-11111111111111111111111111111111", 404, "execution_not_found")]
+    public async Task RawDefault_NodeDeepLinkUsesExactNodeRead(string query, int status, string state)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions());
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?{query}");
+        Assert.Equal(status, (int)response.StatusCode);
+        Assert.Contains($"data-page-state=\"{state}\"", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawDefault_NodeDeepLinkRejectsRevisionChangeBetweenSummaryAndNode()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OwnerReadyOptions(new ReadyDetailService(staleNode: true)));
+        using var response = await host.Client.GetAsync($"/sessions/{SessionId}?node=node-a8a773d6614d5030f505ff195b452dd6");
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("data-page-state=\"workspace_snapshot_stale\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-recovery-action=\"refresh_session_summary\"", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData("&node=node-a8a773d6614d5030f505ff195b452dd6")]
     [InlineData("&execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6")]
@@ -1044,7 +1071,7 @@ public sealed class LocalMonitorV1HumanRouteTests
                 error == "repository_not_found" ? "local_repository_scope_repository_not_found" : error);
     }
 
-    private sealed class ReadyDetailService : ILocalRepositorySessionDetailSnapshotService
+    private sealed class ReadyDetailService(bool staleNode = false) : ILocalRepositorySessionDetailSnapshotService
     {
         public ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
             LocalRepositorySessionDetailRequest request,
@@ -1074,9 +1101,18 @@ public sealed class LocalMonitorV1HumanRouteTests
             var node = new LocalWorkspaceNodeDetail("node-a8a773d6614d5030f505ff195b452dd6", request.SessionId, execution.ExecutionId,
                 "session_event", "event", 0, null, "exact", "event", "recorded", "user.message", "completed", "completed", "missing", null, null, null,
                 activity, tokens, null, null, null);
+            if (request.Kind == LocalRepositorySessionDetailRequestKind.Node)
+            {
+                if (staleNode || request.ExpectedWorkspaceRevision != new string('1', 64))
+                    throw new LocalWorkspaceSessionDetailException("workspace_snapshot_stale");
+                if (request.NodeId != node.NodeId)
+                    throw new LocalWorkspaceSessionDetailException("node_not_found");
+            }
             return ValueTask.FromResult(new LocalRepositorySessionDetailSnapshot(
                 session,
-                new LocalWorkspaceSessionDetailContribution([execution, previousExecution], [node], [], []),
+                new LocalWorkspaceSessionDetailContribution(
+                    request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [execution] : [execution, previousExecution],
+                    request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [node] : [], [], []),
                 new string('1', 64)));
         }
     }
