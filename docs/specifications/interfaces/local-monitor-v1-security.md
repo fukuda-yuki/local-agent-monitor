@@ -287,6 +287,21 @@ AI execution crosses the local-only boundary.
 - credentials and secrets are removed by the accepted filters and closed tool responses;
 - provider request/response/raw bodies/paths are not logged or emitted in diagnostics/artifacts.
 
+Local AI provider failure diagnostics may write one fixed-format local stderr
+record per failed stage. The only variable fields are the canonical opaque run
+UUID, a closed stage (`client_factory`, `client_start`, `session_create`,
+`send_read`, `effective_model`, `session_dispose`, `session_delete`,
+`client_dispose`), and a closed reason (`client_unavailable`, `exception`,
+`timeout`, `cancellation_requested`, `cancellation_unrequested`,
+`final_content_absent`, `effective_model_absent`, `effective_model_mismatch`).
+Cancellation reasons describe whether the run token is canceled when observed;
+they do not infer an authentication, quota, or provider root cause.
+Diagnostics contain no exception object/message/type, provider or model value,
+Session identity, content, path, credential, or payload. They do not enable SDK
+or framework logging, change run/result/provenance state, or add a persistence,
+HTTP, or SSE surface. Cleanup failures are recorded independently without
+replacing the primary failure; diagnostic sink failures do not affect execution.
+
 ## Settings receiver runtime summary
 
 Raw-default alone registers exact `GET /api/local-monitor/v1/settings/runtime`.

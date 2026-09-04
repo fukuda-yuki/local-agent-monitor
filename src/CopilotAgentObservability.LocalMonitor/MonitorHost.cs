@@ -621,7 +621,7 @@ internal static class MonitorHost
                 var runRepository = SqliteLocalAiRunRepositoryV1.Create(
                     options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider, retentionCatalog);
                 var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
-                    localAiClientFactory, localAiOptions.DefaultModel);
+                    localAiClientFactory, localAiOptions.DefaultModel, Console.Error);
                 var localAiRawReader = new LocalAiRetentionRawReaderV1(
                     new LocalWorkspaceNodeContentReader(retentionContext, timeProvider));
                 builder.Services.AddSingleton<ILocalAiAnalysisApplicationV1>(services =>

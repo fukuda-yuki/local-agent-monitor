@@ -10,7 +10,8 @@ namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
 internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     Func<IOwnedCopilotClientV1?> clientFactory,
-    string model) : ILocalAiProviderAdapterV1
+    string model,
+    TextWriter? diagnosticOutput = null) : ILocalAiProviderAdapterV1
 {
     private const string StructuredResultInstruction = """
 Return raw JSON only: no Markdown, code fences, or surrounding prose.
@@ -22,15 +23,27 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
 
     public async ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request, CancellationToken token)
     {
-        var client = clientFactory();
-        if (client is null) return LocalAiProviderOutcomeV1.Failed();
+        IOwnedCopilotClientV1? client;
+        try { client = clientFactory(); }
+        catch (Exception failure)
+        {
+            Diagnose(request.Run.RunId, "client_factory", FailureReason(failure, token));
+            throw;
+        }
+        if (client is null)
+        {
+            Diagnose(request.Run.RunId, "client_factory", "client_unavailable");
+            return LocalAiProviderOutcomeV1.Failed();
+        }
         IOwnedCopilotSessionV1? session = null;
         string? sessionId = null;
         LocalAiProviderOutcomeV1? outcome = null;
         ExceptionDispatchInfo? primaryFailure = null;
+        var stage = "client_start";
         try
         {
             await client.StartAsync(token).ConfigureAwait(false);
+            stage = "session_create";
             var rawTool = CopilotTool.DefineTool(
                 async ([Description("Exact process-internal raw handle from raw_content.evidence_id; never use this handle in result evidence_refs.")] string evidence_id) =>
                     Convert.ToBase64String(await request.RawReads.ReadAsync(evidence_id, token).ConfigureAwait(false)),
@@ -55,16 +68,26 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
             };
             session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
             sessionId = session.SessionId;
+            stage = "send_read";
             var prompt = BuildPrompt(request);
             var response = await session.SendAndReadFinalContentAsync(prompt, TimeSpan.FromSeconds(600), token).ConfigureAwait(false);
-            outcome = response is null || string.IsNullOrWhiteSpace(response.Content)
-                ? LocalAiProviderOutcomeV1.Partial()
-                : string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal)
-                    ? LocalAiProviderOutcomeV1.Failed()
-                    : LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
+            if (response is null || string.IsNullOrWhiteSpace(response.Content))
+            {
+                Diagnose(request.Run.RunId, stage, "final_content_absent");
+                outcome = LocalAiProviderOutcomeV1.Partial();
+            }
+            else if (string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal))
+            {
+                Diagnose(request.Run.RunId, "effective_model",
+                    string.IsNullOrWhiteSpace(response.Model) ? "effective_model_absent" : "effective_model_mismatch");
+                outcome = LocalAiProviderOutcomeV1.Failed();
+            }
+            else
+                outcome = LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
         }
         catch (Exception failure)
         {
+            Diagnose(request.Run.RunId, stage, FailureReason(failure, token));
             primaryFailure = ExceptionDispatchInfo.Capture(failure);
         }
 
@@ -72,17 +95,43 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         if (session is not null)
         {
             try { await session.DisposeAsync().ConfigureAwait(false); }
-            catch (Exception failure) { cleanupFailure = ExceptionDispatchInfo.Capture(failure); }
+            catch (Exception failure)
+            {
+                Diagnose(request.Run.RunId, "session_dispose", FailureReason(failure, token));
+                cleanupFailure = ExceptionDispatchInfo.Capture(failure);
+            }
             try { await client.DeleteSessionAsync(sessionId!, CancellationToken.None).ConfigureAwait(false); }
-            catch (Exception failure) { cleanupFailure ??= ExceptionDispatchInfo.Capture(failure); }
+            catch (Exception failure)
+            {
+                Diagnose(request.Run.RunId, "session_delete", FailureReason(failure, token));
+                cleanupFailure ??= ExceptionDispatchInfo.Capture(failure);
+            }
         }
         try { await client.DisposeAsync().ConfigureAwait(false); }
-        catch (Exception failure) { cleanupFailure ??= ExceptionDispatchInfo.Capture(failure); }
+        catch (Exception failure)
+        {
+            Diagnose(request.Run.RunId, "client_dispose", FailureReason(failure, token));
+            cleanupFailure ??= ExceptionDispatchInfo.Capture(failure);
+        }
 
         primaryFailure?.Throw();
         cleanupFailure?.Throw();
         return outcome!;
     }
+
+    private void Diagnose(string runId, string stage, string reason)
+    {
+        if (diagnosticOutput is null || !Guid.TryParseExact(runId, "D", out var identity)) return;
+        try { diagnosticOutput.WriteLine($"local_ai_provider_failure run_id={identity:D} stage={stage} reason={reason}"); }
+        catch { }
+    }
+
+    private static string FailureReason(Exception failure, CancellationToken token) => failure switch
+    {
+        OperationCanceledException => token.IsCancellationRequested ? "cancellation_requested" : "cancellation_unrequested",
+        TimeoutException => "timeout",
+        _ => "exception",
+    };
 
     internal static string BuildPrompt(LocalAiProviderRequestV1 request)
     {

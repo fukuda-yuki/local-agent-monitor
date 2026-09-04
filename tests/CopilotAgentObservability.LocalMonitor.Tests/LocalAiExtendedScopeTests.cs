@@ -12,7 +12,112 @@ public sealed class LocalAiExtendedScopeTests
     private const string RepositoryId = "018f0000-0000-7000-8000-000000000001";
     private const string ComparisonId = "018f0000-0000-7000-8000-000000000002";
     private const string SnapshotId = "018f0000-0000-7000-8000-000000000003";
+    private const string RunId = "018f0000-0000-7000-8000-000000000004";
     private const string CanonicalEvidenceLocation = "/sessions/018f0000-0000-7000-8000-000000000001?node=node-11111111111111111111111111111111";
+
+    [Theory]
+    [InlineData(ProviderBehavior.FactoryUnavailable, "client_factory", "client_unavailable")]
+    [InlineData(ProviderBehavior.FactoryException, "client_factory", "exception")]
+    [InlineData(ProviderBehavior.StartException, "client_start", "exception")]
+    [InlineData(ProviderBehavior.CreateException, "session_create", "exception")]
+    [InlineData(ProviderBehavior.Exception, "send_read", "exception")]
+    [InlineData(ProviderBehavior.Timeout, "send_read", "timeout")]
+    [InlineData(ProviderBehavior.Cancellation, "send_read", "cancellation_unrequested")]
+    [InlineData(ProviderBehavior.Cancellation, "send_read", "cancellation_requested", true)]
+    [InlineData(ProviderBehavior.Partial, "send_read", "final_content_absent")]
+    [InlineData(ProviderBehavior.MissingModel, "effective_model", "effective_model_absent")]
+    [InlineData(ProviderBehavior.MismatchedModel, "effective_model", "effective_model_mismatch")]
+    [InlineData(ProviderBehavior.CaseMismatchedModel, "effective_model", "effective_model_mismatch")]
+    public async Task ProviderDiagnostics_EmitsOnlyRunIdentityAndClosedFailureCodes(
+        ProviderBehavior behavior, string stage, string reason, bool cancel = false)
+    {
+        using var diagnostics = new StringWriter();
+        using var cancellation = new CancellationTokenSource();
+        if (cancel) cancellation.Cancel();
+        var client = new ProviderClient([], behavior);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => behavior switch
+        {
+            ProviderBehavior.FactoryUnavailable => null,
+            ProviderBehavior.FactoryException => throw new InvalidOperationException("synthetic_private_factory_message"),
+            _ => client,
+        }, "synthetic-model", diagnostics);
+
+        LocalAiProviderOutcomeV1? outcome = null;
+        var failure = await Record.ExceptionAsync(async () =>
+            outcome = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), cancellation.Token));
+
+        if (behavior == ProviderBehavior.FactoryUnavailable)
+        {
+            Assert.Null(failure);
+            Assert.Equal(LocalAiProviderOutcomeKindV1.Failed, outcome!.Kind);
+        }
+        else if (behavior is ProviderBehavior.FactoryException or ProviderBehavior.StartException or ProviderBehavior.CreateException)
+            Assert.IsType<InvalidOperationException>(failure);
+        Assert.Equal($"local_ai_provider_failure run_id={RunId} stage={stage} reason={reason}{Environment.NewLine}", diagnostics.ToString());
+    }
+
+    [Fact]
+    public async Task ProviderDiagnostics_RecordsEveryCleanupFailureWithoutReplacingPrimaryFailure()
+    {
+        using var diagnostics = new StringWriter();
+        var events = new List<string>();
+        var client = new ProviderClient(events, ProviderBehavior.Exception,
+            failDelete: true, failClientDispose: true, failSessionDispose: true);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model", diagnostics);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
+
+        Assert.Equal("synthetic_provider_failure", failure.Message);
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Equal(new[]
+        {
+            $"local_ai_provider_failure run_id={RunId} stage=send_read reason=exception",
+            $"local_ai_provider_failure run_id={RunId} stage=session_dispose reason=exception",
+            $"local_ai_provider_failure run_id={RunId} stage=session_delete reason=exception",
+            $"local_ai_provider_failure run_id={RunId} stage=client_dispose reason=exception",
+        }, diagnostics.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Theory]
+    [InlineData(ProviderBehavior.MissingModel)]
+    [InlineData(ProviderBehavior.Exception)]
+    public async Task ProviderDiagnostics_SinkFailureDoesNotChangeProviderOutcomeOrCleanup(ProviderBehavior behavior)
+    {
+        using var diagnostics = new FailingDiagnosticWriter();
+        var events = new List<string>();
+        var client = new ProviderClient(events, behavior);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model", diagnostics);
+
+        if (behavior == ProviderBehavior.MissingModel)
+            Assert.Equal(LocalAiProviderOutcomeKindV1.Failed,
+                (await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None)).Kind);
+        else
+        {
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
+            Assert.Equal("synthetic_provider_failure", failure.Message);
+        }
+        Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+    }
+
+    [Fact]
+    public async Task ProviderDiagnostics_DoesNotEchoMalformedRunIdentity()
+    {
+        using var diagnostics = new StringWriter();
+        var request = ProviderRequest("repository_selection");
+        request = request with { Run = request.Run with { RunId = "synthetic-private-path\nforged-record" } };
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => null, "synthetic-model", diagnostics);
+
+        Assert.Equal(LocalAiProviderOutcomeKindV1.Failed,
+            (await adapter.ExecuteAsync(request, CancellationToken.None)).Kind);
+        Assert.Empty(diagnostics.ToString());
+    }
+
+    private sealed class FailingDiagnosticWriter : StringWriter
+    {
+        public override void WriteLine(string? value) => throw new IOException("synthetic_private_sink_message");
+    }
 
     [Theory]
     [InlineData(ProviderBehavior.Complete)]
@@ -129,15 +234,17 @@ public sealed class LocalAiExtendedScopeTests
     [Fact]
     public async Task ProviderSession_MatchingEffectiveModelReturnsCompleteWithRequestedModel()
     {
+        using var diagnostics = new StringWriter();
         var events = new List<string>();
         var client = new ProviderClient(events, ProviderBehavior.Complete);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model", diagnostics);
 
         var outcome = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None);
 
         Assert.Equal(LocalAiProviderOutcomeKindV1.Complete, outcome.Kind);
         Assert.Equal("synthetic-model", client.RequestedModel);
         Assert.Equal(["session.dispose", "session.delete", "client.dispose"], events);
+        Assert.Empty(diagnostics.ToString());
     }
 
     [Theory]
@@ -239,7 +346,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,scope,null,null,
             scope=="comparison"?ComparisonId:RepositoryId,"revision","{}"u8.ToArray(),Encoding.UTF8.GetBytes($$"""{"evidence_refs":["{{CanonicalEvidenceLocation}}"]}"""),new string('a',64),new HashSet<string>{CanonicalEvidenceLocation},
             RepositoryId:RepositoryId,ComparisonId:scope=="comparison"?ComparisonId:null);
-        var run=new LocalAiRunStatusV1(SnapshotId,"running",scope,null,null,null,RepositoryId:RepositoryId,ComparisonId:snapshot.ComparisonId);
+        var run=new LocalAiRunStatusV1(RunId,"running",scope,null,null,null,RepositoryId:RepositoryId,ComparisonId:snapshot.ComparisonId);
         return new(snapshot,run,new LocalAiRawReadCapabilityV1([],static (_,_)=>ValueTask.FromResult(Array.Empty<byte>())),null,[]);
     }
 
@@ -418,13 +525,14 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
     private sealed class NoHistoricalEvidence:CopilotAgentObservability.LocalMonitor.Analysis.IHistoricalEvidenceSnapshotSourceV1
     {public ValueTask<CopilotAgentObservability.LocalMonitor.Analysis.IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(CopilotAgentObservability.LocalMonitor.Analysis.HistoricalEvidenceSelectionV1 selection,CancellationToken token)=>throw new NotSupportedException();}
 
-    public enum ProviderBehavior { Complete, Partial, Exception, Timeout, Cancellation, MismatchedModel, CaseMismatchedModel, MissingModel }
+    public enum ProviderBehavior { Complete, Partial, Exception, Timeout, Cancellation, MismatchedModel, CaseMismatchedModel, MissingModel, FactoryUnavailable, FactoryException, StartException, CreateException }
 
     private sealed class ProviderClient(
         List<string> events,
         ProviderBehavior behavior,
         bool failDelete = false,
-        bool failClientDispose = false) : IOwnedCopilotClientV1
+        bool failClientDispose = false,
+        bool failSessionDispose = false) : IOwnedCopilotClientV1
     {
         public int DeleteCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -433,13 +541,17 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         public bool SessionMarkerPresent { get; private set; } = true;
         public string? RequestedModel { get; private set; }
 
-        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StartAsync(CancellationToken cancellationToken) => behavior == ProviderBehavior.StartException
+            ? Task.FromException(new InvalidOperationException("synthetic_private_start_message"))
+            : Task.CompletedTask;
         public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) =>
             Task.FromResult<CopilotRuntimeStatusObservationV1?>(null);
         public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken)
         {
+            if (behavior == ProviderBehavior.CreateException)
+                throw new InvalidOperationException("synthetic_private_create_message");
             RequestedModel = config.Model;
-            return Task.FromResult<IOwnedCopilotSessionV1>(new ProviderSession(events, behavior));
+            return Task.FromResult<IOwnedCopilotSessionV1>(new ProviderSession(events, behavior, failSessionDispose));
         }
         public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken)
         {
@@ -461,7 +573,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         }
     }
 
-    private sealed class ProviderSession(List<string> events, ProviderBehavior behavior) : IOwnedCopilotSessionV1
+    private sealed class ProviderSession(List<string> events, ProviderBehavior behavior, bool failDispose = false) : IOwnedCopilotSessionV1
     {
         public string SessionId => "synthetic-session";
         public Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
@@ -482,6 +594,10 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
                 ProviderBehavior.Cancellation => Task.FromException<OwnedCopilotFinalResponseV1?>(new OperationCanceledException(cancellationToken)),
                 _ => throw new InvalidOperationException(),
             };
-        public ValueTask DisposeAsync() { events.Add("session.dispose"); return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync()
+        {
+            events.Add("session.dispose");
+            return failDispose ? ValueTask.FromException(new InvalidOperationException("synthetic_private_session_cleanup_message")) : ValueTask.CompletedTask;
+        }
     }
 }
