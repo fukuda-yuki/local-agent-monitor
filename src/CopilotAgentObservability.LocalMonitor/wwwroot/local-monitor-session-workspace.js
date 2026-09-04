@@ -574,8 +574,11 @@
       toggle.setAttribute("aria-expanded", String(memory.open));
       const summaryFacts = [`活動 ${format(execution.child_count)}件`, timingLabel(execution)];
       const unavailableFacts = [];
-      if (execution.tokens.total.state === "recorded") summaryFacts.push(`トークン ${format(execution.tokens.total.value)}`);
-      else unavailableFacts.push(["tokens", "トークン", execution.tokens.total]);
+      for (const [key, label] of [["total", "トークン合計"], ["input", "入力トークン"], ["output", "出力トークン"]]) {
+        const fact = execution.tokens[key];
+        if (fact.state === "recorded") summaryFacts.push(`${label} ${format(fact.value)}`);
+        else unavailableFacts.push([key === "total" ? "tokens" : key, label, fact]);
+      }
       for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) {
         if (execution.activity[key].state === "recorded") summaryFacts.push(`${label} ${format(execution.activity[key].count)}件`);
         else unavailableFacts.push([key, label, execution.activity[key]]);
