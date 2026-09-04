@@ -46,12 +46,36 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}"); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" }); await Expect(dialog.GetByRole(AriaRole.Button, new() { Name = "キャンセル" })).ToBeVisibleAsync(); release.SetResult(); await Expect(dialog).ToContainTextAsync("restored terminal"); Assert.True(polls >= 3);
     }
 
-    [Fact]
-    public async Task RemovingAnalysisFromHistoryClosesReportAndReturnsFocusToOverviewAction()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RemovingAnalysisFromHistoryClosesReportAndReturnsFocusToOverviewAction(bool moveFocus)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json")))); await ReadyAi(page); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("history report")}},"snapshot_changed":false}],"next_cursor":null}"""))); await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs/*", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("history report")}}}""")));
-        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}"); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" }); await Expect(dialog).ToBeVisibleAsync(); await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ analysis: null })"); await Expect(dialog).ToBeHiddenAsync(); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" })).ToBeFocusedAsync(); await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("セッションの概要");
+        var readinessStarted = new TaskCompletionSource();
+        var releaseReadiness = new TaskCompletionSource();
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", async route =>
+        {
+            readinessStarted.TrySetResult();
+            await releaseReadiness.Task;
+            await route.FulfillAsync(Json(Readiness()));
+        });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}");
+        var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" });
+        var action = page.Locator("[data-session-ai-open]");
+        await Expect(dialog).ToBeVisibleAsync();
+        await readinessStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await Expect(action).ToBeHiddenAsync();
+        await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ analysis: null })");
+        await Expect(dialog).ToBeHiddenAsync();
+        var execution = page.Locator("[data-execution-toggle]").First;
+        if (moveFocus) await execution.FocusAsync();
+        releaseReadiness.SetResult();
+        await Expect(action).ToBeVisibleAsync();
+        if (moveFocus) await Expect(execution).ToBeFocusedAsync();
+        else await Expect(action).ToBeFocusedAsync();
+        await Expect(page.Locator("[data-session-overview] h2")).ToHaveTextAsync("セッションの概要");
     }
 
     [Fact]

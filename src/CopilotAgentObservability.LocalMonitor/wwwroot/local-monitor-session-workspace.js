@@ -27,6 +27,7 @@
   let rawContentGeneration = 0;
   let aiReady = false;
   let sessionAiInvoker = null;
+  let pendingSessionAiFocus = null;
   let sessionReports = [];
   let sessionReportCursor = null;
   let nodeTranscript = [];
@@ -790,6 +791,7 @@
   async function findExactSessionReport(runId) { return (await readExactSessionReport(runId)).report; }
 
   function showSessionDialog(invoker) {
+    pendingSessionAiFocus = null;
     sessionAiInvoker = invoker; const dialog = document.querySelector("[data-session-ai-dialog]"); if (!dialog.open) dialog.showModal(); dialog.querySelector("[data-session-ai-close]").focus();
   }
 
@@ -1004,6 +1006,7 @@
   }
 
   async function applyRoute(route) {
+    pendingSessionAiFocus = null;
     const generation = ++routeGeneration;
     try {
       if (!state.summary) return;
@@ -1184,7 +1187,12 @@
   async function checkAiReadiness() {
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); const value = response.ok ? await response.json() : null;
-      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady; if (aiReady) { ensureSelectedNodeAiStart(); await readSessionReports(null, false); }
+      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady;
+      const pending = pendingSessionAiFocus; pendingSessionAiFocus = null;
+      const route = window.LocalMonitorV1History.current();
+      if (aiReady && pending?.invoker === action && action.isConnected && pending.generation === routeGeneration
+        && !route.analysis && !route.execution && !route.node && !sessionAiDialog.open) action.focus();
+      if (aiReady) { ensureSelectedNodeAiStart(); await readSessionReports(null, false); }
     } catch { aiReady = false; }
   }
 
@@ -1209,7 +1217,14 @@
     const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   const sessionAiDialog = document.querySelector("[data-session-ai-dialog]");
-  function closeSessionAi(restoreFocus = true) { if (sessionAiDialog.open) sessionAiDialog.close(); activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true; if (restoreFocus) sessionAiInvoker?.focus(); }
+  document.addEventListener("focusin", () => { pendingSessionAiFocus = null; });
+  function closeSessionAi(restoreFocus = true) {
+    pendingSessionAiFocus = null;
+    if (sessionAiDialog.open) sessionAiDialog.close();
+    activeSessionRun = null; sessionPollGeneration++; document.querySelector("[data-session-ai-cancel]").hidden = true;
+    if (restoreFocus && sessionAiInvoker?.hidden) pendingSessionAiFocus = { invoker: sessionAiInvoker, generation: routeGeneration };
+    else if (restoreFocus) sessionAiInvoker?.focus();
+  }
   document.querySelector("[data-session-ai-open]")?.addEventListener("click", event => openSessionAi(event.currentTarget));
   document.querySelector("[data-session-ai-close]")?.addEventListener("click", () => closeSessionAi());
   document.querySelector("[data-session-ai-regenerate]")?.addEventListener("click", startSessionAi);
