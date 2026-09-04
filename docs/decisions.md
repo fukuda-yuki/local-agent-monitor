@@ -788,7 +788,7 @@ GitHub Actions が生成する Windows x64 self-contained folder publish の Rel
 
 Consequences:
 
-- `.github/workflows/local-monitor-release.yml` は build、Playwright Chromium bootstrap、test、package、artifact upload までを行う。
+- `.github/workflows/local-monitor-release.yml` は build、package、artifact upload までを行う。Playwright Chromium bootstrap と test は既定で実施し、workflow_dispatch の boolean 入力で省略できる。tag push では常に実施する。
 - `scripts/local-monitor/start.ps1` は `DotnetRun` と `Published` の両 mode を扱う。
 - ZIP 利用者向け手順は user guide と operations guide に記録する。
 ## D035: Local Monitor から Copilot SDK raw analysis を実行する

@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'Run tests before packaging'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -33,11 +38,15 @@ jobs:
         shell: pwsh
         run: dotnet build CopilotAgentObservability.slnx
 
+      # Playwright is only for tests. inputs exists only on workflow_dispatch;
+      # tag push must still run tests.
       - name: Install Playwright Chromium
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
         shell: pwsh
         run: pwsh scripts\test\install-playwright-chromium.ps1
 
       - name: Test
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
         shell: pwsh
         run: dotnet test CopilotAgentObservability.slnx
 
