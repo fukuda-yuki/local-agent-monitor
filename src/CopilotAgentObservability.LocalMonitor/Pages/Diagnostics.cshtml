@@ -316,6 +316,44 @@
         </div>
     </section>
 
+    <section class="panel" id="semantic-attribute-captures">
+        <h2>属性キーの検証キャプチャ</h2>
+        <p>固定のレビュー済みキーとの比較です。構造上の未知フィールド数や受信可否とは別の診断です。値は保存しません。24 時間で期限切れになります。</p>
+        <p>検証対象の送信を始める前に開始し、送信と受信の完了を確認してから完了してください。未観測は、プロデューサがキーを削除した証明ではありません。</p>
+        @foreach (var source in new[] { "copilot-cli", "vscode-copilot-chat" })
+        {
+            <h3>@source</h3>
+            <form method="post" asp-page-handler="StartSemanticCapture">
+                <input type="hidden" name="sourceFamily" value="@source" />
+                <button type="submit">検証キャプチャを開始</button>
+            </form>
+            @foreach (var capture in Model.SemanticCaptures.Where(item => item.SourceFamily == source))
+            {
+                <p>@(capture.State == "active" ? "捕捉中" : "完了") — 観測数 @capture.ObservationCount / キー数 @capture.Keys.Count</p>
+                @if (capture.Incomplete)
+                {
+                    <p>不完全なキャプチャです。上限超過・受信の欠落・中断・未受信のため、未観測キーの比較は行いません。</p>
+                }
+                @if (capture.State == "active")
+                {
+                    <form method="post" asp-page-handler="CompleteSemanticCapture">
+                        <input type="hidden" name="sourceFamily" value="@source" />
+                        <input type="hidden" name="captureId" value="@capture.CaptureId" />
+                        <button type="submit">検証キャプチャを完了</button>
+                    </form>
+                }
+                <details><summary>レビュー済みベースラインに含まれないキー: @capture.AddedKeys.Count</summary>
+                    <ul>@foreach (var key in capture.AddedKeys) { <li><code>@key.KeyHash</code> — @key.OccurrenceCount 件</li> }</ul>
+                </details>
+                @if (capture.State == "completed" && !capture.Incomplete)
+                {
+                    <details><summary>このキャプチャでは観測されなかったキー: @capture.NotObservedKeys.Count</summary>
+                        <ul>@foreach (var key in capture.NotObservedKeys) { <li><code>@key</code></li> }</ul>
+                    </details>
+                }
+            }
+        }
+    </section>
     <section class="panel" id="retention-diagnostics">
         <div class="panel-head">
             <span class="panel-title">保持と削除の状態</span>

@@ -431,7 +431,7 @@ entry is unchanged:
 alert_engine:2, alert_lifecycle:1, doctor:1, first_trace_navigation:1,
 historical_import:1, historical_instruction_analysis:1,
 local_archive:1, local_repository_catalog:1, local_workspace_projection:5,
-monitor:11, pricing:1, retention:1, runtime_backup:1, sanitized_import:1, session:14,
+monitor:12, pricing:1, retention:1, runtime_backup:1, sanitized_import:1, session:14,
 skill_invocation_snapshot:1, skill_projection:1
 ```
 

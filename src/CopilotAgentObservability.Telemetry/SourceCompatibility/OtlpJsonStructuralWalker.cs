@@ -6,6 +6,13 @@ internal static class OtlpJsonStructuralWalker
 {
     private const string UnknownSampleDomain = "source-unknown-sample-v1\0";
 
+    internal static (IReadOnlyList<SourceStructuralOccurrence> Keys, bool Incomplete) ReadAttributeKeys(JsonElement element, SourceStructuralEnvelope envelope)
+    {
+        var walker = new Walker(DateTimeOffset.UnixEpoch, attributeKeysOnly: true);
+        walker.WalkEnvelope(element, envelope);
+        return (walker.Occurrences.Where(item => item.Role == SourceStructuralRole.AttributeKey && item.Envelope == SourceStructuralEnvelope.KeyValue).ToArray(), walker.HasDroppedRecords);
+    }
+
     public static SourceStructuralInventory Build(string payloadJson) =>
         Build(payloadJson, DateTimeOffset.UnixEpoch);
 
@@ -23,10 +30,11 @@ internal static class OtlpJsonStructuralWalker
         return SourceStructuralInventory.Create(walker.Occurrences, walker.HasRequiredTraceSignal);
     }
 
-    private sealed class Walker(DateTimeOffset observedAt)
+    private sealed class Walker(DateTimeOffset observedAt, bool attributeKeysOnly = false)
     {
         public List<SourceStructuralOccurrence> Occurrences { get; } = [];
         public bool HasRequiredTraceSignal { get; private set; }
+        public bool HasDroppedRecords { get; private set; }
 
         public void WalkEnvelope(JsonElement element, SourceStructuralEnvelope envelope)
         {
@@ -72,6 +80,13 @@ internal static class OtlpJsonStructuralWalker
 
         private void EmitAcceptedField(OtlpTraceField field, JsonElement value)
         {
+            if (attributeKeysOnly && field.FieldCode == "key_value.value") return;
+            if (field.FieldCode.EndsWith(".dropped_attributes_count", StringComparison.Ordinal)
+                || field.FieldCode is "span.dropped_events_count" or "span.dropped_links_count")
+            {
+                var number = value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
+                HasDroppedRecords |= !long.TryParse(number, NumberStyles.Integer, CultureInfo.InvariantCulture, out var count) || count != 0;
+            }
             AddRecognized(field.Envelope, SourceStructuralRole.KnownField, field.FieldCode, field.SemanticType);
             switch (field.Disposition)
             {

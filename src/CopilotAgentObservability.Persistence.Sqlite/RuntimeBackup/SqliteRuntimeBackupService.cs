@@ -55,7 +55,7 @@ public sealed class SqliteRuntimeBackupService
         ["local_comparison"] = LocalComparisonSchemaV1.Version,
         ["local_repository_catalog"] = 1,
         ["local_workspace_projection"] = LocalWorkspaceProjectionSchemaV1.Version,
-        ["monitor"] = 11,
+        ["monitor"] = 12,
         ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
@@ -2232,6 +2232,8 @@ public sealed class SqliteRuntimeBackupService
             ["local_ai_results_update_rejected"] = "local_ai_analysis",
             ["local_ai_terminal_run_update_rejected"] = "local_ai_analysis",
         };
+        foreach (var table in SemanticAttributeCaptureSchema.Tables)
+            owners[table.Name] = "monitor";
         foreach (var table in SkillProjectionSchemaV1.TableNames)
             owners[table] = "skill_projection";
         foreach (var trigger in SkillProjectionSchemaV1.TriggerDefinitions)

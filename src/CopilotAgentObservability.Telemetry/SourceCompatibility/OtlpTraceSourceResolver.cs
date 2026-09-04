@@ -17,6 +17,9 @@ internal sealed record TraceSourceResolutionDraft(
     bool UnknownCandidateObserved,
     bool RelevantEvidenceObserved)
 {
+    public IReadOnlyDictionary<string, int> AttributeKeys { get; init; } = new Dictionary<string, int>();
+    public bool AttributeInventoryIncomplete { get; init; }
+
     internal static TraceSourceResolutionDraft FromEvidence(
         string traceId,
         bool cliCandidateObserved,
@@ -67,6 +70,7 @@ internal static class OtlpTraceSourceResolver
     {
         ArgumentNullException.ThrowIfNull(payloadJsons);
         var evidenceByTrace = new Dictionary<string, TraceSourceEvidence>(StringComparer.Ordinal);
+        var missingTraceIdentityObserved = false;
         foreach (var payloadJson in payloadJsons)
         {
             ArgumentNullException.ThrowIfNull(payloadJson);
@@ -74,7 +78,9 @@ internal static class OtlpTraceSourceResolver
             foreach (var resourceSpan in OtlpSpanReader.EnumerateArrayProperty(document.RootElement, "resourceSpans"))
             {
                 var resourceEvidence = ReadResourceEvidence(resourceSpan);
-                foreach (var traceId in ReadTraceIds(resourceSpan))
+                var traceIds = ReadTraceIds(resourceSpan, out var missingTraceIdentity);
+                missingTraceIdentityObserved |= missingTraceIdentity;
+                foreach (var traceId in traceIds)
                 {
                     if (!evidenceByTrace.TryGetValue(traceId, out var traceEvidence))
                     {
@@ -82,13 +88,24 @@ internal static class OtlpTraceSourceResolver
                         evidenceByTrace.Add(traceId, traceEvidence);
                     }
                     traceEvidence.Merge(resourceEvidence);
+                    if (OtlpSpanReader.TryGetObject(resourceSpan, "resource", out var resource))
+                        traceEvidence.ObserveKeys(resource, SourceStructuralEnvelope.Resource);
+                    foreach (var scopeSpans in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
+                    {
+                        var spans = OtlpSpanReader.EnumerateArrayProperty(scopeSpans, "spans")
+                            .Where(span => StringComparer.Ordinal.Equals(OtlpSpanReader.ReadString(span, "traceId"), traceId)).ToArray();
+                        if (spans.Length == 0) continue;
+                        if (OtlpSpanReader.TryGetObject(scopeSpans, "scope", out var scope))
+                            traceEvidence.ObserveKeys(scope, SourceStructuralEnvelope.Scope);
+                        foreach (var span in spans) traceEvidence.ObserveKeys(span, SourceStructuralEnvelope.Span);
+                    }
                 }
             }
         }
 
         return evidenceByTrace
             .OrderBy(item => item.Key, StringComparer.Ordinal)
-            .Select(item => item.Value.ToResolution(item.Key))
+            .Select(item => item.Value.ToResolution(item.Key, missingTraceIdentityObserved))
             .ToArray();
     }
 
@@ -171,8 +188,9 @@ internal static class OtlpTraceSourceResolver
         }
     }
 
-    private static IEnumerable<string> ReadTraceIds(JsonElement resourceSpan)
+    private static IEnumerable<string> ReadTraceIds(JsonElement resourceSpan, out bool missingTraceIdentity)
     {
+        missingTraceIdentity = false;
         var traceIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
         {
@@ -183,6 +201,7 @@ internal static class OtlpTraceSourceResolver
                 {
                     traceIds.Add(traceId);
                 }
+                else missingTraceIdentity = true;
             }
         }
         return traceIds;
@@ -190,6 +209,17 @@ internal static class OtlpTraceSourceResolver
 
     private sealed class TraceSourceEvidence
     {
+        private readonly Dictionary<string, int> keys = new(StringComparer.Ordinal);
+        private bool attributeInventoryIncomplete;
+
+        public void ObserveKeys(JsonElement element, SourceStructuralEnvelope envelope)
+        {
+            var inventory = OtlpJsonStructuralWalker.ReadAttributeKeys(element, envelope);
+            attributeInventoryIncomplete |= inventory.Incomplete;
+            foreach (var key in inventory.Keys)
+                keys[key.Name.Value] = (int)Math.Min(SourceOccurrenceCount.Maximum,
+                    keys.GetValueOrDefault(key.Name.Value) + (long)key.Count.Value);
+        }
         public bool CliCandidateObserved { get; set; }
         public bool VsCodeCandidateObserved { get; set; }
         public bool UnknownCandidateObserved { get; set; }
@@ -203,12 +233,16 @@ internal static class OtlpTraceSourceResolver
             RelevantEvidenceObserved |= other.RelevantEvidenceObserved;
         }
 
-        public TraceSourceResolutionDraft ToResolution(string traceId) =>
+        public TraceSourceResolutionDraft ToResolution(string traceId, bool missingTraceIdentity = false) =>
             TraceSourceResolutionDraft.FromEvidence(
                 traceId,
                 CliCandidateObserved,
                 VsCodeCandidateObserved,
                 UnknownCandidateObserved,
-                RelevantEvidenceObserved);
+                RelevantEvidenceObserved) with
+            {
+                AttributeKeys = new System.Collections.ObjectModel.ReadOnlyDictionary<string, int>(new Dictionary<string, int>(keys)),
+                AttributeInventoryIncomplete = attributeInventoryIncomplete || missingTraceIdentity
+            };
     }
 }

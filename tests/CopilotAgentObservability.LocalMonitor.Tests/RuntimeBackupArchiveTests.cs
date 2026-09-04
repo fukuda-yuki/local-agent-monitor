@@ -1999,8 +1999,8 @@ public sealed class RuntimeBackupArchiveTests
             if (attack == "duplicate-manifest-key")
                 manifest = Encoding.UTF8.GetBytes(ReplaceRequired(
                     Encoding.UTF8.GetString(manifest),
-                    "\"monitor\":11",
-                    "\"monitor\":11,\"monitor\":11"));
+                    "\"monitor\":12",
+                    "\"monitor\":12,\"monitor\":12"));
             if (attack == "invalid-journal-mode")
                 manifest = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(manifest).Replace("\"source_journal_mode\":\"wal\"", "\"source_journal_mode\":\"other\"", StringComparison.Ordinal));
             if (attack == "invalid-external-state")

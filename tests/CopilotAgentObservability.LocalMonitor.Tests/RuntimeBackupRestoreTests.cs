@@ -1552,15 +1552,15 @@ public sealed class RuntimeBackupRestoreTests
 
         Assert.True(preflight.Success, Describe(preflight));
         Assert.Equal(9, preflight.ComponentVersions!["monitor"]);
-        Assert.Contains("monitor:9->11", preflight.MigrationSteps!);
+        Assert.Contains("monitor:9->12", preflight.MigrationSteps!);
         Assert.True(created.Success, created.ErrorCode);
         Assert.True(preview.Success, preview.ErrorCode);
-        Assert.Equal(11, preview.SourceComponentVersions["monitor"]);
+        Assert.Equal(12, preview.SourceComponentVersions["monitor"]);
         Assert.DoesNotContain(preview.MigrationSteps, step => step.StartsWith("monitor:", StringComparison.Ordinal));
         Assert.True(restored.Success, restored.ErrorCode);
         using (var verification = temp.Open(temp.Target))
         {
-            Assert.Equal(11L, temp.Scalar<long>(
+            Assert.Equal(12L, temp.Scalar<long>(
                 verification,
                 "SELECT version FROM schema_version WHERE component='monitor';"));
             Assert.Equal("copilot-cli", temp.Scalar<string>(
@@ -2979,7 +2979,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.False(result.PreRestoreBackupCreated);
         var preflight = service.PreflightForMigration(destination);
         Assert.True(preflight.Success, preflight.ErrorCode);
-        Assert.Equal(11, preflight.ComponentVersions!["monitor"]);
+        Assert.Equal(12, preflight.ComponentVersions!["monitor"]);
         Assert.Equal(14, preflight.ComponentVersions["session"]);
         Assert.Equal(1, preflight.ComponentVersions["local_repository_catalog"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
@@ -4543,6 +4543,8 @@ public sealed class RuntimeBackupRestoreTests
                 DROP TABLE IF EXISTS skill_projection_generation_inputs;
                 DROP TABLE IF EXISTS skill_projection_generations;
                 DELETE FROM schema_version WHERE component='skill_projection';
+                DROP TABLE source_semantic_capture_keys;
+                DROP TABLE source_semantic_captures;
                 DROP TABLE source_compatibility_reconciliation_receipts;
                 DROP TABLE source_trace_version_interpretation_heads;
                 DROP TABLE source_trace_version_interpretation_supersessions;

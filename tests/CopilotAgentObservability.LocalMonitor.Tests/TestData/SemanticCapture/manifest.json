@@ -1,0 +1,8 @@
+{
+  "file": "monitor-v11.sqlite",
+  "sha256": "39e1d08c1c796c0f7d3c7006a0d49763ea0df750e92ea453b68679209b9d4e91",
+  "monitor_schema_version": 11,
+  "producer_commit": "9ea799ed",
+  "producer": "SqliteSourceCompatibilityStore.CreateSchema from the unchanged published Release assembly",
+  "data": "Empty synthetic database; no producer or user data"
+}

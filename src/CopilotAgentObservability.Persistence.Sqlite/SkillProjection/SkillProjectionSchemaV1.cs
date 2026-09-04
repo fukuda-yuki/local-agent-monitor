@@ -1312,11 +1312,11 @@ internal static class SkillProjectionSchemaV1
         Execute(
             connection,
             transaction,
-            """
+            $"""
             CREATE TABLE schema_version(
                 component TEXT PRIMARY KEY,
                 version INTEGER NOT NULL);
-            INSERT INTO schema_version(component,version) VALUES('monitor',11);
+            INSERT INTO schema_version(component,version) VALUES('monitor',{MonitorSchemaMigrator.BaseSchemaVersion});
             CREATE TABLE retention_component_versions(
                 component TEXT PRIMARY KEY,
                 version INTEGER NOT NULL);
@@ -1430,7 +1430,7 @@ internal static class SkillProjectionSchemaV1
         using var reader = command.ExecuteReader();
         if (!reader.Read()
             || reader.IsDBNull(0)
-            || reader.GetInt64(0) != MonitorSchemaMigrator.BaseSchemaVersion
+            || reader.GetInt64(0) is not (11 or 12)
             || reader.IsDBNull(1)
             || reader.GetInt64(1) != Retention.RetentionV1Constants.CatalogSchemaVersion)
         {
