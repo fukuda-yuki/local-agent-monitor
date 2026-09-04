@@ -910,6 +910,10 @@ nonregular, nonempty,
 malformed, reparse-bearing, competing-owned, or otherwise unproved sidecar
 shape is likewise preserved and fails closed on every platform. A database
 with no sidecars remains eligible for ordinary startup on every platform.
+On Unix, phase-one component validation uses a query-only SQLite connection
+that owns the lifecycle of its read-created sidecars; closing that connection
+must leave the offline database bytes unchanged and no sidecars behind.
+It does not delete or adopt sidecars present before the startup lease's gate.
 After phase one succeeds, canonical owner migrations and phase two remain under
 the same restore lease. Phase two does not repeat phase-one recovery or
 reclassify sidecars created by those owner migrations as external state. It
@@ -1130,6 +1134,13 @@ restore boundary; the operator must close every non-product database client.
 The normal SQLite probe detects conflicting exclusive ownership but does not
 claim to enumerate shared, reserved, or idle connections. The exact original
 target hash and external state are checked again immediately before swap.
+
+On Unix, after sidecar-free offline ownership is established, initialization,
+preflight, and restore validation retain a query-only SQLite connection across
+their reads so SQLite owns and removes the read-created sidecars. That owner
+closes before the pre-swap sidecar/hash gate, and installed validation uses a
+new owner closed before cleanup or rollback. This does not adopt pre-existing
+sidecars or permit application writes through a validation connection.
 
 The state machine is:
 

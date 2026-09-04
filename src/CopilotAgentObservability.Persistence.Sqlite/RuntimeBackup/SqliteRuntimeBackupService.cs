@@ -243,7 +243,9 @@ public sealed class SqliteRuntimeBackupService
             RefreshLiveLocalWorkspaceProjection(database);
         using var validationGuard = TryAcquireRecoveryGuard(database);
         if (validationGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
-        var result = ValidateMonitorComponentVersions(database);
+        RuntimeBackupPreflightResult result;
+        using (var validationOwner = OpenValidationSidecarOwner(database))
+            result = ValidateMonitorComponentVersions(database);
         return TryRemoveEmptyReadSidecars(database)
             ? result
             : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
@@ -307,23 +309,26 @@ public sealed class SqliteRuntimeBackupService
     {
         var preparation = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: false);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
-        var recoveryGuard = TryAcquireRecoveryGuard(database);
-        if (recoveryGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
-        var preflight = PreflightForMigration(database, immutableReadOnly: false);
-        if (!TryRemoveEmptyReadSidecars(database))
+        RuntimeBackupPreflightResult preflight;
+        using (var recoveryGuard = TryAcquireRecoveryGuard(database))
         {
-            recoveryGuard?.Dispose();
-            return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+            if (recoveryGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+            using (var validationOwner = OpenValidationSidecarOwner(database))
+                preflight = PreflightForMigration(database, immutableReadOnly: false);
+            if (!TryRemoveEmptyReadSidecars(database))
+                return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         }
-        recoveryGuard?.Dispose();
         if (!preflight.Success) return preflight;
-        EnsureCurrentBackupTail(database);
+        using (var validationOwner = OpenValidationSidecarOwner(database))
+            EnsureCurrentBackupTail(database);
         if (!TryRemoveEmptyReadSidecars(database))
             return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         checkpoint?.Invoke(CatalogAfterInitializeTailCheckpoint);
         using var finalGuard = TryAcquireRecoveryGuard(database);
         if (finalGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
-        var final = PreflightForMigration(database, immutableReadOnly: false);
+        RuntimeBackupPreflightResult final;
+        using (var validationOwner = OpenValidationSidecarOwner(database))
+            final = PreflightForMigration(database, immutableReadOnly: false);
         return TryRemoveEmptyReadSidecars(database)
             ? final
             : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
@@ -516,7 +521,16 @@ public sealed class SqliteRuntimeBackupService
         if (!TryFullFile(databasePath, mustExist: true, out var database))
             return new(false, RuntimeBackupErrorCodes.InvalidArguments);
         using var guard = TryAcquireRecoveryGuard(database);
-        var result = PreflightForMigration(database, immutableReadOnly: false);
+        RuntimeBackupPreflightResult result;
+        try
+        {
+            using var validationOwner = guard is not null ? OpenValidationSidecarOwner(database) : null;
+            result = PreflightForMigration(database, immutableReadOnly: false);
+        }
+        catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
+        {
+            result = new(false, RuntimeBackupErrorCodes.RestoreIncompatible);
+        }
         return guard is null || TryRemoveEmptyReadSidecars(database)
             ? result
             : new(false, RuntimeBackupErrorCodes.RestoreIncompatible);
@@ -752,6 +766,7 @@ public sealed class SqliteRuntimeBackupService
     {
         InspectionContext? context = null;
         FileStream? currentGuard = null;
+        SqliteConnection? validationOwner = null;
         CapturedSkillRegistryAuthority? operationAuthority = null;
         var inspectionComplete = false;
         try
@@ -767,6 +782,7 @@ public sealed class SqliteRuntimeBackupService
             operationAuthority = CaptureSkillRegistryAuthority();
             var targetExists = PathEntryExists(database);
             if (targetExists) currentGuard = TryAcquireRecoveryGuard(database);
+            if (currentGuard is not null) validationOwner = OpenValidationSidecarOwner(database);
             var current = targetExists
                 ? PreflightForMigration(
                     database,
@@ -812,6 +828,7 @@ public sealed class SqliteRuntimeBackupService
         catch (Exception exception) when (IsIo(exception)) { return PreviewFailure(inspectionComplete ? RuntimeBackupErrorCodes.SnapshotStoreUnavailable : RuntimeBackupErrorCodes.ArchiveInvalid, context?.Result.ArchiveSha256); }
         finally
         {
+            validationOwner?.Dispose();
             if (currentGuard is not null) _ = TryRemoveEmptyReadSidecars(database);
             currentGuard?.Dispose();
             operationAuthority?.Dispose();
@@ -850,6 +867,7 @@ public sealed class SqliteRuntimeBackupService
         FileStream? recoveryGuard = null;
         FileStream? restoreLease = null;
         FileStream? bundleStream = null;
+        SqliteConnection? validationOwner = null;
         CapturedSkillRegistryAuthority? operationAuthority = null;
         RuntimeBackupCreateResult? preRestore = null;
         RetentionComparison comparison = RetentionComparison.Empty;
@@ -885,6 +903,7 @@ public sealed class SqliteRuntimeBackupService
             {
                 ownership = TryAcquireOfflineOwnership(database);
                 if (ownership is null) return RestoreFailure(RuntimeBackupErrorCodes.MonitorMustBeStopped);
+                validationOwner = OpenValidationSidecarOwner(database);
                 var current = PreflightForMigration(
                     database,
                     immutableReadOnly: false,
@@ -993,6 +1012,8 @@ public sealed class SqliteRuntimeBackupService
             var preSwapExternalError = ValidateExternalState(database, scanRuntimeRoot: false, immutableDatabase: false);
             if (preSwapExternalError is not null)
                 throw new RuntimeBackupException(preSwapExternalError);
+            validationOwner?.Dispose();
+            validationOwner = null;
             if (targetExisted && !TryRemoveEmptyReadSidecars(database))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.MonitorMustBeStopped);
             if (targetExisted && !HashEquals(database, targetBeforeHash!))
@@ -1017,6 +1038,7 @@ public sealed class SqliteRuntimeBackupService
             if (HasActiveSqliteSidecar(database) || !HashEquals(database, stagedHash))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
             InvokeCheckpoint(CatalogBeforeInstalledValidationCheckpoint);
+            validationOwner = OpenValidationSidecarOwner(database);
             ValidateInstalledDatabase(database, immutableReadOnly: false, expected: stagedFacts, skillRegistryAuthority: operationAuthority);
             if (!HasMatchingRestoreReceipt(database, operationId, context.Result.ArchiveSha256!, immutableReadOnly: false))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
@@ -1034,6 +1056,8 @@ public sealed class SqliteRuntimeBackupService
             InvokeCheckpoint(RuntimeBackupCheckpoints.AfterJournalCommitted);
             if (!HashEquals(database, stagedHash) || !HasMatchingRestoreReceipt(database, operationId, context.Result.ArchiveSha256!, immutableReadOnly: false))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
+            validationOwner?.Dispose();
+            validationOwner = null;
             if (!TryRemoveEmptyReadSidecars(database))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
             if (targetExisted && (!HashEquals(rollbackPath, targetBeforeHash!) || !DeleteOwnedFile(rollbackPath)))
@@ -1049,6 +1073,8 @@ public sealed class SqliteRuntimeBackupService
         }
         catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException or InvalidDataException or JsonException or InvalidCastException or FormatException or OverflowException || IsIo(exception))
         {
+            validationOwner?.Dispose();
+            validationOwner = null;
             preserveRecoveryArtifacts = false;
             if (committed)
             {
@@ -1098,6 +1124,7 @@ public sealed class SqliteRuntimeBackupService
         }
         finally
         {
+            validationOwner?.Dispose();
             if (ownership is not null) _ = TryRemoveEmptyReadSidecars(database);
             ownership?.Dispose();
             recoveryGuard?.Dispose();
@@ -3761,7 +3788,8 @@ public sealed class SqliteRuntimeBackupService
                 candidateGuard = TryAcquireRecoveryGuard(target);
                 if (candidateGuard is null) return false;
                 if (!HashEquals(target, targetBeforeHash)) return false;
-                ValidateInstalledOrLegacy(target);
+                using (var validationOwner = OpenValidationSidecarOwner(target))
+                    ValidateInstalledOrLegacy(target);
                 restoredTargetGuard = candidateGuard;
                 candidateGuard = null;
                 return true;
@@ -3966,8 +3994,9 @@ public sealed class SqliteRuntimeBackupService
         try
         {
             if (journal.InstalledSha256 is null || HasActiveSqliteSidecar(target) || PathEntryExists(stagePath)
-                || !HashEquals(target, journal.InstalledSha256)
-                || !HasMatchingRestoreReceipt(target, journal.OperationId, journal.ArchiveSha256, immutableReadOnly: false)) return false;
+                || !HashEquals(target, journal.InstalledSha256)) return false;
+            using var validationOwner = OpenValidationSidecarOwner(target);
+            if (!HasMatchingRestoreReceipt(target, journal.OperationId, journal.ArchiveSha256, immutableReadOnly: false)) return false;
             var validationAuthority = ReadCurrentWriterStructuralAuthority(
                 target,
                 immutableReadOnly: false);
@@ -3986,6 +4015,7 @@ public sealed class SqliteRuntimeBackupService
         {
             if (!journal.TargetExisted || journal.TargetBeforeSha256 is null || HasActiveSqliteSidecar(target)
                 || !HashEquals(target, journal.TargetBeforeSha256)) return false;
+            using var validationOwner = OpenValidationSidecarOwner(target);
             ValidateInstalledOrLegacy(target);
             return true;
         }
@@ -4530,6 +4560,26 @@ public sealed class SqliteRuntimeBackupService
     private static bool OptionalHashEquals(string? left, string? right) => left is null ? right is null : right is not null && FixedEquals(left, right);
     private static bool FixedEquals(string? left, string? right) { if (left is null || right is null || left.Length != right.Length) return false; return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right)); }
     private static bool BytesEqual(object? left, object? right) => left is byte[] a && right is byte[] b && CryptographicOperations.FixedTimeEquals(a, b);
+
+    private static SqliteConnection? OpenValidationSidecarOwner(string path)
+    {
+        // Unix read-only WAL connections leave sidecars after their final close.
+        // Windows retains its read-sharing guard and handle-owned cleanup.
+        if (OperatingSystem.IsWindows()) return null;
+        var connection = Open(path, SqliteOpenMode.ReadWrite);
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA query_only=ON; SELECT COUNT(*) FROM sqlite_schema;";
+            _ = command.ExecuteScalar();
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
 
     private static SqliteConnection Open(
         string path,

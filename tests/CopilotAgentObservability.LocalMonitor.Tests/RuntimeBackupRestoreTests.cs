@@ -533,6 +533,25 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_preparation_accepts_an_offline_wal_database_without_changing_its_bytes()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Target, "offline-wal", includeRaw: false);
+        var before = File.ReadAllBytes(temp.Target);
+        Assert.False(File.Exists(temp.Target + "-wal"));
+        Assert.False(File.Exists(temp.Target + "-shm"));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        using var lease = initialization.Lease;
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        Assert.NotNull(lease);
+        Assert.Equal(before, File.ReadAllBytes(temp.Target));
+        Assert.False(File.Exists(temp.Target + "-wal"));
+        Assert.False(File.Exists(temp.Target + "-shm"));
+    }
+
+    [Fact]
     public void Monitor_startup_completion_accepts_sidecars_created_by_owner_migrations_under_the_same_lease()
     {
         using var temp = new RestoreTemp();
