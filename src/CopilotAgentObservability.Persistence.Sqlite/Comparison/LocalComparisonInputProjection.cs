@@ -179,7 +179,9 @@ internal static class LocalComparisonInputProjection
         scalars["total_tokens"] = Observed(row.Tokens.Total, sessionReference);
         scalars["cache_read_tokens"] = Observed(row.Tokens.CacheRead, sessionReference);
         scalars["cache_creation_tokens"] = Observed(row.Tokens.CacheCreation, sessionReference);
-        scalars["session_duration"] = Observed(row.TimingState, row.DurationMilliseconds, sessionReference);
+        scalars["session_duration"] = row is { Status: "active", TimingState: "recorded", EndedAt: null, DurationMilliseconds: null }
+            ? Missing(LocalComparisonFactState.NotObserved)
+            : Observed(row.TimingState, row.DurationMilliseconds, sessionReference);
         scalars["execution_count"] = Count(detail.Executions.Count, sessionReference);
         scalars["tool_call_count"] = Observed(row.Activity.Tool, sessionReference);
         scalars["skill_invocation_count"] = Observed(row.Activity.Skill, sessionReference);

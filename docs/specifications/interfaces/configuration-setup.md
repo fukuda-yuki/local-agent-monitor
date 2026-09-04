@@ -524,6 +524,12 @@ non-absolute value falls back to `$HOME/.local/share`. An injected
 host/test platform. There is no `setup` CLI flag or setup-specific environment
 variable that overrides this root.
 
+Path composition and parent-directory selection use the injected platform's
+`PathStyle`, including in private storage, apply, recovery, rollback, and status.
+Windows-style test-platform paths retain Windows separators and drive-root
+semantics on a Unix host; host-native path parsing does not reinterpret them.
+This lexical rule does not relax target canonicalization or no-follow checks.
+
 Layout:
 
 ```text

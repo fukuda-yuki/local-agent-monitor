@@ -20,6 +20,25 @@ public class MonitorShellPlaywrightTests
     private const string Cursor = "AZvvJSfubUCDILx2dEkk4j_S1wLGQUOW4o1TpZMGBmrYAAAAAZ_mZOZ7MDE4ZjJiNGUtN2MxYS03ZjFhLTlhMmItNmMzZDRlNWY2MDcyZb_UESMy6-2NWv8kzNcu3qwsgZxvWyIdPDe5nrnqQaw";
 
     [Fact]
+    public async Task Shell_UnifiedSettings_EmptyRetentionHasNoOldestPendingAge()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
+        var page = await browser.NewPageAsync();
+
+        await page.GotoAsync($"{host.Url}/?settings=state");
+
+        var summary = page.Locator("[data-settings-state-data]");
+        await Expect(summary).ToContainTextAsync("保留 0件");
+        await Expect(summary).ToContainTextAsync("最古の保留 対象なし");
+        await Expect(summary).Not.ToContainTextAsync("null");
+        await Expect(summary).Not.ToContainTextAsync("最古の保留 0秒");
+    }
+
+    [Fact]
     public async Task SharedPaths_MatchCanonicalBuildersAndRejectEveryNonIdentityWithoutSideEffects()
     {
         using var temp = new MonitorTempDirectory();

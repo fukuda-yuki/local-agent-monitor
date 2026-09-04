@@ -285,6 +285,9 @@ For a nonempty granted selection, Config CLI publication fully writes, flushes,
 and inspects that hidden same-directory file before calling
 `TrySealRawReplayFilePublication()`. Only `sealed` returns the single-use ticket
 that permits the exact non-overwrite move to the already validated destination.
+On Linux that move uses atomic `renameat2(RENAME_NOREPLACE)`; an unsupported
+primitive or filesystem fails with `publish_failed`, without a check-then-rename
+fallback. Concurrent publishers cannot both succeed for the same destination.
 Pre-capture commit-control and `output_name_invalid` failures have no handle and
 make no terminal call. After a nonempty grant, every raw-derived archive,
 credential, post-materialization bound/inspection, `output_exists`, parent,

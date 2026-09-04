@@ -752,11 +752,13 @@ internal sealed record SetupStatusTargetObservation(
 
 internal sealed class SetupStatusTargetObserver
 {
+    private readonly SetupPathStyle pathStyle;
     private readonly AtomicFileSetupStep fileStep;
     private readonly UserEnvironmentSetupStep environmentStep;
 
     public SetupStatusTargetObserver(ISetupPlatform platform)
     {
+        pathStyle = platform.PathStyle;
         fileStep = new AtomicFileSetupStep(platform);
         environmentStep = new UserEnvironmentSetupStep(platform);
     }
@@ -794,7 +796,7 @@ internal sealed class SetupStatusTargetObserver
         CaptureFile(
             target,
             fileStep.Capture(
-                Path.GetDirectoryName(target.TargetLocation) ?? throw new FormatException(),
+                SetupPathPolicy.GetDirectoryName(pathStyle, target.TargetLocation) ?? throw new FormatException(),
                 target.TargetLocation));
 
     private static SetupStatusTargetObservation CaptureFile(

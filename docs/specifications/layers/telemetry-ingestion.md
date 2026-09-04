@@ -567,8 +567,7 @@ manifest schema. Issue #116 used Claude-specific adapter evidence from live
 print-mode OTel and an exercised Hook path; it is a different evidence
 authority, none of its evidence is copied here, and the Claude manifest remains
 byte-identical. Unknown relevant attribute values continue to fail closed under
-Issue #151, while detection of unknown attribute keys remains open in Issue
-#152.
+Issue #151. Semantic attribute-key diagnostics follow the separate contract below.
 
 Runtime selection consumes Issue #151's exact `TraceSourceResolutionDraft`;
 there is no second resolver or database reader:
@@ -588,6 +587,48 @@ trace-scoped `service.version` observed on that trace remains available to the
 separate source-version authority, but it never supplies source identity. The
 `service.name=github-copilot` mapping remains valid only for a trace that
 actually carries that non-empty exact value.
+
+### Semantic attribute-key diagnostics
+
+The fixed reviewed key baseline under `contracts/source-capabilities/v1/` is
+derived from the positively observed attribute-key rows of Issue #129's
+catalogue at commit `ae02f8a7`. It is not an exhaustive producer schema,
+capability promotion, or an automatically learned previous capture. Baseline
+changes require explicit review. Source scope is exactly `github-copilot-cli`
+and `github-copilot-vscode`, selected using the existing exact trace source
+resolution. These source surfaces map respectively to internal source families
+`copilot-cli` and `vscode-copilot-chat`. The capture baseline is family-scoped;
+existing source-version diagnostics remain separate and never supply identity.
+
+Semantic key diagnostics are independent of structural unknown counts,
+fingerprints, compatibility states, readiness and ingestion acceptance. A key
+outside the reviewed baseline is an addition observation, not an error or a
+claim that the producer has just introduced that key. Baseline mismatch and
+detail truncation never change ingestion acceptance; SQLite persistence failures
+retain the existing atomic raw/structural commit failure behavior. Keys use the existing
+role-domain SHA-256 representation; no attribute values are retained by this
+feature. Resource, scope, span, event and link keys retain exact trace/source
+boundaries. Missing, conflicting or unrecognised attribution is never guessed.
+
+Diagnostics provides explicit start and complete operations for a validation
+capture and displays its result through Razor Page handlers, without modifying
+the frozen JSON API or SSE contracts. Each source retains one active capture
+and its latest completed capture. Completion compares only that capture with
+the fixed baseline. Missing baseline keys mean **not observed in this capture**,
+never guaranteed producer deletion. No traffic, an ingestion/capture gap,
+restart during capture, missing trace identity, dropped producer records or
+truncated detail makes the capture incomplete and
+suppresses removal-candidate evaluation. Additions remain positive observations.
+
+Each capture retains at most 256 distinct hashed key details, with occurrence
+counts capped at the existing 1,000,000 limit. No version value or version state
+is copied into the capture; existing source diagnostics retain that authority.
+Captures expire 24 hours after start (active) or completion (completed), with no
+new configuration. Reads exclude expired captures and the existing retention
+execution removes their rows. Dedicated additive monitor-schema tables migrate
+transactionally as monitor v12 over v11, preserve existing observations and
+participate in runtime backup/restore validation; the current schema rejects
+partial/newer authorities.
 
 ### Copilot CLI Skill projection
 

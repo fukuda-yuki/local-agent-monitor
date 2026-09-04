@@ -521,6 +521,8 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
             transaction,
             rawRecordId,
             observation.TraceSourceResolutions);
+        ObserveSemanticKeys(connection, transaction, observation.TraceSourceResolutions,
+            observation.Inventory.HasUnknownFields, observation.ObservedAt);
         return id;
     }
 

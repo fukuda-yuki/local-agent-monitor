@@ -234,6 +234,10 @@ internal static class MonitorHost
         var compatibilityStore = testOptions?.SourceCompatibilityStore
             ?? new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
         compatibilityStore.CreateSchema();
+        var semanticCaptureStore = new SqliteSourceCompatibilityStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        semanticCaptureStore.MarkSemanticCaptureGap();
+        builder.Services.AddSingleton(semanticCaptureStore);
+        builder.Services.AddSingleton(timeProvider);
         var runtimeStateStore = new SqliteMonitorRuntimeStateStore(
             options.DatabasePath,
             timeProvider,
@@ -491,7 +495,8 @@ internal static class MonitorHost
         builder.Services.AddSingleton(retentionAdapters);
         if (testOptions?.StartRetentionCleanupWorker ?? true)
         {
-            builder.Services.AddHostedService(_ => new RetentionCleanupWorker(new RetentionCleanupCoordinator(retentionCatalog, retentionAdapters, timeProvider), timeProvider));
+            builder.Services.AddHostedService(_ => new RetentionCleanupWorker(new RetentionCleanupCoordinator(retentionCatalog, retentionAdapters, timeProvider)
+                { SemanticCaptureStore = semanticCaptureStore }, timeProvider));
         }
         var alertConnectionString = new SqliteConnectionStringBuilder { DataSource = options.DatabasePath, Pooling = false }.ToString();
         var alertEngineStore = testOptions?.AlertEngineStore ?? new SqliteAlertEngineStore(alertConnectionString);
@@ -621,7 +626,7 @@ internal static class MonitorHost
                 var runRepository = SqliteLocalAiRunRepositoryV1.Create(
                     options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider, retentionCatalog);
                 var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
-                    localAiClientFactory, localAiOptions.DefaultModel);
+                    localAiClientFactory, localAiOptions.DefaultModel, Console.Error);
                 var localAiRawReader = new LocalAiRetentionRawReaderV1(
                     new LocalWorkspaceNodeContentReader(retentionContext, timeProvider));
                 builder.Services.AddSingleton<ILocalAiAnalysisApplicationV1>(services =>
@@ -953,6 +958,21 @@ internal static class MonitorHost
 
                 await WriteFailureAsync(context, StatusCodes.Status500InternalServerError, "internal_error", "The request could not be processed.");
             });
+        });
+        app.Use(async (context, next) =>
+        {
+            if (context.Request.Path != TracePath) { await next(context); return; }
+            semanticCaptureStore.BeginSemanticIngestion();
+            var succeeded = false;
+            try
+            {
+                await next(context);
+                succeeded = context.Response.StatusCode < 400;
+            }
+            finally
+            {
+                semanticCaptureStore.EndSemanticIngestion(succeeded);
+            }
         });
         app.Use(async (context, next) =>
         {

@@ -143,6 +143,12 @@ consumed value/revision, and optional opaque execution/node references. Missing
 is not zero. No raw content, path, locator, prompt/response, Tool payload, Skill
 body, or inferred identity is returned.
 
+Session duration uses the completed duration fact, not the availability of a
+recorded start. An active Session with recorded timing and null `ended_at` /
+`duration_ms` retains its recorded start but contributes `not_observed` for
+Compare's `session_duration`; it does not contribute zero or an elapsed estimate
+to that metric's available count or aggregates.
+
 Evidence `session_location` is the server-authored canonical human Session URL
 for the frozen references on that evidence item. It is Session-only when neither
 reference exists, otherwise uses canonical query order `execution`, then `node`;

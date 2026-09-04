@@ -641,18 +641,22 @@
           "orphan_or_unexpected_missing_count", "expired_but_readable_violation_count", "oldest_pending_age_seconds", "worker_state",
           "last_successful_run_at", "inventory_version", "adapter_coverage_version", "items"];
         const aggregates = [value.pending_count, value.queued_count, value.deleting_count, value.failed_count, value.retry_exhausted_count,
-          value.orphan_or_unexpected_missing_count, value.expired_but_readable_violation_count, value.oldest_pending_age_seconds];
+          value.orphan_or_unexpected_missing_count, value.expired_but_readable_violation_count];
         const allNull = aggregates.every(item => item === null);
         const allCounts = aggregates.every(count);
         if (!exact(value, keys) || value.schema_version !== 1 || !allNull && !allCounts
+          || value.oldest_pending_age_seconds !== null && (!allCounts || !count(value.oldest_pending_age_seconds))
           || typeof value.worker_state !== "string" || !(value.worker_state in RETENTION_WORKER_STATES)
           || value.last_successful_run_at !== null && !timestamp(value.last_successful_run_at)
           || !Array.isArray(value.items) || value.items.length > 100) throw new Error();
         const retentionTarget = section === "state" ? owned.get("state").querySelector("[data-settings-state-data] p")
           : owned.get("storage").querySelector(".local-monitor-settings-card p");
+        const oldestPending = value.oldest_pending_age_seconds === null
+          ? value.pending_count === 0 ? "対象なし" : "確認できません"
+          : `${value.oldest_pending_age_seconds}秒`;
         if (generation === requestGeneration) retentionTarget.textContent = value.pending_count === null
           ? "保持状態は利用できません。"
-          : `保留 ${value.pending_count}件 · 待機 ${value.queued_count}件 · 削除中 ${value.deleting_count}件 · 失敗 ${value.failed_count}件 · 再試行終了 ${value.retry_exhausted_count}件 · 所在不明 ${value.orphan_or_unexpected_missing_count}件 · 期限切れ閲覧可能 ${value.expired_but_readable_violation_count}件 · 最古の保留 ${value.oldest_pending_age_seconds}秒 · 保持処理 ${RETENTION_WORKER_STATES[value.worker_state]} · 最終成功 ${value.last_successful_run_at ?? "記録なし"}`;
+          : `保留 ${value.pending_count}件 · 待機 ${value.queued_count}件 · 削除中 ${value.deleting_count}件 · 失敗 ${value.failed_count}件 · 再試行終了 ${value.retry_exhausted_count}件 · 所在不明 ${value.orphan_or_unexpected_missing_count}件 · 期限切れ閲覧可能 ${value.expired_but_readable_violation_count}件 · 最古の保留 ${oldestPending} · 保持処理 ${RETENTION_WORKER_STATES[value.worker_state]} · 最終成功 ${value.last_successful_run_at ?? "記録なし"}`;
       } catch {
         if (generation === requestGeneration) {
           const target = section === "state" ? owned.get("state").querySelector("[data-settings-state-data] p") : null;

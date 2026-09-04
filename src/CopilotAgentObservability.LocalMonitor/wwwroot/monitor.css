@@ -4248,7 +4248,7 @@ a.kpi-card:hover {
 .local-monitor-compare-table { border-collapse: collapse; table-layout: fixed; width: 100%; }
 .local-monitor-compare-table caption { text-align: left; }
 .local-monitor-compare-table th,
-.local-monitor-compare-table td { border-bottom: 1px solid var(--border, #30363d); overflow-wrap: anywhere; padding: 8px; text-align: left; }
+.local-monitor-compare-table td { border-bottom: 1px solid var(--border, #30363d); overflow-wrap: anywhere; padding: 8px; text-align: left; white-space: normal; }
 .local-monitor-compare-table thead th { background: var(--surface-raised, #161b22); position: sticky; top: 0; z-index: 2; }
 .local-monitor-compare-table th:first-child { width: 34%; }
 .local-monitor-compare-table td:last-child { width: 120px; }

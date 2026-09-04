@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class MonitorSchemaMigrator
 {
-    public const int BaseSchemaVersion = 11;
+    public const int BaseSchemaVersion = 12;
 
     public static void EnsureRawRecordsSchema(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -153,6 +153,7 @@ internal static class MonitorSchemaMigrator
             SqliteSourceCompatibilityStore.TransitionRetainedTraceSourceAttribution(connection, transaction);
         }
         SourceCompatibilitySchemaV11.Ensure(connection, transaction, existingVersion);
+        SemanticAttributeCaptureSchema.Ensure(connection, transaction, existingVersion);
 
         if (existingVersion is null or < BaseSchemaVersion)
         {
@@ -171,7 +172,8 @@ internal static class MonitorSchemaMigrator
                 $"Unsupported newer monitor schema version {existingVersion.Value}.");
         }
 
-        if (existingVersion == BaseSchemaVersion)
+        SemanticAttributeCaptureSchema.Validate(connection, transaction, existingVersion);
+        if (existingVersion >= 11)
         {
             ValidateCurrentTraceSourceAttributionSchema(connection, transaction);
             SourceCompatibilitySchemaV11.Validate(connection, transaction);

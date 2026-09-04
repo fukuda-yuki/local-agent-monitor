@@ -524,7 +524,7 @@ public sealed class SourceCompatibilityStoreTests
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 12 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 13 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
@@ -532,7 +532,7 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Contains("newer", exception.Message, StringComparison.OrdinalIgnoreCase);
         using var verification = Open(database.Path);
-        Assert.Equal(12L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(13L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Theory]
@@ -550,7 +550,7 @@ public sealed class SourceCompatibilityStoreTests
         {
             Execute(connection, """
                 DROP INDEX IX_raw_records_source;
-                UPDATE schema_version SET version = 12 WHERE component = 'monitor';
+                UPDATE schema_version SET version = 13 WHERE component = 'monitor';
                 CREATE TABLE future_monitor_sentinel(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
                 INSERT INTO future_monitor_sentinel(id,value) VALUES(1,'future-state');
                 PRAGMA journal_mode=DELETE;
@@ -582,7 +582,7 @@ public sealed class SourceCompatibilityStoreTests
         Assert.False(File.Exists(database.Path + "-wal"));
         Assert.False(File.Exists(database.Path + "-shm"));
         using var verification = Open(database.Path);
-        Assert.Equal(12L, Scalar(
+        Assert.Equal(13L, Scalar(
             verification,
             "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(0L, Scalar(
@@ -709,7 +709,7 @@ public sealed class SourceCompatibilityStoreTests
         Assert.False(File.Exists(database.Path + "-shm"));
         Assert.False(File.Exists(database.Path + "-journal"));
         using var verification = Open(database.Path);
-        Assert.Equal(11L, Scalar(
+        Assert.Equal(12L, Scalar(
             verification,
             "SELECT version FROM schema_version WHERE component='monitor';"));
         Assert.Equal("current-state", ScalarText(
@@ -801,6 +801,8 @@ public sealed class SourceCompatibilityStoreTests
             Execute(
                 connection,
                 """
+                DROP TABLE source_semantic_capture_keys;
+                DROP TABLE source_semantic_captures;
                 UPDATE schema_version SET version=9 WHERE component='monitor';
                 CREATE TABLE v9_migration_sentinel(
                     id INTEGER PRIMARY KEY,
@@ -819,7 +821,7 @@ public sealed class SourceCompatibilityStoreTests
             .CreateSchema());
 
         Assert.Equal(
-            "Unsupported incomplete monitor schema version 11.",
+            "Unsupported incomplete monitor schema version 12.",
             exception.Message);
         Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(database.Path)));
         Assert.False(File.Exists(database.Path + "-wal"));
@@ -939,6 +941,8 @@ public sealed class SourceCompatibilityStoreTests
             Execute(
                 connection,
                 """
+                DROP TABLE source_semantic_capture_keys;
+                DROP TABLE source_semantic_captures;
                 DROP TABLE IF EXISTS skill_projection_sdk_claims;
                 DROP TABLE IF EXISTS skill_projection_inventory_names;
                 DROP TABLE IF EXISTS skill_projection_inventories;
@@ -971,7 +975,7 @@ public sealed class SourceCompatibilityStoreTests
         store.CreateSchema();
 
         using var verification = Open(database.Path);
-        Assert.Equal(11L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(12L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(
             ["source_observation_id", "trace_id", "resolution_state", "source_application_version"],
             Columns(verification, "source_trace_version_observations"));

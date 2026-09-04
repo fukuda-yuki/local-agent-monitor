@@ -46,6 +46,7 @@
     <None Include="TestData\SchemaMigrations\session\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SchemaMigrations\retention\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\Retention\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\SemanticCapture\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\InstructionFindings\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\HistoricalInstructionAnalysis\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SanitizedExport\**\*" CopyToOutputDirectory="PreserveNewest" />

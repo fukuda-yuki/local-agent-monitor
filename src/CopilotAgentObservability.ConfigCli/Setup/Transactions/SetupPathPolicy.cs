@@ -16,6 +16,25 @@ internal sealed class SetupFileStepException : Exception
 
 internal static class SetupPathPolicy
 {
+    public static string Combine(SetupPathStyle style, params string[] components)
+    {
+        var separator = style == SetupPathStyle.Windows ? '\\' : '/';
+        return string.Join(separator, components.Select((component, index) => index == 0
+            ? component.TrimEnd(separator)
+            : component.Trim(separator)));
+    }
+
+    public static string? GetDirectoryName(SetupPathStyle style, string path)
+    {
+        var separator = style == SetupPathStyle.Windows ? '\\' : '/';
+        var normalized = style == SetupPathStyle.Windows ? path.Replace('/', '\\') : path;
+        var offset = normalized.LastIndexOf(separator);
+        if (offset < 0) return null;
+        return offset == 0 || style == SetupPathStyle.Windows && offset == 2 && normalized[1] == ':'
+            ? normalized[..(offset + 1)]
+            : normalized[..offset];
+    }
+
     public static string ValidateFileTarget(ISetupPlatform platform, string allowedRoot, string targetPath)
     {
         try

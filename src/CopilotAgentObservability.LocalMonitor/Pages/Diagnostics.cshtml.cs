@@ -2,6 +2,7 @@ using CopilotAgentObservability.LocalMonitor.Diagnostics;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using Microsoft.AspNetCore.Mvc.RazorPages;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Pages;
@@ -14,6 +15,25 @@ namespace CopilotAgentObservability.LocalMonitor.Pages;
 /// </summary>
 public sealed class DiagnosticsModel : PageModel
 {
+    internal IReadOnlyList<SemanticAttributeCaptureRow> SemanticCaptures { get; private set; } = [];
+
+    public IActionResult OnPostStartSemanticCapture(string sourceFamily)
+    {
+        Response.Headers.CacheControl = "no-store";
+        if (sourceFamily is null || !SemanticAttributeKeyBaseline.Supports(sourceFamily)) return BadRequest();
+        HttpContext.RequestServices.GetRequiredService<SqliteSourceCompatibilityStore>()
+            .StartSemanticCapture(sourceFamily, HttpContext.RequestServices.GetRequiredService<TimeProvider>().GetUtcNow());
+        return RedirectToPage();
+    }
+
+    public IActionResult OnPostCompleteSemanticCapture(string sourceFamily, string captureId)
+    {
+        Response.Headers.CacheControl = "no-store";
+        if (sourceFamily is null || captureId is null) return BadRequest();
+        var completed = HttpContext.RequestServices.GetRequiredService<SqliteSourceCompatibilityStore>()
+            .CompleteSemanticCapture(sourceFamily, captureId, HttpContext.RequestServices.GetRequiredService<TimeProvider>().GetUtcNow());
+        return completed ? RedirectToPage() : BadRequest();
+    }
     internal MonitorReadiness Readiness { get; private set; } = null!;
 
     internal int IngestionStallThresholdSeconds { get; private set; }
@@ -26,6 +46,8 @@ public sealed class DiagnosticsModel : PageModel
     public async Task OnGetAsync()
     {
         Response.Headers.CacheControl = "no-store";
+        SemanticCaptures = HttpContext.RequestServices.GetRequiredService<SqliteSourceCompatibilityStore>()
+            .ListSemanticCaptures(HttpContext.RequestServices.GetRequiredService<TimeProvider>().GetUtcNow());
         var health = HttpContext.RequestServices.GetRequiredService<MonitorHealthState>();
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
         IngestionStallThresholdSeconds = options.IngestionStallThresholdSeconds;

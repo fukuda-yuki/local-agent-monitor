@@ -82,6 +82,8 @@ public sealed class SourceCompatibilityV10MigrationTests
             INSERT INTO source_trace_version_observations(
                 source_observation_id,trace_id,resolution_state,source_application_version)
             VALUES(1,'{TraceId}','resolved','1.0.74');
+            DROP TABLE source_semantic_capture_keys;
+            DROP TABLE source_semantic_captures;
             DROP TABLE source_compatibility_reconciliation_receipts;
             DROP TABLE source_trace_version_interpretation_heads;
             DROP TABLE source_trace_version_interpretation_supersessions;

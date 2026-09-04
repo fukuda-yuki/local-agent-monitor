@@ -129,8 +129,11 @@ counts are tracked separately from retained diagnostic rows. Overflow counts
 describe only truncated diagnostic identities and never redefine support.
 
 Unknown kind is exactly `span`, `event`, or `attribute`. Unrecognized span and
-event identities map respectively to `span` and `event`; unrecognized attribute
-keys or fields at any OTLP envelope map to `attribute`. Unknown children derive
+event identities map respectively to `span` and `event`; unrecognized structural
+fields at any OTLP envelope map to `attribute`. These counts do not classify
+semantic attribute-key values. The separate bounded capture contract is owned by
+[Telemetry Ingestion](../layers/telemetry-ingestion.md#semantic-attribute-key-diagnostics).
+Unknown children derive
 their version label from their parent observation. Their name is either the
 exact keyed-hash form above or a fixed code-owned transport identifier; count is
 1..1,000,000; first observed time is not after last observed time; and sample
@@ -258,7 +261,7 @@ revision/invalidation and backup rules are owned by
 OTel Skill generations consume that authority through
 [Skill Projection](../layers/skill-projection.md). This does not alter this
 interface's ingest-batch compatibility states, unknown-field diagnostics,
-Claude authority, or Issue #152's unresolved unknown attribute-key drift.
+Claude authority, or the separate semantic attribute-key diagnostics.
 
 ## Claude producer and authority contract
 

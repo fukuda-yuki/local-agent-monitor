@@ -5,6 +5,7 @@ namespace CopilotAgentObservability.LocalMonitor.Retention;
 
 internal sealed class RetentionCleanupCoordinator
 {
+    internal SqliteSourceCompatibilityStore? SemanticCaptureStore { get; init; }
     private readonly RetentionCatalogStore? catalog;
     private readonly RetentionAdapterRegistry? adapters;
     private readonly RetentionSqliteMaintenance maintenance;
@@ -41,6 +42,8 @@ internal sealed class RetentionCleanupCoordinator
     private async ValueTask<RetentionCycleResult> RunCoreAsync(CancellationToken stopScanningToken, CancellationToken drainToken)
     {
         if (catalog is null || adapters is null) return new(0, 0, false, false, null, false);
+        try { SemanticCaptureStore?.ExpireSemanticCaptures(time.GetUtcNow()); }
+        catch (Microsoft.Data.Sqlite.SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { }
         var batch = await catalog.PrepareCleanupBatchAsync(time.GetUtcNow(), RetentionV1Constants.ExpiryScanItemLimit, RetentionV1Constants.ClaimBatchLimit, RetentionV1Constants.ScanElapsedBudget, stopScanningToken).ConfigureAwait(false);
         if (batch.CoverageBlocked) return new(0, 0, false, false, batch.NextEligibleAt, false);
         var work = Channel.CreateBounded<RetentionWorkReference>(new BoundedChannelOptions(RetentionV1Constants.ClaimBatchLimit) { SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });

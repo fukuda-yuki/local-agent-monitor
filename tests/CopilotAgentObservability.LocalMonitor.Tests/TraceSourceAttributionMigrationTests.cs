@@ -91,7 +91,7 @@ public sealed class TraceSourceAttributionMigrationTests
 
         using (var connection = Open(temp.DatabasePath))
         {
-            Assert.Equal(11L, Scalar<long>(
+            Assert.Equal(12L, Scalar<long>(
                 connection,
                 "SELECT version FROM schema_version WHERE component='monitor';"));
             Assert.Equal("copilot-cli", Scalar<string>(
@@ -460,7 +460,7 @@ public sealed class TraceSourceAttributionMigrationTests
         AssertUnavailableAttribution(temp.DatabasePath);
         using (var verification = Open(temp.DatabasePath))
         {
-            Assert.Equal(11L, Scalar<long>(
+            Assert.Equal(12L, Scalar<long>(
                 verification,
                 "SELECT version FROM schema_version WHERE component='monitor';"));
         }
@@ -666,6 +666,8 @@ public sealed class TraceSourceAttributionMigrationTests
             DROP TABLE IF EXISTS skill_projection_generation_inputs;
             DROP TABLE IF EXISTS skill_projection_generations;
             DELETE FROM schema_version WHERE component='skill_projection';
+            DROP TABLE source_semantic_capture_keys;
+            DROP TABLE source_semantic_captures;
             DROP TABLE source_compatibility_reconciliation_receipts;
             DROP TABLE source_trace_version_interpretation_heads;
             DROP TABLE source_trace_version_interpretation_supersessions;

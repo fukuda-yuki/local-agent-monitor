@@ -6,4 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="../../docs/specifications/contracts/source-capabilities/v1/semantic-attribute-key-baseline.json" LogicalName="semantic-attribute-key-baseline.json" />
+  </ItemGroup>
 </Project>
