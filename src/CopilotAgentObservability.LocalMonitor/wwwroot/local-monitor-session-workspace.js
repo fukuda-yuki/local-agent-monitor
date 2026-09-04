@@ -1055,12 +1055,13 @@
       const additionalInstruction = overview.appendChild(el("p", null, `追加の指示 ${format(session.instruction.additional_count)}件`));
       additionalInstruction.dataset.sessionAdditionalInstructionCount = "";
     }
-    overview.append(el("p", null, `状態 ${STATUS_LABELS[session.status]} · 実行 ${format(summary.executions.length)}件`));
+    overview.append(el("p", null, `${session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : `状態 ${STATUS_LABELS[session.status]}`} · 実行 ${format(summary.executions.length)}件`));
     const sourceRow = el("p"); sourceRow.append(document.createTextNode("取得元 ")); const source = sourceRow.appendChild(el("span")); source.dataset.sessionOverviewSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
     const timeRow = el("p"); timeRow.append(document.createTextNode("時刻 ")); const time = timeRow.appendChild(el("span")); time.dataset.sessionOverviewTime = "";
     if (session.timing.state === "recorded") time.textContent = timingLabel(session);
+    else if (session.timing.last_seen_at !== null) time.textContent = `最終観測 ${session.timing.last_seen_at}`;
     else renderFact(time, { state: session.timing.state, count: null });
     overview.append(sourceRow, timeRow);
     const coverage = el("ul", "local-monitor-session-coverage");

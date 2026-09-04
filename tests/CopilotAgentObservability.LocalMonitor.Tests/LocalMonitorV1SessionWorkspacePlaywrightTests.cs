@@ -1367,6 +1367,10 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要");
         await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("VS Code");
         await Expect(page.Locator("[data-session-time]")).ToHaveTextAsync("最終観測 2026-08-26T01:02:03.0000000+00:00");
+        await Expect(page.Locator("[data-session-overview]")).ToBeVisibleAsync();
+        await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("状態未観測");
+        await Expect(page.Locator("[data-session-overview]")).Not.ToContainTextAsync("実行中");
+        await Expect(page.Locator("[data-session-overview-time]")).ToHaveTextAsync("最終観測 2026-08-26T01:02:03.0000000+00:00");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
             await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-fixed-coverage]")).ToContainTextAsync("記録が一部欠けています");
@@ -1381,6 +1385,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("[data-session-additional-instruction-count]")).ToHaveTextAsync("追加の指示 0件");
         await Expect(page.Locator("[data-session-additional-instruction-fact]")).ToHaveCountAsync(0);
+        await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("状態 完了");
+        await Expect(page.Locator("[data-session-overview-time]")).ToHaveTextAsync("1,000 ms");
     }
 
     [Theory]
