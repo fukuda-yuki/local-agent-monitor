@@ -7,37 +7,34 @@ Copilot Chat や GitHub Copilot CLI から送られてくる OTLP HTTP/protobuf 
 Langfuse、Docker Desktop、外部ネットワークは不要です。
 ループバック（`127.0.0.1`）にバインドし、同一マシン内でのみ動作します。
 
-> [!IMPORTANT]
-> このガイドの画面説明は、置換 Issue の完了まで残るインストール済み pre-v1 UI
-> を対象にしています。採用済み Local Monitor v1 は Repository → Session Explorer
-> → Session detail / deterministic Compare の構成で、permanent sidebar や汎用 KPI
-> dashboard を持ちません。現行 authority は
-> [製品定義](../specifications/interfaces/local-monitor-v1-product-definition.md) と
-> [IA 仕様](../specifications/interfaces/local-monitor-v1-ia.md) です。統合後の操作手順は
-> #148 で更新します。
-
 ## 何が確認できるか
 
-画面は左にサイドバー（**概要 / トレース** の 2 項目）、下部に受信ステータスバッジが
-ある構成です。診断はバッジ → ポップオーバー →「詳細診断を開く」の順に開きます
-（`/diagnostics` への直接アクセスも可能）。
+Local Monitor v1 の基本操作は、リポジトリを選ぶ → Session Explorer でセッションを探す
+→ セッション詳細を開く、または明示的に比較を作成する流れです。
+観測・調査・比較は AI なしで利用できます。GitHub Copilot SDK の AI 分析は任意です。
 
-画面は次の 12 個です。
+ヘッダーにはパンくず、受信状態、「設定」があります。受信状態と「設定」は同じ設定モーダルを開きます。
+常設サイドバー、概要 KPI ダッシュボード、一覧の右側プレビューはありません。
 
 | 画面 | 開き方 | 内容 |
 |---|---|---|
-| 概要 | `http://127.0.0.1:4320/` | トークン KPI（実消費 / 実効入力換算 / キャッシュ読取率 / エラー trace）、期間トグル（今日 / 7日 / 30日）、最新の critical alert、モデル別内訳、キャッシュ効率、高コスト trace TOP5、時間帯別トークン、最近のトレース |
-| トレース一覧 | `/traces` | テーブル + 右プレビューパネルの一覧詳細構成。プロンプト / モデル / 状態 / 期間で絞り込み、トークン・所要・時刻でソート |
-| トレース詳細 | `/traces/{traceId}` | 実行の流れを **フロー / waterfall** セグメントで切替表示。ターンカード、並行ツールのグループ表現、失敗 → 再試行の回復ペア、右列に常設のキャッシュ列 |
-| スパンインスペクタ | 詳細画面でスパンをクリック | 右パネルに **整形 / raw** タブ。整形はメッセージ構成・トークン内訳・メタ、raw は OTLP span JSON 全文 |
-| エラー解析モード | エラーを含む trace の詳細画面 | エラー要約ストリップ、エラー一覧（回復済み / 未回復）、エラー詳細、入力トークン推移（128K 上限の目安線付き） |
-| Copilot 解析ドロワー | 詳細画面の「Copilot で解析」 | 観点を選んで raw trace をローカルの Copilot SDK で解析。チャット形式の追い質問（履歴再送）に対応 |
-| Alert Center | 概要の最新 critical alert、トレース詳細の「関連 Alert」、または `/alerts` | frozen alert receipt とその lifecycle を一覧・絞り込みし、根拠となる証拠、再発グループ、抑制状況を確認。acknowledge / dismiss / resolve / reopen を明示操作 |
-| Cost | Overview / Diagnostics の固定リンク、Session / Alert Center の文脈リンク、または `/costs` | pricing catalog/configuration の preview・commit、明示 recalculation と durable retry history、Session estimate history/delta、currency/registry 別 range total・UTC daily trend・analytics/coverage、Session / UTC calendar day / configured rolling period budget 状態を確認 |
-| 診断 | ステータスバッジ → ポップオーバー →「詳細診断を開く」 | 取り込みパイプライン 4 段の状態、コンポーネント確認、readiness しきい値、取り込み履歴、リポジトリメタデータ診断 |
-| 履歴インポート | 診断ページの「履歴インポート」カード → `/historical-import` | 明示的に選択した GitHub Copilot CLI / Claude Code の履歴 source を preview し、対応済み source のみ確認後に import。live Session と historical observation は別 tab で表示 |
-| サニタイズ済み証拠の取り込み | `/sanitized-import` へ直接アクセス | frozen v1 ZIP の preview、明示確定、取り込み結果、bounded history。raw telemetry は復元しない |
-| runtime backup と restore | 概要の「runtime backup と restore」→ `/backup-restore` | raw-bearing な online backup の作成・ダウンロードと archive の復元前検査。restore は Local Monitor を停止して Config CLI から実行 |
+| リポジトリ選択 | `http://127.0.0.1:4320/` | リポジトリのカード、すべてのセッション、リポジトリ未設定のセッション |
+| Session Explorer | `/repositories/{repositoryId}/sessions` | リポジトリ内のセッションを検索・絞り込み、直接開く |
+| すべてのセッション / 未設定 | `/sessions` / `/sessions/unassigned` | リポジトリを指定しない調査、手動割り当て |
+| セッション詳細 | `/sessions/{sessionId}` | トークン、階層タイムライン、選択した記録のインスペクタ |
+| 比較 | Explorer の「比較を作成」→ `/repositories/{repositoryId}/comparisons/{comparisonId}` | 基準と比較対象の固定指標、利用可能件数、根拠への移動 |
+| 設定 | ヘッダーの「設定」 | 状態 / 受信 / AI設定 / リポジトリ / アーカイブ / 保存・バックアップ / 診断 |
+
+旧 `/traces` 一覧と `/historical-analysis` は廃止され、404 を返します。
+`/traces/{traceId}` は正確なトレースを調べる技術情報の画面として残ります。
+`/diagnostics`、`/historical-import`、`/backup-restore` は管理の詳細画面、
+`/alerts`、`/costs`、`/sanitized-import` は個別の用途の画面として引き続き利用できます。
+設定の「保持と削除」は `/diagnostics#retention-diagnostics` を開き、対象別の保持操作は
+`/retention/{targetKind}/{targetId}` で行います。
+Canvas、CLI と以下の既存 machine API は、この画面構成の変更では廃止されません。
+
+製品の正本は [製品定義](../specifications/interfaces/local-monitor-v1-product-definition.md) と
+[IA 仕様](../specifications/interfaces/local-monitor-v1-ia.md) です。
 
 主な API は次のとおりです。
 
@@ -65,15 +62,12 @@ Langfuse、Docker Desktop、外部ネットワークは不要です。
 HTTP restore endpoint はありません。restore は Local Monitor を停止し、Config CLI の
 `runtime-backup restore` だけで実行します。
 
-API（`/api/monitor/*`）と SSE は **sanitized metadata のみ** を返します（プロンプトを含みません）。
-raw body（tool arguments / results、sub-agent instructions / responses、system prompt）と PII は
-既定で trace 詳細ページに表示されます（server 描画、実行されない text）。さらに、トレースを
-不透明な TraceId ではなく入力プロンプトで識別できるよう、**概要とトレース一覧でも
-代表プロンプトを既定で表示**します（D032。raw store の OTLP から server 側で抽出した、実行されない text。
-same-origin / `Cache-Control: no-store` を強制）。`--sanitized-only` を付けて起動すると
-receiver / health / machine API 専用になり、Razor Pages、human static assets、
-人向け画面、`/api/local-monitor/v1/*` は登録されません。画面ごとの metadata-only
-表示や短縮 TraceId への切り替えはありません。
+凍結済みの `/api/monitor/*`、`/api/session-workspace/*` v1 と SSE は sanitized metadata を返します。
+これに対し `/api/local-monitor/v1/*` はローカルの人向け UI 用で、raw 内容を含むため共有用 API ではありません。
+記録された指示やツール入出力は、保存期間と取得状態が許す範囲でローカル画面から確認できます。
+`--sanitized-only` では受信・health・対応する machine API だけを提供し、Razor Pages、
+human static assets、raw-local route、`/api/local-monitor/v1/*` を登録しません。
+画面ごとの metadata-only 表示はありません。
 
 ## 必要なもの
 
@@ -369,24 +363,32 @@ code .
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-copilot-cli-env --profile raw-local-receiver
 ```
 
-出力された環境変数を適用してから `gh copilot` コマンドを実行します。
+出力された環境変数を適用した後、同じ shell で送信先を monitor に変更してから実行します。
+この CLI 用 profile の既定は receiver の `4319` です。
+
+```powershell
+$env:OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4320"
+copilot -p "動作確認用の短い質問"
+```
 
 ### Step 3 — Copilot を使う
 
-VS Code で Copilot Chat に質問する、または `gh copilot -- -p "..."` を実行します。
+VS Code で Copilot Chat に質問する、または `copilot -p "..."` を実行します。
 モニターはリアルタイムでテレメトリを受信し、ブラウザ UI が自動更新されます。
 
 ### Step 4 — ブラウザで確認する
 
-`http://127.0.0.1:4320/`（概要）を開くと、トークン KPI と最近のトレースが表示されます。
-受信直後に projection が走り、`/traces`（トレース一覧）に集約された trace 行が現れます。
-各トレースは入力プロンプトで識別できます（既定）。
+1. `http://127.0.0.1:4320/` を開き、受信状態を確認します。
+2. リポジトリのカードを開きます。見つからない場合は「すべてのセッション」または
+   「リポジトリ未設定のセッション」を開きます。
+3. 対象のセッション行を開き、取得元、開始時刻、指示、実行の記録を確認します。
+   受信から表示まで projection の処理待ちが生じる場合があります。
+
+設定の成功だけでなく、実行した内容がセッション詳細に反映されたことを確認してください。
 
 ## Alert Center
 
-概要の「最新の critical alert」、トレース詳細の「関連 Alert」、または
-`http://127.0.0.1:4320/alerts` から開きます。サイドバーは従来どおり
-**概要 / トレース** の2項目で、Alert Center は作業対象の文脈から移動します。
+`http://127.0.0.1:4320/alerts`、または技術的なトレース詳細の「関連 Alert」から開きます。
 
 一覧では重大度、lifecycle 状態、ルール、source、repository、workspace、期間、
 完全性で絞り込めます。各行の詳細には receipt が固定した観測値・実効しきい値・
@@ -403,8 +405,8 @@ Session がある場合だけ `supported` です。同じ Session の複数 rece
 画面の「Coverage / suppressions」に表示される抑制 fact はアラートではありません。
 
 取得上限に達して `snapshot_state: incomplete` になった場合、画面は取得範囲内の
-結果として表示します。空でも全体の 0 件とは断定せず、概要の項目を「最新」とは
-表示せず、「Recurring patterns」も `incomplete_snapshot` のままです。
+結果として表示します。空でも全体の 0 件とは断定せず、
+「Recurring patterns」も `incomplete_snapshot` のままです。
 
 状態変更は詳細に表示された許可済み操作（acknowledge / dismiss / resolve / reopen）
 から行います。画面は表示中の revision を送信し、競合した場合は上書きせず最新状態を
@@ -433,8 +435,8 @@ lifecycle revision conflict は v1 と同様に明示し、別の lifecycle は�
 
 ## Estimated-cost analytics
 
-`http://127.0.0.1:4320/costs` はサイドバーへ3項目目を増やさず、データがない場合も
-Overview と Diagnostics の固定 Cost entry から開けます。Session または Alert Center
+`http://127.0.0.1:4320/costs` は個別の費用調査画面です。データがない場合も
+Diagnostics の固定 Cost entry から開けます。Session または Alert Center
 の文脈リンクでは exact Session / estimate に絞り込めます。次の順で使用します。
 
 1. safe catalog route から bundled/local-override catalog の metadata と provider
@@ -582,7 +584,8 @@ setup の静的成功、`doctor evaluate` の処理成功、verification start �
 
 ## モックデータで試す
 
-Copilot を使わなくても、リポジトリ同梱の合成モックデータで全画面の動作を確認できます。
+Copilot を使わなくても、リポジトリ同梱の合成モックデータで技術的なトレース詳細を試せます。
+このデータは Local Monitor v1 の全セッション操作や比較を保証するものではありません。
 モックデータは完全な合成データで（trace id は `demo-` プレフィックス、
 `user.email` はダミー値）、実プロンプトや PII を含みません。
 
@@ -596,17 +599,14 @@ pwsh scripts\demo\seed-monitor-mock-data.ps1 -MonitorUrl http://127.0.0.1:4320
 
 投入されるのは 9 トレースです: 3 ターン + 並行ツール + キャッシュトークン入りの
 リッチトレース（正常 / 回復済みエラー / 異常終了の 3 種）、エラー一覧用の最小回復ケース、
-モデル・クライアント・トークン量を変えた一覧用トレース 4 件、概要用の単発トレースです。
-概要 KPI、一覧のフィルタ・ソート、詳細のフロー / waterfall、キャッシュ列、
-スパンインスペクタ、エラー解析モードがすべて点灯します。
+モデル・クライアント・トークン量を変えたトレース 4 件と単発トレースです。
+`/traces/{traceId}` の技術的な詳細、スパンインスペクタなどの確認に使えます。
 
 注意点:
 
 - **1 つの DB につき投入は 1 回**にしてください。同じ DB へ再投入すると同一 trace の
   スパンが重複します。やり直すときは、新しい `--db` パスでモニターを起動し直してから
   再投入してください。
-- 投入直後は全データが「今日」の受信になるため、概要の期間トグル
-  （今日 / 7日 / 30日）はどの期間でも同じ値になります（実運用の初日と同じ挙動です）。
 - Copilot 解析ドロワーの実行には、ローカルで利用可能な GitHub Copilot SDK
   （または BYOK provider 設定）が必要です。未設定の場合、解析 run は
   Failed で終了します（ドロワー UI 自体の表示は確認できます）。
@@ -625,46 +625,94 @@ CLI の既定は `4319`（ConfigCli receiver）です。モニター（4320）�
 
 ## 画面ガイド
 
-### 概要
+### リポジトリを選ぶ
 
-トークンコストの把握を最優先にした KPI ダッシュボードです。今日 / 7日 / 30日の
-期間トグルと、次の KPI を表示します。
+`/` のカードには表示名、アクティブな割り当て済みセッション数、最後に記録された時刻を表示します。
+同名でも別のリポジトリとして扱います。「すべてのセッション」では全体を、
+「リポジトリ未設定のセッション」では未割り当ての記録を探せます。
 
-- **実消費トークン**: 未キャッシュ入力 + 出力（= 総量 − キャッシュ読取）。
-  agent セッションは毎ターン履歴を再送するため、キャッシュ読取込みの総量は
-  大半がキャッシュで占められます。ヒーロー数値は実際に新規処理された
-  トークンとし、キャッシュ読取込みの総量とキャッシュ読取量は同カードの
-  内訳行に表示します。前期間比較も実消費ベースです。
-- **実効入力換算**: キャッシュ読取 = 0.1x 換算のコスト近似。
-- **キャッシュ読取率**: キャッシュ読取トークン ÷ 入力トークン
-  （入力トークンはキャッシュ読取分を含む値）。カードに分子 ÷ 分母の
-  内訳行を表示するので、率の根拠を数値で確認できます。
-- **エラー trace 数**: クリックでエラーのみの一覧へドリルダウン。
+「リポジトリを追加」や設定の「リポジトリ」で管理し、Explorer の行の操作から手動で割り当てます。
+手動割り当ての変更・解除・自動割り当てへの復帰は元のテレメトリを書き換えません。
+名前、作業ディレクトリ、指示文、時刻の近さから所属を推測することはありません。
 
-下段にはモデル別トークン内訳、モデル別キャッシュ効率、高コスト trace
-TOP5、時間帯別トークン分布、最近のトレースが並びます。
+### Session Explorer
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor 概要" src="../assets/screenshots/local-monitor-overview.png">
-</p>
+一覧の列は「セッション / 状態 / 要約 / トークン合計 / 開始」です。
+指示のラベル、スキル、ツールの検索に加え、期間、取得元、モデル、状態、記録の有無で絞り込み、
+「次のページ」で続きを開きます。行を開くとセッション詳細へ移動します。
+検索語とモデル条件は現在のページだけに保持され、再読み込みや戻る・進むでリセットされます。
 
-### トレース一覧
+「要約」はスキル、ツール、サブエージェント、エラー、再試行の記録を示します。
+未記録・取得元の非対応・記録の欠落・取得の安定性が未確認の状態を区別し、欠けた値を 0 にしません。
+指示内容が取得できない、または保存期限を過ぎた場合は安全な日付ベースのラベル等を表示します。
 
-テーブル + 右プレビューパネル（一覧と詳細を同じ画面で並べる構成）です。行はプロンプト / モデル /
-トークン / cache% / 所要 / 時刻で構成され、既定はトークン降順です。上部の検索
-（プロンプト・TraceId）、モデル / 状態（正常・エラー・回復済み・異常終了）/ 期間の
-フィルタで絞り込めます。行をクリックすると、ページ遷移せずに右パネルへミニ KPI・
-トークン構成・コストの大きいスパン TOP3 が表示され、「詳細を開く」で詳細画面へ
-進めます。
+### AI を使わずに比較する
 
-> プロンプト検索は server 側の TraceId 部分一致 + client 側の読み込み済み行の
-> prompt label フィルタです（読み込み済み以外を含む prompt 全文検索は未対応）。
+1. リポジトリの Session Explorer で「比較を作成」を押します。通常の一覧には選択欄はありません。
+2. 各セッションを「基準」または「比較対象」に指定します。それぞれ 1 件以上必要です。
+3. 「比較を確認」で対象と除外を確認し、確認画面の「比較を作成」を押します。
+   選択が古くなった場合や条件を満たさない場合は、表示された内容に従って選び直します。
+4. 比較画面の「指標 / 基準 / 比較対象 / 差」を確認し、根拠のリンクから対象セッションや記録を開きます。
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース一覧" src="../assets/screenshots/local-monitor-trace-list.png">
-</p>
+画面は「対象 / トークン / 入力トークンの内訳 / 時間・実行量 / スキル / ツール /
+サブエージェント / エラー・再試行 / 比較条件」の順です。値のあるセッションの中央値、最小・最大、
+利用可能件数と補足の合計を確認します。欠けた値は計算上の 0 ではありません。
+スキル・ツール・サブエージェントの名前付き行は検索とページ送りですべて確認できます。
+件数、取得元、モデル、記録範囲が異なる場合は「比較条件」も確認してください。
 
-### トレース詳細（フロー / waterfall + キャッシュ列）
+比較は固定された記録から決定的に計算され、LLM、スコア、順位、改善の判定は使いません。
+スキル変更前後を調べる場合も、正確な履歴スナップショットの digest が根拠となる組を使い、
+名前や時刻の近さだけで変更前後と判断しないでください。
+作成前の選択は再読み込みで失われます。作成後は比較 URL から同じ snapshot を開けますが、
+24 時間で期限切れとなり、恒久的な保存済み比較一覧やバックアップには入りません。
+
+### セッション詳細
+
+見出しで指示、状態、取得元、時刻、アーカイブ状態、記録の制限を確認します。
+「トークン合計」は入力と出力、「入力トークンの内訳」はキャッシュから読み込みと新規入力を示し、
+取得できた場合はキャッシュ書き込みも別に表示します。ノードを選んでも上部の値はセッション全体です。
+
+入力・出力が記録されていても、取得元が合計値を送っていない場合、合計は入力と出力を足して補いません。
+上部の集計はセッション全体が対象のため、一部の実行に記録が欠けていると欠落表示が残りますが、
+実行ごとの記録では取得できた入力・出力を確認できます。セッションの完了状態は Hook の終了信号などの
+終了記録で判定する別の情報です。終了記録を受信しても、欠けたトークン値が補われるわけではありません。
+
+階層タイムラインには実行ごとの Agent、スキル、ツール、サブエージェント等を表示し、
+最新の実行が初めに展開されます。ノードを選ぶとインスペクタで入出力、状態、関連する記録を確認できます。
+親子関係や時刻が不明な場合は推測しません。「技術情報」から正確な証拠へ進めます。
+スキルの実行時スナップショットと現在のファイルは別の内容として確認してください。
+現在のファイルを過去の実行内容の代わりには扱いません。
+
+### 任意の AI 分析
+
+「設定」→「AI設定」で GitHub Copilot の認証と利用準備を確認します。
+準備ができると「AIで分析」等の操作が現れ、利用者が明示したときだけ実行します。
+明示的に AI 操作を開始したときに、選択した内容が GitHub Copilot に送信されます。SQLite ファイル全体や任意の SQL を渡す機能ではありません。
+
+セッション全体のレポートは履歴に残り、「再分析」は新しい snapshot と結果を作ります。
+過去の分析は上書きされませんが、保存期限に従います。ノードの結果は一時的で履歴には入りません。
+リポジトリの選択範囲は実行前に対象を確認します。リポジトリ選択と比較の結果は 24 時間の運用用保存で、
+恒久的な履歴やバックアップには入りません。比較 AI は計算済みの比較結果を解釈し、値を再計算しません。
+AI の所見と観測された事実は区別し、根拠リンクから確認します。AI の失敗でも通常の調査・比較は続けられます。
+
+### アーカイブと復元
+
+セッションやリポジトリをアーカイブすると通常の一覧・比較対象から除外されます。
+「アーカイブ済みを含む」や「設定」→「アーカイブ」で確認・復元できます。
+リポジトリのアーカイブは配下のセッション自体をまとめてアーカイブする操作ではありません。
+直接のセッション URL は引き続き開け、新しいデータの到着だけでは復元されません。
+アーカイブは削除・保存期間・ピン留めとは別で、内容の保存期限は延長しません。
+
+### 統合された設定
+
+ヘッダーの「設定」は「状態 / 受信 / AI設定 / リポジトリ / アーカイブ / 保存・バックアップ / 診断」を開きます。
+受信状態からは同じモーダルの「受信」へ進みます。Escape または閉じる操作で元の画面へ戻れます。
+受信の endpoint や起動・受信状況を確認し、詳細診断、保存・バックアップ等の個別操作へ進めます。
+`/?settings=diagnostics` のように特定セクションを直接開くこともできます。
+
+### 技術的なトレース詳細（フロー / waterfall + キャッシュ列）
+
+`/traces/{traceId}` は正確なトレースの技術調査用です。以下はセッション詳細とは別の画面です。
 
 trace を開くと、パンくず・プロンプト見出し・状態ピル（正常 / エラー · 回復済み /
 エラー · 異常終了）・トークン合計（キャッシュ / 入力 / 出力の内訳）の下に、
@@ -683,14 +731,6 @@ trace を開くと、パンくず・プロンプト見出し・状態ピル（�
 - ビュー選択とスパン選択は URL（`?view=waterfall&span=...`）に保存され、
   リロードや共有で復元されます。
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース詳細（フロー）" src="../assets/screenshots/local-monitor-trace-detail-flow.png">
-</p>
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース詳細（waterfall）" src="../assets/screenshots/local-monitor-trace-detail-waterfall.png">
-</p>
-
 ### スパンインスペクタ
 
 フローまたは waterfall のスパンをクリックすると、右列がスパンインスペクタに
@@ -703,10 +743,6 @@ trace を開くと、パンくず・プロンプト見出し・状態ピル（�
   OTLP span JSON 全文を表示します（「JSON をコピー」付き）。整形抽出が
   できないスパンでも raw タブは常に機能します。
 - `--sanitized-only` では画面自体を登録せず、detail route も 404 です。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor スパンインスペクタ" src="../assets/screenshots/local-monitor-span-inspector.png">
-</p>
 
 ### エラー解析モード
 
@@ -721,10 +757,6 @@ trace を開くと、パンくず・プロンプト見出し・状態ピル（�
   未回復 = 赤）、エラー詳細（span id・種別・発生ターン・モデル・例外メッセージ）、
   「原因の手がかり — 入力トークンの推移」（128K 上限の赤破線付きターン別バー）を
   表示します。エラー行をクリックするとフロー側の該当カードが選択されます。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor エラー解析モード" src="../assets/screenshots/local-monitor-error-mode.png">
-</p>
 
 ### Copilot 解析ドロワー
 
@@ -754,15 +786,9 @@ Host ヘッダー検証を強制し、POST は CSRF header を必要とします
 
 ### 診断
 
-サイドバー下部の受信ステータスバッジ（「正常 · 受信中」等）をクリックすると
-ポップオーバーが開き、`/health/ready` の結果と取り込みパイプライン 4 段
-（① 受信 / ② 書き込みキュー / ③ Projection / ④ DB · migration）の状態を確認できます。
-「詳細診断を開く」で `/diagnostics` へ、「取り込み履歴」で
-`/diagnostics#ingestion-history`（履歴セクションが展開された状態）へ進みます。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor 受信ステータスポップオーバー" src="../assets/screenshots/local-monitor-status-popover.png">
-</p>
+ヘッダーの「設定」→「診断」から `/diagnostics` を開きます。
+受信状態は同じ設定モーダルの「受信」で確認できます。
+取り込み履歴は `/diagnostics#ingestion-history` からも開けます。
 
 診断ページでは、パイプライン各段の詳細、コンポーネント確認（loopback bind / DB /
 migration / writer / projection worker / ingestion queue）、readiness しきい値の実効値、
@@ -778,11 +804,6 @@ URL、owner、ローカルパス、ユーザー情報は表示されません。
 含まない canonical GitHub HTTPS URL の `vcs.repository.url.full` だけがある場合に限り、
 repository segment をラベルとして使用します。名前が危険な場合や、metadata 自体がない
 場合に prompt、CWD、path、時刻の近さからリポジトリを推測することはありません。
-診断ページでもナビは 2 項目のままです。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor 診断" src="../assets/screenshots/local-monitor-diagnostics.png">
-</p>
 
 ### 履歴インポート
 
@@ -876,18 +897,18 @@ raw body（tool arguments / results、sub-agent instructions / responses、syste
 PII（`user.id` / `user.email`）は **既定で表示されます**。trace-detail page（スパン
 インスペクタの raw タブと raw OTLP ペイロードセクション）に描画され、
 `GET /traces/{rawRecordId}/raw` でも個別の raw OTLP JSON を確認できます。
-加えて、概要とトレース一覧、trace 詳細の見出しでは、各トレースの**代表入力
-プロンプト**を server 側で抽出して表示します（D032。プロンプトのみ raw 扱いで、他の列は
-sanitized メタデータ。`/api/monitor/*` と SSE はプロンプトを含みません）。
+Session Explorer とセッション詳細では、取得・保存状態が許す範囲で指示ラベルを表示します。
+凍結済み `/api/monitor/*` と SSE はプロンプトを含みません。
 
-raw を表示する全ページ（概要 / trace 一覧 / trace 詳細 / raw route）は次を満たします:
+raw を表示するページと route は次を満たします:
+
 
 - same-origin アクセスのみ（cross-site は `403`）
 - `Cache-Control: no-store`
 - HTML エスケープされた、実行されない text として描画（スクリプト実行なし）
 
 `--sanitized-only` を付けて起動すると receiver / health / machine API 専用になり、
-概要 / 一覧 / trace 詳細を含む Razor Pages、human static assets、Copilot 解析ドロワー、
+セッション画面 / trace 詳細を含む Razor Pages、human static assets、Copilot 解析ドロワー、
 raw-local route、`/api/local-monitor/v1/*` は登録されません。既知の人向け GET / HEAD は
 空 body の `404` と `Cache-Control: no-store` を返します。画面ごとの metadata-only
 fallback はありません。
@@ -898,8 +919,7 @@ raw store ファイル（`data\monitor.db` 等）を repository に commit し�
 ## SSE によるリアルタイム更新
 
 `GET /events`（`text/event-stream`）を購読すると、新しい取り込みが projection されるたびに
-通知（`data: {}`）が届きます。ブラウザの概要や `/traces` はこれを使って
-自動的に API を再読み込みします。
+通知（`data: {}`）が届きます。この通知は変更の通知だけで、セッション本体や raw 内容を返しません。
 
 通知には raw payload・PII を含みません。
 
@@ -1019,6 +1039,9 @@ Local Monitor release を先に install し、restore 後に setup を再実行�
 [docs/specifications/security-data-boundaries.md](../specifications/security-data-boundaries.md) を参照してください。
 
 ## Copilot raw analysis
+
+この節は技術的なトレース詳細の既存解析機能です。セッションや比較の v1 AI 分析は
+[任意の AI 分析](#任意の-ai-分析)を参照してください。以下の BYOK 設定は v1 の provider 選択機能ではありません。
 
 raw default の Local Monitor では、trace 詳細の「Copilot で解析」ドロワーから
 raw analysis run を開始できます。これは captured raw trace / raw record / span context を

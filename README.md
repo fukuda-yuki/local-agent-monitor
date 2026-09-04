@@ -44,82 +44,34 @@ Copilot は内部で多くのステップを踏んでいます。LLM の呼び�
 VS Code Copilot Chat からテレメトリを直接受信し、ローカル DB に蓄積してブラウザで確認する  
 **観測 UI** です（`http://127.0.0.1:4320`）。外部サーバーは不要です。
 
-> [!IMPORTANT]
-> Local Monitor v1 の採用済み製品形は Repository → Session Explorer →
-> Session detail / deterministic Compare です。詳細は
-> [製品定義](docs/specifications/interfaces/local-monitor-v1-product-definition.md)
-> と [IA 仕様](docs/specifications/interfaces/local-monitor-v1-ia.md) を参照してください。
-> 以下の画面説明と画像は、置換 Issue の完了まで残るインストール済み pre-v1 UI の
-> 操作ガイドです。#148 が統合実装後のガイドを更新します。
+### リポジトリからセッションを調べる
 
-> [!NOTE]
-> 画面キャプションに掲載されているスクリーンショット画像は表示例（デモデータセット）です。実際の観測時は、画面右上等の受信ステータスバッジ（`受信中` / `未接続`）でリアルタイム接続状態を確認できます。
+`/` でリポジトリを選び、Session Explorer でセッションを探し、行を開いて詳細を確認します。
+「すべてのセッション」と「リポジトリ未設定のセッション」からも調査できます。
+ヘッダーのパンくずで戻り、受信状態と「設定」から管理操作を開きます。
 
-### 概要ダッシュボード
+セッション詳細では「トークン合計」（入力 / 出力）と「入力トークンの内訳」
+（キャッシュから読み込み / 新規入力 / キャッシュ書き込み）を確認し、階層タイムラインから
+ツール、スキル、サブエージェントの記録へ進めます。記録されていない値は 0 と扱いません。
 
-トークンコストの把握を最優先にした KPI ダッシュボードです。
+### AI を使わずに比較する
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor 概要" src="./docs/assets/screenshots/local-monitor-overview.png">
-</p>
+リポジトリの Session Explorer で「比較を作成」を押し、「基準」と「比較対象」を明示的に選びます。
+「比較を確認」で対象を確認してから作成すると、固定指標のセッションごとの中央値・範囲・
+利用可能件数と、その根拠を調べられます。比較の計算に LLM や認証は必要ありません。
 
-今日 / 7日 / 30日のトークン合計・実効入力換算・キャッシュ読取率・エラー trace 数を即時把握。  
-モデル別トークン内訳とキャッシュ効率、高コスト trace TOP5、時間帯別分布、最近のトレースから
-気になる trace へ直接ジャンプできます。
+GitHub Copilot SDK による AI 分析は任意です。「設定」の「AI設定」で利用準備を確認し、
+明示的に実行した場合に選択した内容が GitHub Copilot に送信されます。
+AI の未設定や失敗で、セッション調査や比較が使えなくなることはありません。
 
-### トレース一覧（master-detail）
+### 設定とデータ管理
 
-保存されたすべての実行トレースをテーブル + 右プレビューで絞り込みます。
+「設定」には状態、受信、AI設定、リポジトリ、アーカイブ、保存・バックアップ、診断をまとめています。
+リポジトリとセッションのアーカイブは元に戻せる非表示操作で、削除や保存期間の延長ではありません。
+`--sanitized-only` で起動すると受信・health・対応する machine API 専用となり、人向け UI は提供しません。
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース一覧" src="./docs/assets/screenshots/local-monitor-trace-list.png">
-</p>
-
-プロンプト・モデル・状態（正常 / 回復済みエラー / 異常終了）・期間でフィルタし、
-トークン・所要・時刻でソート。行を選ぶとページ遷移なしで右パネルにミニ KPI・
-トークン構成・高コストスパン TOP3 が表示されます。各トレースは入力プロンプトで識別できます（既定）。
-
-### トレース詳細（フロー / waterfall + キャッシュ列）
-
-エージェントの実行の流れをターン単位で調査します。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース詳細（フロー）" src="./docs/assets/screenshots/local-monitor-trace-detail-flow.png">
-</p>
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース詳細（waterfall）" src="./docs/assets/screenshots/local-monitor-trace-detail-waterfall.png">
-</p>
-
-- **フロー / waterfall 切替**: ターンカードの時系列表示と時間軸バー表示をワンクリックで切替。並行ツール呼出は「⑂ 並行 N 件」、失敗 → 再試行は回復ペアとして表現
-- **常設キャッシュ列**: 読取率・実効入力換算・ターン別キャッシュ読取率を常時表示
-- **スパンインスペクタ**: スパンをクリックすると整形（メッセージ構成・トークン内訳）と raw（OTLP span JSON 全文）を右パネルで確認
-- **エラー解析モード**: エラーを含む trace ではエラー要約・エラー一覧（回復済み / 未回復）・入力トークン推移（128K 目安線）に自動で切替
-
-「なぜ意図しない回答をしたか」「どのツールがボトルネックか」「キャッシュは効いているか」を根本原因レベルで調べられます。
-
-### Copilot 解析ドロワー
-
-明示的な解析実行時、選択した記録内容を GitHub Copilot へ送信します。
-
-観点（トークン / キャッシュ / エラー / 遅延 / ツール利用 / エージェントの流れ）を選んで実行し、
-所見にチャット形式で追い質問できます。
-
-### 診断
-
-テレメトリの受信状況を段階的に確認します。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor 診断" src="./docs/assets/screenshots/local-monitor-diagnostics.png">
-</p>
-
-サイドバーの受信ステータスバッジ → ポップオーバー → 詳細診断の順に、受信 / 書き込み /
-Projection / 表示の 4 段の状態、readiness しきい値、取り込み履歴を確認できます。
-診断ページの明示的なカードから `/historical-import` を開くと、選択した履歴 source の
-metadata-only preview、confirmation、結果/履歴を確認できます。ページを開いただけで
-source を検索・読み取ることはありません。現在の GitHub Copilot CLI / Claude Code profile は
-format 未承認のため、content を読まず zero-candidate / import 不可を明示します。
-詳細は [Local Monitor ユーザーガイド](docs/user-guide/local-monitor.md#履歴インポート) を参照してください。
+操作手順と技術的なトレース詳細・履歴インポート等の導線は
+[Local Monitor ユーザーガイド](docs/user-guide/local-monitor.md) を参照してください。
 
 ---
 
@@ -186,7 +138,7 @@ Windows x64 Release ZIP をお使いの場合は `.\scripts\setup.ps1` に同じ
 
 > [!IMPORTANT]
 > スクリプト実行時の **`success: true` は設定ファイルの静的検証（生成・書き込み）が成功したことを意味します**。実際のテレメトリ受信完了を示すものではありません。
-> 設定適用後、VS Code で Copilot Chat を実行し、Local Monitor 画面（`http://127.0.0.1:4320`）に最初のトレース（First Trace）が表示されたことをもって環境構築完了と判定してください。
+> 設定適用後、VS Code で Copilot Chat を実行し、Local Monitor 画面（`http://127.0.0.1:4320`）からセッションを開き、実行内容が反映されたことをもって環境構築完了と判定してください。
 
 詳しい対象範囲とロールバック条件は [Local Ingestion Monitor ガイド](docs/user-guide/local-monitor.md) を参照してください。
 

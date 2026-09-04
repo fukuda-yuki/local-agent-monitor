@@ -164,16 +164,21 @@ public sealed class LocalMonitorV1SessionDetailPagingProofTests
         var children = new[]
         {
             Node("node-00000000000000000000000000000012", "invalid", null, 0),
-            Node("node-00000000000000000000000000000011", "missing", null, 99),
+            Node("node-00000000000000000000000000000011", "missing", null, 99) with { RelationshipAuthority = "explicit" },
             Node("node-00000000000000000000000000000010", "recorded", 638917344000000010, 100),
+            Node("node-00000000000000000000000000000013", "missing", null, 0) with { RelationshipAuthority = "unknown" },
         };
-        using var json = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeNode(Snapshot(children), RootNodeId));
+        var snapshot = Snapshot(children);
+        using var json = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeNode(snapshot, RootNodeId));
 
-        Assert.Equal(children.OrderBy(TimeGroup).ThenBy(static node => node.StartUtcTicks ?? 0)
-                .ThenBy(static node => node.SourceOrdinal).ThenBy(static node => node.NodeId, StringComparer.Ordinal)
-                .Select(static node => node.NodeId),
+        Assert.Equal(new[] { "node-00000000000000000000000000000010", "node-00000000000000000000000000000011", "node-00000000000000000000000000000012" },
             json.RootElement.GetProperty("related").GetProperty("children").EnumerateArray()
                 .Select(static item => item.GetProperty("node_id").GetString()));
+        Assert.Equal(4, json.RootElement.GetProperty("node").GetProperty("child_count").GetInt32());
+        using var timeline = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeTimeline(snapshot, ExecutionId, RootNodeId, 200, null, new byte[32]));
+        Assert.Equal(new[] { "node-00000000000000000000000000000010", "node-00000000000000000000000000000013", "node-00000000000000000000000000000011", "node-00000000000000000000000000000012" },
+            timeline.RootElement.GetProperty("items").EnumerateArray().Select(static item => item.GetProperty("node_id").GetString()));
+        Assert.Equal("unknown", timeline.RootElement.GetProperty("items")[1].GetProperty("relationship_authority").GetString());
     }
 
     [Fact]
@@ -183,6 +188,15 @@ public sealed class LocalMonitorV1SessionDetailPagingProofTests
         var exception = Assert.Throws<LocalMonitorV1SessionDetailException>(() =>
             LocalMonitorV1SessionDetailApplication.SerializeNode(Snapshot(children), RootNodeId));
         Assert.Equal("workspace_too_large", exception.Error);
+        children[0] = children[0] with { RelationshipAuthority = "explicit" };
+        children[^1] = children[^1] with { RelationshipAuthority = "unknown" };
+        using var json = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeNode(Snapshot(children.Reverse().ToArray()), RootNodeId));
+        var relatedChildren = json.RootElement.GetProperty("related").GetProperty("children");
+        Assert.Equal(200, relatedChildren.GetArrayLength());
+        Assert.Equal(Enumerable.Range(10, 200).Select(index => $"node-{index:x32}"),
+            relatedChildren.EnumerateArray().Select(static item => item.GetProperty("node_id").GetString()));
+        Assert.Equal("explicit", relatedChildren[0].GetProperty("relationship_authority").GetString());
+        Assert.Equal(201, json.RootElement.GetProperty("node").GetProperty("child_count").GetInt32());
     }
 
     private static LocalRepositorySessionDetailSnapshot Snapshot(IReadOnlyList<LocalWorkspaceNodeDetail> children)

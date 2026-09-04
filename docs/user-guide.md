@@ -15,7 +15,7 @@
 
 ### 2. 画面別操作マニュアル
 - [Local Ingestion Monitor 利用ガイド](user-guide/local-monitor.md)  
-  リアルタイムでトレースを監視するローカル UI（概要ダッシュボード、トレース一覧、フロー/Waterfall、スパンインスペクタ、エラー解析モード、Copilot解析ドロワー）の操作ガイドです。
+  リポジトリ選択、Session Explorer、セッション詳細、AI 不要の比較、任意の AI 分析、設定・アーカイブの操作ガイドです。
 - [Static Dashboard 利用ガイド](user-guide/static-dashboard.md)  
   蓄積データから生成された静的 HTML ダッシュボードの閲覧・フィルタリング方法を解説します。
 
@@ -85,25 +85,15 @@ pwsh scripts\local-monitor\setup.ps1 plan --adapter claude-code --target cli
 - 生成済み dashboard artifact を共有場所に置く前に、access control、retention、削除方法、利用者周知を確認する。
 - remote managed Langfuse / Collector endpoint に送信する前に、access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決める。
 
-## Local Ingestion Monitor の画面イメージ
+## Local Ingestion Monitor の基本操作
 
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor 概要" src="./assets/screenshots/local-monitor-overview.png">
-</p>
+リポジトリを選び、Session Explorer でセッションを探して詳細を開きます。
+比較するときは「比較を作成」から基準と比較対象を明示します。比較の計算に AI は不要です。
+トークン、ツール、スキル、サブエージェントの記録と根拠を確認できます。
 
-Local Ingestion Monitor は、VS Code や GitHub Copilot CLI から収集したテレメトリを可視化するローカル専用 UI です。トークンコスト、エラー率、モデル別キャッシュ効率をひと目で把握できます。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース一覧" src="./assets/screenshots/local-monitor-trace-list.png">
-</p>
-
-保存された全トレースをプロンプト・モデル・実行状態（正常 / エラー / 回復済み）で絞り込み、右プレビューパネルでトークン構成や高コストスパンを即座に確認できます。
-
-<p align="center">
-  <img width="900" alt="Local Ingestion Monitor トレース詳細（フロー）" src="./assets/screenshots/local-monitor-trace-detail-flow.png">
-</p>
-
-トレース内の各ステップ（LLM 呼び出し、ツール実行、並行処理）を時系列フローまたは Waterfall 表示で追跡し、ボトルネックやエラー原因を特定できます。
+ヘッダーの「設定」から受信、任意の AI、リポジトリ、アーカイブ、保存・バックアップ、診断を管理します。
+アーカイブは元に戻せる非表示操作です。削除や保存期間の延長ではありません。
+詳しくは [画面ガイド](user-guide/local-monitor.md#画面ガイド)を参照してください。
 
 ## Static Dashboard の画面イメージ
 
