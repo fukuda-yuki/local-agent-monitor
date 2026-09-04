@@ -727,11 +727,57 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
-        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>(); var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null; timeline["items"]![0]!["relationship_authority"] = "unknown";
-        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
+        var summary = Summary("summary-full.json"); var revision = JsonNode.Parse(summary)!["workspace_revision"]!.GetValue<string>();
+        var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject(); timeline["workspace_revision"] = revision; timeline["next_cursor"] = null;
+        const string groupId = "node-11111111111111111111111111111111";
+        var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); node["workspace_revision"] = revision;
+        var tool = node["node"]!.AsObject(); var toolId = tool["node_id"]!.GetValue<string>(); var executionId = tool["execution_id"]!.GetValue<string>();
+        tool["kind"] = "tool"; tool["name"]!["text"] = "sample-tool"; tool["parent_node_id"] = groupId; tool["relationship_authority"] = "unknown";
+        tool["child_count"] = 1; tool["has_more_children"] = true; tool["collapsed_children"]!["count"] = 1;
+        tool["metadata"] = JsonNode.Parse("""{"kind":"tool","caller":{"state":"not_observed","node_id":null},"lifecycle":{"state":"recorded","value":"completed"},"status":{"state":"recorded","value":"completed"},"exit":{"state":"source_unsupported"},"mcp_server_identity":{"state":"not_observed","value":null},"mcp_server_name":{"state":"source_unsupported","value":null},"mcp_tool_name":{"state":"not_observed","value":null},"input":{"state":"not_captured","available":false},"result":{"state":"not_captured","available":false},"error":{"state":"not_captured","available":false},"retry":{"state":"not_observed","node_ids":[]},"recovery":{"state":"not_observed","node_ids":[]},"child_activity":{"skill":{"state":"not_observed","count":null},"tool":{"state":"not_observed","count":null},"subagent":{"state":"not_observed","count":null},"error":{"state":"not_observed","count":null},"retry":{"state":"not_observed","count":null}},"source_references":{"state":"not_observed","references":[]}}""");
+        var group = node["parent_path"]![0]!.DeepClone(); group["node_id"] = groupId; group["kind"] = "unknown_relation_group"; group["relationship_authority"] = "unknown";
+        group["lifecycle"] = "unknown"; group["status"] = "unknown"; group["timing"] = JsonNode.Parse("""{"state":"missing","started_at":null,"ended_at":null,"duration_ms":null}""");
+        group["tokens"] = tool["tokens"]!.DeepClone(); group["child_count"] = 1; group["collapsed_children"]!["count"] = 1; group["source_references"] = JsonNode.Parse("""{"state":"not_observed","references":[]}""");
+        node["parent_path"] = new JsonArray(group.DeepClone());
+        var childPage = timeline.DeepClone().AsObject(); childPage["parent_node_id"] = groupId;
+        var child = tool.DeepClone().AsObject(); child.Remove("technical_references"); child.Remove("metadata"); childPage["items"] = new JsonArray(child);
+        const string eventId = "node-22222222222222222222222222222222";
+        var eventDetail = JsonNode.Parse(Summary("node-nested.json"))!.AsObject(); eventDetail["workspace_revision"] = revision;
+        eventDetail["node"]!["node_id"] = eventId; eventDetail["node"]!["parent_node_id"] = toolId;
+        eventDetail["parent_path"] = new JsonArray(group.DeepClone(), child.DeepClone());
+        var eventItem = eventDetail["node"]!.DeepClone().AsObject(); eventItem.Remove("technical_references"); eventItem.Remove("metadata");
+        var eventPage = timeline.DeepClone().AsObject(); eventPage["parent_node_id"] = toolId; eventPage["items"] = new JsonArray(eventItem);
+        timeline["items"] = new JsonArray(group.DeepClone());
+        var groupDetail = node.DeepClone().AsObject(); var groupNode = group.DeepClone().AsObject();
+        groupNode["technical_references"] = JsonNode.Parse("""{"source_kind":null,"source_identity":null,"trace_id":null,"span_id":null,"event_id":null}"""); groupNode["metadata"] = JsonNode.Parse("""{"kind":"unknown_relation_group"}""");
+        groupDetail["node"] = groupNode; groupDetail["parent_path"] = new JsonArray();
+        await page.RouteAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={eventId}", async route =>
+        {
+            var response = await route.FetchAsync(new() { Url = host.Url + $"/sessions/{SessionId}" });
+            await route.FulfillAsync(new() { Response = response });
+        });
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary)));
+        await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json((r.Request.Url.Contains("parent_node_id=" + groupId, StringComparison.Ordinal) ? childPage : r.Request.Url.Contains("parent_node_id=" + toolId, StringComparison.Ordinal) ? eventPage : timeline).ToJsonString())));
+        await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json((new Uri(r.Request.Url).AbsolutePath.EndsWith(groupId, StringComparison.Ordinal) ? groupDetail : new Uri(r.Request.Url).AbsolutePath.EndsWith(eventId, StringComparison.Ordinal) ? eventDetail : node).ToJsonString())));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         await Expect(page.Locator(".local-monitor-session-unknown-group")).ToContainTextAsync("親子関係不明");
         await Expect(page.Locator(".local-monitor-session-unknown-group [data-timeline-node]")).ToHaveCountAsync(1);
+        var groupRow = page.Locator($"[data-timeline-node='{groupId}']"); var toolRow = page.Locator($"[data-timeline-node='{toolId}']");
+        await groupRow.ClickAsync(); await toolRow.ClickAsync();
+        await Expect(page.Locator("[data-inspector-kind=tool]")).ToContainTextAsync("sample-tool");
+        await Expect(toolRow).ToHaveAttributeAsync("aria-selected", "true"); await Expect(groupRow).ToHaveAttributeAsync("aria-expanded", "true");
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={toolId}");
+        await page.ReloadAsync();
+        await Expect(page.Locator("[data-inspector-kind=tool]")).ToContainTextAsync("sample-tool");
+        await Expect(toolRow).ToBeVisibleAsync(); await Expect(toolRow).ToHaveAttributeAsync("aria-selected", "true");
+        await Expect(groupRow).ToHaveAttributeAsync("aria-expanded", "true");
+        var eventRow = page.Locator($"[data-timeline-node='{eventId}']"); await toolRow.ClickAsync(); await eventRow.ClickAsync();
+        await Expect(page.Locator("[data-inspector-kind=event]")).ToContainTextAsync("user.message");
+        await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution={executionId}&node={eventId}");
+        await page.ReloadAsync();
+        await Expect(page.Locator("[data-inspector-kind=event]")).ToContainTextAsync("user.message");
+        await Expect(eventRow).ToBeVisibleAsync(); await Expect(eventRow).ToHaveAttributeAsync("aria-selected", "true");
+        await Expect(groupRow).ToHaveAttributeAsync("aria-expanded", "true"); await Expect(toolRow).ToHaveAttributeAsync("aria-expanded", "true");
     }
 
     [Theory]

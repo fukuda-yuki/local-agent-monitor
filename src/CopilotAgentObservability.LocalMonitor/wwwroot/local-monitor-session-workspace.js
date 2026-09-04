@@ -158,7 +158,8 @@
         || !Array.isArray(detail.parent_path) || detail.parent_path.length > 4096 || !detail.parent_path.every(item => timelineItem(item, detail.execution.execution_id))
         || new Set(detail.parent_path.map(item => item.node_id)).size !== detail.parent_path.length
         || detail.parent_path.some(item => item.node_id === nodeId)
-        || detail.parent_path.length > 0 && (detail.parent_path[0].node_id !== detail.execution.node_id || detail.parent_path[0].kind !== "execution")
+        || detail.parent_path.length > 0 && !(detail.parent_path[0].node_id === detail.execution.node_id && detail.parent_path[0].kind === "execution"
+          || detail.parent_path[0].kind === "unknown_relation_group" && detail.parent_path[0].relationship_authority === "unknown")
         || detail.parent_path.some((item, index) => index === 0 ? item.parent_node_id !== null : item.parent_node_id !== detail.parent_path[index - 1].node_id)
         || (detail.parent_path.length ? detail.node.parent_node_id !== detail.parent_path.at(-1).node_id : detail.node.parent_node_id !== null)
         || !exact(detail.related, ["retry", "recovery", "children"])
@@ -979,9 +980,9 @@
     throwIfRequestSuperseded(generation, current);
     executionId = detail.execution.execution_id;
     const memory = executionMemory(executionId);
-    const path = (detail.parent_path ?? []).filter(parent => ["exact", "explicit"].includes(parent.relationship_authority));
+    const path = detail.parent_path.filter(parent => parent.node_id !== detail.execution.node_id);
     if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation, current)) return false;
-    for (const parent of path.slice(1)) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
+    for (const parent of path) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
     throwIfRequestSuperseded(generation, current);
     state.selectedExecutionId = executionId; state.selectedNodeId = nodeId; memory.open = true;
     for (const parent of path) memory.expanded.add(parent.node_id);
