@@ -365,6 +365,17 @@ closure fixes its opaque nullable shape and referential lifetime.
 
 ### Approved attributes
 
+Automatic assignment is conditional on an accepted URL in the received OTLP
+payload and exact supported source attribution. It is not a guarantee of
+ordinary Copilot installation. The observed CLI 1.0.82 and VS Code Copilot Chat
+0.64.1 inputs contained Git branch/commit metadata but neither approved URL
+key; those inputs do not support automatic Repository assignment. This does
+not establish the capability of other versions or configurations. Branches,
+commits, and working directories are not Repository identity authorities.
+When no accepted URL is sent, users create a Repository with **Add Repository**
+and manually assign it from the Session workspace. No collection setting or
+local Git lookup is implied by this workflow.
+
 v1 reads exactly these two attribute keys:
 
 ```text
@@ -962,6 +973,36 @@ A label MUST NOT be synthesized from locator/display components, filesystem
 paths, Repository names, workspace labels, prompts, or adjacent metadata.
 
 ### Provenance scalars
+
+Capture provenance and Repository observation provenance are distinct.
+Ordinary ingestion persists `raw-otlp` capture provenance without overwriting
+it with a guessed producer. The Repository consumer accepts this capture
+envelope only with the existing single-row, payload-digest, timestamp, and
+nullable-version validation. While holding the raw retention lease, it uses
+the existing exact OTLP trace-source resolver on that payload. Every trace
+must resolve to the same supported source family and its attribute inventory
+must be complete. The derived observation surface maps `copilot-cli` to
+`github-copilot-cli` and `vscode-copilot-chat` to `github-copilot-vscode`.
+The capture version is preserved, including null; no version is guessed.
+Exact Session event joins must match this derived surface. Finalization still
+revalidates the original capture envelope; persisted observations retain their
+closed source scalar and exact Session context for restore validation.
+
+Empty, missing, unknown, conflicting, mixed-family, or incomplete source
+evidence fails terminally as `catalog_schema_violation`; malformed JSON remains
+`catalog_parse_failure`. A valid supported payload with no locator completes
+without creating a Repository or an assignment. Existing named capture
+surfaces retain their current contract.
+
+Existing terminal queue entries are not reset or silently retried by this
+repair. Before any operator-authorized recovery, retain a consistent backup
+including the original queue state, reason, attempt count, capture provenance,
+and raw digest. Validate replay only in an isolated copy while retaining that
+untouched backup; reset only the specifically diagnosed terminal entries in
+the disposable copy, never the installed database. Copy results are separate
+evidence and do not replace the original failure or prove installed recovery.
+An installed-data recovery requires an explicit operator decision after this
+validation; no automatic migration or repair endpoint is provided.
 
 `source_surface` is closed to:
 

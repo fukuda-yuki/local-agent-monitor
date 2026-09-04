@@ -275,27 +275,30 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             statementObserver?.Invoke("tokens");
             command.Transaction = transaction;
             command.CommandText = """
-                WITH ranked AS (
-                  SELECT *,row_number() OVER(PARTITION BY session_id,execution_id ORDER BY
-                    CASE WHEN input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL
-                               AND reasoning_tokens IS NULL AND cache_read_tokens IS NULL AND cache_creation_tokens IS NULL
-                         THEN 1 ELSE 0 END,
-                    authority_rank,source_identity COLLATE BINARY) ordinal
-                  FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))), selected AS (SELECT * FROM ranked WHERE ordinal=1)
                 SELECT session_id,execution_id,authority,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens
-                FROM selected ORDER BY session_id,execution_id;
+                FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                ORDER BY session_id,execution_id,authority_rank,source_identity COLLATE BINARY;
                 """;
             command.Parameters.AddWithValue("$ids", ids);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            var observations = new Dictionary<string, List<TokenObservation>>(StringComparer.Ordinal);
+            var observations = new Dictionary<string, List<(string ExecutionId, TokenObservation Tokens)>>(StringComparer.Ordinal);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 var sessionId = reader.GetString(0);
                 if (!observations.TryGetValue(sessionId, out var values)) observations[sessionId] = values = [];
-                values.Add(new(reader.GetString(2), Nullable(reader, 3), Nullable(reader, 4), Nullable(reader, 5), Nullable(reader, 6), Nullable(reader, 7), Nullable(reader, 8)));
+                values.Add((reader.GetString(1), new(reader.GetString(2), Nullable(reader, 3), Nullable(reader, 4), Nullable(reader, 5), Nullable(reader, 6), Nullable(reader, 7), Nullable(reader, 8))));
             }
-            foreach (var pair in observations) if (byId.TryGetValue(pair.Key, out var row)) row.TokenAggregate = ReadTokens(pair.Value);
+            foreach (var pair in observations)
+            {
+                if (!byId.TryGetValue(pair.Key, out var row)) continue;
+                var calls = pair.Value.GroupBy(value => value.ExecutionId, StringComparer.Ordinal)
+                    .Where(call => call.Any(value => value.Tokens.Authority == "llm_span" || value.Tokens.Values.Any(token => token is not null)))
+                    .Select(call => SelectCallTokens(call.Select(value => value.Tokens).ToArray())).ToArray();
+                if (calls.Length > 0) row.TokenAggregate = ReadTokens(calls);
+            }
         }
+        await ReadPairs(connection, transaction, "capture", "SELECT DISTINCT session_id,'source_unsupported' FROM session_events WHERE content_state='unsupported' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id;", ids, byId,
+            static (row, note) => row.AdditionalCaptureNotes.Add(note), statementObserver, cancellationToken);
         var frozen = rows.Select(static row => row.Freeze()).ToArray();
         if (frozen.Any(static row => !ValidClosedRow(row)))
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
@@ -1045,10 +1048,31 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         }
     }
 
+    private static TokenObservation SelectCallTokens(IReadOnlyList<TokenObservation> observations)
+    {
+        var authorities = new HashSet<string>(StringComparer.Ordinal);
+        long? Select(Func<TokenObservation, long?> component)
+        {
+            foreach (var observation in observations)
+            {
+                if (component(observation) is not { } value) continue;
+                authorities.Add(observation.Authority);
+                return value;
+            }
+            return null;
+        }
+        var input = Select(row => row.Input); var output = Select(row => row.Output);
+        var total = Select(row => row.Total); var reasoning = Select(row => row.Reasoning);
+        var cache = Select(row => row.CacheRead); var creation = Select(row => row.CacheCreation);
+        var authority = authorities.Count == 0 ? "none" : authorities.Count == 1 ? authorities.Single() : "mixed";
+        return new(authority, input, output, total, reasoning, cache, creation);
+    }
+
     private static LocalWorkspaceTokenFacts ReadTokens(IReadOnlyList<TokenObservation> rows)
     {
         var total = rows.Count; var available = rows.Count(r => r.Values.Any(v => v is not null));
-        var authority = rows.Select(r => r.Authority).Distinct(StringComparer.Ordinal).Count() == 1 ? rows[0].Authority : "mixed";
+        var authorities = rows.Select(r => r.Authority).Where(authority => authority != "none").Distinct(StringComparer.Ordinal).ToArray();
+        var authority = authorities.Length == 0 ? "none" : authorities.Length == 1 ? authorities[0] : "mixed";
         var overflow = false;
         LocalWorkspaceFact<long> Fact(Func<TokenObservation, long?> select)
         {
@@ -1121,6 +1145,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         internal List<string> Sources { get; } = [];
         internal List<string> Models { get; } = [];
         internal List<string> SearchTexts { get; } = [];
+        internal List<string> AdditionalCaptureNotes { get; } = [];
         internal Dictionary<string, LocalWorkspaceFact<long>> Activity { get; } = new(StringComparer.Ordinal);
         internal bool HasClosedActivityFamilies =>
             Activity.Count == 5
@@ -1137,7 +1162,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             var tokens = TokenAggregate ?? new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
             return new LocalWorkspaceProjectionRow(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
                 new(sourceState, Array.AsReadOnly(Sources.ToArray())), new(modelState, Array.AsReadOnly(Models.ToArray())), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
-                timingState, startedAt, endedAt, lastSeenAt, lastSeenEpoch, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',')), Array.AsReadOnly(SearchTexts.ToArray()), revision)
+                timingState, startedAt, endedAt, lastSeenAt, lastSeenEpoch, duration, Array.AsReadOnly((notes.Length == 0 ? [] : notes.Split(',')).Concat(AdditionalCaptureNotes).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()), Array.AsReadOnly(SearchTexts.ToArray()), revision)
             {
                 CurrentSkillFilter = CurrentSkillFilter,
             };

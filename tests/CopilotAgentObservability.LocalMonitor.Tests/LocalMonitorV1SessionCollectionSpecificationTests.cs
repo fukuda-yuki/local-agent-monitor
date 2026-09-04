@@ -74,7 +74,7 @@ public sealed class LocalMonitorV1SessionCollectionSpecificationTests
                     "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation",
                     "new_input", "cache_read_ratio_basis_points");
                 Assert.All(item.GetProperty("tokens").EnumerateObject().Skip(4), component => AssertProperties(component.Value, "state", "value"));
-                AssertProperties(item.GetProperty("timing"), "state", "started_at", "ended_at", "duration_ms");
+                AssertProperties(item.GetProperty("timing"), "state", "started_at", "ended_at", "last_seen_at", "duration_ms");
             }
         }
 

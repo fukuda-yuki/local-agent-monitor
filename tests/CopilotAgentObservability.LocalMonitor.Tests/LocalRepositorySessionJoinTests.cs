@@ -212,6 +212,7 @@ public sealed class LocalRepositorySessionJoinTests
 
     [Theory]
     [InlineData("github-copilot-cli", null)]
+    [InlineData("raw-otlp", null)]
     [InlineData("github-copilot-vscode", "v")]
     [InlineData("github-copilot-cli", "1234567890123456789012345678901234567890123456789012345678901234")]
     public void CaptureProvenance_AcceptsClosedSurfacesAndNullableVersionBounds(

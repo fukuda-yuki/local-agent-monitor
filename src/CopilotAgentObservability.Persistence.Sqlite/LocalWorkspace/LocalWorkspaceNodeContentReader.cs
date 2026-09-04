@@ -30,7 +30,7 @@ internal static class LocalWorkspaceContentAuthority
         CASE
           WHEN c.availability_state='invalid' AND c.revision_input LIKE 'projection_invalid|competing_exact_sources|%' THEN 'invalid'
           WHEN i.item_id IS NULL THEN CASE
-            WHEN c.availability_state='not_captured' AND s.event_id IS NULL AND e.content_state='not_captured' THEN 'not_captured'
+            WHEN c.availability_state='not_captured' AND s.event_id IS NULL AND e.content_state IN ('not_captured','unsupported') THEN 'not_captured'
             ELSE 'invalid' END
           WHEN i.state='deleted' AND i.deleted_at IS NOT NULL AND tmb.item_id=i.item_id
             AND tmb.receipt_at=i.deleted_at AND tmb.deleted_at=i.deleted_at AND s.event_id IS NULL THEN 'deleted'

@@ -82,11 +82,12 @@
           }
         },
         "timing": {
-          "type": "object", "additionalProperties": false, "required": ["state", "started_at", "ended_at", "duration_ms"],
+          "type": "object", "additionalProperties": false, "required": ["state", "started_at", "ended_at", "last_seen_at", "duration_ms"],
           "properties": {
             "state": {"$ref": "#/$defs/factState"},
             "started_at": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}\\+00:00$"},
             "ended_at": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}\\+00:00$"},
+            "last_seen_at": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}\\+00:00$"},
             "duration_ms": {"$ref": "#/$defs/nullableNonnegativeInteger"}
           }
         },

@@ -148,7 +148,7 @@ internal static class LocalRepositorySessionEventJoin
             || !LocalRepositoryCatalogValidation.IsLowerSha256(rawPayloadSha256)
             || !string.Equals(rawPayloadSha256, expectedRawPayloadSha256, StringComparison.Ordinal)
             || Text(reader, 3) is not { } sourceSurface
-            || sourceSurface is not ("github-copilot-cli" or "github-copilot-vscode")
+            || sourceSurface is not ("raw-otlp" or "github-copilot-cli" or "github-copilot-vscode")
             || !TryNullableText(reader, 4, out var sourceApplicationVersion)
             || sourceApplicationVersion is not null && !IsVisibleApplicationVersion(sourceApplicationVersion)
             || Text(reader, 5) is not { } observedAtText

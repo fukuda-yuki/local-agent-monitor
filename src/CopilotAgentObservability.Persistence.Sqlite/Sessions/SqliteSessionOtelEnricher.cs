@@ -7,6 +7,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 public sealed class SqliteSessionOtelEnricher
 {
     public const string ProjectorKey = "session-otel-enrichment";
+    internal const string ContentProjectorKey = "session-copilot-otel-content-v1";
     private readonly string databasePath;
     private readonly ISessionStore store;
     private readonly RawTelemetryStore rawStore;
@@ -41,6 +42,7 @@ public sealed class SqliteSessionOtelEnricher
         var rawResult = rawStore.ReadRawRecordsAsync(rows.Select(row => row.RawRecordId).ToArray(), RetentionReadKind.Operation, CancellationToken.None).AsTask().GetAwaiter().GetResult();
         if (rawResult.Lease is null)
         {
+            ProcessContentBatch(limit);
             return 0;
         }
         try
@@ -61,7 +63,21 @@ public sealed class SqliteSessionOtelEnricher
                         var binding = payloadJson is null
                             ? null
                             : claudeExactBindingRule.Resolve(payloadJson, sourceRow.TraceId, sourceRow.SpanId);
-                        return new PreparedProjectedSpan(sourceRow, binding);
+                        var source = payloadJson is null ? null : OtlpTraceSourceResolver.Resolve(payloadJson).SingleOrDefault(item => item.TraceId == sourceRow.TraceId);
+                        var hasCopilotEvidence = source is { CliCandidateObserved: true } or { VsCodeCandidateObserved: true };
+                        var copilotSurface = source?.State == TraceSourceResolutionState.Resolved
+                            && string.Equals(source.SourceFamily, sourceRow.ClientKind, StringComparison.Ordinal)
+                            ? ConfirmSurface(sourceRow.ClientKind) : null;
+                        var rejectedCopilotSource = hasCopilotEvidence && copilotSurface is null;
+                        var identity = payloadJson is null ? null : CopilotOtelMessages.ReadIdentity(payloadJson, sourceRow.TraceId, sourceRow.SpanId);
+                        return new PreparedProjectedSpan(sourceRow with
+                        {
+                            ConversationId = hasCopilotEvidence ? copilotSurface is null ? null : identity?.NativeId : sourceRow.ConversationId,
+                            ClientKind = rejectedCopilotSource ? null : sourceRow.ClientKind,
+                            HasCopilotNativeIdentity = copilotSurface is not null && identity is not null,
+                            RejectedCopilotSource = rejectedCopilotSource,
+                            HasCopilotSource = copilotSurface is not null,
+                        }, rejectedCopilotSource ? null : binding);
                     })
                     .ToArray();
             }
@@ -82,7 +98,68 @@ public sealed class SqliteSessionOtelEnricher
             }
         }
         finally { rawResult.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+        ProcessContentBatch(limit);
         return rows.Count;
+    }
+
+    private void ProcessContentBatch(int limit)
+    {
+        var cursor = store.GetProjectionState(ContentProjectorKey)?.ProjectionCursor ?? 0;
+        var metadataCursor = store.GetProjectionState(ProjectorKey)?.ProjectionCursor ?? 0;
+        foreach (var row in ReadRows(cursor, limit).TakeWhile(row => row.Id <= metadataCursor))
+        {
+            var owner = FindEventBySourceIdentity("otel-exact", $"{row.TraceId}/{row.SpanId}");
+            if (owner is not null && ConfirmSurface(row.ClientKind) is { } surface)
+            {
+                var result = rawStore.ReadRawRecordsAsync([row.RawRecordId], RetentionReadKind.Operation, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+                try
+                {
+                    if (result.Lease is null)
+                    {
+                        if (result.Disposition is not (RetentionReadDisposition.LifecycleDenied or RetentionReadDisposition.SelectorUnavailable)) return;
+                    }
+                    else
+                    {
+                        if (result.Disposition is not null) { _ = result.CompletePostGrantFailure(); return; }
+                        using (var reference = result.Lease.AcquireValueReference())
+                        {
+                            var raw = reference.Value.Single();
+                            var messages = CopilotOtelMessages.ReadSurface(raw.PayloadJson, row.TraceId) == surface
+                                ? CopilotOtelMessages.Read(raw.PayloadJson, row.TraceId, row.SpanId) : [];
+                            var detail = store.GetDetail(owner.SessionId)!;
+                            var events = new List<ObservedSessionEvent>();
+                            var content = new List<SessionEventContent>();
+                            foreach (var message in messages)
+                            {
+                                var sourceId = $"{row.TraceId}/{row.SpanId}/{message.Direction}/{message.Ordinal}";
+                                if (FindEventBySourceIdentity("copilot-otel", sourceId) is not null) continue;
+                                var eventId = Guid.CreateVersion7();
+                                events.Add(new(eventId, owner.SessionId, owner.RunId, surface, null, row.TraceId, null,
+                                    "copilot-otel", sourceId, message.Type,
+                                    message.Direction == "output" ? row.EndTime ?? row.StartTime ?? row.ProjectedAt : row.StartTime ?? row.ProjectedAt,
+                                    message.State, MatchKind: SessionMatchKind.TraceContinuity));
+                                if (message.Json is not null)
+                                    content.Add(new(eventId, "application/json", message.Json, raw.ReceivedAt, raw.ReceivedAt.AddDays(90)));
+                            }
+                            if (events.Count != 0)
+                            {
+                                checkpoint?.Invoke("before-copilot-content-write");
+                                var session = content.Count == 0 ? detail.Session : detail.Session with
+                                {
+                                    RawRetentionState = SessionRawRetentionState.Expiring,
+                                    UpdatedAt = timeProvider.GetUtcNow(),
+                                };
+                                ((SqliteSessionStore)store).WriteFromOtel(new(new(session, [], [], events), content), result.Lease.Grants);
+                            }
+                        }
+                        if (result.Lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw) return;
+                    }
+                }
+                catch (SessionOtelLeaseLostException) { return; }
+                finally { result.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+            }
+            store.UpsertProjectionState(new(ContentProjectorKey, row.Id, 0, timeProvider.GetUtcNow()));
+        }
     }
 
     public long CountBacklog()
@@ -97,8 +174,21 @@ public sealed class SqliteSessionOtelEnricher
 
     private void Process(ProjectedSpan row, ClaudeExactBindingMatch? claudeBinding)
     {
-        var traceSessionId = FindSessionByTraceId(row.TraceId);
-        var conversationSessionId = string.IsNullOrEmpty(row.ConversationId) ? null : FindUnambiguousSessionByNativeId(row.ConversationId);
+        var confirmedSurface = ConfirmSurface(row.ClientKind);
+        var traceSessionId = row.RejectedCopilotSource ? null : row.HasCopilotSource
+            ? FindCopilotSession(row.TraceId, confirmedSurface!.Value, byTrace: true)
+            : FindSessionByTraceId(row.TraceId);
+        var conversationSessionId = string.IsNullOrEmpty(row.ConversationId) ? null
+            : row.HasCopilotSource ? FindCopilotSession(row.ConversationId, confirmedSurface!.Value, byTrace: false)
+            : FindUnambiguousSessionByNativeId(row.ConversationId);
+        if (row.HasCopilotNativeIdentity && traceSessionId is not null)
+        {
+            var traceNativeIds = store.GetDetail(traceSessionId.Value)!.NativeIds
+                .Where(item => item.SourceSurface == confirmedSurface).ToArray();
+            if (traceNativeIds.Length != 0 && traceNativeIds.All(item => !string.Equals(item.NativeSessionId, row.ConversationId, StringComparison.Ordinal)))
+                traceSessionId = null;
+        }
+        var identityConflict = traceSessionId is not null && conversationSessionId is not null && traceSessionId != conversationSessionId;
         var sessionId = claudeBinding?.SessionId ?? traceSessionId ?? conversationSessionId ?? Guid.CreateVersion7();
         var matchKind = claudeBinding is not null
             ? MatchKind(claudeBinding.BindingKind)
@@ -108,14 +198,15 @@ public sealed class SqliteSessionOtelEnricher
                     ? SessionMatchKind.ConversationId
                     : SessionMatchKind.None;
         var existing = store.GetDetail(sessionId);
-        var confirmedSurface = ConfirmSurface(row.ClientKind);
         var eventId = Guid.CreateVersion7();
         var runId = Guid.CreateVersion7();
         var occurredAt = row.StartTime ?? row.ProjectedAt;
 
         var nativeIds = new List<SessionNativeId>();
-        if (conversationSessionId == sessionId && confirmedSurface is not null && row.ConversationId is not null
-            && existing!.NativeIds.All(item => item.SourceSurface != confirmedSurface.Value || !string.Equals(item.NativeSessionId, row.ConversationId, StringComparison.Ordinal)))
+        if (!identityConflict && confirmedSurface is not null && row.ConversationId is not null
+            && (conversationSessionId == sessionId || row.HasCopilotNativeIdentity && conversationSessionId is null
+                && (existing is null || existing.NativeIds.Count == 0))
+            && (existing?.NativeIds ?? []).All(item => item.SourceSurface != confirmedSurface.Value || !string.Equals(item.NativeSessionId, row.ConversationId, StringComparison.Ordinal)))
         {
             nativeIds.Add(new(sessionId, confirmedSurface.Value, row.ConversationId, SessionBindingKind.Native, occurredAt));
         }
@@ -141,7 +232,7 @@ public sealed class SqliteSessionOtelEnricher
                 UpdatedAt = now,
             }
             : new ObservedSession(
-                sessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Unbound,
+                sessionId, ObservedSessionStatus.Unknown, completeness,
                 row.Repository, row.Workspace, null, null, occurredAt,
                 SessionRawRetentionState.NotCaptured, now, now);
         var hasLlmTokenAuthority = string.Equals(row.Category, "llm_call", StringComparison.Ordinal);
@@ -153,7 +244,7 @@ public sealed class SqliteSessionOtelEnricher
             hasLlmTokenAuthority ? row.ProducerTotalTokens : null);
         var @event = new ObservedSessionEvent(
             eventId, sessionId, runId, confirmedSurface, null, row.TraceId, null,
-            "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, SessionContentState.NotCaptured,
+            "otel-exact", $"{row.TraceId}/{row.SpanId}", "otel.span", occurredAt, row.RejectedCopilotSource ? SessionContentState.Unsupported : SessionContentState.NotCaptured,
             MatchKind: matchKind);
         store.Write(new(new(session, nativeIds, [run], [@event]), []));
     }
@@ -397,6 +488,18 @@ public sealed class SqliteSessionOtelEnricher
         return command.ExecuteScalar() is not null;
     }
 
+    private Guid? FindCopilotSession(string identity, SessionSourceSurface surface, bool byTrace) => FindUnambiguous($"""
+        SELECT DISTINCT candidate.session_id FROM {(byTrace ? "session_events" : "session_native_ids")} candidate
+        WHERE candidate.{(byTrace ? "trace_id" : "native_session_id")}=$first COLLATE BINARY
+          AND (candidate.source_surface=$second OR (candidate.source_surface='hook-unknown'
+          AND NOT EXISTS(SELECT 1 FROM {(byTrace ? "session_events" : "session_native_ids")} exact
+            WHERE exact.{(byTrace ? "trace_id" : "native_session_id")}=$first COLLATE BINARY AND exact.source_surface=$second)
+          AND NOT EXISTS(SELECT 1 FROM session_native_ids known WHERE known.session_id=candidate.session_id
+            AND known.source_surface IN ('copilot-cli','vscode') AND known.source_surface<>$second)
+          AND NOT EXISTS(SELECT 1 FROM session_events known WHERE known.session_id=candidate.session_id
+            AND known.source_surface IN ('copilot-cli','vscode') AND known.source_surface<>$second)));
+        """, identity, SessionWire.ToWire(surface));
+
     private Guid? FindSessionByTraceId(string traceId) => FindUnambiguous("SELECT DISTINCT session_id FROM session_events WHERE trace_id=$value COLLATE BINARY;", traceId);
     private Guid? FindUnambiguousSessionByNativeId(string nativeId) => FindUnambiguous("SELECT DISTINCT session_id FROM session_native_ids WHERE native_session_id=$value COLLATE BINARY;", nativeId);
 
@@ -464,6 +567,9 @@ public sealed class SqliteSessionOtelEnricher
         string? AdapterVersion,
         string? SchemaFingerprint)
     {
+        public bool RejectedCopilotSource { get; init; }
+        public bool HasCopilotSource { get; init; }
+        public bool HasCopilotNativeIdentity { get; init; }
         public bool IsClaudeCode => string.Equals(SourceSurface, "claude-code", StringComparison.Ordinal)
             && string.Equals(SourceAdapter, "claude-code-otel", StringComparison.Ordinal);
     }

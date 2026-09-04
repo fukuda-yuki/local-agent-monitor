@@ -919,10 +919,15 @@ Session completeness.
 
 OTel Session enrichment runs only after the existing monitor projection. It
 uses the dedicated `session_projection_state` cursor. A byte-for-byte trace
-context already recorded on an event may exact-link OTel evidence. Exact
-`gen_ai.conversation.id` may bind/enrich only when byte-for-byte equal to an
-already-recorded native session ID; otherwise OTel remains `unbound`.
-`client_kind` never binds or merges Sessions. Session schema migration runs at
+context already recorded on an event may exact-link OTel evidence. For unambiguously resolved Copilot CLI or VS Code, exact
+`gen_ai.conversation.id` bootstraps the first native binding, scoped separately
+to that source surface, and links later traces with the same byte-for-byte ID.
+Missing, duplicate, or ambiguous identities create no native binding; existing
+exact trace rules still apply. Other identity
+aliases are not substitutes. `client_kind` alone never proves identity.
+Existing Session owners are never merged or moved. A newly admitted native ID
+that contradicts the trace owner's same-source native ID uses its own exact
+native owner or creates a separate bound Session; existing events stay put. Session schema migration runs at
 startup, and failure fails host construction, matching the analysis-store
 migration. It does not change the existing OTLP receiver, trace/span schema,
 monitor projection cursor, or readiness thresholds/body/status mapping.

@@ -598,9 +598,9 @@
       throw new TypeError("invalid session collection");
     }
     const timing = value.timing;
-    if (!exactKeys(timing, ["state", "started_at", "ended_at", "duration_ms"])
+    if (!exactKeys(timing, ["state", "started_at", "ended_at", "last_seen_at", "duration_ms"])
         || !FACT_STATES.has(timing.state)
-        || !timestamp(timing.started_at) || !timestamp(timing.ended_at)
+        || !timestamp(timing.started_at) || !timestamp(timing.ended_at) || !timestamp(timing.last_seen_at)
         || timing.duration_ms !== null && !count(timing.duration_ms)
         || timing.state === "recorded" && (timing.started_at === null
           || (timing.ended_at === null) !== (timing.duration_ms === null))
@@ -1075,7 +1075,8 @@
   }
 
   function fallbackLabel(item) {
-    return item.timing.started_at === null ? "日時不明のセッション" : `${localTime(item.timing.started_at)} のセッション`;
+    const observed = item.timing.started_at ?? item.timing.last_seen_at;
+    return observed === null ? "日時不明のセッション" : `${localTime(observed)}${item.timing.started_at === null ? " 最終観測" : ""} のセッション`;
   }
 
   function statusText(value) {
@@ -1468,7 +1469,7 @@
     disclosure.append(disclosureSummary, panel);
     secondary.append(disclosure);
     identity.append(link, secondary);
-    const sessionStatus = element("td", "local-monitor-session-status", statusText(item.status));
+    const sessionStatus = element("td", "local-monitor-session-status", item.status === "active" && item.timing.state === "not_observed" ? "状態未観測" : statusText(item.status));
     sessionStatus.dataset.sessionStatus = "";
     if (item.archive.exclusion_reason === "session_archived") {
       sessionStatus.append(element("small", null, "セッションをアーカイブ済み"));
@@ -1493,6 +1494,10 @@
           renderCollectionFact(factTarget, { state: item.timing.state, count: null });
         });
       }
+    } else if (item.timing.last_seen_at !== null) {
+      const time = element("time", null, `最終観測 ${localTime(item.timing.last_seen_at)}`);
+      time.dateTime = item.timing.last_seen_at;
+      started.append(time);
     } else {
       renderFactDisclosure(started, item, "時間", factTarget => {
         renderCollectionFact(factTarget, { state: item.timing.state, count: null });

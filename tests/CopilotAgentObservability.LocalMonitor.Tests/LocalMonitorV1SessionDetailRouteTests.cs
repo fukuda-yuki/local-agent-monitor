@@ -1582,7 +1582,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
 
-    private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(MonitorTempDirectory temp)
+    internal static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(MonitorTempDirectory temp)
         => await StartProductionDetailRouteAsync(temp, null);
 
     private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(
@@ -1608,7 +1608,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
 
-    private static SqliteLocalRepositoryScopeSnapshotService CreateProductionDetailService(
+    internal static SqliteLocalRepositoryScopeSnapshotService CreateProductionDetailService(
         MonitorTempDirectory temp,
         ISkillRegistryGenerationAuthority? registryAuthority = null)
     {
@@ -1636,7 +1636,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         }
     }
 
-    private static void EnsureProductionProjectionSchemas(MonitorTempDirectory temp)
+    internal static void EnsureProductionProjectionSchemas(MonitorTempDirectory temp)
     {
         using (var connection = Open(temp))
         {
@@ -1728,7 +1728,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         transaction.Commit();
     }
 
-    private sealed class RunningDetailRoute(WebApplication app, HttpClient client) : IDisposable
+    internal sealed class RunningDetailRoute(WebApplication app, HttpClient client) : IDisposable
     {
         internal HttpClient Client { get; } = client;
         public void Dispose()
@@ -1798,7 +1798,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return connection;
     }
 
-    private static void SeedDeterministicSession(MonitorTempDirectory temp, bool full = false,
+    internal static void SeedDeterministicSession(MonitorTempDirectory temp, bool full = false,
         string contentJson = "{\"value\":\"Review the retained instruction\",\"prompt\":\"Review the retained instruction\"}",
         string eventType = "user.message", string sourceAdapter = "github-copilot-vscode-otel", string? schemaFingerprint = null)
     {

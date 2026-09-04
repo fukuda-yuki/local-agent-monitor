@@ -64,7 +64,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
         Assert.Equal(10_000, result.Sessions.Count);
-        Assert.Equal(["sessions", "sources", "models", "search", "activity", "tokens"], statements);
+        Assert.Equal(["sessions", "sources", "models", "search", "activity", "tokens", "capture"], statements);
         Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
     }
 
@@ -93,7 +93,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
         Assert.Equal(10_000, result.Sessions.Count);
-        Assert.Equal(["sessions", "sources", "models", "search", "activity", "tokens"], statements);
+        Assert.Equal(["sessions", "sources", "models", "search", "activity", "tokens", "capture"], statements);
         Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
 
         using var plan = connection.CreateCommand();
@@ -227,6 +227,58 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         var searchTexts = Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).SearchTexts;
         if (expected) Assert.Contains("exact-tool", searchTexts);
         else Assert.DoesNotContain("exact-tool", searchTexts);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ContributorUsesLlmCoverageAndRetainsExactSpanCacheWithoutDoubleCountingRunUsage(bool missingCallUsage)
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs(run_id,session_id,input_tokens,output_tokens,status) VALUES
+              ('llm','0198f5b8-0c00-7000-8000-000000000001',100,7,'active'),
+              ('tool','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001','llm','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            INSERT INTO raw_records VALUES(1,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1);
+            INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,'chat','llm_call',NULL,100,7,NULL,60,NULL);
+            """);
+        if (missingCallUsage)
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                UPDATE monitor_spans SET cache_read_tokens=NULL;
+                INSERT INTO session_runs(run_id,session_id,status) VALUES('missing-llm','0198f5b8-0c00-7000-8000-000000000001','active');
+                INSERT INTO session_events(event_id,session_id,run_id,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+                  VALUES('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001','missing-llm','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccc','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
+                INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','cccccccccccccccc',1,'chat','llm_call',NULL,NULL,NULL,NULL,NULL,NULL);
+                """);
+        }
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        var result = await new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(DateTimeOffset.Parse("2026-08-25T00:00:00Z")))
+            .ReadAsync(new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+        var tokens = Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).Tokens;
+        if (missingCallUsage)
+        {
+            Assert.Equal("session_run", tokens.Authority);
+            Assert.Equal(2, tokens.TotalExecutionCount);
+            Assert.Equal(1, tokens.AvailableExecutionCount);
+            Assert.Equal(new LocalWorkspaceFact<long>("capture_gap", null), tokens.Input);
+            Assert.Equal(new LocalWorkspaceFact<long>("capture_gap", null), tokens.Output);
+            Assert.Equal(new LocalWorkspaceFact<long>("not_observed", null), tokens.CacheRead);
+            Assert.Equal(new LocalWorkspaceFact<long>("not_observed", null), tokens.Total);
+            return;
+        }
+        Assert.Equal("mixed", tokens.Authority);
+        Assert.Equal(1, tokens.TotalExecutionCount);
+        Assert.Equal(1, tokens.AvailableExecutionCount);
+        Assert.Equal(new LocalWorkspaceFact<long>("recorded", 100), tokens.Input);
+        Assert.Equal(new LocalWorkspaceFact<long>("recorded", 7), tokens.Output);
+        Assert.Equal(new LocalWorkspaceFact<long>("recorded", 60), tokens.CacheRead);
+        Assert.Equal(new LocalWorkspaceFact<long>("not_observed", null), tokens.Total);
     }
 
     [Fact]

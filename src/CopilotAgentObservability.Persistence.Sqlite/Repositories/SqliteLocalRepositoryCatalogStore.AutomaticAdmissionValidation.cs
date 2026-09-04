@@ -39,6 +39,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         var afterRawRecordId = 0L;
         var afterSourceIdentity = string.Empty;
         LocalRepositoryCaptureProvenance? currentProvenance = null;
+        string? currentObservationSurface = null;
         while (true)
         {
             var page = new List<AutomaticAdmissionObservationRow>(AutomaticAdmissionValidationPageSize);
@@ -84,9 +85,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                         RejectAutomaticAdmission();
                     }
                     currentProvenance = result.Provenance!;
+                    currentObservationSurface = row.SourceSurface;
                 }
                 if (currentProvenance.RawPayloadSha256 != row.RawPayloadSha256
-                    || currentProvenance.SourceSurface != row.SourceSurface
+                    || currentObservationSurface != row.SourceSurface
+                    || currentProvenance.SourceSurface != "raw-otlp" && currentProvenance.SourceSurface != row.SourceSurface
                     || currentProvenance.SourceApplicationVersion != row.SourceApplicationVersion
                     || currentProvenance.ObservedAt.ToString("O", CultureInfo.InvariantCulture) != row.ObservedAt)
                 {

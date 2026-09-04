@@ -119,8 +119,8 @@
       }
     },
     "execution": {
-      "type": "object", "additionalProperties": false, "required": ["execution_id", "node_id", "latest", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"],
-      "properties": {"execution_id": {"$ref": "#/$defs/uuidv7"}, "node_id": {"$ref": "#/$defs/nodeId"}, "latest": {"type": "boolean"}, "source": {"type": ["string", "null"], "minLength": 1}, "model": {"type": ["string", "null"], "minLength": 1}, "lifecycle": {"enum": ["selected", "started", "completed", "failed", "deselected", "unknown"]}, "status": {"enum": ["active", "completed", "failed", "unknown"]}, "timing": {"$ref": "#/$defs/executionTiming"}, "tokens": {"$ref": "#/$defs/tokens"}, "activity": {"$ref": "#/$defs/activity"}, "child_count": {"type": "integer", "minimum": 0, "maximum": 4096}}
+      "type": "object", "additionalProperties": false, "required": ["execution_id", "node_id", "latest", "source_ordinal", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"],
+      "properties": {"execution_id": {"$ref": "#/$defs/uuidv7"}, "node_id": {"$ref": "#/$defs/nodeId"}, "latest": {"type": "boolean"}, "source_ordinal": {"type": "integer", "minimum": 0}, "source": {"type": ["string", "null"], "minLength": 1}, "model": {"type": ["string", "null"], "minLength": 1}, "lifecycle": {"enum": ["selected", "started", "completed", "failed", "deselected", "unknown"]}, "status": {"enum": ["active", "completed", "failed", "unknown"]}, "timing": {"$ref": "#/$defs/executionTiming"}, "tokens": {"$ref": "#/$defs/tokens"}, "activity": {"$ref": "#/$defs/activity"}, "child_count": {"type": "integer", "minimum": 0, "maximum": 4096}}
     },
     "session": {
       "type": "object", "additionalProperties": false, "required": ["session_id", "status", "completeness", "assignment", "archive", "instruction", "source", "model", "version", "timing", "tokens", "activity", "capture"],

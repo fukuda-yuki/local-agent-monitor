@@ -520,7 +520,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
 
     private static void AssertExecutionOrder(JsonElement execution)
     {
-        AssertProperties(execution, "execution_id", "node_id", "latest", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count");
+        AssertProperties(execution, "execution_id", "node_id", "latest", "source_ordinal", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count");
         AssertProperties(execution.GetProperty("timing"), "state", "started_at", "ended_at", "duration_ms");
         AssertTokenOrder(execution.GetProperty("tokens"));
         AssertActivityOrder(execution.GetProperty("activity"));

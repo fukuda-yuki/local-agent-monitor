@@ -451,6 +451,9 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
     public void Write(SessionWriteBatch batch)
         => WriteCore(batch, [], []);
 
+    internal void WriteFromOtel(SessionWriteBatch batch, IReadOnlyList<RetentionReadGrant> grants)
+        => WriteCore(batch, [], [], grants);
+
     void IClassifiedSessionStore.WriteClassified(
         SessionWriteBatch batch,
         IReadOnlyList<SessionTerminalFact> terminalFacts,
@@ -460,7 +463,8 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
     private void WriteCore(
         SessionWriteBatch batch,
         IReadOnlyList<SessionTerminalFact> terminalFacts,
-        IReadOnlyList<SessionReplayContentCandidate> replayContentCandidates)
+        IReadOnlyList<SessionReplayContentCandidate> replayContentCandidates,
+        IReadOnlyList<RetentionReadGrant>? otelGrants = null)
     {
         ArgumentNullException.ThrowIfNull(batch);
         ArgumentNullException.ThrowIfNull(terminalFacts);
@@ -475,6 +479,9 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        using var otelPublications = otelGrants is null ? null : RetentionGrantPublicationSet.EnterInOrder(
+            otelGrants.Select((grant, index) => new RetentionGrantPublicationMember(grant, index)).ToArray());
+        ValidateOtelGrants(connection, transaction, otelGrants, otelPublications);
         RetentionCatalogStore? catalog = retentionContext is null ? null : new RetentionCatalogStore(retentionContext, timeProvider);
         if (catalog is not null) catalog.InitializeForWrite(connection, transaction);
         var replayComparisonNow = replayContentCandidates.Count == 0
@@ -636,9 +643,20 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
             [Id(batch.Detail.Session.SessionId)],
             timeProvider.GetUtcNow());
 
+        ValidateOtelGrants(connection, transaction, otelGrants, otelPublications);
         transaction.Commit();
         }
         finally { publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+    }
+
+    private void ValidateOtelGrants(SqliteConnection connection, SqliteTransaction transaction,
+        IReadOnlyList<RetentionReadGrant>? grants, RetentionGrantPublicationSet? publications)
+    {
+        if (grants is null) return;
+        var now = timeProvider.GetUtcNow();
+        for (var index = 0; index < grants.Count; index++)
+            if (!RetentionCatalogStore.IsGrantUsable(connection, transaction, grants[index], publications!.ScopeFor(index, grants[index]), now))
+                throw new SessionOtelLeaseLostException();
     }
 
     private static bool IsExactOtelEvent(ObservedSessionEvent item) =>
@@ -3481,3 +3499,5 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
     private static string ApplyState(ProposalApplyState state) => state switch { ProposalApplyState.Draft => "draft", ProposalApplyState.Approved => "approved", ProposalApplyState.Applied => "applied", ProposalApplyState.RolledBack => "rolled_back", ProposalApplyState.Failed => "failed", _ => throw new ArgumentOutOfRangeException(nameof(state)) };
     private static ProposalApplyState ParseApplyState(string value) => value switch { "draft" => ProposalApplyState.Draft, "approved" => ProposalApplyState.Approved, "applied" => ProposalApplyState.Applied, "rolled_back" => ProposalApplyState.RolledBack, "failed" => ProposalApplyState.Failed, _ => throw new InvalidOperationException("Invalid proposal apply state.") };
 }
+
+internal sealed class SessionOtelLeaseLostException : InvalidOperationException;

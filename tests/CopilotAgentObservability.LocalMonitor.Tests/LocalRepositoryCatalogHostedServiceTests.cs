@@ -6,11 +6,94 @@ using CopilotAgentObservability.Telemetry;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using System.Text;
+using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalRepositoryCatalogHostedServiceTests
 {
+    [Theory]
+    [InlineData("copilot-cli", true, "github-copilot-cli")]
+    [InlineData("copilot-cli", false, "github-copilot-cli")]
+    [InlineData("vscode-copilot-chat", true, "github-copilot-vscode")]
+    [InlineData("vscode-copilot-chat", false, "github-copilot-vscode")]
+    public async Task DefaultIngress_ProcessesExactSourceWithOrWithoutLocator(
+        string source, bool hasLocator, string observationSurface)
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = TimeProvider.System };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
+        {
+            UseUserSecrets = false,
+            ProjectionPollInterval = TimeSpan.FromMilliseconds(20),
+        });
+        using var response = await host.Client.PostAsync("/v1/traces",
+            new StringContent(DefaultIngressPayload(source, hasLocator), Encoding.UTF8, "application/json"));
+        response.EnsureSuccessStatusCode();
+        await WaitForTerminalQueueAsync(temp.DatabasePath);
+
+        using var connection = Open(temp.DatabasePath);
+        Assert.Equal("completed", ScalarText(connection, "SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal("raw-otlp", ScalarText(connection, "SELECT source_surface FROM source_schema_observations;"));
+        Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM source_schema_observations WHERE source_application_version IS NULL;"));
+        Assert.Equal(hasLocator ? 1 : 0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repositories;"));
+        Assert.Equal(hasLocator ? 1 : 0, ScalarLong(connection, "SELECT COUNT(*) FROM session_repository_observations;"));
+        if (hasLocator)
+        {
+            Assert.Equal(observationSurface, ScalarText(connection, "SELECT source_surface FROM session_repository_observations;"));
+            Assert.Equal("assigned", ScalarText(connection, "SELECT new_state FROM session_repository_assignment_history;"));
+            Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM session_repository_observation_contexts;"));
+            using var transaction = connection.BeginTransaction();
+            var reconciliation = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction);
+            SqliteLocalRepositoryCatalogStore.ValidateRestorableAutomaticAdmissionState(connection, transaction, reconciliation);
+        }
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("mixed")]
+    [InlineData("conflicting")]
+    public async Task DefaultIngress_UnresolvedSourceRemainsTerminalWithoutRepository(string input)
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = TimeProvider.System };
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
+        {
+            UseUserSecrets = false,
+            ProjectionPollInterval = TimeSpan.FromMilliseconds(20),
+        });
+        var payload = DefaultIngressPayload(input == "unknown" ? "unknown-client" : "copilot-cli", true);
+        if (input == "mixed")
+        {
+            using var cli = JsonDocument.Parse(payload);
+            using var vscode = JsonDocument.Parse(DefaultIngressPayload("vscode-copilot-chat", true)
+                .Replace("11111111111111111111111111111111", "33333333333333333333333333333333", StringComparison.Ordinal));
+            payload = "{\"resourceSpans\":[" + cli.RootElement.GetProperty("resourceSpans")[0].GetRawText()
+                + "," + vscode.RootElement.GetProperty("resourceSpans")[0].GetRawText() + "]}";
+        }
+        if (input == "conflicting")
+            payload = payload.Replace("\"resource\":{\"attributes\":[", "\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"copilot-chat\"}},", StringComparison.Ordinal);
+        using var response = await host.Client.PostAsync("/v1/traces",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+        response.EnsureSuccessStatusCode();
+        await WaitForTerminalQueueAsync(temp.DatabasePath);
+        using var connection = Open(temp.DatabasePath);
+        Assert.Equal("failed_terminal", ScalarText(connection, "SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal("catalog_schema_violation", ScalarText(connection, "SELECT terminal_reason FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repositories;"));
+    }
+
+    private static string DefaultIngressPayload(string source, bool hasLocator) => $$$"""
+        {"resourceSpans":[{"resource":{"attributes":[{"key":"client.kind","value":{"stringValue":"{{{source}}}"}}]},"scopeSpans":[{"spans":[{"traceId":"11111111111111111111111111111111","spanId":"2222222222222222","name":"chat","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}} {{{(hasLocator ? ",{\"key\":\"vcs.repository.url.full\",\"value\":{\"stringValue\":\"https://github.com/Example/Widget\"}}" : "")}}}]}]}]}]}
+        """;
+
+    private static async Task WaitForTerminalQueueAsync(string databasePath)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var connection = Open(databasePath);
+        while (ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue WHERE state IN ('completed','failed_terminal');") == 0)
+            await Task.Delay(20, timeout.Token);
+    }
+
     [Fact]
     public async Task RawDefault_SinglePassDiscoversTwoProjectedRowsAndClaimsExactlyOne()
     {

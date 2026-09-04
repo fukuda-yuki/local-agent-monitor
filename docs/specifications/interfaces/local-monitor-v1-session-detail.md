@@ -127,7 +127,11 @@ facts reuse the exact Session collection object graphs and property order.
 for recorded, additional count is a nonnegative integer only when it is
 authoritatively known, and content availability is true only when an exact raw
 reference is currently Retention-admissible. `timing` is exactly
-`{state,started_at,ended_at,last_seen_at,duration_ms}`. When Session timing is
+`{state,started_at,ended_at,last_seen_at,duration_ms}`. `last_seen_at` is an
+observation timestamp independent of native lifecycle: when start is absent,
+headings and context show it explicitly as **最終観測**. An active stored status
+with `timing.state=not_observed` is labeled **状態未観測**. No observed timestamp
+completes a Session or supplies its duration. When Session timing is
 `recorded`, `started_at` and `last_seen_at` are non-null. An active recorded
 Session has both `ended_at` and `duration_ms` null; a completed recorded Session
 has both non-null and duration is at least zero. `capture` is exactly
@@ -144,8 +148,11 @@ events, Session completeness, or another signal family.
 `executions` contains `0..256` objects ordered by recorded start descending,
 then source ordinal ascending, then execution ID ascending. Missing time sorts
 after recorded; invalid time sorts after missing. Each object property order is
-`execution_id, node_id, latest, source, model, lifecycle, status, timing, tokens,
+`execution_id, node_id, latest, source_ordinal, source, model, lifecycle, status, timing, tokens,
 activity, child_count`.
+
+`source_ordinal` is the nonnegative persisted source order used for tie-breaking;
+clients validate order with this number, never with the displayed source string.
 
 `latest` is an explicit Boolean on every execution. An empty array has no
 latest execution. A nonempty array has exactly one `latest:true`, selected by
@@ -297,7 +304,12 @@ explicit edges are returned.
 `content` has the six part names in the accepted part order. Each value is
 `{state,available}` with state
 `available|not_captured|expired|deleted|read_denied|oversized|invalid`.
-Availability is true only for `available`. Skill body/path/current-file are not
+Availability is true only for `available`. An explicitly unsupported producer
+message with no stored content or retention owner has `not_captured` raw
+availability; its persisted unsupported event contributes the existing
+`source_unsupported` capture note, displayed as an unsupported-format reason.
+It never grants a content read or invalidates other Session evidence.
+Skill body/path/current-file are not
 represented here and remain exclusively on the #158 routes.
 
 ## Exact raw content response

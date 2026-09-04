@@ -115,13 +115,32 @@ integer, except cache-read ratio is limited to 0..10000.
 cache-read are recorded and `0 <= cache_read <= input`; the ratio additionally
 requires input greater than zero. Inconsistent inputs produce state
 `inconsistent` and null derived values. Producer `total` is never reconstructed.
-For every exact execution, one authority row is selected: Session Run is
-preferred over an exact-linked LLM span, and the two authorities are never
-added together for the same execution.
+Session aggregate contributors are exact-linked LLM calls, including calls
+whose usage is missing, and token-bearing Session Runs without an exact LLM
+span. Non-LLM Runs with no usage do not enter the coverage denominator.
+For each contributor and each component independently, a recorded Session Run
+value is preferred; otherwise the first recorded exact-linked LLM span value
+in source-identity order is used. Run and span values for the same call are
+never added together. Authority is `mixed` when selected components come from
+both sources. Each component is summed only when every applicable call has
+that component; partial coverage remains `capture_gap` with a null value.
+A component absent from every call remains `not_observed`, including producer
+total. The two execution counts describe applicable calls with any recorded
+usage and all applicable calls respectively. Execution and node facts retain
+their own authority and remain usable when a Session aggregate is unavailable.
 
 ### Timing, capture and revision
 
-`timing` order is `state, started_at, ended_at, duration_ms`. Timestamps are
+`started_at`, `ended_at`, and `duration_ms` remain native Session lifecycle facts.
+`last_seen_at` is the latest persisted observation timestamp, not a Session
+completion or duration. For ordinary OTel-only Sessions it comes from accepted
+OTel observations and can be shown as **最終観測** when native start is absent.
+Headings use native start first, otherwise this explicitly labeled observation.
+Date filtering and ordering use the persisted accepted epoch, overridden by
+last observation when native start is absent. The stored projection is unchanged. An active stored status without observed native timing is displayed
+as **状態未観測**, never as proof of a running or completed Session.
+
+`timing` order is `state, started_at, ended_at, last_seen_at, duration_ms`. Timestamps are
 null or canonical UTC `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. Duration is null or a
 nonnegative integer, and is recorded only when both endpoints are valid and
 ordered.

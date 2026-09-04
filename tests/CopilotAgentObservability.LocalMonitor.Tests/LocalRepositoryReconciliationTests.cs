@@ -79,12 +79,16 @@ public sealed class LocalRepositoryReconciliationTests
         Assert.True(fixture.DomainRowCount() > 0);
     }
 
-    [Fact]
-    public async Task MalformedPayloadIsParseFailureWithNoDomainRows()
+    [Theory]
+    [InlineData("github-copilot-cli")]
+    [InlineData("raw-otlp")]
+    public async Task MalformedPayloadIsParseFailureWithNoDomainRows(string captureSurface)
     {
         using var fixture = new LocalRepositoryAdmissionFixture();
 
-        await fixture.RunAsync("{", []);
+        var prepared = fixture.Prepare("{", []);
+        fixture.Execute($"UPDATE source_schema_observations SET source_surface='{captureSurface}';");
+        await fixture.RunPreparedAsync(prepared);
 
         Assert.Equal("failed_terminal", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
         Assert.Equal("catalog_parse_failure", fixture.ScalarText("SELECT terminal_reason FROM local_repository_reconciliation_queue;"));

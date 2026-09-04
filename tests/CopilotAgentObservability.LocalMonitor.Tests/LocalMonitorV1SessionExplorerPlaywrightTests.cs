@@ -13,6 +13,32 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 {
     [Fact]
+    public async Task ObservationTimeLabelsOtelOnlySessionWithoutInventingLifecycle()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var payload = JsonNode.Parse(await TwoSessionsAsync())!;
+        var item = payload["items"]![0]!;
+        item["label"]!["state"] = "not_observed";
+        item["label"]!["text"] = null;
+        item["status"] = "active";
+        item["timing"]!["state"] = "not_observed";
+        item["timing"]!["started_at"] = null;
+        item["timing"]!["ended_at"] = null;
+        item["timing"]!["duration_ms"] = null;
+        item["timing"]!["last_seen_at"] = "2026-01-02T00:00:02.0000000+00:00";
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(Canonical(payload))));
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions");
+        await Expect(page.Locator("[data-session-started]").First).ToContainTextAsync("最終観測");
+        await Expect(page.Locator("[data-session-status]").First).ToHaveTextAsync("状態未観測");
+        await Expect(page.Locator("[data-session-started]").Nth(1)).Not.ToContainTextAsync("最終観測");
+    }
+
+    [Fact]
     public async Task DisabledRepositoryAiLeavesExplorerInteractiveWithoutAiElementsOrRequests()
     {
         using var temp = new MonitorTempDirectory();

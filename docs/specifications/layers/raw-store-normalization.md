@@ -476,17 +476,44 @@ The normalizer assigns exactly one completeness state:
 The post-projection OTel enricher advances only its dedicated Session cursor.
 It runs after existing monitor projection and must not advance or redefine the
 existing monitor cursor/readiness contract. A byte-for-byte trace context
-already recorded on a Session event may link OTel evidence. Exact
-`gen_ai.conversation.id` may bind/enrich only when byte-for-byte equal to an
-already-recorded native session ID; otherwise OTel remains `unbound`.
-`client_kind` never participates in binding or merge and may only confirm
-whether `hook-unknown` is `copilot-cli` or `vscode`. Inexact evidence does not
+already recorded on a Session event may link OTel evidence. For unambiguously
+resolved Copilot CLI or VS Code, exact
+`gen_ai.conversation.id` bootstraps the first native binding, scoped separately
+to that source surface, and links later traces with the same byte-for-byte ID.
+Missing, duplicate, or ambiguous identities create no native binding; existing
+exact trace rules still apply. Other identity
+aliases are not substitutes. `client_kind` alone never proves identity.
+Existing Session owners are never merged or moved. A newly admitted native ID
+that contradicts the trace owner's same-source native ID uses its own exact
+native owner or creates a separate bound Session; existing events stay put.
+Inexact evidence does not
 merge a Session or produce `full` completeness.
 
 Session schema migration runs during Local Monitor startup. Any migration
 failure fails host construction, matching the analysis-store migration; it is
 not represented by a new readiness check. Existing readiness body fields,
 thresholds, units, configuration names, and HTTP status mapping remain unchanged.
+
+Copilot OTel content projection admits exact trace/span message attributes
+`gen_ai.input.messages` and `gen_ai.output.messages` encoded as JSON strings
+containing arrays of `{role,parts:[{type:"text",content:string}]}`. It records
+the last user entry of each input array as `copilot-otel / user.message` with
+`{value:text}`, and output assistant text as `assistant.message` with a JSON
+string. It does not import preceding input history, tool messages, or tool-call
+parts. Multiple text parts preserve order without inserted text. These are
+span observations, not a claimed count of distinct user turns; repeated equal
+text on different spans is not deduplicated by content. Exact source-event
+identity prevents replay duplicates. Unsupported message shapes are explicit
+`unsupported`, while absent message attributes add no content observation.
+The shared Session secret filter applies before persistence.
+
+A separate bounded content cursor repairs existing retained Copilot spans
+under their existing Session/Run owners without resetting metadata cursors,
+creating duplicate Runs, or changing identity ownership. Existing content
+events, including expired/deleted ones, are never recreated. Raw grants remain
+held and are checked inside the content write transaction before writing and
+committing. Content capture time and the 90-day expiry are inherited from the
+raw record, not extended by repair. Denied raw content is not read or resurrected.
 
 Raw event content receives `expires_at = captured_at + 90 days`. Expiry changes
 the content read to `410` / `expired_pending_deletion`; the row remains stored.

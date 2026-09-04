@@ -139,9 +139,9 @@
     if (!exact(detail, ["schema_version", "workspace_revision", "session_id", "execution", "node", "parent_path", "related", "content"])
         || detail.schema_version !== "local-monitor-session-node.response.v2" || detail.workspace_revision !== state.revision
         || detail.session_id !== root.dataset.sessionId
-        || !exact(detail.execution, ["execution_id", "node_id", "latest", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
+        || !exact(detail.execution, ["execution_id", "node_id", "latest", "source_ordinal", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
         || !UUID_V7.test(detail.execution.execution_id) || !NODE.test(detail.execution.node_id)
-        || typeof detail.execution.latest !== "boolean"
+        || typeof detail.execution.latest !== "boolean" || !nonnegative(detail.execution.source_ordinal)
         || detail.execution.source !== null && (typeof detail.execution.source !== "string" || detail.execution.source.length === 0)
         || detail.execution.model !== null && (typeof detail.execution.model !== "string" || detail.execution.model.length === 0)
         || !oneOf(detail.execution.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
@@ -277,8 +277,8 @@
         || !distinct(summary.technical_references.trace_ids) || !sorted(summary.technical_references.trace_ids)) throw new TypeError("invalid Session summary");
     let latest = 0;
     for (const execution of summary.executions) {
-      if (!exact(execution, ["execution_id", "node_id", "latest", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
-          || !UUID_V7.test(execution.execution_id) || !NODE.test(execution.node_id) || typeof execution.latest !== "boolean"
+      if (!exact(execution, ["execution_id", "node_id", "latest", "source_ordinal", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
+          || !UUID_V7.test(execution.execution_id) || !NODE.test(execution.node_id) || typeof execution.latest !== "boolean" || !nonnegative(execution.source_ordinal)
           || execution.source !== null && (typeof execution.source !== "string" || execution.source.length === 0)
           || execution.model !== null && (typeof execution.model !== "string" || execution.model.length === 0)
           || !oneOf(execution.lifecycle, ["selected", "started", "completed", "failed", "deselected", "unknown"])
@@ -298,9 +298,7 @@
     if (groupDifference !== 0) return groupDifference;
     if (left.timing.state === "recorded" && left.timing.started_at !== right.timing.started_at)
       return left.timing.started_at > right.timing.started_at ? -1 : 1;
-    const leftSource = left.source ?? "\uffff";
-    const rightSource = right.source ?? "\uffff";
-    if (leftSource !== rightSource) return leftSource < rightSource ? -1 : 1;
+    if (left.source_ordinal !== right.source_ordinal) return left.source_ordinal < right.source_ordinal ? -1 : 1;
     return left.execution_id < right.execution_id ? -1 : left.execution_id > right.execution_id ? 1 : 0;
   }
 
@@ -1110,21 +1108,23 @@
   function render(summary, openLatest = true) {
     const session = summary.session;
     const safeInstant = session.timing.started_at ?? session.timing.last_seen_at;
-    const sessionLabel = session.instruction.label !== null ? session.instruction.label : safeInstant === null ? "日時不明のセッション" : `${new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(safeInstant))} のセッション`;
+    const sessionLabel = session.instruction.label !== null ? session.instruction.label : safeInstant === null ? "日時不明のセッション" : `${new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(safeInstant))}${session.timing.started_at === null ? " 最終観測" : ""} のセッション`;
     root.querySelector("[data-session-breadcrumb]").textContent = sessionLabel;
     root.querySelector("[data-session-title]").textContent = sessionLabel;
     const context = root.querySelector("[data-session-context-content]");
-    context.replaceChildren(el("strong", null, sessionLabel), el("span", null, ` ${STATUS_LABELS[session.status]}`));
+    context.replaceChildren(el("strong", null, sessionLabel), el("span", null, ` ${session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : STATUS_LABELS[session.status]}`));
     const source = el("span"); source.dataset.sessionSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
     const time = el("span"); time.dataset.sessionTime = "";
     if (session.timing.state === "recorded") time.textContent = session.timing.ended_at === null
       ? `${session.timing.started_at} から実行中` : `${session.timing.started_at} – ${session.timing.ended_at} · ${format(session.timing.duration_ms)} ms`;
+    else if (session.timing.last_seen_at !== null) time.textContent = `最終観測 ${session.timing.last_seen_at}`;
     else renderFact(time, { state: session.timing.state, count: null });
     context.append(source, time);
     if (session.archive.state !== "active") context.append(el("span", null, " アーカイブ済み"));
     if (session.capture.state !== "complete") context.append(el("span", null, " 記録に制限があります"));
+    if (session.capture.notes.includes("source_unsupported")) context.append(el("span", null, " この取得元では、一部のメッセージ形式に対応していません"));
 
     const summaryRoot = root.querySelector("[data-session-summary]");
     summaryRoot.replaceChildren();

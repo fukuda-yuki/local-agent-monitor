@@ -8,6 +8,37 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1CollectionApplicationTests
 {
     [Fact]
+    public void OtelObservationDateFiltersWithoutNativeLifecycleTiming()
+    {
+        var observed = Session(1, startedAt: null);
+        observed = observed with { Session = ((LocalWorkspaceProjectionRow)observed.Session) with
+        {
+            TimingState = "not_observed", EndedAt = null, DurationMilliseconds = null,
+            LastSeenAt = "2026-01-02T00:00:00.0000000+00:00", LastSeenEpochMilliseconds = 1_767_312_000_000,
+            SortGroup = 0, SortEpochMilliseconds = 1_767_225_600_000
+        } };
+        var request = Parse("""{"schema_version":"local-monitor-session-search.request.v1","scope":"all","repository_id":null,"archive_scope":"active_only","from":"2026-01-02T00:00:00.0000000+00:00","to":"2026-01-03T00:00:00.0000000+00:00","source":[],"model":[],"status":[],"has_skill":null,"has_subagent":null,"has_error":null,"has_retry":null,"q":null,"cursor":null,"limit":null}""");
+        using var json = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(
+            new(new(LocalRepositoryScopeKind.All, null), [], [observed, Session(2)]), request, new byte[32]));
+        var item = Assert.Single(json.RootElement.GetProperty("items").EnumerateArray());
+        var timing = item.GetProperty("timing");
+        Assert.Equal("not_observed", timing.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, timing.GetProperty("started_at").ValueKind);
+        Assert.Equal(JsonValueKind.Null, timing.GetProperty("ended_at").ValueKind);
+        Assert.Equal(JsonValueKind.Null, timing.GetProperty("duration_ms").ValueKind);
+        Assert.Equal("2026-01-02T00:00:00.0000000+00:00", timing.GetProperty("last_seen_at").GetString());
+        Assert.Equal("active", item.GetProperty("status").GetString());
+        var snapshot = new LocalRepositoryScopeSnapshot(new(LocalRepositoryScopeKind.All, null), [], [observed, Session(2)]);
+        var paged = request with { From = null, To = null, Limit = 1 };
+        using var first = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, paged, new byte[32]));
+        var cursor = first.RootElement.GetProperty("next_cursor").GetString();
+        using var second = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, paged with { Cursor = cursor }, new byte[32]));
+        Assert.Equal(observed.SessionId, first.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString());
+        Assert.Equal(Session(2).SessionId, Assert.Single(second.RootElement.GetProperty("items").EnumerateArray()).GetProperty("session_id").GetString());
+        Assert.Equal(item.GetProperty("workspace_revision").GetString(), first.RootElement.GetProperty("items")[0].GetProperty("workspace_revision").GetString());
+    }
+
+    [Fact]
     public void RepositoryQueryRejectsUnknownDuplicateAndEmptyValues()
     {
         Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse("?unknown=x", out _));

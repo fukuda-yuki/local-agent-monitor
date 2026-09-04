@@ -14,6 +14,236 @@ public sealed class SessionOtelEnrichmentTests
     private static readonly DateTimeOffset ObservedAt = DateTimeOffset.Parse("2026-07-12T00:00:00Z");
 
     [Fact]
+    public void ProcessNextBatch_CopilotFirstObservationPreservesContentAndSourceScopedContinuity()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        IngestCopilot(temp, "trace-first", "github-copilot", "same-native", "first instruction", "first answer");
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        var first = Assert.Single(store.ListMostRecent(10));
+        Assert.Equal(SessionCompleteness.Partial, first.Completeness);
+        Assert.Equal(first.SessionId, store.Resolve(SessionSourceSurface.CopilotCli, "same-native")!.SessionId);
+        IngestCopilot(temp, "trace-later", "github-copilot", "same-native", "second instruction", "second answer");
+        IngestCopilot(temp, "trace-vscode", "copilot-chat", "same-native", "other instruction", "other answer");
+        Assert.Equal(2, enricher.ProcessNextBatch());
+        Assert.Equal(2, store.ListMostRecent(10).Count);
+        Assert.Equal(2, store.GetDetail(first.SessionId)!.Runs.Count);
+        Assert.NotEqual(first.SessionId, store.Resolve(SessionSourceSurface.VisualStudioCode, "same-native")!.SessionId);
+        Assert.Equal(6, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+        Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content WHERE json_extract(content_json,'$.value')='first instruction';"));
+        Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content WHERE json_extract(content_json,'$')='second answer';"));
+        Assert.Equal(0, enricher.ProcessNextBatch());
+        Assert.Equal(6, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    [Fact]
+    public void ProcessNextBatch_CopilotContentRepairKeepsExistingOwnersAndIsIdempotent()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        IngestCopilot(temp, "trace-repair", "github-copilot", "repair-native", "instruction Bearer synthetic-secret", "answer");
+        var interrupted = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock,
+            checkpoint => { if (checkpoint == "before-copilot-content-write") throw new InvalidOperationException("synthetic stop"); });
+        Assert.Throws<InvalidOperationException>(() => interrupted.ProcessNextBatch());
+        var before = Assert.Single(store.ListMostRecent(10));
+        Assert.Single(store.GetDetail(before.SessionId)!.Runs);
+        Assert.Equal(0, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+        var resumed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(0, resumed.ProcessNextBatch());
+        Assert.Equal(before.SessionId, Assert.Single(store.ListMostRecent(10)).SessionId);
+        Assert.Single(store.GetDetail(before.SessionId)!.Runs);
+        Assert.Equal(2, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+        Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content WHERE json_extract(content_json,'$.value')='instruction [REDACTED]';"));
+        store.UpsertProjectionState(new(SqliteSessionOtelEnricher.ContentProjectorKey, 0, 0, ObservedAt));
+        Assert.Equal(0, resumed.ProcessNextBatch());
+        Assert.Equal(2, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    [Fact]
+    public void ProcessNextBatch_CopilotContentLostGrantWritesNothingAndKeepsRepairCursor()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        IngestCopilot(temp, "trace-lost-grant", "github-copilot", "native-lost-grant", "instruction", "answer");
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock,
+            checkpoint => { if (checkpoint == "before-copilot-content-write") Execute(temp.DatabasePath, "DELETE FROM retention_leases WHERE lease_kind='operation';"); });
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        Assert.Equal(0, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+        Assert.Null(store.GetProjectionState(SqliteSessionOtelEnricher.ContentProjectorKey));
+    }
+
+    [Fact]
+    public void ProcessNextBatch_CopilotConfirmationCannotBridgeSourcesThroughUnknownHook()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        var sessionId = Guid.CreateVersion7();
+        store.Write(new(new(new(sessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Partial,
+            null, null, null, null, ObservedAt, SessionRawRetentionState.NotCaptured, ObservedAt, ObservedAt),
+            [new(sessionId, SessionSourceSurface.HookUnknown, "shared-hook-native", SessionBindingKind.Native, ObservedAt)], [],
+            [Event(sessionId, "unknown-hook", "UserPromptSubmit", ObservedAt)]), []));
+        IngestCopilot(temp, "trace-cli-confirm", "github-copilot", "shared-hook-native", "CLI input", "CLI answer");
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        Assert.Equal(sessionId, store.Resolve(SessionSourceSurface.CopilotCli, "shared-hook-native")!.SessionId);
+        IngestCopilot(temp, "trace-vscode-separate", "copilot-chat", "shared-hook-native", "VSCode input", "VSCode answer");
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        Assert.NotEqual(sessionId, store.Resolve(SessionSourceSurface.VisualStudioCode, "shared-hook-native")!.SessionId);
+        Assert.Equal(2, store.ListMostRecent(10).Count);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_CopilotDifferentNativeIdsDoNotJoinBySharedTrace()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        IngestCopilot(temp, "trace-shared", "github-copilot", "native-first", "first input", "first answer");
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        var firstOwner = store.Resolve(SessionSourceSurface.CopilotCli, "native-first")!.SessionId;
+        IngestCopilot(temp, "trace-shared", "github-copilot", "native-second", "second input", "second answer", spanId: "span-2");
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        Assert.NotEqual(firstOwner, store.Resolve(SessionSourceSurface.CopilotCli, "native-second")!.SessionId);
+        Assert.Equal(2, store.ListMostRecent(10).Count);
+        Assert.Single(store.GetDetail(firstOwner)!.Runs);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_CopilotExactLegacyMixedOwnerIsNotRebound()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        var sessionId = Guid.CreateVersion7();
+        store.Write(new(new(new(sessionId, ObservedSessionStatus.Unknown, SessionCompleteness.Partial,
+            null, null, null, null, ObservedAt, SessionRawRetentionState.NotCaptured, ObservedAt, ObservedAt),
+            [new(sessionId, SessionSourceSurface.CopilotCli, "legacy-mixed-native", SessionBindingKind.Native, ObservedAt),
+             new(sessionId, SessionSourceSurface.VisualStudioCode, "legacy-mixed-native", SessionBindingKind.Native, ObservedAt)], [], []), []));
+        var unknownOwner = Guid.CreateVersion7();
+        store.Write(new(new(new(unknownOwner, ObservedSessionStatus.Unknown, SessionCompleteness.Partial,
+            null, null, null, null, ObservedAt, SessionRawRetentionState.NotCaptured, ObservedAt, ObservedAt),
+            [new(unknownOwner, SessionSourceSurface.HookUnknown, "legacy-mixed-native", SessionBindingKind.Native, ObservedAt)], [], []), []));
+        IngestCopilot(temp, "trace-legacy-mixed", "github-copilot", "legacy-mixed-native", "input", "answer");
+        Assert.Equal(1, new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock).ProcessNextBatch());
+        Assert.Equal(2, store.ListMostRecent(10).Count);
+        Assert.Empty(store.GetDetail(unknownOwner)!.Runs);
+        Assert.Equal(2, store.GetDetail(sessionId)!.NativeIds.Count);
+        Assert.Single(store.GetDetail(sessionId)!.Runs);
+    }
+
+    [Theory]
+    [InlineData("[{\"parts\":[]}]")]
+    [InlineData("[{\"role\":\"user\",\"parts\":[{\"type\":\"image\"}]}]")]
+    public void ProcessNextBatch_CopilotPresentUnsupportedInputIsNotNotCaptured(string input)
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        IngestCopilot(temp, "trace-unsupported", "github-copilot", "unsupported-native", "unused", "answer", inputMessages: input);
+        Assert.Equal(1, new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock).ProcessNextBatch());
+        var detail = store.GetDetail(Assert.Single(store.ListMostRecent(10)).SessionId)!;
+        Assert.Single(detail.Events, item => item.SourceAdapter == "copilot-otel" && item.ContentState == SessionContentState.Unsupported);
+        Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    [Fact]
+    public void ProcessNextBatch_CopilotConflictingTraceSourcesDoNotBootstrapOrCopyContent()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        IngestCopilot(temp, "trace-conflicting", "github-copilot", "conflicting-native", "CLI input", "CLI answer");
+        IngestCopilot(temp, "trace-conflicting", "copilot-chat", "conflicting-native", "VSCode input", "VSCode answer", spanId: "span-2");
+        Assert.Equal(2, new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock).ProcessNextBatch());
+        Assert.Equal(0, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_native_ids;"));
+        Assert.Equal(0, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+        Assert.All(store.ListMostRecent(10), item => Assert.Equal(SessionCompleteness.Unbound, item.Completeness));
+    }
+
+    [Fact]
+    public async Task ProcessNextBatch_UnsupportedCopilotOutputKeepsProductionSummaryAvailable()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new FixedTimeProvider(ObservedAt);
+        temp.TimeProvider = clock;
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        IngestCopilot(temp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "github-copilot", "unsupported-output", "recorded question", "unused",
+            spanId: "bbbbbbbbbbbbbbbb", outputMessages: """[{"role":"assistant","parts":[{"type":"tool_call","name":"read_file"}]}]""");
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        var session = Assert.Single(store.ListMostRecent(10));
+        var detail = store.GetDetail(session.SessionId)!;
+        var unsupported = Assert.Single(detail.Events, item => item.ContentState == SessionContentState.Unsupported);
+        Assert.Equal("assistant.message", unsupported.Type);
+        using var host = await LocalMonitorV1SessionDetailRouteTests.StartProductionDetailRouteAsync(temp);
+        using var response = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{session.SessionId:D}/summary");
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        using var summary = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Contains(summary.RootElement.GetProperty("session").GetProperty("capture").GetProperty("notes").EnumerateArray(),
+            note => note.GetString() == "source_unsupported");
+        Assert.DoesNotContain(summary.RootElement.GetProperty("session").GetProperty("capture").GetProperty("notes").EnumerateArray(),
+            note => note.GetString() == "raw_content_not_captured");
+        Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    private static void IngestCopilot(MonitorTempDirectory temp, string traceId, string service, string nativeId, string prompt, string answer, string? inputMessages = null, string spanId = "span-1", string? outputMessages = null)
+    {
+        static object Attribute(string key, string value) => new { key, value = new { stringValue = value } };
+        var input = inputMessages ?? System.Text.Json.JsonSerializer.Serialize(new[] { new { role = "user", parts = new[] { new { type = "text", content = prompt } } } });
+        var output = outputMessages ?? System.Text.Json.JsonSerializer.Serialize(new[] { new { role = "assistant", parts = new[] { new { type = "text", content = answer } } } });
+        var payload = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            resourceSpans = new[] { new
+            {
+                resource = new { attributes = new[] { Attribute("service.name", service) } },
+                scopeSpans = new[] { new { spans = new[] { new
+                {
+                    traceId, spanId, name = "chat", startTimeUnixNano = "1783814400000000000", endTimeUnixNano = "1783814401000000000",
+                    attributes = new[] { Attribute("gen_ai.operation.name", "chat"), Attribute("gen_ai.conversation.id", nativeId), Attribute("gen_ai.input.messages", input), Attribute("gen_ai.output.messages", output) },
+                } } } },
+            } },
+        });
+        var raw = RawOtlpIngestor.CreateRecordFromPayloadJson(payload, ObservedAt);
+        var rawStore = temp.CreateRawStore();
+        var rawId = rawStore.Insert(raw);
+        raw = raw with { Id = rawId };
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT payload_json FROM raw_records ORDER BY id;";
+        var payloads = new List<string>();
+        using (var reader = command.ExecuteReader()) while (reader.Read()) payloads.Add(reader.GetString(0));
+        var sources = OtlpTraceSourceResolver.Resolve(payloads);
+        rawStore.ApplyProjection(rawId, raw.Source, raw.ReceivedAt,
+            MonitorProjectionBuilder.Build(raw, id => sources.Single(item => item.TraceId == id).SourceFamily), ObservedAt);
+        rawStore.ApplySpanProjection(rawId, MonitorSpanProjectionBuilder.Build(raw), ObservedAt);
+    }
+
+    [Fact]
     public void ProcessNextBatch_UsesOnlyExactLinksAndCreatesUnboundForUnmatchedRows()
     {
         using var temp = new MonitorTempDirectory();

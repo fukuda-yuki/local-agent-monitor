@@ -48,7 +48,7 @@ internal static class LocalMonitorV1CollectionApplication
     {
         var rows = snapshot.Sessions
             .Where(row => SelectorMatches(row, request))
-            .Select(row => (Scope: row, Projection: (LocalWorkspaceProjectionRow)row.Session))
+            .Select(row => (Scope: row, Projection: CollectionTiming((LocalWorkspaceProjectionRow)row.Session)))
             .OrderBy(row => row.Projection.SortGroup)
             .ThenByDescending(row => row.Projection.SortEpochMilliseconds)
             .ThenByDescending(row => row.Projection.SessionId, StringComparer.Ordinal)
@@ -72,7 +72,7 @@ internal static class LocalMonitorV1CollectionApplication
         {
             writer.WriteStartObject(); writer.WriteString("schema_version", "local-monitor-sessions.response.v1"); writer.WriteString("workspace_revision", revision);
             writer.WritePropertyName("items"); writer.WriteStartArray();
-            foreach (var row in emitted) WriteSession(writer, row.Scope, row.Projection, itemRevisionOverride);
+            foreach (var row in emitted) WriteSession(writer, row.Scope, (LocalWorkspaceProjectionRow)row.Scope.Session, itemRevisionOverride);
             writer.WriteEndArray(); if (next is null) writer.WriteNull("next_cursor"); else writer.WriteString("next_cursor", next); writer.WriteEndObject();
         });
     }
@@ -129,9 +129,14 @@ internal static class LocalMonitorV1CollectionApplication
         (request.Scope switch { "all" => row.IsAllScopeMember, "unassigned" => row.IsUnassignedScopeMember, "repository" => row.IsRequestedScopeMember, _ => false })
         && (request.ArchiveScope == "include_archived" || row.IsEffectivelyEligible);
 
+    private static LocalWorkspaceProjectionRow CollectionTiming(LocalWorkspaceProjectionRow row) =>
+        row.StartedAt is null && row.LastSeenEpochMilliseconds is { } observed
+            ? row with { SortGroup = 0, SortEpochMilliseconds = observed }
+            : row;
+
     private static bool Matches(LocalRepositoryScopeSessionSnapshot row, LocalMonitorV1SessionSearchRequest request)
     {
-        var p = (LocalWorkspaceProjectionRow)row.Session;
+        var p = CollectionTiming((LocalWorkspaceProjectionRow)row.Session);
         var acceptedEpochMilliseconds = p.SortGroup == 0 ? p.SortEpochMilliseconds : (long?)null;
         var fromEpochMilliseconds = request.From?.ToUnixTimeMilliseconds();
         var toEpochMilliseconds = request.To?.ToUnixTimeMilliseconds();
@@ -158,7 +163,7 @@ internal static class LocalMonitorV1CollectionApplication
         w.WritePropertyName("label"); Fact(w, p.LabelState, p.LabelText, "text"); w.WriteString("status", p.Status); w.WriteString("completeness", p.Completeness);
         Set(w, "source", p.Sources); Set(w, "model", p.Models); w.WritePropertyName("summary"); w.WriteStartObject(); Count(w,"skill",p.Activity.Skill); Count(w,"tool",p.Activity.Tool); Count(w,"subagent",p.Activity.Subagent); Count(w,"error",p.Activity.Error); Count(w,"retry",p.Activity.Retry); w.WriteEndObject();
         var t=p.Tokens; var inconsistent=new LocalWorkspaceFact<long>("inconsistent",null); var inconsistentCache=new LocalWorkspaceFact<long>("inconsistent",t.CacheRead.Value); w.WritePropertyName("tokens"); w.WriteStartObject(); w.WriteString("authority",t.Authority); w.WriteString("state",t.State); w.WriteNumber("available_execution_count",t.AvailableExecutionCount); w.WriteNumber("total_execution_count",t.TotalExecutionCount); Value(w,"input",t.Input); Value(w,"output",t.Output); Value(w,"total",t.Total); Value(w,"reasoning",t.Reasoning); Value(w,"cache_read",t.State=="inconsistent"?inconsistentCache:t.CacheRead); Value(w,"cache_creation",t.CacheCreation); Value(w,"new_input",t.State=="inconsistent"?inconsistent:t.NewInput); Value(w,"cache_read_ratio_basis_points",t.State=="inconsistent"?inconsistent:t.CacheReadRatioBasisPoints); w.WriteEndObject();
-        w.WritePropertyName("timing"); w.WriteStartObject(); w.WriteString("state",p.TimingState); Nullable(w,"started_at",p.StartedAt); Nullable(w,"ended_at",p.EndedAt); if(p.DurationMilliseconds is null)w.WriteNull("duration_ms");else w.WriteNumber("duration_ms",p.DurationMilliseconds.Value); w.WriteEndObject(); w.WritePropertyName("capture_notes"); JsonSerializer.Serialize(w,p.CaptureNotes); w.WriteString("workspace_revision",revisionOverride??Hash("local-monitor-session-item\0v1\0",s,p)); w.WriteEndObject();
+        w.WritePropertyName("timing"); w.WriteStartObject(); w.WriteString("state",p.TimingState); Nullable(w,"started_at",p.StartedAt); Nullable(w,"ended_at",p.EndedAt); Nullable(w,"last_seen_at",p.LastSeenAt); if(p.DurationMilliseconds is null)w.WriteNull("duration_ms");else w.WriteNumber("duration_ms",p.DurationMilliseconds.Value); w.WriteEndObject(); w.WritePropertyName("capture_notes"); JsonSerializer.Serialize(w,p.CaptureNotes); w.WriteString("workspace_revision",revisionOverride??Hash("local-monitor-session-item\0v1\0",s,p)); w.WriteEndObject();
     }
     private static void Set(Utf8JsonWriter w,string n,LocalWorkspaceSetFact f){w.WritePropertyName(n);w.WriteStartObject();w.WriteString("state",f.State);w.WritePropertyName("values");JsonSerializer.Serialize(w,f.Values);w.WriteEndObject();}
     private static void Count(Utf8JsonWriter w,string n,LocalWorkspaceFact<long> f){w.WritePropertyName(n);Fact(w,f.State,f.Value,"count");}

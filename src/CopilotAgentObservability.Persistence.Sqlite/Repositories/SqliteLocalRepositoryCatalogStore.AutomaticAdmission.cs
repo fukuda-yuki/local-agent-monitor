@@ -61,11 +61,29 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         string? terminalReason = null;
         try
         {
+            var observationSurface = provenance.SourceSurface;
+            if (observationSurface == "raw-otlp")
+            {
+                var sources = OtlpTraceSourceResolver.Resolve(rawRecord.PayloadJson);
+                if (sources.Count == 0
+                    || sources.Any(source => source.State != TraceSourceResolutionState.Resolved
+                        || source.AttributeInventoryIncomplete)
+                    || sources.Select(source => source.SourceFamily).Distinct(StringComparer.Ordinal).Count() != 1)
+                {
+                    throw new ArgumentException("local_repository_source_unresolved");
+                }
+                observationSurface = sources[0].SourceFamily switch
+                {
+                    OtlpTraceSourceResolver.CopilotCliFamily => "github-copilot-cli",
+                    OtlpTraceSourceResolver.VsCodeCopilotChatFamily => "github-copilot-vscode",
+                    _ => throw new ArgumentException("local_repository_source_unresolved"),
+                };
+            }
             parsed = LocalRepositoryObservationParser.Parse(
                 suppliedRawRecordId,
                 rawRecord.PayloadJson,
                 provenance.RawPayloadSha256,
-                provenance.SourceSurface,
+                observationSurface,
                 provenance.SourceApplicationVersion,
                 provenance.ObservedAt);
         }
@@ -302,7 +320,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             var result = LocalRepositorySessionEventJoin.ResolveContext(
                 connection,
                 transaction,
-                provenance,
+                provenance with { SourceSurface = link.Occurrence.SourceSurface },
                 link.TraceId ?? string.Empty,
                 link.SpanId ?? string.Empty);
             switch (result.Status)

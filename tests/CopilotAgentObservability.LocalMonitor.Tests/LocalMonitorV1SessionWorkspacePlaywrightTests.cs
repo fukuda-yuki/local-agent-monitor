@@ -17,6 +17,48 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     private const string AiLatestRunId = "018f0000-0000-7000-8000-000000000073";
 
     [Fact]
+    public async Task ServerSummaryWithTiedStartsUsesSourceOrdinalBeforeExecutionId()
+    {
+        using var temp = new MonitorTempDirectory();
+        LocalMonitorV1SessionDetailRouteTests.SeedDeterministicSession(temp);
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                INSERT INTO session_runs(run_id,session_id,source_surface,started_at,ended_at,status)
+                SELECT '018f0000-0000-7000-8000-000000000004',session_id,source_surface,started_at,ended_at,status FROM session_runs;
+                """);
+        }
+        LocalMonitorV1SessionDetailRouteTests.EnsureProductionProjectionSchemas(temp);
+        var service = LocalMonitorV1SessionDetailRouteTests.CreateProductionDetailService(temp);
+        var snapshot = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, SessionId), CancellationToken.None);
+        var executions = snapshot.Detail.Executions;
+        Assert.Equal(2, executions.Count);
+        Assert.Equal(executions[0].StartUtcTicks, executions[1].StartUtcTicks);
+        Assert.True(executions[0].SourceOrdinal < executions[1].SourceOrdinal);
+        Assert.True(StringComparer.Ordinal.Compare(executions[0].ExecutionId, executions[1].ExecutionId) > 0);
+        Assert.True(executions[0].Latest);
+        Assert.False(executions[1].Latest);
+        using var hostTemp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(hostTemp, testOptions: new MonitorHostTestOptions
+        {
+            AdditionalServices = services =>
+            {
+                services.AddSingleton<ILocalRepositoryScopeSnapshotService>(service);
+                services.AddSingleton<ILocalRepositorySessionDetailSnapshotService>(service);
+            },
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await Expect(page.Locator("[data-session-overview]")).ToBeVisibleAsync();
+        await Expect(page.Locator("[data-session-executions]")).ToBeVisibleAsync();
+        await Expect(page.Locator("[data-timeline-node]").First).ToBeVisibleAsync();
+    }
+
+    [Fact]
     public async Task UnavailableSessionHistoryIsNotEmptyAndRecoveryPreservesTheDurableReport()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -1319,12 +1361,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         fixture = "summary-nonrecorded-evidence.json";
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("2026/8/26 10:02 のセッション");
-        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("2026/8/26 10:02 のセッション");
-        await Expect(page.Locator("[data-session-context-content] strong")).ToHaveTextAsync("2026/8/26 10:02 のセッション");
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("2026/8/26 10:02 最終観測 のセッション");
+        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("2026/8/26 10:02 最終観測 のセッション");
+        await Expect(page.Locator("[data-session-context-content] strong")).ToHaveTextAsync("2026/8/26 10:02 最終観測 のセッション");
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要");
         await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("VS Code");
-        await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("今回の記録にはありません");
+        await Expect(page.Locator("[data-session-time]")).ToHaveTextAsync("最終観測 2026-08-26T01:02:03.0000000+00:00");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
             await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("今回の記録にはありません");
         await Expect(page.Locator("[data-session-fixed-coverage]")).ToContainTextAsync("記録が一部欠けています");

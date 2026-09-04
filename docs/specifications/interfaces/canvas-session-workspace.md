@@ -43,10 +43,15 @@ context. Trace-ID-only evidence never merges Sessions and never becomes
 conditions 1 and 2 until a later spec-first DTO adds the complete context.
 
 Repository and timestamp proximity must never merge sessions.
-`client_kind` never participates in Session binding or merge. An exact
-`gen_ai.conversation.id` may bind/enrich only when it is byte-for-byte equal to
-an already-recorded native session ID; this is the identical-native-ID rule,
-not a separate heuristic. Otherwise OTel evidence remains `unbound`.
+For ordinary Copilot OTel, the unambiguous source resolver scopes exact
+`gen_ai.conversation.id` separately to Copilot CLI and VS Code. The first
+observation creates that native binding; later traces with the same exact ID
+join it. `client_kind` alone and differently named identity aliases do not
+prove a join. Missing, duplicate, or ambiguous identities create no native binding; existing
+exact trace rules still apply.
+Existing owners are never merged or moved. A newly admitted native ID that
+contradicts the trace owner's same-source native ID uses its own exact native
+owner or creates a separate bound Session; existing events stay put. Claude retains its separate exact-binding contract.
 
 ## Completeness
 
@@ -989,12 +994,10 @@ deletion. The existing workspace v1 response bytes remain frozen.
 
 OTel enrichment runs after the existing monitor projection and uses a dedicated
 cursor in `session_projection_state`. It may bind or enrich a Session from a
-byte-for-byte trace-context match already recorded on an event. Exact
-`gen_ai.conversation.id` may bind/enrich only when byte-for-byte equal to an
-already-recorded native session ID. Otherwise the OTel evidence remains
-`unbound`. `client_kind` never participates in Session binding or merge; it may
-only confirm whether an ambiguous `hook-unknown` surface is `copilot-cli` or
-`vscode`. An ingest gap, unsupported event version, inexact OTel linkage, or
+byte-for-byte trace-context match already recorded on an event.
+Copilot `gen_ai.conversation.id` follows the source-scoped first-observation
+binding contract above; Claude retains its separate exact-binding contract.
+An ingest gap, unsupported event version, inexact OTel linkage, or
 missing surface-required evidence prevents `full` completeness.
 
 The existing OTLP receiver, trace/span schema, monitor projection cursor, and

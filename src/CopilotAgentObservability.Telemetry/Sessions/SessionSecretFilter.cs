@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace CopilotAgentObservability.LocalMonitor.Sessions;
+namespace CopilotAgentObservability.Telemetry.Sessions;
 
 internal static class SessionSecretFilter
 {
