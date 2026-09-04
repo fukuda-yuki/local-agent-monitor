@@ -2377,8 +2377,8 @@ internal sealed class SetupRecoveryCoordinator
         hash.AppendData(bytes);
     }
 
-    private static string GetAllowedRoot(string targetPath) =>
-        Path.GetDirectoryName(targetPath) ?? throw new FormatException();
+    private string GetAllowedRoot(string targetPath) =>
+        SetupPathPolicy.GetDirectoryName(platform.PathStyle, targetPath) ?? throw new FormatException();
 
     private static void RequireRegular(SetupPathMetadata metadata)
     {

@@ -1,4 +1,5 @@
 using CopilotAgentObservability.ConfigCli.Setup.Platform;
+using CopilotAgentObservability.ConfigCli.Setup.Transactions;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Storage;
 
@@ -6,12 +7,12 @@ public sealed class SetupRuntimePaths
 {
     public SetupRuntimePaths(ISetupPlatform platform)
     {
-        Root = Path.Combine(platform.LocalApplicationData, "CopilotAgentObservability", "LocalMonitor", "setup");
-        OwnershipLedger = Path.Combine(Root, "ownership-ledger.v1.json");
-        Lock = Path.Combine(Root, "setup.lock");
-        Plans = Path.Combine(Root, "plans");
-        Backups = Path.Combine(Root, "backups");
-        Transactions = Path.Combine(Root, "transactions");
+        Root = SetupPathPolicy.Combine(platform.PathStyle, platform.LocalApplicationData, "CopilotAgentObservability", "LocalMonitor", "setup");
+        OwnershipLedger = SetupPathPolicy.Combine(platform.PathStyle, Root, "ownership-ledger.v1.json");
+        Lock = SetupPathPolicy.Combine(platform.PathStyle, Root, "setup.lock");
+        Plans = SetupPathPolicy.Combine(platform.PathStyle, Root, "plans");
+        Backups = SetupPathPolicy.Combine(platform.PathStyle, Root, "backups");
+        Transactions = SetupPathPolicy.Combine(platform.PathStyle, Root, "transactions");
         this.platform = platform;
     }
 
@@ -31,9 +32,9 @@ public sealed class SetupRuntimePaths
 
     public void EnsureRoot() => platform.FileSystem.CreateDirectory(Root);
 
-    public string GetPlan(Guid changeSetId) => Path.Combine(Plans, $"{changeSetId:D}.json");
+    public string GetPlan(Guid changeSetId) => SetupPathPolicy.Combine(platform.PathStyle, Plans, $"{changeSetId:D}.json");
 
-    public string GetBackup(Guid changeSetId, Guid recordId) => Path.Combine(Backups, $"{changeSetId:D}", $"{recordId:D}.backup");
+    public string GetBackup(Guid changeSetId, Guid recordId) => SetupPathPolicy.Combine(platform.PathStyle, Backups, $"{changeSetId:D}", $"{recordId:D}.backup");
 
-    public string GetTransactionJournal(Guid changeSetId) => Path.Combine(Transactions, $"{changeSetId:D}.journal.json");
+    public string GetTransactionJournal(Guid changeSetId) => SetupPathPolicy.Combine(platform.PathStyle, Transactions, $"{changeSetId:D}.journal.json");
 }

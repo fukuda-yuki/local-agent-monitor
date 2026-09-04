@@ -396,12 +396,14 @@ internal static class SetupRollbackPreflightEvaluator
 
 internal sealed class SetupRollbackPreflightObserver
 {
+    private readonly SetupPathStyle pathStyle;
     private readonly SetupRuntimePaths paths;
     private readonly AtomicFileSetupStep fileStep;
     private readonly UserEnvironmentSetupStep environmentStep;
 
     public SetupRollbackPreflightObserver(ISetupPlatform platform, SetupRuntimePaths paths)
     {
+        pathStyle = platform.PathStyle;
         this.paths = paths;
         fileStep = new AtomicFileSetupStep(platform);
         environmentStep = new UserEnvironmentSetupStep(platform);
@@ -471,6 +473,6 @@ internal sealed class SetupRollbackPreflightObserver
         return new SetupRollbackPreflightObservations(observations);
     }
 
-    private static string GetAllowedRoot(string targetPath) =>
-        Path.GetDirectoryName(targetPath) ?? throw new FormatException();
+    private string GetAllowedRoot(string targetPath) =>
+        SetupPathPolicy.GetDirectoryName(pathStyle, targetPath) ?? throw new FormatException();
 }

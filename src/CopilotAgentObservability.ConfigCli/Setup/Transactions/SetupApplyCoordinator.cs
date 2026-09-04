@@ -1199,7 +1199,7 @@ internal sealed class SetupApplyCoordinator
         if (missing.Count > 0)
         {
             platform.FileSystem.CreateDirectory(paths.Backups);
-            platform.FileSystem.CreateDirectory(Path.Combine(paths.Backups, plan.ChangeSetId.ToString("D")));
+            platform.FileSystem.CreateDirectory(SetupPathPolicy.Combine(platform.PathStyle, paths.Backups, plan.ChangeSetId.ToString("D")));
             foreach (var capture in missing)
             {
                 CreateOrValidateBackup(
@@ -1472,8 +1472,8 @@ internal sealed class SetupApplyCoordinator
         return true;
     }
 
-    private static string GetAllowedRoot(string targetPath) =>
-        Path.GetDirectoryName(targetPath) ?? throw new SetupApplyException(SetupCodes.UnsafePath);
+    private string GetAllowedRoot(string targetPath) =>
+        SetupPathPolicy.GetDirectoryName(platform.PathStyle, targetPath) ?? throw new SetupApplyException(SetupCodes.UnsafePath);
 
     private static string MapStorageCode(string code) => code switch
     {
