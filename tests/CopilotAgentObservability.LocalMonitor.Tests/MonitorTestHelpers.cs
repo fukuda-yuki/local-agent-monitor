@@ -238,7 +238,9 @@ internal static class MonitorTestHost
         int maxRequestBodyBytes = MonitorOptions.DefaultMaxRequestBodyBytes,
         int ingestionStallThresholdSeconds = MonitorOptions.DefaultIngestionStallThresholdSeconds,
         int projectionLagThresholdSeconds = MonitorOptions.DefaultProjectionLagThresholdSeconds,
-        MonitorHostTestOptions? testOptions = null)
+        MonitorHostTestOptions? testOptions = null,
+        bool repositoryAiEnabled = true,
+        bool compareAiEnabled = true)
     {
         var options = new MonitorOptions(
             temp.DatabasePath,
@@ -246,7 +248,9 @@ internal static class MonitorTestHost
             SanitizedOnly: sanitizedOnly,
             MaxRequestBodyBytes: maxRequestBodyBytes,
             ingestionStallThresholdSeconds,
-            projectionLagThresholdSeconds);
+            projectionLagThresholdSeconds,
+            RepositoryAiEnabled: repositoryAiEnabled,
+            CompareAiEnabled: compareAiEnabled);
         testOptions ??= new MonitorHostTestOptions();
         testOptions.TimeProvider ??= temp.TimeProvider;
         var app = MonitorHost.Build(options, testOptions);

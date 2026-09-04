@@ -12,6 +12,32 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 {
+    [Fact]
+    public async Task DisabledRepositoryAiLeavesExplorerInteractiveWithoutAiElementsOrRequests()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true), repositoryAiEnabled: false);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var errors = new List<string>();
+        var aiRequests = new List<string>();
+        page.PageError += (_, error) => errors.Add(error);
+        page.Request += (_, request) => { if (request.Url.Contains("/ai/", StringComparison.Ordinal) || request.Url.EndsWith("/ai-readiness", StringComparison.Ordinal)) aiRequests.Add(request.Url); };
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(TwoSessionsAsync().GetAwaiter().GetResult())));
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions");
+        await Expect(page.Locator("#session-explorer-rows tr")).ToHaveCountAsync(2);
+        await page.Locator("#session-search").FillAsync("still usable");
+        await page.RunAndWaitForRequestAsync(
+            () => page.Locator("#session-explorer-filters button[type='submit']").ClickAsync(),
+            request => request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal)
+                && request.PostData?.Contains("still usable", StringComparison.Ordinal) == true);
+        await Expect(page.Locator("#session-ai-open, #session-ai-dialog")).ToHaveCountAsync(0);
+        Assert.Empty(errors);
+        Assert.Empty(aiRequests);
+    }
+
     private const string SessionId = "018f0000-0000-7000-8000-000000000002";
     private const string SecondSessionId = "018f0000-0000-7000-8000-000000000003";
     private const string ThirdSessionId = "018f0000-0000-7000-8000-000000000004";

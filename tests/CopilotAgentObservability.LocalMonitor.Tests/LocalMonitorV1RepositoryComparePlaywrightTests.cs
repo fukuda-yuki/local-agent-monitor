@@ -10,6 +10,28 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 {
+    [Fact]
+    public async Task DisabledCompareAiLeavesDeterministicReceiptVisibleWithoutAiElementsOrRequests()
+    {
+        var readBody = await Golden("local-monitor-comparison-read.response.json");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readBody), compareAiEnabled: false);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var errors = new List<string>();
+        var aiRequests = new List<string>();
+        page.PageError += (_, error) => errors.Add(error);
+        page.Request += (_, request) => { if (request.Url.Contains("/ai/", StringComparison.Ordinal) || request.Url.EndsWith("/ai-readiness", StringComparison.Ordinal)) aiRequests.Add(request.Url); };
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("[data-compare-ai]")).ToHaveCountAsync(0);
+        Assert.Empty(errors);
+        Assert.Empty(aiRequests);
+    }
+
     private const string RepositoryId = "018f0000-0000-7000-8000-000000000100";
     private const string ComparisonId = "018f0000-0000-7000-8000-000000000010";
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";

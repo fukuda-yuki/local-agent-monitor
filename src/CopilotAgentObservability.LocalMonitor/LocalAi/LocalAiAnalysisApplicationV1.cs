@@ -72,7 +72,9 @@ internal sealed class LocalAiAnalysisApplicationV1(
     Func<string, LocalAiRawEvidenceV1, CancellationToken, ValueTask<byte[]>>? rawReader = null,
     TimeProvider? timeProvider = null,
     ILocalAiComparisonSnapshotAdapterV1? comparisons = null,
-    ILocalAiRepositorySnapshotAdapterV1? repositories = null) : ILocalAiAnalysisApplicationV1, IHostedService
+    ILocalAiRepositorySnapshotAdapterV1? repositories = null,
+    bool repositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
+    bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled) : ILocalAiAnalysisApplicationV1, IHostedService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
@@ -89,18 +91,18 @@ internal sealed class LocalAiAnalysisApplicationV1(
 
     public async ValueTask<LocalAiStartResponseV1> StartComparisonAsync(LocalAiComparisonRunRequestV1 request, CancellationToken token)
     {
-        if (comparisons is null) return new(null, "provider_unavailable");
+        if (!compareAiEnabled || comparisons is null) return new(null, "provider_unavailable");
         return await StartProjectedAsync(request.TimeoutSeconds,
             cancellationToken => ValueTask.FromResult(comparisons.Read(request.RepositoryId, request.ComparisonId, cancellationToken)), token).ConfigureAwait(false);
     }
     public async ValueTask<LocalAiRepositoryPreviewResultV1> PreviewRepositoryAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)
     {
-        if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)throw new InvalidOperationException("provider_unavailable");
+        if(!repositoryAiEnabled||repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)throw new InvalidOperationException("provider_unavailable");
         var preview=await repositories.PreviewAsync(request,token).ConfigureAwait(false);accepted.StoreAccepted(preview.Snapshot);return preview;
     }
     public async ValueTask<LocalAiStartResponseV1> StartRepositoryAsync(LocalAiRepositoryRunRequestV1 request,CancellationToken token)
     {
-        if(repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)return new(null,"provider_unavailable");
+        if(!repositoryAiEnabled||repositories is null||runs is not ILocalAiAcceptedSnapshotRepositoryV1 accepted)return new(null,"provider_unavailable");
         LocalAiSnapshotProjectionV1? snapshot;try{snapshot=accepted.ReadAccepted(request.SnapshotId);}catch(SqliteException exception) when(exception.SqliteErrorCode is 5 or 6){return new(null,"persistence_busy");}catch(LocalRepositoryScopeSnapshotException exception){return new(null,exception.ErrorCode);}if(snapshot is null)return new(null,"snapshot_not_found");if(snapshot.ExpiresAt<=clock.GetUtcNow())return new(null,"snapshot_expired");if(snapshot.PayloadSha256!=request.PayloadSha256)return new(null,"stale_snapshot");
         LocalAiSnapshotProjectionV1? current;
         try{current=await repositories.RehydrateCurrentAsync(snapshot,token).ConfigureAwait(false);}
@@ -217,12 +219,27 @@ internal sealed class LocalAiAnalysisApplicationV1(
 
     public ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token)
     {
-        try { return ValueTask.FromResult<LocalAiRunStatusV1?>(runs.Read(runId)); }
+        try
+        {
+            var run = runs.Read(runId);
+            return ValueTask.FromResult(IsScopeEnabled(run.ScopeKind) ? run : null);
+        }
         catch (InvalidOperationException) { return ValueTask.FromResult<LocalAiRunStatusV1?>(null); }
     }
 
+    private bool IsScopeEnabled(string scopeKind) => scopeKind switch
+    {
+        "repository_selection" => repositoryAiEnabled,
+        "comparison" => compareAiEnabled,
+        _ => true,
+    };
+
     public ValueTask<bool> CancelAsync(string runId, CancellationToken token)
     {
+        LocalAiRunStatusV1 run;
+        try { run = runs.Read(runId); }
+        catch (InvalidOperationException) { return ValueTask.FromResult(false); }
+        if (!IsScopeEnabled(run.ScopeKind)) throw new LocalAiScopeSnapshotException("run_not_found");
         var canceled = runs.Cancel(runId);
         lock (lifecycleGate)
             if (canceled && active.Values.FirstOrDefault(item => item.RunId == runId)?.Cancellation is { } execution)

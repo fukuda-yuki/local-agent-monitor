@@ -189,6 +189,16 @@ internal static class LocalMonitorV1HumanRoutes
             return true;
         }
 
+        var options = context.RequestServices.GetRequiredService<MonitorOptions>();
+        if (query!.AnalysisId is not null
+            && (path.RouteKind == LocalMonitorV1PrimaryRouteKind.RepositorySessions && !options.RepositoryAiEnabled
+                || path.RouteKind == LocalMonitorV1PrimaryRouteKind.ComparisonDetail && !options.CompareAiEnabled))
+        {
+            await Page(context, LocalMonitorV1PageModel.ResolvedError(
+                path, query, "analysis_run_not_found", "open_repository_selection"), StatusCodes.Status404NotFound);
+            return true;
+        }
+
         var resolution = await ResolveAsync(
             path,
             query!,

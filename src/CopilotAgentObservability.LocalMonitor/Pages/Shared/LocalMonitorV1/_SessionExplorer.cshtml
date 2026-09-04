@@ -1,4 +1,5 @@
 @model CopilotAgentObservability.LocalMonitor.Pages.LocalMonitorV1PageModel
+@inject CopilotAgentObservability.LocalMonitor.MonitorOptions Options
 @{
     var repositoryId = Model.ExplorerScope == "repository" ? Model.Path?.RepositoryId : null;
 }
@@ -17,7 +18,10 @@
             <p><span id="session-result-count">読み込み中</span></p>
         </div>
         <button type="button" id="session-compare-mode">比較を作成</button>
-        <button type="button" id="session-ai-open" hidden>現在の絞り込みをAIで分析</button>
+        @if (Options.RepositoryAiEnabled)
+        {
+            <button type="button" id="session-ai-open" hidden>現在の絞り込みをAIで分析</button>
+        }
     </header>
 
     <form id="session-explorer-filters" class="local-monitor-session-explorer-filters" role="search">
@@ -142,6 +146,8 @@
             </div>
         </form>
     </dialog>
+    @if (Options.RepositoryAiEnabled)
+    {
     <dialog id="session-ai-dialog" aria-labelledby="session-ai-title">
         <h2 id="session-ai-title">リポジトリ選択のAI分析</h2>
         <p id="session-ai-status" role="status" aria-live="polite"></p>
@@ -158,4 +164,5 @@
         <button type="button" id="session-ai-start" disabled>分析を開始</button>
         <button type="button" id="session-ai-cancel" hidden>キャンセル</button>
     </dialog>
+    }
 </section>

@@ -444,6 +444,27 @@ the same route returns the same durable history normally with each
 
 ### Repository selection / Compare
 
+Repository AI and Compare AI have independent, process-lifetime release gates
+owned by `MonitorOptions`: `RepositoryAiEnabled` and `CompareAiEnabled`.
+Only `--repository-ai-enabled <true|false>` and `--compare-ai-enabled <true|false>`
+override the build defaults (Debug: both on; non-Debug: both off), independently
+of the hosting environment or debugger. Values accept only case-insensitive
+`true` and `false`; missing, invalid, or duplicate values fail startup parsing.
+Changing a gate requires restart; no environment alias, persisted setting,
+Settings control, or runtime reload exists.
+
+For a disabled scope, server-rendered controls and panels are absent, its
+preview/start API routes are not registered (ordinary `404`), and human
+`analysis` deep links and result restoration return `404`. Shared run-read
+and cancel requests hide existing runs of that scope with `404 run_not_found`;
+hidden cancellation neither mutates nor signals the run. Disabled requests
+do not capture snapshots, invoke providers, or create previews, runs, or results.
+Gates do not change stored state, receipts, retention/backup ownership, or
+acceptance evidence; re-enabling restores access under the existing contract.
+Repository selection, Explorer, deterministic Compare, Session/node AI,
+Archive, Settings, Diagnostics, and sanitized-only behavior are unaffected.
+These gates do not satisfy Repository/Compare live acceptance.
+
 - bounded preview first;
 - no permanent history;
 - Compare AI receives only the deterministic comparison receipt.
