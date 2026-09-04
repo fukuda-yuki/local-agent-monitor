@@ -278,7 +278,20 @@ internal static class LocalMonitorV1HumanRoutes
                             return (LocalMonitorV1PageModel.ResolvedError(path, query, "analysis_run_not_found", "open_session_overview"), 404);
                         if (string.Equals(run.ScopeKind, "node", StringComparison.Ordinal))
                         {
-                            var anchor = snapshot.Detail.Nodes.SingleOrDefault(item => item.NodeId == run.NodeId);
+                            if (run.NodeId is null)
+                                return (LocalMonitorV1PageModel.ResolvedError(path, query, "analysis_run_not_found", "open_session_overview"), 404);
+                            LocalRepositorySessionDetailSnapshot anchorSnapshot;
+                            try
+                            {
+                                anchorSnapshot = await detailService.ReadDetailAsync(
+                                    new(LocalRepositorySessionDetailRequestKind.Node, path.SessionId!, NodeId: run.NodeId,
+                                        ExpectedWorkspaceRevision: snapshot.WorkspaceRevision), cancellationToken);
+                            }
+                            catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "node_not_found")
+                            {
+                                return (LocalMonitorV1PageModel.ResolvedError(path, query, "analysis_run_not_found", "open_session_overview"), 404);
+                            }
+                            var anchor = anchorSnapshot.Detail.Nodes.SingleOrDefault(item => item.NodeId == run.NodeId);
                             if (anchor is null
                                 || query.NodeId is not null && query.NodeId != anchor.NodeId
                                 || query.ExecutionId is not null && query.ExecutionId != anchor.ExecutionId)
@@ -293,7 +306,10 @@ internal static class LocalMonitorV1HumanRoutes
                     }
                     if (query.NodeId is not null)
                     {
-                        var node = snapshot.Detail.Nodes.SingleOrDefault(item => item.NodeId == query.NodeId);
+                        var nodeSnapshot = await detailService.ReadDetailAsync(
+                            new(LocalRepositorySessionDetailRequestKind.Node, path.SessionId!, NodeId: query.NodeId,
+                                ExpectedWorkspaceRevision: snapshot.WorkspaceRevision), cancellationToken);
+                        var node = nodeSnapshot.Detail.Nodes.SingleOrDefault(item => item.NodeId == query.NodeId);
                         if (node is null || query.ExecutionId is not null && node.ExecutionId != query.ExecutionId)
                             return (LocalMonitorV1PageModel.ResolvedError(path, query, "node_not_found", "open_session_overview"), 404);
                     }
@@ -340,6 +356,14 @@ internal static class LocalMonitorV1HumanRoutes
         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "session_not_found")
         {
             return (LocalMonitorV1PageModel.ResolvedError(path, query, "session_not_found", "open_all_sessions"), 404);
+        }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "node_not_found")
+        {
+            return (LocalMonitorV1PageModel.ResolvedError(path, query, "node_not_found", "open_session_overview"), 404);
+        }
+        catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_snapshot_stale")
+        {
+            return (LocalMonitorV1PageModel.ResolvedError(path, query, "workspace_snapshot_stale", "refresh_session_summary"), 409);
         }
         catch (LocalWorkspaceSessionDetailException exception) when (exception.Error == "workspace_too_large")
         {
