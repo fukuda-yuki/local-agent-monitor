@@ -14,6 +14,89 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Trait("ValidationLane", "Affected")]
 public sealed class LocalAiProductionStackTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AiReleaseGatesHideExistingRunsWithoutChangingStoredState(bool repositoryEnabled, bool compareEnabled)
+    {
+        using var temp = new MonitorTempDirectory();
+        var retention = new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, temp.TimeProvider), temp.TimeProvider);
+        var runs = SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath, "model-test", new string('a', 64), temp.TimeProvider, retention);
+        var savedRuns = new List<(LocalAiRunStatusV1 Run, bool Enabled)>();
+        foreach (var (scope, enabled) in new[] { ("repository_selection", repositoryEnabled), ("comparison", compareEnabled) })
+        {
+            var repositoryId = Guid.CreateVersion7().ToString();
+            var comparisonId = scope == "comparison" ? Guid.CreateVersion7().ToString() : null;
+            var snapshot = new LocalAiSnapshotProjectionV1(Guid.CreateVersion7().ToString(), scope, null, null,
+                comparisonId ?? repositoryId,
+                "revision", "{}"u8.ToArray(), "{\"evidence_refs\":[]}"u8.ToArray(),
+                Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData("{}"u8)), new HashSet<string>(),
+                RepositoryId: repositoryId,
+                ComparisonId: comparisonId, ExpiresAt: temp.TimeProvider.GetUtcNow().AddHours(1));
+            var run = runs.Create(snapshot, 60);
+            runs.Start(run.RunId);
+            savedRuns.Add((runs.Read(run.RunId), enabled));
+            var completedSnapshot = snapshot with { SnapshotId = Guid.CreateVersion7().ToString() };
+            var completed = runs.Create(completedSnapshot, 60);
+            runs.Start(completed.RunId);
+            var result = LocalAiResultEnvelopeV1.Compose("{\"summary\":\"none\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}"u8.ToArray(), completedSnapshot, runs.Read(completed.RunId), temp.TimeProvider.GetUtcNow());
+            var completedRun = runs.Complete(completed.RunId, LocalAiProviderOutcomeV1.Complete(result), temp.TimeProvider.GetUtcNow());
+            Assert.Equal("zero_findings", completedRun.State);
+            Assert.NotNull(completedRun.ResultJson);
+            savedRuns.Add((completedRun, enabled));
+        }
+        var before = ReadAiState(temp.DatabasePath);
+        await using (var host = await MonitorTestHost.StartAsync(temp, repositoryAiEnabled: repositoryEnabled, compareAiEnabled: compareEnabled))
+        {
+            foreach (var (run, enabled) in savedRuns)
+            {
+                using var read = await host.Client.GetAsync($"/api/local-monitor/v1/ai/runs/{run.RunId}");
+                Assert.Equal(enabled ? HttpStatusCode.OK : HttpStatusCode.NotFound, read.StatusCode);
+                if (!enabled)
+                {
+                    Assert.Equal("{\"error\":\"run_not_found\"}", await read.Content.ReadAsStringAsync());
+                    using var cancel = await host.Client.SendAsync(Post($"/api/local-monitor/v1/ai/runs/{run.RunId}/cancel", "{}"));
+                    Assert.Equal(HttpStatusCode.NotFound, cancel.StatusCode);
+                    Assert.Equal("{\"error\":\"run_not_found\"}", await cancel.Content.ReadAsStringAsync());
+                }
+            }
+            Assert.Equal(before, ReadAiState(temp.DatabasePath));
+        }
+        await using var restored = await MonitorTestHost.StartAsync(temp, repositoryAiEnabled: true, compareAiEnabled: true);
+        foreach (var (run, _) in savedRuns)
+        {
+            var read = await Get(restored.Client, $"/api/local-monitor/v1/ai/runs/{run.RunId}");
+            Assert.Equal(run.State, read.GetProperty("state").GetString());
+            if (run.ResultJson is not null)
+            {
+                using var result = JsonDocument.Parse(run.ResultJson);
+                Assert.True(JsonElement.DeepEquals(result.RootElement, read.GetProperty("result")));
+            }
+        }
+        Assert.Equal(before, ReadAiState(temp.DatabasePath));
+    }
+
+    private static string ReadAiState(string databasePath)
+    {
+        using var connection = Open(databasePath);
+        var rows = new List<object[]>();
+        foreach (var table in new[] { "local_ai_snapshots", "local_ai_runs", "local_ai_results" })
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT * FROM {table} ORDER BY 1;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var values = new object[reader.FieldCount];
+                reader.GetValues(values);
+                rows.Add(values);
+            }
+        }
+        return JsonSerializer.Serialize(rows);
+    }
+
     private const string SessionId="018f0000-0000-7000-8000-000000000001";
     private const string RunA="018f0000-0000-7000-8000-000000000010";
     private const string RunB="018f0000-0000-7000-8000-000000000020";
@@ -58,7 +141,7 @@ public sealed class LocalAiProductionStackTests
         var scope=new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider,registryAuthority:authority),SqliteLocalArchiveFactSnapshotContributor.Instance,new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority:authority,timeProvider:temp.TimeProvider),skillRegistryAuthority:authority,timeProvider:temp.TimeProvider);
         var historical=new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath,new SqliteSessionStore(temp.DatabasePath));
         var repository=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider);
-        var firstApplication=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,repository,new CapturingProvider(),timeProvider:temp.TimeProvider,repositories:new LocalAiRepositorySnapshotAdapterV1(scope,scope,historical,temp.TimeProvider));
+        var firstApplication=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,repository,new CapturingProvider(),timeProvider:temp.TimeProvider,repositories:new LocalAiRepositorySnapshotAdapterV1(scope,scope,historical,temp.TimeProvider),repositoryAiEnabled:true);
         await using(var first=await MonitorTestHost.StartAsync(temp,testOptions:new MonitorHostTestOptions{LocalRepositoryScopeSnapshotService=scope,HistoricalEvidenceSource=historical,LocalAiAnalysisApplication=firstApplication,TimeProvider=temp.TimeProvider}))
         {
             LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,RunA,RunB);
@@ -76,7 +159,7 @@ public sealed class LocalAiProductionStackTests
             Assert.Equal("not_captured",previewSession.GetProperty("content_state").GetString());
             using(var locked=Open(temp.DatabasePath)){using(var begin=locked.CreateCommand()){begin.CommandText="BEGIN EXCLUSIVE;";begin.ExecuteNonQuery();}var runBody=JsonSerializer.Serialize(new{schema_version="local-ai-repository-run.request.v1",snapshot_id=snapshotId,payload_sha256=hash,timeout_seconds=60});using var busy=await first.Client.SendAsync(Post("/api/local-monitor/v1/ai/repository-runs",runBody));Assert.Equal(HttpStatusCode.ServiceUnavailable,busy.StatusCode);Assert.Equal("{\"error\":\"persistence_busy\"}",await busy.Content.ReadAsStringAsync());using var rollback=locked.CreateCommand();rollback.CommandText="ROLLBACK;";rollback.ExecuteNonQuery();}
             var provider=new RepositoryRawProvider();var restartedRepository=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider);
-            var restartedApplication=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,restartedRepository,provider,static (_,_,_)=>ValueTask.FromResult("raw-safe"u8.ToArray()),timeProvider:temp.TimeProvider,repositories:new LocalAiRepositorySnapshotAdapterV1(scope,scope,historical,temp.TimeProvider));
+            var restartedApplication=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,restartedRepository,provider,static (_,_,_)=>ValueTask.FromResult("raw-safe"u8.ToArray()),timeProvider:temp.TimeProvider,repositories:new LocalAiRepositorySnapshotAdapterV1(scope,scope,historical,temp.TimeProvider),repositoryAiEnabled:true);
             var start=await restartedApplication.StartRepositoryAsync(new(snapshotId,hash,60),CancellationToken.None);Assert.Null(start.ErrorCode);Assert.NotNull(start.RunId);
             var status=await Poll(first.Client,$"/api/local-monitor/v1/ai/runs/{start.RunId}");Assert.Equal("succeeded",status.GetProperty("state").GetString());
             Assert.NotNull(provider.Request);var request=provider.Request!;var payload=Encoding.UTF8.GetString(request.Snapshot.PayloadCanonicalJson);
@@ -97,7 +180,7 @@ public sealed class LocalAiProductionStackTests
     {
         using var temp=new MonitorTempDirectory();var repositoryId=Guid.CreateVersion7().ToString();var scope=new OversizedFilterScope(repositoryId);
         var runs=SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider);var adapter=new LocalAiRepositorySnapshotAdapterV1(scope,new ThrowProjection(),new ThrowHistorical(),temp.TimeProvider);
-        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new ThrowProjection(),runs,new CapturingProvider(),timeProvider:temp.TimeProvider,repositories:adapter);
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new ThrowProjection(),runs,new CapturingProvider(),timeProvider:temp.TimeProvider,repositories:adapter,repositoryAiEnabled:true);
         await using var host=await MonitorTestHost.StartAsync(temp,testOptions:new MonitorHostTestOptions{LocalAiAnalysisApplication=application,TimeProvider=temp.TimeProvider});
         var filter=new{schema_version="local-monitor-session-search.request.v1",scope="repository",repository_id=repositoryId,archive_scope="active_only",from=(string?)null,to=(string?)null,source=Array.Empty<string>(),model=Array.Empty<string>(),status=Array.Empty<string>(),has_skill=(bool?)null,has_subagent=(bool?)null,has_error=(bool?)null,has_retry=(bool?)null,q=(string?)null,cursor=(string?)null,limit=(int?)null};
         using var response=await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/repository-preview",JsonSerializer.Serialize(new{schema_version="local-ai-repository-preview.request.v1",repository_id=repositoryId,selection=new{kind="filter",request=filter}})));
@@ -118,8 +201,8 @@ public sealed class LocalAiProductionStackTests
         var retention=new RetentionCatalogStore(RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath,temp.TimeProvider),temp.TimeProvider);
         var repository=new SqliteLocalAiRunRepositoryV1(temp.DatabasePath,"model-test",new string('a',64),temp.TimeProvider,retention);
         var provider=new SequenceProvider("session-one","!zero","session-two",null,"node-one","!invalid","!block","!timeout");
-        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,repository,provider,timeProvider:temp.TimeProvider);
-        await using var host=await MonitorTestHost.StartAsync(temp,testOptions:new MonitorHostTestOptions{
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),scope,repository,provider,timeProvider:temp.TimeProvider,repositoryAiEnabled:false,compareAiEnabled:false);
+        await using var host=await MonitorTestHost.StartAsync(temp,repositoryAiEnabled:false,compareAiEnabled:false,testOptions:new MonitorHostTestOptions{
             LocalRepositoryScopeSnapshotService=scope,LocalAiAnalysisApplication=application,TimeProvider=temp.TimeProvider});
         using(var schema=Open(temp.DatabasePath))LocalAiAnalysisSchemaV1.Ensure(schema);
         LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,RunA,RunB);

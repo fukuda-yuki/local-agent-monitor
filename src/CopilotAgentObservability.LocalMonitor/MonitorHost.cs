@@ -641,7 +641,9 @@ internal static class MonitorHost
                         localAiRawReader.ReadAsync,
                         timeProvider,
                         new LocalAiComparisonSnapshotAdapterV1(services.GetRequiredService<SqliteLocalComparisonStore>()),
-                        new LocalAiRepositorySnapshotAdapterV1(services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(),services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),services.GetRequiredService<IHistoricalEvidenceSnapshotSourceV1>(),timeProvider)));
+                        new LocalAiRepositorySnapshotAdapterV1(services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(),services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),services.GetRequiredService<IHistoricalEvidenceSnapshotSourceV1>(),timeProvider),
+                        options.RepositoryAiEnabled,
+                        options.CompareAiEnabled));
                 if (testOptions?.LocalAiAnalysisApplication is null)
                     builder.Services.AddHostedService(services =>
                         (LocalAiAnalysisApplicationV1)services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
@@ -1203,7 +1205,8 @@ internal static class MonitorHost
                 contentReader: new LocalWorkspaceNodeContentReader(retentionContext, timeProvider),
                 contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
             LocalMonitorV1ComparisonRoutes.Map(app, app.Services.GetRequiredService<ILocalMonitorV1ComparisonApplication>());
-            LocalAiRoutesV1.Map(app, app.Services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
+            LocalAiRoutesV1.Map(app, app.Services.GetRequiredService<ILocalAiAnalysisApplicationV1>(),
+                options.RepositoryAiEnabled, options.CompareAiEnabled);
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(

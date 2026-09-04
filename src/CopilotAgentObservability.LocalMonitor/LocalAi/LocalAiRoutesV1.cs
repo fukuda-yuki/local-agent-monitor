@@ -11,13 +11,19 @@ internal static class LocalAiRoutesV1
     private const int MaximumNodeBody = 262_144;
     internal static bool IsPath(PathString path) => path.Value?.StartsWith("/api/local-monitor/v1/ai", StringComparison.Ordinal) == true;
 
-    internal static void Map(IEndpointRouteBuilder endpoints, ILocalAiAnalysisApplicationV1 application)
+    internal static void Map(IEndpointRouteBuilder endpoints, ILocalAiAnalysisApplicationV1 application,
+        bool repositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
+        bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled)
     {
         endpoints.Map("/api/local-monitor/v1/ai/session-runs", context => StartSession(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/node-runs", context => StartNode(context, application));
-        endpoints.Map("/api/local-monitor/v1/ai/comparison-runs", context => StartComparison(context, application));
-        endpoints.Map("/api/local-monitor/v1/ai/repository-preview", context => PreviewRepository(context, application));
-        endpoints.Map("/api/local-monitor/v1/ai/repository-runs", context => StartRepository(context, application));
+        if (compareAiEnabled)
+            endpoints.Map("/api/local-monitor/v1/ai/comparison-runs", context => StartComparison(context, application));
+        if (repositoryAiEnabled)
+        {
+            endpoints.Map("/api/local-monitor/v1/ai/repository-preview", context => PreviewRepository(context, application));
+            endpoints.Map("/api/local-monitor/v1/ai/repository-runs", context => StartRepository(context, application));
+        }
         endpoints.Map("/api/local-monitor/v1/ai/session-runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/session-runs/", "session"));
         endpoints.Map("/api/local-monitor/v1/ai/node-runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/node-runs/", "node"));
         endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/runs/", null));
@@ -106,8 +112,13 @@ internal static class LocalAiRoutesV1
         if (context.Request.QueryString.HasValue) { await Error(context,400,"invalid_request"); return; }
         if (!body.AsSpan().SequenceEqual("{}"u8))
         { await Error(context, 400, "invalid_request"); return; }
-        if (!await application.CancelAsync(runId!, context.RequestAborted).ConfigureAwait(false))
-        { await Error(context, 409, "run_not_cancelable"); return; }
+        try
+        {
+            if (!await application.CancelAsync(runId!, context.RequestAborted).ConfigureAwait(false))
+            { await Error(context, 409, "run_not_cancelable"); return; }
+        }
+        catch (LocalAiScopeSnapshotException exception) when (exception.Error == "run_not_found")
+        { await Error(context, 404, "run_not_found"); return; }
         await Json(context, 200, new { run_id=runId, state="canceled" }).ConfigureAwait(false);
     }
 

@@ -883,11 +883,12 @@
   }
 
   async function enableRepositoryAi() {
-    if (root.dataset.explorerScope !== "repository" || !UUID_V7.test(root.dataset.repositoryId ?? "")) return;
+    if (!aiOpen || root.dataset.explorerScope !== "repository" || !UUID_V7.test(root.dataset.repositoryId ?? "")) return;
     try { const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin" }); const value = response.ok ? await readAiJson(response, 16_384) : null; if (value?.readiness_state === "ready") aiOpen.hidden = false; } catch { }
   }
 
   async function restoreRepositoryAnalysis(route) {
+    if (!aiDialog) return;
     const runId = route?.analysis;
     if (runId === null || runId === undefined) {
       if (aiState.restoredRunId !== null) { aiState.controller?.abort(); ++aiState.generation; aiState.runId = null; aiState.restoredRunId = null; aiState.preview = null; aiResult.replaceChildren(); if (aiDialog.open) aiDialog.close(); }
@@ -2083,7 +2084,7 @@
     }, "assignmentPicker");
   });
 
-  aiOpen.addEventListener("click", () => {
+  aiOpen?.addEventListener("click", () => {
     aiState.controller?.abort(); ++aiState.generation;
     aiState.preview = null;
     aiState.frozenIds = [...new Set([...state.cohorts.a, ...state.cohorts.b])];
@@ -2093,12 +2094,12 @@
     aiPreviewContent.replaceChildren(); aiResult.replaceChildren(); aiStart.disabled = true;
     aiStatus.textContent = "分析対象を選んで確認してください。"; aiDialog.showModal();
   });
-  root.querySelector("#session-ai-close").addEventListener("click", () => aiDialog.close());
-  aiPreviewButton.addEventListener("click", previewAiSelection);
-  aiStart.addEventListener("click", startAiRun);
+  root.querySelector("#session-ai-close")?.addEventListener("click", () => aiDialog.close());
+  aiPreviewButton?.addEventListener("click", previewAiSelection);
+  aiStart?.addEventListener("click", startAiRun);
   root.querySelectorAll("input[name='session-ai-mode']").forEach(control => control.addEventListener("change", () => { aiState.preview = null; aiStart.disabled = true; aiPreviewContent.replaceChildren(); }));
-  filters.addEventListener("input", () => { if (aiDialog.open) { aiState.preview = null; aiStart.disabled = true; } });
-  aiCancel.addEventListener("click", async () => {
+  filters.addEventListener("input", () => { if (aiDialog?.open) { aiState.preview = null; aiStart.disabled = true; } });
+  aiCancel?.addEventListener("click", async () => {
     if (!aiState.runId) return;
     const runId = aiState.runId;
     const generation = aiState.generation;

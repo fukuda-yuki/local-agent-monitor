@@ -9,6 +9,29 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalAiExtendedScopeTests
 {
+    [Fact]
+    public async Task DisabledAiScopesRejectDirectApplicationCallsBeforeAnyCaptureOrProviderWork()
+    {
+        using var temp = new MonitorTempDirectory();
+        var runs = SqliteLocalAiRunRepositoryV1.Create(temp.DatabasePath, "model", new string('a', 64), temp.TimeProvider);
+        var application = new LocalAiAnalysisApplicationV1(
+            _ => throw new Xunit.Sdk.XunitException("Disabled scope checked provider readiness."),
+            new NoSnapshots(), runs, new NoProvider(),
+            comparisons: new LocalAiComparisonSnapshotAdapterV1((_, _, _) => throw new Xunit.Sdk.XunitException("Disabled scope read comparison.")),
+            repositories: new BusyRepository(), repositoryAiEnabled: false, compareAiEnabled: false);
+
+        Assert.Equal("provider_unavailable", (await application.StartComparisonAsync(new(RepositoryId, ComparisonId, 60), CancellationToken.None)).ErrorCode);
+        Assert.Equal("provider_unavailable", (await application.StartRepositoryAsync(new(SnapshotId, new string('a', 64), 60), CancellationToken.None)).ErrorCode);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => application.PreviewRepositoryAsync(
+            new(RepositoryId, "explicit", "active_only", [ComparisonId], null), CancellationToken.None).AsTask());
+        Assert.Equal("provider_unavailable", error.Message);
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath}");
+        connection.Open();
+        using var count = connection.CreateCommand();
+        count.CommandText = "SELECT (SELECT count(*) FROM local_ai_snapshots) + (SELECT count(*) FROM local_ai_runs) + (SELECT count(*) FROM local_ai_results);";
+        Assert.Equal(0L, count.ExecuteScalar());
+    }
+
     private const string RepositoryId = "018f0000-0000-7000-8000-000000000001";
     private const string ComparisonId = "018f0000-0000-7000-8000-000000000002";
     private const string SnapshotId = "018f0000-0000-7000-8000-000000000003";
@@ -441,7 +464,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
     public async Task RepositoryRun_ProviderUnavailableCreatesNoRun()
     {
         var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,"repository_selection",null,null,RepositoryId,"revision","{\"members\":[]}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),RepositoryId:RepositoryId,ExpiresAt:DateTimeOffset.MaxValue);
-        var runs=new AcceptedRuns(snapshot);var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(false),new NoSnapshots(),runs,new NoProvider(),timeProvider:TimeProvider.System,repositories:new CurrentRepository(snapshot));
+        var runs=new AcceptedRuns(snapshot);var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(false),new NoSnapshots(),runs,new NoProvider(),timeProvider:TimeProvider.System,repositories:new CurrentRepository(snapshot),repositoryAiEnabled:true);
         var result=await application.StartRepositoryAsync(new(SnapshotId,new string('a',64),60),CancellationToken.None);
         Assert.Equal("provider_unavailable",result.ErrorCode);Assert.Equal(0,runs.CreateCount);
     }
@@ -449,7 +472,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
     public async Task RepositoryRun_PreservesPersistenceBusyFromRehydration()
     {
         var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,"repository_selection",null,null,RepositoryId,"revision","{\"members\":[]}"u8.ToArray(),"{\"evidence_refs\":[]}"u8.ToArray(),new string('a',64),new HashSet<string>(),RepositoryId:RepositoryId,ExpiresAt:DateTimeOffset.MaxValue);
-        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new NoSnapshots(),new AcceptedRuns(snapshot),new NoProvider(),repositories:new BusyRepository());
+        var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new NoSnapshots(),new AcceptedRuns(snapshot),new NoProvider(),repositories:new BusyRepository(),repositoryAiEnabled:true);
         var result=await application.StartRepositoryAsync(new(SnapshotId,new string('a',64),60),CancellationToken.None);
         Assert.Equal("persistence_busy",result.ErrorCode);
     }

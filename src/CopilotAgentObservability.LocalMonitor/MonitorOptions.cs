@@ -12,8 +12,15 @@ internal sealed record MonitorOptions(
     IReadOnlyList<ConfiguredApplyRoot>? ApplyRoots = null,
     IReadOnlyList<string>? PricingRegistryOverridePaths = null,
     IReadOnlyList<string>? SkillDiscoveryProjectPaths = null,
-    IReadOnlyList<string>? SkillDiscoveryDirectories = null)
+    IReadOnlyList<string>? SkillDiscoveryDirectories = null,
+    bool RepositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
+    bool CompareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled)
 {
+#if DEBUG
+    public const bool DefaultExtendedAiEnabled = true;
+#else
+    public const bool DefaultExtendedAiEnabled = false;
+#endif
     public const string MaxRequestBodyBytesEnvironmentVariable = "CAO_MONITOR_MAX_REQUEST_BODY_BYTES";
     public const int DefaultMaxRequestBodyBytes = 31_457_280;
     public const string IngestionStallThresholdSecondsEnvironmentVariable = "CAO_MONITOR_INGESTION_STALL_THRESHOLD_SECONDS";
@@ -33,6 +40,8 @@ internal sealed record MonitorOptions(
         var urlSet = false;
         var portSet = false;
         var sanitizedOnly = false;
+        bool? repositoryAiEnabled = null;
+        bool? compareAiEnabled = null;
         int? maxRequestBodyBytes = null;
         int? ingestionStallThresholdSeconds = null;
         int? projectionLagThresholdSeconds = null;
@@ -120,6 +129,30 @@ internal sealed record MonitorOptions(
 
                 case "--sanitized-only":
                     sanitizedOnly = true;
+                    break;
+
+                case "--repository-ai-enabled":
+                case "--compare-ai-enabled":
+                    var option = args[index];
+                    ref var enabled = ref (option == "--repository-ai-enabled" ? ref repositoryAiEnabled : ref compareAiEnabled);
+                    if (enabled is not null)
+                    {
+                        return Failure($"local-monitor accepts {option} only once.");
+                    }
+
+                    if (!TryReadValue(args, index, out var enabledValue))
+                    {
+                        return Failure($"{option} requires a value.");
+                    }
+
+                    if (!string.Equals(enabledValue, "true", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(enabledValue, "false", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Failure($"{option} requires true or false.");
+                    }
+
+                    enabled = string.Equals(enabledValue, "true", StringComparison.OrdinalIgnoreCase);
+                    index++;
                     break;
 
                 case "--max-request-body-bytes":
@@ -333,7 +366,9 @@ internal sealed record MonitorOptions(
                 applyRoots,
                 pricingRegistryOverridePaths.AsReadOnly(),
                 skillDiscoveryProjectPaths.AsReadOnly(),
-                skillDiscoveryDirectories.AsReadOnly()),
+                skillDiscoveryDirectories.AsReadOnly(),
+                repositoryAiEnabled ?? DefaultExtendedAiEnabled,
+                compareAiEnabled ?? DefaultExtendedAiEnabled),
             null);
     }
 

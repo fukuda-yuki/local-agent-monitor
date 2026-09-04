@@ -17,6 +17,56 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Trait("ValidationLane", "Nightly")]
 public sealed class LocalMonitorV1HumanRouteTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AiReleaseGatesControlServerRenderedSurfacesRoutesAndDeepLinks(bool repositoryEnabled, bool compareEnabled)
+    {
+        using var temp = new MonitorTempDirectory();
+        var runId = Guid.CreateVersion7().ToString();
+        var ai = new StubLocalAiApplication(new(runId, "running", "repository_selection", null, null, null,
+            RepositoryId: RepositoryId, ExpiresAt: DateTimeOffset.MaxValue));
+        await using var host = await MonitorTestHost.StartAsync(temp,
+            testOptions: OwnerReadyOptions(comparisonApplication: new StubComparisonApplication(200, null), localAiApplication: ai),
+            repositoryAiEnabled: repositoryEnabled, compareAiEnabled: compareEnabled);
+
+        var explorer = await host.Client.GetStringAsync($"/repositories/{RepositoryId}/sessions");
+        Assert.Equal(repositoryEnabled, explorer.Contains("id=\"session-ai-open\"", StringComparison.Ordinal));
+        Assert.Equal(repositoryEnabled, explorer.Contains("id=\"session-ai-dialog\"", StringComparison.Ordinal));
+        var compare = await host.Client.GetStringAsync($"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
+        Assert.Equal(compareEnabled, compare.Contains("data-compare-ai-start", StringComparison.Ordinal));
+        Assert.Equal(compareEnabled, compare.Contains("data-compare-ai-result", StringComparison.Ordinal));
+
+        foreach (var (leaf, enabled) in new[] { ("repository-preview", repositoryEnabled), ("repository-runs", repositoryEnabled), ("comparison-runs", compareEnabled) })
+        {
+            var path = $"/api/local-monitor/v1/ai/{leaf}";
+            Assert.Equal(enabled, host.RoutePatterns.Contains(path));
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(enabled ? HttpStatusCode.MethodNotAllowed : HttpStatusCode.NotFound, response.StatusCode);
+            if (!enabled)
+            {
+                Assert.Equal(UnsupportedEndpoint, await response.Content.ReadAsStringAsync());
+                using var direct = await host.Client.PostAsync(path, new StringContent("{}", Encoding.UTF8, "application/json"));
+                Assert.Equal(HttpStatusCode.NotFound, direct.StatusCode);
+                Assert.Equal(UnsupportedEndpoint, await direct.Content.ReadAsStringAsync());
+            }
+        }
+        Assert.Contains("/api/local-monitor/v1/ai/session-runs", host.RoutePatterns);
+        Assert.Contains("/api/local-monitor/v1/ai/node-runs", host.RoutePatterns);
+        using var restored = await host.Client.GetAsync($"/repositories/{RepositoryId}/sessions?analysis={runId}");
+        Assert.Equal(repositoryEnabled ? HttpStatusCode.OK : HttpStatusCode.NotFound, restored.StatusCode);
+        ai.Run = ai.Run! with { ScopeKind = "comparison", ComparisonId = ComparisonId };
+        using var comparisonRestored = await host.Client.GetAsync($"/repositories/{RepositoryId}/comparisons/{ComparisonId}?analysis={runId}");
+        Assert.Equal(compareEnabled ? HttpStatusCode.OK : HttpStatusCode.NotFound, comparisonRestored.StatusCode);
+        foreach (var path in new[] { "/", "/sessions", $"/sessions/{SessionId}", "/?settings=ai" })
+        {
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+    }
+
     private const string UnsupportedEndpoint =
         """{"accepted":false,"error":"unsupported_endpoint","message":"Only /v1/traces is supported."}""";
     private const string RepositoryId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071";
@@ -966,9 +1016,10 @@ public sealed class LocalMonitorV1HumanRouteTests
 
     private class StubLocalAiApplication(LocalAiRunStatusV1? run) : ILocalAiAnalysisApplicationV1
     {
+        internal LocalAiRunStatusV1? Run { get; set; } = run;
         public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token) => throw new NotSupportedException();
-        public virtual ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(run?.RunId == runId ? run : null);
+        public virtual ValueTask<LocalAiRunStatusV1?> ReadRunAsync(string runId, CancellationToken token) => ValueTask.FromResult(Run?.RunId == runId ? Run : null);
         public ValueTask<bool> CancelAsync(string runId, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<LocalAiReportPageResponseV1> ReadReportsAsync(string sessionId, int? limit, string? cursor, CancellationToken token) => throw new NotSupportedException();
     }

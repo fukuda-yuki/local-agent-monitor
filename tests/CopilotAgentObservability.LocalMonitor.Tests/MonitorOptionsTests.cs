@@ -2,6 +2,60 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public class MonitorOptionsTests
 {
+    [Theory]
+    [InlineData("true", "false")]
+    [InlineData("FALSE", "TrUe")]
+    [InlineData("true", "true")]
+    [InlineData("false", "false")]
+    public void Parse_AiReleaseGatesAcceptIndependentExplicitBooleans(string repository, string compare)
+    {
+        var result = MonitorOptions.Parse(["--repository-ai-enabled", repository, "--compare-ai-enabled", compare]);
+
+        Assert.Null(result.Error);
+        Assert.Equal(string.Equals(repository, "true", StringComparison.OrdinalIgnoreCase), result.Options!.RepositoryAiEnabled);
+        Assert.Equal(string.Equals(compare, "true", StringComparison.OrdinalIgnoreCase), result.Options.CompareAiEnabled);
+    }
+
+    [Theory]
+    [InlineData("Development")]
+    [InlineData("Production")]
+    public void Parse_AiReleaseGatesDefaultByBuildAndIgnoreEnvironmentAliases(string hostingEnvironment)
+    {
+#if DEBUG
+        const string contraryValue = "false";
+#else
+        const string contraryValue = "true";
+#endif
+        var result = MonitorOptions.Parse([], name => name is "ASPNETCORE_ENVIRONMENT" or "DOTNET_ENVIRONMENT"
+            ? hostingEnvironment : name.Contains("AI_ENABLED", StringComparison.Ordinal) ? contraryValue : null);
+        Assert.Null(result.Error);
+#if DEBUG
+        Assert.True(result.Options!.RepositoryAiEnabled);
+        Assert.True(result.Options.CompareAiEnabled);
+#else
+        Assert.False(result.Options!.RepositoryAiEnabled);
+        Assert.False(result.Options.CompareAiEnabled);
+#endif
+        var repositoryOnly = MonitorOptions.Parse(["--repository-ai-enabled", contraryValue]).Options!;
+        Assert.NotEqual(result.Options.RepositoryAiEnabled, repositoryOnly.RepositoryAiEnabled);
+        Assert.Equal(result.Options.CompareAiEnabled, repositoryOnly.CompareAiEnabled);
+        var compareOnly = MonitorOptions.Parse(["--compare-ai-enabled", contraryValue]).Options!;
+        Assert.Equal(result.Options.RepositoryAiEnabled, compareOnly.RepositoryAiEnabled);
+        Assert.NotEqual(result.Options.CompareAiEnabled, compareOnly.CompareAiEnabled);
+    }
+
+    [Theory]
+    [InlineData("--repository-ai-enabled")]
+    [InlineData("--compare-ai-enabled")]
+    public void Parse_AiReleaseGatesRejectMissingInvalidAndDuplicateValues(string option)
+    {
+        Assert.Equal($"{option} requires a value.", MonitorOptions.Parse([option]).Error);
+        Assert.Equal($"{option} requires a value.", MonitorOptions.Parse([option, "--sanitized-only"]).Error);
+        foreach (var value in new[] { "", "1", "0", "yes", " true", "false ", "true\0" })
+            Assert.Equal($"{option} requires true or false.", MonitorOptions.Parse([option, value]).Error);
+        Assert.Equal($"local-monitor accepts {option} only once.", MonitorOptions.Parse([option, "false", option, "true"]).Error);
+    }
+
     [Fact]
     public void Parse_accepts_repeated_apply_roots_without_exposing_paths_in_labels()
     {

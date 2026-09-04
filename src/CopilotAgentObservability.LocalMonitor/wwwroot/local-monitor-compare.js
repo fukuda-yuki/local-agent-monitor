@@ -77,12 +77,12 @@
   let aiCancelFailed = false;
 
   const clearAiStatusOutline = () => { aiStatus.style.outline = ""; aiStatus.style.outlineOffset = ""; };
-  aiStatus.addEventListener("focus", () => {
+  aiStatus?.addEventListener("focus", () => {
     if (aiStatus.dataset.terminalFailure !== "true") return;
     aiStatus.style.outline = "2px solid currentColor";
     aiStatus.style.outlineOffset = "2px";
   });
-  aiStatus.addEventListener("blur", clearAiStatusOutline);
+  aiStatus?.addEventListener("blur", clearAiStatusOutline);
 
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && Object.keys(value).every((key, index) => key === keys[index]);
@@ -669,6 +669,7 @@
   }
 
   async function checkAiReadiness() {
+    if (!aiSurface) return;
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { method: "GET", credentials: "same-origin", cache: "no-store" });
       if (!response.ok) return;
@@ -679,8 +680,8 @@
     } catch { /* deterministic Compare remains available without AI */ }
   }
 
-  aiStart.addEventListener("click", startAi);
-  aiCancel.addEventListener("click", async () => {
+  aiStart?.addEventListener("click", startAi);
+  aiCancel?.addEventListener("click", async () => {
     if (!activeAiRun || aiCancel.disabled) return;
     aiCancel.disabled = true;
     const runId = activeAiRun;
@@ -695,7 +696,7 @@
     } catch { if (generation !== aiGeneration || activeAiRun !== runId) return; aiCancelFailed = true; aiCancel.disabled = false; aiStatus.textContent = "キャンセルできませんでした。AI解釈の状態を確認しています。"; }
   });
   document.addEventListener("cao-route-state", event => {
-    if (aiSurface.hidden) return;
+    if (!aiSurface || aiSurface.hidden) return;
     const runId = event.detail?.analysis;
     if (UUID_V7.test(runId ?? "")) { restoreAi(runId); return; }
     resetAiFailureFocus(true);
