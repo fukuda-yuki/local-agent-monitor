@@ -120,6 +120,30 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     [Fact]
+    public void WorkspaceAdapterKeepsActiveRecordedTimingWithoutInventingDuration()
+    {
+        var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
+        var row = Assert.IsType<LocalWorkspaceProjectionRow>(session.Session) with
+        {
+            Status = "active",
+            EndedAt = null,
+            DurationMilliseconds = null,
+        };
+        session = session with { Session = row };
+        var detail = Detail(session.SessionId, unidentifiedSubagent: false);
+
+        var fact = LocalComparisonInputProjection.MapSessionFact(session, detail, ComparisonDetail(detail.Nodes), new string('a', 64), includeArchived: false);
+
+        Assert.Equal(LocalComparisonFactState.NotObserved, fact.Scalars["session_duration"].Observation.State);
+        Assert.Null(fact.Scalars["session_duration"].Observation.Value);
+        Assert.Null(Assert.Single(fact.Scalars["session_duration"].Evidence).Reference);
+        Assert.Equal(LocalComparisonFactState.Recorded, fact.Scalars["input_tokens"].Observation.State);
+        Assert.Equal(10m, fact.Scalars["input_tokens"].Observation.Value);
+        Assert.Equal(LocalComparisonFactState.Recorded, fact.Target.ObservedAtState);
+        Assert.Equal(new DateTimeOffset(2026, 8, 29, 0, 0, 1, TimeSpan.Zero), fact.Target.ObservedAt);
+    }
+
+    [Fact]
     public void WorkspaceAdapterGroupsExactSemanticNamesAndPreservesEveryObservation()
     {
         var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
