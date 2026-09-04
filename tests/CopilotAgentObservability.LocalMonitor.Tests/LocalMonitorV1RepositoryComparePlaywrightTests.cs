@@ -676,13 +676,16 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
               const header = document.querySelector('.local-monitor-repository-compare-header').getBoundingClientRect();
               const body = document.querySelector('.local-monitor-repository-compare-body');
               const sticky = getComputedStyle(document.querySelector('.local-monitor-compare-table thead th')).position;
-              return [header.height, document.documentElement.scrollWidth, innerWidth, body.scrollHeight, body.clientHeight, sticky === 'sticky' ? 1 : 0];
+              const cellOverflow = Math.max(...Array.from(body.querySelectorAll('.local-monitor-compare-table th, .local-monitor-compare-table td'))
+                .filter(cell => cell.clientWidth > 0).map(cell => cell.scrollWidth - cell.clientWidth));
+              return [header.height, document.documentElement.scrollWidth, innerWidth, body.scrollHeight, body.clientHeight, sticky === 'sticky' ? 1 : 0, cellOverflow];
             }
             """);
         Assert.True(layout[0] <= 112);
         Assert.True(layout[1] <= layout[2]);
         Assert.True(layout[3] >= layout[4]);
         Assert.Equal(1, layout[5]);
+        Assert.True(layout[6] <= 0, $"Compare cell content overflows its cell by {layout[6]}px.");
 
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
