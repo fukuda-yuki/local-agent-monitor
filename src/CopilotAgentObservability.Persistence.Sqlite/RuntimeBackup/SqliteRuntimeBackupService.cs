@@ -1753,7 +1753,11 @@ public sealed class SqliteRuntimeBackupService
                             componentTransaction,
                             publicationTime,
                             validationAuthority,
-                            canonicalReplica);
+                            canonicalReplica,
+                            validateCanonicalProjection: archiveWriterVersion is null
+                                || !LocalRepositoryCatalogSchemaV1.HasExactLegacyBackupSchema(
+                                    connection,
+                                    componentTransaction));
                     }
                 }
             }

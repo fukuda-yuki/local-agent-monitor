@@ -21,6 +21,37 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class RuntimeBackupRestoreTests
 {
     [Fact]
+    public void LegacyArchivePreflight_CanDeferOnlyCanonicalProjectionUntilMigration()
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = new LocalRepositoryCatalogFixture();
+        fixture.CreateSession(LocalRepositoryCatalogFixture.SessionId(3_703));
+        using var connection = temp.Open(fixture.DatabasePath);
+        using (var install = connection.BeginTransaction())
+        {
+            LocalArchiveSchemaV1.Ensure(connection, install);
+            SkillProjectionSchemaV1.Ensure(connection, install);
+            SkillInvocationSnapshotSchemaV1.Ensure(connection, install);
+            install.Commit();
+        }
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
+        using (var drift = connection.CreateCommand())
+        {
+            drift.CommandText = "UPDATE local_workspace_sessions SET revision_seed=$seed;";
+            drift.Parameters.AddWithValue("$seed", new string('f', 64));
+            drift.ExecuteNonQuery();
+        }
+        using var validation = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, validation)).Message);
+        LocalWorkspaceProjectionBackupValidation.Validate(
+            connection,
+            validation,
+            validateCanonicalProjection: false);
+    }
+
+    [Fact]
     public void LocalWorkspaceProjection_AllOwnedTablesRoundTripThroughProductionRestore()
     {
         using var temp = new RestoreTemp();

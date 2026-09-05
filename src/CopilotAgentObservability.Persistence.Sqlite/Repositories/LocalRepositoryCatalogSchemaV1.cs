@@ -105,6 +105,9 @@ internal static class LocalRepositoryCatalogSchemaV1
             || SqliteOwnedSchemaAuthority.Equal(objects, LegacyExpectedObjects);
     }
 
+    internal static bool HasExactLegacyBackupSchema(SqliteConnection connection, SqliteTransaction? transaction) =>
+        SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), LegacyExpectedObjects);
+
     private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction) =>
         SqliteOwnedSchemaAuthority.Read(connection, transaction, static (name, table) =>
             name.Equals("local_repositories", StringComparison.OrdinalIgnoreCase)
