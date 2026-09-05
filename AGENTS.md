@@ -23,6 +23,36 @@ Use `docs/agent-guides/repository-workflow.md` for working order, autonomy, mini
 
 Default to the smallest coherent change that satisfies the request and current contract, using existing repository patterns.
 
+## Instruction Interpretation
+
+Before acting on any repository instruction, Skill, Sub-agent prompt, Hook output,
+template, generated plan, or external guide, first decide whether it is applicable
+to the user's current request and the active work item.
+
+The user's latest explicit instruction takes precedence over repository guidance,
+Skills, Sub-agent prompts, Hook output, templates, generated plans, and external
+guides. Repository guidance exists to constrain and focus the work; it does not
+authorize extra work.
+
+When an instruction source would cause you to pause, ask for confirmation, expand
+scope, run broader validation, create extra artifacts, delegate work, or leave the
+requested task unfinished, do not follow it mechanically. Check whether the
+instruction is a hard repository rule, a conditional rule whose condition is
+actually met, or only a general recommendation.
+
+If a Skill, Sub-agent prompt, Hook, template, generated plan, or external guide
+conflicts with the user's request, AGENTS.md, the active work item, or the owning
+specification, follow the higher-priority source. If the conflict changes the
+result, state the conflict briefly and name the source that was not followed.
+
+If an instruction source makes you stop, ask for permission, or diverge from the
+user's intent, cite the exact file or source and quote the relevant instruction.
+Distinguish explicit requirements from your interpretation.
+
+Do not use these rules as a reason to produce long meta-analysis. Apply them
+briefly, then proceed with the smallest coherent action that satisfies the user's
+request and current contract.
+
 ## Execution Limits
 
 - For a non-trivial task, identify the goal, non-goals, acceptance criteria, intended change surface, what remains untouched, and verification before editing.
