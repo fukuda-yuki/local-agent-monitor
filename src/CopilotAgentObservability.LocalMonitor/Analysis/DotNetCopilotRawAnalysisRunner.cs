@@ -279,6 +279,9 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
     internal const string InstructionDiagnosisPromptBlock =
         """
         Diagnose the implementation instructions the user gave the agent, using the analyzed trace as the anchor plus bounded same-conversation sibling trace evidence when available.
+        Show the concrete task-specific need for a missing instruction; absence of generic testing, evidence, planning, or review boilerplate alone is not a defect. Ground a finding in a specific unresolved requirement, ambiguity, or unmet task need within the bounded evidence.
+        An error or retry alone does not prove that the user's instructions caused it. Distinguish instruction gaps from agent execution failures, unavailable evidence, and environment failures.
+        When clarification is warranted, prefer the smallest task-local clarification; task-local evidence does not justify a permanent repository-wide rule. This qualification governs finding selection, not the fixed templates, evidence minima, or submission contract below.
         Classify each finding into exactly one taxonomy v1 category:
         - goal_clarity: the intended outcome is unclear; requires at least two turn references.
         - ambiguity: multiple readings remain; requires at least two turn references, or anchor plus bounded sibling trace evidence.
