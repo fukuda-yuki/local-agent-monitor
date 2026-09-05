@@ -8,7 +8,8 @@ description: Use when the user wants to see the Local Ingestion Monitor UI with 
 Start a monitor on a fresh throwaway database, post the synthetic demo
 payloads, and point the user at the UI. Every payload under
 `scripts\demo\payloads\` is fully synthetic (demo-prefixed trace ids, fake
-identity), so seeding is safe against any local monitor instance.
+identity). Seed only a monitor started on a fresh disposable database under
+`tmp\`.
 
 Invoke this skill only for an explicit demo-data, visual-verification, or screenshot-session request. It does not authorize product changes, broader testing, documentation, or cleanup.
 
@@ -19,7 +20,9 @@ Invoke this skill only for an explicit demo-data, visual-verification, or screen
   captured data). Always pass a fresh path under `tmp\`.
 - **Seed each database once.** Re-seeding the same DB re-ingests the same
   trace ids and duplicates spans in the projection. For a clean rerun:
-  stop the monitor, delete the tmp DB (or pick a new path), start again.
+  stop the monitor, pick a new unused path under `tmp\`, and start again.
+- **Never reuse or automatically delete an existing DB.** If the example
+  path already exists, choose a new unused path before starting the monitor.
 - Loopback URLs only (the scripts enforce this).
 
 ## Steps
@@ -27,7 +30,9 @@ Invoke this skill only for an explicit demo-data, visual-verification, or screen
 1. If a monitor is already running (`pwsh scripts\local-monitor\status.ps1`),
    stop it first so seeding cannot hit the wrong database:
    `pwsh scripts\local-monitor\stop.ps1`
-2. Start on a fresh demo DB and wait for ready:
+2. Check that `tmp\monitor-demo\monitor.db` does not exist. If it exists,
+   choose a new unused DB path under `tmp\` and use it in the command below.
+   Start on that fresh demo DB and wait for ready:
 
    ```powershell
    pwsh scripts\local-monitor\start.ps1 -DbPath tmp\monitor-demo\monitor.db
@@ -43,8 +48,8 @@ Invoke this skill only for an explicit demo-data, visual-verification, or screen
    Expected: one `ok <payload>` line per file, then `Seeded 9 demo traces.`
 4. Tell the user to open `http://127.0.0.1:4320/` — overview KPIs, trace
    list, drawer, and span detail should all show demo data.
-5. When done: `pwsh scripts\local-monitor\stop.ps1`, then remove
-   `tmp\monitor-demo\` if a clean slate is wanted.
+5. When done: `pwsh scripts\local-monitor\stop.ps1`. Use a new unused DB
+   path for the next demo; do not automatically delete the demo DB.
 
 ## Troubleshooting
 

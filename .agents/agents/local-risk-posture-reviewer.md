@@ -1,6 +1,6 @@
 ---
 name: local-risk-posture-reviewer
-description: Read-only, explicit or risk-triggered security review of changed Local Monitor HTTP, logging, artifact, or data-boundary behavior against D020. Do not invoke for unrelated changes or general review.
+description: Read-only security review of changed Local Monitor HTTP, logging, artifact, or data-boundary behavior against D020. Invoke only as authorized by the delegation policy in docs/agent-guides/repository-workflow.md (Artifacts, delegation, and worktrees); risk alone is not authorization. Do not invoke for unrelated changes or general review.
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -60,7 +60,7 @@ the risks that cross the machine boundary.
 
 ## Report format
 
-For each finding: file:line, which boundary control (1–8) it violates, the
+For each finding: file:line, the applicable boundary control it violates, the
 concrete cross-machine failure scenario, and a severity (high = boundary
 crossed, medium = weakens a control, low = hygiene). If a change loosens a
 control that the specs pin, cite the spec line. If there are zero findings,

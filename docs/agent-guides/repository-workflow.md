@@ -120,6 +120,8 @@ Return to the smallest design or replan before continuing when:
 
 Validation must match the changed surface. Start narrow and expand only when the affected contract or acceptance criteria require it.
 
+Reuse passing validation results obtained in the current task while the relevant files, inputs, and environment remain unchanged. Do not rerun validation merely because review, commit, or reporting begins. Revalidate when relevant changes, failures, unresolved risks, or explicit requirements warrant it. This reuse rule does not waive required Affected, Completion, Nightly, or live validation.
+
 ### 1. Local iteration and completion report — Affected
 
 During implementation and before the ordinary coding-agent completion report,

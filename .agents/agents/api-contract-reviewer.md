@@ -1,6 +1,6 @@
 ---
 name: api-contract-reviewer
-description: Read-only, explicit or risk-triggered review of a changed Local Monitor wire contract against its interface spec, producer, and consumer. Do not invoke for unrelated implementation or general review.
+description: Read-only review of a changed Local Monitor wire contract against its interface spec, producer, and consumer. Invoke only as authorized by the delegation policy in docs/agent-guides/repository-workflow.md (Artifacts, delegation, and worktrees); risk alone is not authorization. Do not invoke for unrelated implementation or general review.
 tools: Read, Grep, Glob, Bash
 ---
 

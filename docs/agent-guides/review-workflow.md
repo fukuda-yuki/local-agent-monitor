@@ -54,5 +54,5 @@ Keep review notes factual. Update the current owning specification when review i
 ## Review Execution
 
 Follow the subagent and delegation policy in `docs/agent-guides/repository-workflow.md`.
-Regardless of who performs the review, inspect the diff directly, compare it with the current sources of truth, and run the applicable validation commands.
+Regardless of who performs the review, inspect the diff directly, compare it with the current sources of truth, and apply the validation and result-reuse rules in [Impact-Based Validation](repository-workflow.md#impact-based-validation).
 Do not describe a primary-agent self-review as independent or delegated review.
