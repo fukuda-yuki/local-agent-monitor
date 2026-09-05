@@ -507,6 +507,13 @@ Sections:
 
 Each section shows current state and primary supported action together. Complex or destructive workflows open a focused detail or confirmation dialog. There is no separate Settings dashboard or nested permanent navigation.
 
+Settings source diagnostics consume the server's six compatibility states:
+`supported`, `supported_with_unknown_fields`, `schema_drift_detected`,
+`unsupported_source_version`, `recognized_record_drop_detected`, and
+`adapter_failure`. Each state displays its recorded next action; unknown states
+or actions fail validation. Receiver health and source compatibility are
+independently labelled facts.
+
 The raw-default `アーカイブ` section keeps its paged archived Session list and
 offers an independent exact Session ID search. Only a canonical UUIDv7 starts
 the direct no-store owner read at

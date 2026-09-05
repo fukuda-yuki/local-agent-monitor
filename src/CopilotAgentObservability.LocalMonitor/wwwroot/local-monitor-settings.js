@@ -486,10 +486,27 @@
         const keys = ["observation_id", "ingest_batch_id", "source_surface", "source_application_version", "source_adapter", "adapter_version",
           "schema_fingerprint", "inventory_hash", "compatibility_state", "reason_codes", "unknown_span_count", "unknown_event_count",
           "unknown_attribute_count", "observed_at", "next_action"];
-        if (!exact(item, keys) || !["supported", "supported_with_unknown_fields", "unsupported"].includes(item.compatibility_state)
+        const states = {
+          supported: "取得元の互換性を確認済みです。",
+          supported_with_unknown_fields: "取得元に未対応の項目があります。",
+          schema_drift_detected: "取得元の記録形式に変更を検出しました。",
+          unsupported_source_version: "この取得元の版には対応していません。",
+          recognized_record_drop_detected: "認識済みの記録に取り込み漏れを検出しました。",
+          adapter_failure: "取得元の変換処理に失敗しました。",
+        };
+        const actions = {
+          none: "追加の操作はありません。",
+          review_unknown_fields: "未対応の項目を診断画面で確認してください。",
+          use_compatible_source_or_update_adapter: "対応する取得元の版を使うか、アダプターを更新してください。",
+          capture_fixture_and_review_mapping: "記録例を保存し、項目の対応付けを確認してください。",
+          restore_mapping_or_update_versioned_golden: "項目の対応付けと版別の回帰例を確認してください。",
+          validate_payload_and_protocol: "受信内容とプロトコルを確認してください。",
+          inspect_sanitized_adapter_failure: "診断画面で変換処理の失敗を確認してください。",
+        };
+        if (!exact(item, keys) || !Object.hasOwn(states, item.compatibility_state) || !Object.hasOwn(actions, item.next_action)
             || !Array.isArray(item.reason_codes) || !count(item.unknown_span_count) || !count(item.unknown_event_count)
             || !count(item.unknown_attribute_count)) throw new Error();
-        text = item.compatibility_state === "supported" ? "取得元の互換性を確認済みです。" : "取得元の互換性に注意が必要です。";
+        text = `${states[item.compatibility_state]} ${actions[item.next_action]} 受信の稼働状態とは別の判定です。`;
       }
       if (generation === requestGeneration && target) {
         if (text === null) window.LocalMonitorV1FactState.render(target, { state: "not_observed" });
