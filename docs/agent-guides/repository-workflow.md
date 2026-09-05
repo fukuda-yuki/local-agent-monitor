@@ -62,6 +62,8 @@ If a change is materially larger than the problem, reduce it before continuing.
 
 ## Goal-Driven Execution
 
+Prioritize customer value and product quality when choosing work and judging acceptance. State evidence-backed disagreements, failures, and remaining gaps candidly; do not soften conclusions to reassure the user or justify prior investment.
+
 Define observable completion criteria before editing. For a multi-step task, use a brief plan that pairs each step with its verification.
 Do not broaden ambiguous wording into speculative product behavior. Resolve scope from the active work item and current specification; if they cannot resolve it, state the minimum explicit assumption or stop for the missing decision.
 
@@ -194,6 +196,12 @@ workflow; these development lanes do not replace those gates.
 Use component-owned specifications, scripts, READMEs, and test projects for feature-specific validation. This guide intentionally contains no feature- or Issue-specific smoke procedure.
 
 Keep automated tests deterministic and isolate external services, network access, and live machine state. Do not use network-dependent validation as the only proof of correctness. Follow the fixture and data-safety rules in `AGENTS.md`.
+
+During each Issue's repair, use relevant existing local data and the actual Local Monitor when they help diagnose the defect, debug the change, or establish customer-facing acceptance. The user authorizes this local use, including creating masked copies and distilling examples for unit-test fixtures or E2E mocks; do not ask again merely because the evidence is real user data. Preserve original records and use copies for experiments that modify data. This permission does not authorize publishing raw data or destructive changes to the source installation.
+
+Choose the smallest evidence approach that materially improves confidence. Real-data investigation is on demand, not a mandatory recurring test suite or a separate data-preparation task. Create a distilled fixture only when its diagnostic or regression value justifies the effort and the existing new-test gate is met. Anonymization must remove private content while preserving the failure-relevant structure, such as exact relationships, ordering, types, missing versus zero values, and failure states. Review derived fixtures before tracking or sharing them; keep real-data working copies in gitignored local storage.
+
+For a repaired user-visible defect, revisit the original failure with the same records where available and trace the relevant data-to-UI path. Distinguish actual installed-path observations, replay/copy results, and mocked/component tests in the closeout. A passing mock does not establish normal-user acceptance, and absent UI data does not establish source absence. Record only the necessary sanitized evidence and remaining limitations in the owning Issue or PR.
 
 If a required command fails, is skipped, or cannot run:
 
