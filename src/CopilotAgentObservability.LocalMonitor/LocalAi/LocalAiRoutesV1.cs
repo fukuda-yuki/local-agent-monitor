@@ -13,8 +13,13 @@ internal static class LocalAiRoutesV1
 
     internal static void Map(IEndpointRouteBuilder endpoints, ILocalAiAnalysisApplicationV1 application,
         bool repositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
-        bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled)
+        bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
+        ILocalAiModelDiscoveryV1? models = null)
     {
+        if (models is not null)
+        {
+            endpoints.Map("/api/local-monitor/v1/ai/models", context => Models(context, models));
+        }
         endpoints.Map("/api/local-monitor/v1/ai/session-runs", context => StartSession(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/node-runs", context => StartNode(context, application));
         if (compareAiEnabled)
@@ -29,6 +34,25 @@ internal static class LocalAiRoutesV1
         endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}", context => ReadRun(context, application, "/api/local-monitor/v1/ai/runs/", null));
         endpoints.Map("/api/local-monitor/v1/ai/runs/{runId}/cancel", context => Cancel(context, application));
         endpoints.Map("/api/local-monitor/v1/ai/sessions/{sessionId}/reports", context => Reports(context, application));
+    }
+
+    private static async Task Models(HttpContext context, ILocalAiModelDiscoveryV1 models)
+    {
+        if (!ExactPath(context, "/api/local-monitor/v1/ai/models")) { await NotFound(context); return; }
+        if (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
+        {
+            if (MonitorHost.IsCrossSiteRequest(context)) { await Error(context, 403, "csrf_rejected"); return; }
+            if (context.Request.QueryString.HasValue) { await Error(context, 400, "invalid_request"); return; }
+            await WriteModels(context, models.Current()).ConfigureAwait(false);
+            return;
+        }
+        if (!await PreparePost(context, 256).ConfigureAwait(false)) return;
+        var body = await Body(context, 256).ConfigureAwait(false);
+        if (body is null) { await Error(context, 413, "request_too_large"); return; }
+        if (!SupportedMedia(context)) { await Error(context, 415, "unsupported_media_type"); return; }
+        if (context.Request.QueryString.HasValue || !TryRefreshRequest(body)) { await Error(context, 400, "invalid_request"); return; }
+        var snapshot = await models.RefreshAsync(context.RequestAborted).ConfigureAwait(false);
+        await WriteModels(context, snapshot).ConfigureAwait(false);
     }
 
     private static async Task StartSession(HttpContext context, ILocalAiAnalysisApplicationV1 application)
@@ -170,25 +194,44 @@ internal static class LocalAiRoutesV1
             if(stream.Length+read>maximum)return null; stream.Write(buffer,0,read); }
     }
 
+    private static bool TryRefreshRequest(byte[]? bytes)
+    {
+        if (bytes is null) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 8 });
+            return Closed(document.RootElement, [], []);
+        }
+        catch (JsonException) { return false; }
+    }
+
     private static bool TrySessionRequest(byte[]? bytes, out LocalAiSessionStartRequestV1? request)
     {
-        request=null; if(!TryObject(bytes,["session_id","timeout_seconds"], ["session_id"],out var root))return false;
-        if(!TryUuid(root.GetProperty("session_id"),out var session))return false;
+        request=null; if(!TryObject(bytes,["session_id","model","timeout_seconds"], ["session_id","model"],out var root))return false;
+        if(!TryUuid(root.GetProperty("session_id"),out var session)||!TryModel(root,out var model))return false;
         var timeout=60;if(root.TryGetProperty("timeout_seconds",out var value)&&(value.ValueKind!=JsonValueKind.Number||!value.TryGetInt32(out timeout)))return false;
-        if(timeout is <1 or >600)return false; request=new(session!,timeout); return true;
+        if(timeout is <1 or >600)return false; request=new(session!,model!,timeout); return true;
     }
 
     private static bool TryNodeRequest(byte[]? bytes, out LocalAiNodeStartRequestV1? request)
     {
-        request=null; if(!TryObject(bytes,["session_id","node_id","timeout_seconds","question","prior_turns"],["session_id","node_id"],out var root))return false;
-        if(!TryUuid(root.GetProperty("session_id"),out var session)||root.GetProperty("node_id").ValueKind!=JsonValueKind.String)return false;
+        request=null; if(!TryObject(bytes,["session_id","node_id","model","timeout_seconds","question","prior_turns"],["session_id","node_id","model"],out var root))return false;
+        if(!TryUuid(root.GetProperty("session_id"),out var session)||root.GetProperty("node_id").ValueKind!=JsonValueKind.String||!TryModel(root,out var model))return false;
         var node=root.GetProperty("node_id").GetString(); if(!CanonicalNodeId(node))return false;
         var timeout=60;if(root.TryGetProperty("timeout_seconds",out var timeoutValue)&&(timeoutValue.ValueKind!=JsonValueKind.Number||!timeoutValue.TryGetInt32(out timeout)))return false;
         string? question=null; if(root.TryGetProperty("question",out var q)){if(q.ValueKind!=JsonValueKind.String)return false;question=q.GetString();}
         var turns=new List<LocalAiPriorTurnV1>(); if(root.TryGetProperty("prior_turns",out var prior))
         { if(prior.ValueKind!=JsonValueKind.Array)return false; foreach(var item in prior.EnumerateArray())
           { if(!Closed(item,["question","answer"],["question","answer"])||item.GetProperty("question").ValueKind!=JsonValueKind.String||item.GetProperty("answer").ValueKind!=JsonValueKind.String)return false; turns.Add(new(item.GetProperty("question").GetString()!,item.GetProperty("answer").GetString()!)); } }
-        request=new(session!,node!,timeout,question,turns); return timeout is >=1 and <=600;
+        request=new(session!,node!,model!,timeout,question,turns); return timeout is >=1 and <=600;
+    }
+
+    private static bool TryModel(JsonElement root, out string? model)
+    {
+        model = null;
+        if (root.GetProperty("model").ValueKind != JsonValueKind.String) return false;
+        model = root.GetProperty("model").GetString();
+        return LocalAiModelIdentityV1.IsSupportedId(model);
     }
 
     private static bool TryObject(byte[]? bytes, string[] allowed, string[] required, out JsonElement root)
@@ -229,6 +272,14 @@ internal static class LocalAiRoutesV1
         ? Json(context,201,new{run_id=result.RunId}) : Error(context,result.ErrorCode switch
         {"provider_unavailable" or "projection_unavailable"=>503,"session_not_found" or "node_not_found" or "comparison_not_found" or "snapshot_not_found"=>404,
          "persistence_busy"=>503,"snapshot_expired" or "comparison_expired"=>410,"invalid_request"=>400,_=>409},result.ErrorCode);
+    private static Task WriteModels(HttpContext context, LocalAiModelDiscoverySnapshotV1 snapshot) =>
+        Json(context, 200, new
+        {
+            discovery_state = snapshot.State,
+            models = snapshot.Models.Select(item => new { id = item.Id, display_name = item.DisplayName }),
+            legacy_configured_model = snapshot.LegacyConfiguredModel,
+            legacy_eligible = snapshot.LegacyEligible,
+        });
     internal static Task Error(HttpContext context,int status,string code)=>Json(context,status,new{error=code});
     internal static byte[] SerializeRun(LocalAiRunStatusV1 status)
     {

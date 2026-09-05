@@ -207,18 +207,18 @@ public sealed class LocalAiProductionStackTests
         using(var schema=Open(temp.DatabasePath))LocalAiAnalysisSchemaV1.Ensure(schema);
         LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath,SessionId,RunA,RunB);
 
-        var first=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        var first=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test"}""");
         var firstStatus=await Poll(host.Client,$"/api/local-monitor/v1/ai/session-runs/{first}");
         Assert.Equal("succeeded",firstStatus.GetProperty("state").GetString());
         Assert.Equal("session-one",firstStatus.GetProperty("result").GetProperty("summary").GetString());
         var generic=await Get(host.Client,$"/api/local-monitor/v1/ai/runs/{first}");
         Assert.Equal("session-one",generic.GetProperty("result").GetProperty("summary").GetString());
 
-        var zero=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        var zero=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test"}""");
         Assert.Equal("zero_findings",(await Poll(host.Client,$"/api/local-monitor/v1/ai/session-runs/{zero}")).GetProperty("state").GetString());
-        var second=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        var second=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test"}""");
         Assert.NotEqual(first,second);await Poll(host.Client,$"/api/local-monitor/v1/ai/session-runs/{second}");
-        var failed=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        var failed=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test"}""");
         Assert.Equal("provider_failed",(await Poll(host.Client,$"/api/local-monitor/v1/ai/session-runs/{failed}")).GetProperty("state").GetString());
 
         using(var connection=Open(temp.DatabasePath))
@@ -243,21 +243,21 @@ public sealed class LocalAiProductionStackTests
         using(var malformed=Post("/api/local-monitor/v1/ai/node-runs",$$"""{"session_id":"{{SessionId}}","node_id":"node-anchor"}"""))
         using(var malformedResponse=await host.Client.SendAsync(malformed))Assert.Equal(HttpStatusCode.BadRequest,malformedResponse.StatusCode);
         foreach(var body in new[]{
-            $$"""{"session_id":"{{SessionId}}","node_id":"node-00000000000000000000000000000000"}""",
-            $$"""{"session_id":"018f0000-0000-7000-8000-000000000002","node_id":"{{nodeId}}"}"""})
+            $$"""{"session_id":"{{SessionId}}","node_id":"node-00000000000000000000000000000000","model":"model-test"}""",
+            $$"""{"session_id":"018f0000-0000-7000-8000-000000000002","node_id":"{{nodeId}}","model":"model-test"}"""})
         {
             using var missingNode=Post("/api/local-monitor/v1/ai/node-runs",body);using var missingNodeResponse=await host.Client.SendAsync(missingNode);
             Assert.Equal(HttpStatusCode.NotFound,missingNodeResponse.StatusCode);
             Assert.Equal("{\"error\":\"node_not_found\"}",await missingNodeResponse.Content.ReadAsStringAsync());
         }
         using(var noRejectedRows=Open(temp.DatabasePath)){using var countRejected=noRejectedRows.CreateCommand();countRejected.CommandText="SELECT COUNT(*) FROM local_ai_runs WHERE scope_kind='node';";Assert.Equal(0L,(long)countRejected.ExecuteScalar()!);}
-        var nodeRun=await Start(host.Client,"/api/local-monitor/v1/ai/node-runs",$$"""{"session_id":"{{SessionId}}","node_id":"{{nodeId}}"}""");
+        var nodeRun=await Start(host.Client,"/api/local-monitor/v1/ai/node-runs",$$"""{"session_id":"{{SessionId}}","node_id":"{{nodeId}}","model":"model-test"}""");
         var nodeStatus=await Poll(host.Client,$"/api/local-monitor/v1/ai/node-runs/{nodeRun}");
         Assert.Equal("node-one",nodeStatus.GetProperty("result").GetProperty("summary").GetString());
         Assert.Equal("node-one",(await Get(host.Client,$"/api/local-monitor/v1/ai/runs/{nodeRun}")).GetProperty("result").GetProperty("summary").GetString());
         var afterNode=await Get(host.Client,$"/api/local-monitor/v1/ai/sessions/{SessionId}/reports");
         Assert.DoesNotContain(afterNode.GetProperty("reports").EnumerateArray(),item=>item.GetProperty("run_id").GetString()==nodeRun);
-        var invalid=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        var invalid=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test"}""");
         Assert.Equal("invalid_result",(await Poll(host.Client,$"/api/local-monitor/v1/ai/runs/{invalid}")).GetProperty("state").GetString());
 
         using(var expired=Open(temp.DatabasePath)){using var command=expired.CreateCommand();command.CommandText="DELETE FROM local_ai_results WHERE run_id=$run;";command.Parameters.AddWithValue("$run",first);command.ExecuteNonQuery();}
@@ -265,12 +265,12 @@ public sealed class LocalAiProductionStackTests
         var expiredItem=Assert.Single(expiredReports.GetProperty("reports").EnumerateArray(),item=>item.GetProperty("run_id").GetString()==first);
         Assert.Equal("expired",expiredItem.GetProperty("content_state").GetString());Assert.Equal(JsonValueKind.Null,expiredItem.GetProperty("result").ValueKind);
 
-        var activeStart=Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}"}""");
+        var activeStart=Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test"}""");
         await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));var active=await activeStart;
         using var activeCancel=Post($"/api/local-monitor/v1/ai/runs/{active}/cancel","{}");using var activeCancelResponse=await host.Client.SendAsync(activeCancel);
         Assert.Equal(HttpStatusCode.OK,activeCancelResponse.StatusCode);provider.Release.TrySetResult();
         Assert.Equal("canceled",(await Poll(host.Client,$"/api/local-monitor/v1/ai/runs/{active}")).GetProperty("state").GetString());
-        var timedOut=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","timeout_seconds":1}""");
+        var timedOut=await Start(host.Client,"/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{SessionId}}","model":"model-test","timeout_seconds":1}""");
         Assert.Equal("timed_out",(await Poll(host.Client,$"/api/local-monitor/v1/ai/runs/{timedOut}")).GetProperty("state").GetString());
 
         using var cancel=Post($"/api/local-monitor/v1/ai/runs/{nodeRun}/cancel","{}");
@@ -284,7 +284,7 @@ public sealed class LocalAiProductionStackTests
         using(var wrongMethod=new HttpRequestMessage(HttpMethod.Put,"/api/local-monitor/v1/ai/runs/not-a-uuid"))
         using(var wrongMethodResponse=await host.Client.SendAsync(wrongMethod))Assert.Equal(HttpStatusCode.MethodNotAllowed,wrongMethodResponse.StatusCode);
         const string missing="018f0000-0000-7000-8000-000000000099";
-        using(var missingRequest=Post("/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{missing}}"}"""))
+        using(var missingRequest=Post("/api/local-monitor/v1/ai/session-runs",$$"""{"session_id":"{{missing}}","model":"model-test"}"""))
         {missingRequest.Content!.Headers.ContentType=System.Net.Http.Headers.MediaTypeHeaderValue.Parse("Application/Json");using var missingResponse=await host.Client.SendAsync(missingRequest);Assert.Equal(HttpStatusCode.NotFound,missingResponse.StatusCode);}
         using(var missingReports=await host.Client.GetAsync($"/api/local-monitor/v1/ai/sessions/{missing}/reports"))Assert.Equal(HttpStatusCode.NotFound,missingReports.StatusCode);
         using(var oversized=Post("/api/local-monitor/v1/ai/session-runs",new string('x',16_385)))
