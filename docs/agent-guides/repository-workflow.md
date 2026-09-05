@@ -27,7 +27,7 @@ Inspect only when the task affects them:
 - user guides for user-workflow changes.
 
 Do not read all canonical documents by default.
-If task authority and a current specification disagree, report the conflict before editing. When the user's latest explicit decision resolves the conflict, update the owning specification before or together with the implementation. Otherwise stop for a product decision.
+If task authority and a current specification disagree, report the conflict before editing. When the user's latest explicit decision resolves the conflict, update the owning specification before or together with the implementation. For an unresolved decision, follow [Autonomy And Confirmation](#autonomy-and-confirmation).
 
 ## Autonomy And Confirmation
 
@@ -35,7 +35,7 @@ For review, diagnosis, planning, or explanation requests, inspect and report wit
 
 For implementation or fix requests, make the requested in-scope local changes and run relevant non-destructive validation without asking again.
 
-Stop before proceeding only when the task would:
+Pause the dependent action for a user decision only when it would:
 
 - perform a remote write that the user has not explicitly authorized for the exact target;
 - make a destructive or irreversible change;
@@ -43,7 +43,7 @@ Stop before proceeding only when the task would:
 - materially expand the requested scope;
 - require an unresolved product or specification decision.
 
-Minor, reversible, in-scope local edits do not require confirmation.
+Minor, reversible, in-scope local edits do not require confirmation. A missing decision blocks only the dependent action; continue independent authorized work and report what remains blocked. Do not ask again for a decision already resolved by the user's latest explicit instruction.
 
 ## Simplicity And Change Scope
 
@@ -65,7 +65,7 @@ If a change is materially larger than the problem, reduce it before continuing.
 Prioritize customer value and product quality when choosing work and judging acceptance. State evidence-backed disagreements, failures, and remaining gaps candidly; do not soften conclusions to reassure the user or justify prior investment.
 
 Define observable completion criteria before editing. For a multi-step task, use a brief plan that pairs each step with its verification.
-Do not broaden ambiguous wording into speculative product behavior. Resolve scope from the active work item and current specification; if they cannot resolve it, state the minimum explicit assumption or stop for the missing decision.
+Do not broaden ambiguous wording into speculative product behavior. Resolve scope from the active work item and current specification; if they cannot resolve it, state the minimum explicit assumption that preserves the contract, or escalate the unresolved decision under [Autonomy And Confirmation](#autonomy-and-confirmation).
 
 ### Pre-implementation scope contract
 
@@ -80,7 +80,7 @@ What remains untouched
 Verification for each changed contract
 ```
 
-Use the active work item or the conversation for task-specific design, planning, status, and review. Update a current owning specification only when the durable product contract changes. Do not create task-specific design, plan, review, closeout, or status Markdown files in the repository.
+Keep this scope contract in the conversation or active work item, following [artifact placement](#artifacts-delegation-and-worktrees). Update a current owning specification only when the durable product contract changes.
 
 ### New-test gate
 
@@ -92,24 +92,37 @@ Add a test only when all three questions have concrete answers:
 
 Do not add a test mechanically for each new method or class, backfill coverage for an unchanged module, expand into future cases or a snapshot/parameter matrix, create a production abstraction only to enable a test, or add an unrelated E2E, OS, live, or long-running matrix.
 
-### Scope-expansion stop conditions
+### Scope and replanning
 
-Return to the smallest design or replan before continuing when:
+This section owns scope-expansion decisions. Judge scope by the authorized outcome and current contract, not by whether every affected file was predicted.
 
-- an unplanned production file or subsystem must change;
-- a new framework, dependency, config layer, or public interface becomes necessary;
-- a compatibility shim, fallback, old/new dual path, or second implementation becomes necessary;
-- tests expand beyond the changed acceptance criteria into a suite or E2E matrix; or
-- surrounding cleanup, abstraction, documentation, or test scaffolding becomes larger than the implementation.
+When investigation identifies another necessary file, subsystem, or verification step, reconsider the smallest coherent solution and update the brief plan internally. Continue without another approval when the outcome, contracts, and authorization remain unchanged. Necessary changes discovered during implementation or review are not defects merely because they were unplanned.
+
+If the proposed solution adds outcomes or machinery not required by the task, remove that expansion or choose a smaller design. Use [Autonomy And Confirmation](#autonomy-and-confirmation) when a retained proposal needs a user decision; do not bypass its dependency, destructive-action, or remote-write boundaries. Apply the [new-test gate](#new-test-gate) and [Impact-Based Validation](#impact-based-validation) rather than growing a test matrix to match file count. An eligible bounded delegation under the next section does not itself expand scope.
 
 ### Artifacts, delegation, and worktrees
 
-- Do not create repository design drafts, implementation plans, review reports, closeout records, status ledgers, or generated agent reports for any task. A Skill's file-output convention does not override this rule.
-- Use a Sub-agent only when the user or active work item explicitly requests delegation and an independent workstream exists. Do not dispatch Sub-agents by repository default.
-- When delegation is requested, give each Sub-agent an independent scope, file ownership, and success criteria. The primary agent remains responsible for shared-file coordination, integration, validation, and final decisions.
-- Do not claim delegation when the active surface does not provide it.
+- Keep task-specific design, planning, status, review, and closeout in the conversation or active GitHub Issue/PR. Do not create repository design drafts, implementation plans, review reports, status ledgers, or generated agent reports. A Skill's file-output convention does not override this rule.
 - Create a worktree only when the active work item, concurrent work, or branch isolation requires it.
 - Generic procedure in an executable plan does not override `AGENTS.md` or this guide.
+
+This section is the single owner of the delegation policy. Codex may choose bounded delegation when an independent workstream is expected to reduce elapsed time or improve quality enough to justify coordination overhead; no separate delegation approval is required. Delegation is optional, not a completion gate. Prefer direct execution when it is the better approach, and honor a current explicit user restriction on delegation.
+
+Give each Sub-agent an independent scope, file ownership or read-only review surface, and a concrete expected result. Use only the workers needed; avoid competing edits and duplicated work. Briefly state the split and expected benefit, without creating another planning artifact. The primary agent owns coordination, assessment of returned findings/diffs, integration, verification, and the final answer.
+
+Delegation does not grant wider task, data, dependency, destructive-action, or remote-write authority; the same constraints apply to the primary agent and every worker. Tool availability and concurrency ceilings are not instructions to fill all worker slots. Use only capabilities actually available on the active surface; do not claim a delegation that did not occur. If delegation is unavailable, continue work the primary agent can perform and distinguish self-review from independent review.
+
+#### Codex reviewer delivery
+
+The retained Markdown procedures below are reference documents for Codex, not automatically registered native Codex agents. Select only the procedure relevant to the bounded review; do not load or invoke all three by default.
+
+- [API contract reviewer](../../.agents/agents/api-contract-reviewer.md): affected specification, producer, and consumer wire contract.
+- [Async UI state reviewer](../../.agents/agents/async-ui-state-reviewer.md): affected asynchronous selection, response/render, and focus behavior.
+- [Local risk posture reviewer](../../.agents/agents/local-risk-posture-reviewer.md): affected HTTP, logging, artifact, and data boundaries under the documented local threat model.
+
+When delegating through the active surface's available agent tool, supply the repository root, exact selected procedure path, bounded review surface or diff, and expected result. Instruct the reviewer to read that procedure before reviewing. If it cannot access the file, provide its relevant procedure text explicitly; do not assume context or file access was inherited. An unread or undelivered procedure is an unverified review, not a successful one.
+
+Require no file edits or remote mutations and return findings to the primary agent. Markdown `tools:` metadata serves the Claude copies; it is not a Codex-enforced permission boundary. Inspect the target runtime's effective permissions, including inherited/session overrides, before claiming enforced read-only isolation. Report observed no-write behavior separately from permission enforcement. Keep canonical procedures and the existing `.claude/agents/` copies aligned without a new registration or synchronization framework.
 
 ### Single ownership of responsibilities
 

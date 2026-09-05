@@ -23,13 +23,9 @@ Check these perspectives before completion:
 
 ## Over-implementation blocking check
 
-Before completion, block the change unless:
+Review the final diff against [Simplicity And Change Scope](repository-workflow.md#simplicity-and-change-scope) and the [new-test gate](repository-workflow.md#new-test-gate). Unnecessary behavior, unused machinery, duplicated coverage, and extra artifacts remain blocking findings.
 
-- every changed file and behavior is necessary for the request, an acceptance criterion, or the affected contract;
-- no unused abstraction, configuration, fallback, compatibility path, or parallel implementation remains;
-- every new test covers changed observable behavior rather than duplicating existing coverage or backfilling an unrelated module;
-- unplanned files, lines, artifacts, and Sub-agent output have been removed or returned to a scope decision; and
-- no work was added only to make the result appear more complete.
+Use [Scope and replanning](repository-workflow.md#scope-and-replanning) for newly discovered changes. A necessary file or line within the same authorized outcome is not a reason to remove the fix or request approval solely because it was unplanned. Review Sub-agent output by the same standard.
 
 This workflow owns current-specification consistency review. Do not duplicate that responsibility in another Sub-agent.
 
@@ -53,6 +49,6 @@ Keep review notes factual. Update the current owning specification when review i
 
 ## Review Execution
 
-Follow the subagent and delegation policy in `docs/agent-guides/repository-workflow.md`.
+Follow the single [delegation policy and Codex reviewer delivery procedure](repository-workflow.md#artifacts-delegation-and-worktrees). Review depth does not itself require a Sub-agent.
 Regardless of who performs the review, inspect the diff directly, compare it with the current sources of truth, and apply the validation and result-reuse rules in [Impact-Based Validation](repository-workflow.md#impact-based-validation).
 Do not describe a primary-agent self-review as independent or delegated review.

@@ -3,19 +3,15 @@
 # <repository>/.codex/config.toml
 # trusted repository only
 
-# トップレベル設定は、最初のテーブル宣言より前に置く
+# Top-level settings precede table declarations.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
 model_verbosity = "low"
 model_reasoning_summary = "concise"
 
-[agents]
-max_depth = 2
-
-# 公開設定側のスレッド上限も合わせる
-max_threads = 24
-
+# Availability only; delegation policy is in docs/agent-guides/repository-workflow.md.
+# No repository concurrency/depth override; other config layers and runtime defaults apply.
 [features]
 multi_agent = true
 
