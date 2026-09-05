@@ -179,6 +179,18 @@ internal static class LocalComparisonInputProjection
         scalars["total_tokens"] = Observed(row.Tokens.Total, sessionReference);
         scalars["cache_read_tokens"] = Observed(row.Tokens.CacheRead, sessionReference);
         scalars["cache_creation_tokens"] = Observed(row.Tokens.CacheCreation, sessionReference);
+        foreach (var (metric, component) in new[] { ("input_tokens", "input"), ("output_tokens", "output"), ("total_tokens", "total"), ("cache_read_tokens", "cache_read"), ("cache_creation_tokens", "cache_creation") })
+        {
+            if (row.Tokens.Observations?.TryGetValue(component, out var observation) == true)
+            {
+                var original = scalars[metric];
+                scalars[metric] = new(original.Observation, sessionReference)
+                {
+                    TokenObservation = observation,
+                    CacheRatioObservation = component == "cache_read" ? row.Tokens.Observations["cache_read_ratio_basis_points"] : null,
+                };
+            }
+        }
         scalars["session_duration"] = row is { Status: "active", TimingState: "recorded", EndedAt: null, DurationMilliseconds: null }
             ? Missing(LocalComparisonFactState.NotObserved)
             : Observed(row.TimingState, row.DurationMilliseconds, sessionReference);
@@ -201,8 +213,8 @@ internal static class LocalComparisonInputProjection
         {
             ["sources"] = Condition(row.Sources.State, row.Sources.Values, sessionReference),
             ["models"] = Condition(row.Models.State, row.Models.Values, sessionReference),
-            ["source_versions"] = Condition(comparisonDetail.SourceApplicationVersions is null ? "source_unsupported" : "recorded", comparisonDetail.SourceApplicationVersions ?? [], sessionReference),
-            ["adapter_versions"] = Condition(comparisonDetail.AdapterVersions is null ? "source_unsupported" : "recorded", comparisonDetail.AdapterVersions ?? [], sessionReference),
+            ["source_versions"] = Condition(comparisonDetail.SourceApplicationVersions is null ? "source_unsupported" : comparisonDetail.SourceApplicationVersions.Count == 0 ? "not_observed" : "recorded", comparisonDetail.SourceApplicationVersions ?? [], sessionReference),
+            ["adapter_versions"] = Condition(comparisonDetail.AdapterVersions is null ? "source_unsupported" : comparisonDetail.AdapterVersions.Count == 0 ? "not_observed" : "recorded", comparisonDetail.AdapterVersions ?? [], sessionReference),
             ["completeness"] = Condition("recorded", [row.Completeness], sessionReference),
         };
         var observedAt = DateTimeOffset.TryParse(row.LastSeenAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed)

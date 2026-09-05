@@ -115,6 +115,29 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task ProductionCoordinatorValidatesRecordedOtelFailureActivity()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string runId = "018f0000-0000-7000-8000-000000000010";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, runId,
+            "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"UPDATE monitor_spans SET status='error'; UPDATE session_runs SET status='failed' WHERE run_id='{runId}';");
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:00Z"), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+        }
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+        var execution = Assert.Single(detail.Detail.Executions, value => value.SourceIdentity == runId);
+        Assert.Equal("recorded", execution.Activity.Error.State);
+        Assert.Equal(1, execution.Activity.Error.Value);
+    }
+
+    [Fact]
     public async Task ProductionCoordinatorKeepsAStandaloneSdkToolStartAsARawEvent()
     {
         using var temp = new MonitorTempDirectory();

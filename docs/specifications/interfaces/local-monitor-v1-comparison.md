@@ -1,5 +1,14 @@
 # Local Monitor v1 Repository Session Compare
 
+New snapshots preserve token component observed subtotals and call coverage in
+the v3 Session fact frame. Cache-read ratio uses the paired call input denominator
+from the Workspace projection. Missing full totals remain distinct from observed
+subtotals. Existing v1/v2 fact frames and their snapshots retain their original
+encoding and validation; an upgrade never rewrites them. Producer version absence
+is `not_observed`, not an available empty set. The UI presents available values
+first, groups unavailable statistics per cohort, distinguishes missing numeric,
+lifecycle, version, and activity facts, and keeps evidence accessible.
+
 This is the sole Issue #166 owner transport. It composes #165's deterministic
 formula/snapshot contract with existing Local Monitor identity, archive,
 Workspace, security, and human-route authorities. It adds no alias, version

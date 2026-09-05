@@ -158,15 +158,38 @@ internal static class LocalMonitorV1CollectionApplication
     private static void WriteSession(Utf8JsonWriter w, LocalRepositoryScopeSessionSnapshot s, LocalWorkspaceProjectionRow p, string? revisionOverride)
     {
         w.WriteStartObject(); w.WriteString("session_id", p.SessionId);
+        ObservedActivity(w,p);
         w.WritePropertyName("assignment"); w.WriteStartObject(); w.WriteString("state", EnumName(s.AssignmentState)); w.WriteString("authority", EnumName(s.AssignmentAuthority)); w.WriteNumber("revision", s.AssignmentRevision); if (s.RepositoryId is null) w.WriteNull("repository_id"); else w.WriteString("repository_id", s.RepositoryId); w.WritePropertyName("candidate_repository_ids"); JsonSerializer.Serialize(w, s.CandidateRepositoryIds); w.WriteEndObject();
         w.WritePropertyName("archive"); w.WriteStartObject(); w.WriteString("state", Name(s.ArchiveState)); w.WriteNumber("revision", s.ArchiveRevision); w.WriteBoolean("effectively_eligible", s.IsEffectivelyEligible); if (s.ArchiveExclusionReason is null) w.WriteNull("exclusion_reason"); else w.WriteString("exclusion_reason", s.ArchiveExclusionReason); w.WriteEndObject();
         w.WritePropertyName("label"); Fact(w, p.LabelState, p.LabelText, "text"); w.WriteString("status", p.Status); w.WriteString("completeness", p.Completeness);
         Set(w, "source", p.Sources); Set(w, "model", p.Models); w.WritePropertyName("summary"); w.WriteStartObject(); Count(w,"skill",p.Activity.Skill); Count(w,"tool",p.Activity.Tool); Count(w,"subagent",p.Activity.Subagent); Count(w,"error",p.Activity.Error); Count(w,"retry",p.Activity.Retry); w.WriteEndObject();
-        var t=p.Tokens; var inconsistent=new LocalWorkspaceFact<long>("inconsistent",null); var inconsistentCache=new LocalWorkspaceFact<long>("inconsistent",t.CacheRead.Value); w.WritePropertyName("tokens"); w.WriteStartObject(); w.WriteString("authority",t.Authority); w.WriteString("state",t.State); w.WriteNumber("available_execution_count",t.AvailableExecutionCount); w.WriteNumber("total_execution_count",t.TotalExecutionCount); Value(w,"input",t.Input); Value(w,"output",t.Output); Value(w,"total",t.Total); Value(w,"reasoning",t.Reasoning); Value(w,"cache_read",t.State=="inconsistent"?inconsistentCache:t.CacheRead); Value(w,"cache_creation",t.CacheCreation); Value(w,"new_input",t.State=="inconsistent"?inconsistent:t.NewInput); Value(w,"cache_read_ratio_basis_points",t.State=="inconsistent"?inconsistent:t.CacheReadRatioBasisPoints); w.WriteEndObject();
+        var t=p.Tokens; var inconsistent=new LocalWorkspaceFact<long>("inconsistent",null); var inconsistentCache=new LocalWorkspaceFact<long>("inconsistent",t.CacheRead.Value); w.WritePropertyName("tokens"); w.WriteStartObject(); w.WriteString("authority",t.Authority); w.WriteString("state",t.State); w.WriteNumber("available_execution_count",t.AvailableExecutionCount); w.WriteNumber("total_execution_count",t.TotalExecutionCount); Value(w,"input",t.Input); Value(w,"output",t.Output); Value(w,"total",t.Total); Value(w,"reasoning",t.Reasoning); Value(w,"cache_read",t.State=="inconsistent"?inconsistentCache:t.CacheRead); Value(w,"cache_creation",t.CacheCreation); Value(w,"new_input",t.State=="inconsistent"?inconsistent:t.NewInput); Value(w,"cache_read_ratio_basis_points",t.State=="inconsistent"?inconsistent:t.CacheReadRatioBasisPoints); TokenObservations(w,t); w.WriteEndObject();
         w.WritePropertyName("timing"); w.WriteStartObject(); w.WriteString("state",p.TimingState); Nullable(w,"started_at",p.StartedAt); Nullable(w,"ended_at",p.EndedAt); Nullable(w,"last_seen_at",p.LastSeenAt); if(p.DurationMilliseconds is null)w.WriteNull("duration_ms");else w.WriteNumber("duration_ms",p.DurationMilliseconds.Value); w.WriteEndObject(); w.WritePropertyName("capture_notes"); JsonSerializer.Serialize(w,p.CaptureNotes); w.WriteString("workspace_revision",revisionOverride??Hash("local-monitor-session-item\0v1\0",s,p)); w.WriteEndObject();
     }
     private static void Set(Utf8JsonWriter w,string n,LocalWorkspaceSetFact f){w.WritePropertyName(n);w.WriteStartObject();w.WriteString("state",f.State);w.WritePropertyName("values");JsonSerializer.Serialize(w,f.Values);w.WriteEndObject();}
     private static void Count(Utf8JsonWriter w,string n,LocalWorkspaceFact<long> f){w.WritePropertyName(n);Fact(w,f.State,f.Value,"count");}
+    internal static void ObservedActivity(Utf8JsonWriter w, LocalWorkspaceProjectionRow row)
+    {
+        if (row.ObservedActivity is not { } range) return;
+        w.WritePropertyName("observed_activity"); w.WriteStartObject();
+        w.WriteString("started_at",range.StartedAt); w.WriteString("ended_at",range.EndedAt);
+        w.WriteNumber("duration_ms",range.DurationMilliseconds); w.WriteEndObject();
+    }
+    internal static void TokenObservations(Utf8JsonWriter w, LocalWorkspaceTokenFacts tokens)
+    {
+        if (tokens.Observations is null) return;
+        w.WritePropertyName("observed_components"); w.WriteStartObject();
+        foreach (var pair in tokens.Observations)
+        {
+            w.WritePropertyName(pair.Key); w.WriteStartObject();
+            Value(w, "subtotal", pair.Value.Subtotal);
+            w.WriteNumber("observed_call_count", pair.Value.ObservedCallCount);
+            w.WriteNumber("applicable_call_count", pair.Value.ApplicableCallCount);
+            if (pair.Value.PairedInput is long input) w.WriteNumber("paired_input", input); else w.WriteNull("paired_input");
+            w.WriteEndObject();
+        }
+        w.WriteEndObject();
+    }
     private static void Value(Utf8JsonWriter w,string n,LocalWorkspaceFact<long> f){w.WritePropertyName(n);Fact(w,f.State,f.Value,"value");}
     private static void Fact<T>(Utf8JsonWriter w,string state,T? value,string n){w.WriteStartObject();w.WriteString("state",state);w.WritePropertyName(n);if(value is null)w.WriteNullValue();else JsonSerializer.Serialize(w,value);w.WriteEndObject();}
     private static void Nullable(Utf8JsonWriter w,string n,string? v){if(v is null)w.WriteNull(n);else w.WriteString(n,v);}

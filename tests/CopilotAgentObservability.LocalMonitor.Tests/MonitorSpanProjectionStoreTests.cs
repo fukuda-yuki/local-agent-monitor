@@ -304,6 +304,37 @@ public class MonitorSpanProjectionStoreTests
 
     // ---- Helpers ------------------------------------------------------------
 
+    [Fact]
+    public async Task RetainedCacheWriteIsReprojectedAtomicallyWithoutDuplicateSpans()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.TimeProvider = TimeProvider.System;
+        var store = NewStore(temp);
+        var raw = Raw("cache-upgrade", DateTimeOffset.UtcNow) with { PayloadJson = """
+            {"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"cache-upgrade","spanId":"one",
+            "attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+            {"key":"gen_ai.usage.cache_write.input_tokens","value":{"intValue":"30"}}]},
+            {"traceId":"other","spanId":"two","attributes":[]}]}]}]}
+            """ };
+        var id = store.Insert(raw);
+        Assert.True(store.ApplyProjection(id, Source, raw.ReceivedAt, MakeProjection("cache-upgrade"), DateTimeOffset.UtcNow));
+        var spans = MonitorSpanProjectionBuilder.Build(raw);
+        Assert.True(store.ApplySpanProjection(id, spans.Select(span => span with { CacheCreationTokens = null }).ToArray(), DateTimeOffset.UtcNow));
+        store.CreateMonitorSchema();
+        Assert.Single(store.ListUnprocessedForSpanProjection(100));
+        var failing = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext,
+            projectionPublicationCheckpoint: phase => { if (phase == MonitorProjectionPublicationCheckpoint.BeforeCommit) throw new InvalidOperationException("injected"); });
+        var read = await failing.ReadRawRecordsAsync([id], CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionReadKind.Operation, CancellationToken.None);
+        Assert.NotNull(read.Lease);
+        try { Assert.Throws<InvalidOperationException>(() => failing.ApplySpanProjection(id, spans, DateTimeOffset.UtcNow, read.Lease)); }
+        finally { await read.Lease.DisposeAsync(); }
+        Assert.Null(Assert.Single(store.GetSpansForTrace("cache-upgrade")).CacheCreationTokens);
+        Assert.True(store.ApplySpanProjection(id, spans, DateTimeOffset.UtcNow));
+        Assert.Equal(30, Assert.Single(store.GetSpansForTrace("cache-upgrade")).CacheCreationTokens);
+        store.CreateMonitorSchema();
+        Assert.Empty(store.ListUnprocessedForSpanProjection(100));
+    }
+
     private static RawTelemetryStore NewStore(MonitorTempDirectory temp)
     {
         var store = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);

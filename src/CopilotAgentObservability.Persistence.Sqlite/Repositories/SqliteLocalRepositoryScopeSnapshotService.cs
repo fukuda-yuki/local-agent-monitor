@@ -510,19 +510,20 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         static bool ValidTokenFact(LocalWorkspaceFact<long> value) => value.State switch
         {
             "recorded" => value.Value is >= 0,
-            "not_observed" or "inconsistent" => value.Value is null,
+            "not_observed" or "inconsistent" or "capture_gap" or "oversized" => value.Value is null,
             _ => false,
         };
         static bool ValidTokens(LocalWorkspaceTokenFacts value) =>
             value.AvailableExecutionCount >= 0 && value.TotalExecutionCount >= value.AvailableExecutionCount
             && value.Authority is "none" or "session_run" or "llm_span" or "mixed"
-            && value.State is "recorded" or "not_observed" or "inconsistent"
+            && value.State is "recorded" or "not_observed" or "inconsistent" or "capture_gap" or "oversized"
+            && value.HasValidObservations()
             && ValidTokenFact(value.Input) && ValidTokenFact(value.Output) && ValidTokenFact(value.Total)
             && ValidTokenFact(value.Reasoning) && ValidTokenFact(value.CacheRead) && ValidTokenFact(value.CacheCreation)
             && ValidTokenFact(value.NewInput) && ValidTokenFact(value.CacheReadRatioBasisPoints)
             && (value.Total.Value is null || value.Input.Value is null || value.Output.Value is null
                 || value.Total.Value >= value.Input.Value + value.Output.Value)
-            && (value.CacheRead.Value is null || value.Input.Value is not null && value.CacheRead.Value <= value.Input.Value)
+            && (value.CacheRead.Value is null || value.Input.Value is null || value.CacheRead.Value <= value.Input.Value || value.State == "inconsistent")
             && (value.NewInput.Value is null || value.Input.Value is not null && value.CacheRead.Value is not null
                 && value.NewInput.Value == value.Input.Value - value.CacheRead.Value)
             && (value.CacheReadRatioBasisPoints.Value is null || value.CacheReadRatioBasisPoints.Value is >= 0 and <= 10_000);

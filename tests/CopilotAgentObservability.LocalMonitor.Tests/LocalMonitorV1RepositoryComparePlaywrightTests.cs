@@ -566,14 +566,12 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         var missingDifference = cells.Nth(3).Locator(".local-monitor-compare-fact > span:nth-child(2)");
         var malformed = cells.Nth(0).Locator(".local-monitor-compare-fact > span:nth-child(2)");
 
-        await Expect(closedZero).ToHaveAttributeAsync("data-fact-state", "observed-zero");
-        await Expect(closedZero.Locator(".fact-state-primary")).ToHaveTextAsync("0件");
-        await Expect(closedZero.Locator("p")).ToHaveTextAsync("取得元: 保存済み比較。保存時点で明示的に 0 です。");
-        await Expect(unavailableCount.Locator("[data-fact-state]")).ToHaveAttributeAsync("data-fact-state", "not-observed");
-        await Expect(unavailableCount).ToContainTextAsync("今回の記録にはありません");
+        await Expect(closedZero).ToHaveCountAsync(0);
+        await Expect(unavailableCount).ToContainTextAsync("未記録");
         await Expect(unavailableCount).ToContainTextAsync("（2件）");
-        await Expect(missingDifference).ToHaveAttributeAsync("data-fact-state", "not-observed");
-        await Expect(missingDifference).Not.ToContainTextAsync("0件");
+        await Expect(missingDifference).ToHaveCountAsync(0);
+        await Expect(cells.Nth(3)).ToContainTextAsync("比較可能な値が揃っていません");
+        await Expect(page.Locator(".local-monitor-compare-table").First).Not.ToContainTextAsync("この記録では呼び出しを確認できませんでした。");
         await Expect(malformed).ToHaveAttributeAsync("data-fact-state", "projection-invalid");
         await Expect(malformed).Not.ToContainTextAsync("not_observed");
     }
@@ -656,7 +654,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal(["絶対差", "相対差"], await scalarCells.Nth(3).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
         Assert.Equal(["2", "20.0"], await scalarCells.Nth(3).Locator(".local-monitor-compare-fact > span:nth-child(2)").AllTextContentsAsync());
         await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("0");
-        await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("今回の記録にはありません");
+        await Expect(page.Locator(".local-monitor-compare-table").First).ToContainTextAsync("未記録");
         var compareBody = page.Locator(".local-monitor-repository-compare-body");
         await Expect(compareBody).Not.ToContainTextAsync("not_observed");
         await Expect(compareBody).Not.ToContainTextAsync("total_tokens");
@@ -673,8 +671,8 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(toolSection).Not.ToContainTextAsync("hidden-sort-key");
         var toolRow = toolSection.Locator("tbody > tr").First;
         await Expect(toolRow.Locator(":scope > th, :scope > td")).ToHaveCountAsync(4);
-        var failureRelativeDifference = toolRow.Locator("td").Nth(2).Locator(".local-monitor-compare-fact").Filter(new() { HasText = "失敗回数・相対差" });
-        await Expect(failureRelativeDifference).ToContainTextAsync("今回の記録にはありません");
+        var failureRelativeDifference = toolRow.Locator("td").Nth(2);
+        await Expect(failureRelativeDifference).ToContainTextAsync("基準が0のため、相対差は計算できません。");
         await Expect(failureRelativeDifference).Not.ToContainTextAsync("失敗回数・相対差0");
         await toolSection.GetByPlaceholder("ツールを検索").FillAsync("synthetic");
         await toolSection.GetByRole(AriaRole.Button, new() { Name = "検索" }).ClickAsync();
@@ -684,6 +682,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(toolSection.Locator("tbody > tr")).ToHaveCountAsync(2);
         Assert.Contains(rowQueries, IsExactNextPageQuery);
 
+        await page.GetByText("根拠を確認", new() { Exact = true }).First.ClickAsync();
         var evidenceButton = page.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true });
         await evidenceButton.ClickAsync();
         await Expect(page.Locator("#repository-compare-evidence-dialog")).ToBeVisibleAsync();

@@ -162,7 +162,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         }
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,tool_name TEXT);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,tool_name TEXT,status TEXT);
             INSERT INTO local_workspace_session_search_facts VALUES
               ('0198f5b8-0c00-7000-8000-000000000001','label','label-1','expired label','2026-08-26T00:00:00.0000000+00:00'),
               ('0198f5b8-0c00-7000-8000-000000000001','tool','1:0','expired tool','2026-08-26T00:00:00.0000000+00:00');
@@ -197,7 +197,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         {
             command.CommandText = """
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER,retention_owner_token BLOB);
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER,status TEXT,parent_span_id TEXT);
             INSERT INTO raw_records VALUES(1,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1,randomblob(32));
             INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,$operation,$category,'exact-tool');
             """;
@@ -243,9 +243,9 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             INSERT INTO session_events(event_id,session_id,run_id,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
               VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001','llm','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER);
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER,status TEXT,parent_span_id TEXT);
             INSERT INTO raw_records VALUES(1,'otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1);
-            INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,'chat','llm_call',NULL,100,7,NULL,60,NULL);
+            INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,'chat','llm_call',NULL,100,7,NULL,60,NULL,NULL,NULL);
             """);
         if (missingCallUsage)
         {
@@ -254,7 +254,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
                 INSERT INTO session_runs(run_id,session_id,status) VALUES('missing-llm','0198f5b8-0c00-7000-8000-000000000001','active');
                 INSERT INTO session_events(event_id,session_id,run_id,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
                   VALUES('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001','missing-llm','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccc','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured');
-                INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','cccccccccccccccc',1,'chat','llm_call',NULL,NULL,NULL,NULL,NULL,NULL);
+                INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','cccccccccccccccc',1,'chat','llm_call',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
                 """);
         }
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
@@ -299,7 +299,33 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         Assert.Null(tokens.Input.Value);
         Assert.Equal("capture_gap", tokens.Output.State);
         Assert.Null(tokens.Output.Value);
+        Assert.Equal(new LocalWorkspaceFact<long>("recorded", 2), tokens.Observations!["output"].Subtotal);
+        Assert.Equal(1, tokens.Observations["output"].ObservedCallCount);
+        Assert.Equal(2, tokens.Observations["output"].ApplicableCallCount);
+        Assert.Equal("oversized", tokens.Observations["input"].Subtotal.State);
         Assert.Equal(2, tokens.AvailableExecutionCount);
+    }
+
+    [Theory]
+    [InlineData(0, "recorded", 0L)]
+    [InlineData(60, "recorded", 6000L)]
+    [InlineData(101, "inconsistent", null)]
+    public void PartialCacheUsesItsObservedCallsAndPairedInput(long cache, string ratioState, long? ratio)
+    {
+        var missing = new LocalWorkspaceFact<long>("not_observed", null);
+        LocalWorkspaceTokenFacts Call(long input, long? read) => new("llm_span", "recorded", 1, 1,
+            new("recorded", input), missing, missing, missing,
+            read is null ? missing : new("recorded", read), missing, missing, missing);
+        var tokens = LocalWorkspaceSessionSnapshotContributor.AggregateCalls([Call(100, cache), Call(500, null)]);
+        Assert.Equal(600, tokens.Input.Value);
+        Assert.Equal(new LocalWorkspaceFact<long>("capture_gap", null), tokens.CacheRead);
+        var observed = tokens.Observations!["cache_read"];
+        Assert.Equal(cache, observed.Subtotal.Value);
+        Assert.Equal(1, observed.ObservedCallCount);
+        Assert.Equal(2, observed.ApplicableCallCount);
+        var observedRatio = tokens.Observations["cache_read_ratio_basis_points"];
+        Assert.Equal(100, observedRatio.PairedInput);
+        Assert.Equal(new LocalWorkspaceFact<long>(ratioState, ratio), observedRatio.Subtotal);
     }
 
     private sealed class TestReadTransaction(Microsoft.Data.Sqlite.SqliteConnection connection) : ILocalRepositoryReadTransaction

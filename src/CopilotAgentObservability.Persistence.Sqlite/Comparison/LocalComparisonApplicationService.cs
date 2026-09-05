@@ -44,6 +44,8 @@ internal sealed record LocalComparisonObservedScalar
 
     internal LocalComparisonScalarObservation Observation { get; }
     internal IReadOnlyList<LocalComparisonFactEvidence> Evidence { get; }
+    internal LocalWorkspaceTokenObservationFact? TokenObservation { get; init; }
+    internal LocalWorkspaceTokenObservationFact? CacheRatioObservation { get; init; }
 }
 
 internal sealed record LocalComparisonSessionTargetFact(
@@ -83,7 +85,8 @@ internal sealed record LocalComparisonSessionFact(
     IReadOnlyDictionary<string, LocalComparisonConditionFact> Conditions,
     LocalComparisonSessionTargetFact Target,
     bool IsArchiveInclusionExplicit = false,
-    bool IsAssignedRepositoryArchived = false);
+    bool IsAssignedRepositoryArchived = false,
+    int FactFrameVersion = 3);
 
 internal sealed record LocalComparisonCohortDraft(
     IReadOnlyList<LocalComparisonSessionFact> Members,
@@ -435,7 +438,16 @@ internal sealed class LocalComparisonApplicationService
         var ordinal = nextOrdinal++;
         var a = input.CohortA.Select(session => Metric(session, metric.Key)).ToArray();
         var b = input.CohortB.Select(session => Metric(session, metric.Key)).ToArray();
-        var values = ScalarValues(a, b, metric.IncludeTotal);
+        var values = ScalarValues(a, b, metric.IncludeTotal).ToList();
+        foreach (var (cohort, facts) in new[] { ("a", a), ("b", b) })
+        {
+            var observed = facts.Select(fact => fact.TokenObservation).Where(value => value is not null).ToArray();
+            if (observed.Length == 0) continue;
+            values.Add(new(cohort + "_observed_call_count", observed.Sum(value => value!.ObservedCallCount).ToString(CultureInfo.InvariantCulture)));
+            values.Add(new(cohort + "_applicable_call_count", observed.Sum(value => value!.ApplicableCallCount).ToString(CultureInfo.InvariantCulture)));
+            if (observed.Any(value => value!.PairedInput.HasValue))
+                values.Add(new(cohort + "_paired_input", observed.Sum(value => value!.PairedInput ?? 0).ToString(CultureInfo.InvariantCulture)));
+        }
         results.Add(LocalComparisonStoredResult.Create(
             comparisonId, ordinal, metric.SectionOrdinal, "scalar", metric.Key, values));
         AddMetricEvidence(comparisonId, ordinal, "value", "a", input.CohortA, a, evidence);
@@ -669,13 +681,28 @@ internal sealed class LocalComparisonApplicationService
         string key) => key switch
         {
             "new_input_tokens" => NewInput(session),
-            "cache_read_ratio" => CacheRatio(session),
+            "cache_read_ratio" => session.Scalars["cache_read_tokens"].CacheRatioObservation is { } ratio
+                ? ObservedSubtotal(session.Scalars["cache_read_tokens"], ratio, 10_000m) : CacheRatio(session),
             "subagent_aggregate_start_count" => session.Scalars["subagent_start_count"],
             "subagent_aggregate_completed_count" => session.Scalars["subagent_completed_count"],
             "subagent_aggregate_failed_count" => session.Scalars["subagent_failed_count"],
             "subagent_aggregate_recorded_tokens" => session.Scalars["subagent_recorded_tokens"],
-            _ => session.Scalars[key],
+            _ => session.Scalars[key].TokenObservation is { } observed
+                ? ObservedSubtotal(session.Scalars[key], observed) : session.Scalars[key],
         };
+
+    private static LocalComparisonObservedScalar ObservedSubtotal(LocalComparisonObservedScalar source, LocalWorkspaceTokenObservationFact observed, decimal divisor = 1m)
+    {
+        var state = observed.Subtotal.State switch
+        {
+            "recorded" => observed.Subtotal.Value == 0 ? LocalComparisonFactState.ExplicitZero : LocalComparisonFactState.Recorded,
+            "inconsistent" => LocalComparisonFactState.Inconsistent,
+            "oversized" => LocalComparisonFactState.TooLarge,
+            _ => LocalComparisonFactState.NotObserved,
+        };
+        return new(new(state, observed.Subtotal.Value / divisor), source.Evidence.Select(value =>
+            new LocalComparisonFactEvidence(state, value.Reference, observed.Subtotal.Value is null ? null : LocalComparisonScalarCalculator.CanonicalDecimal(observed.Subtotal.Value.Value / divisor))).ToArray()) { TokenObservation = observed };
+    }
 
     private static LocalComparisonObservedScalar NewInput(LocalComparisonSessionFact session)
     {
@@ -1164,6 +1191,18 @@ internal static class LocalComparisonApplicationValidation
         LocalComparisonObservedScalar fact,
         string sessionId)
     {
+        if (fact is null || fact.Evidence is null) throw new ArgumentException("local_comparison_input_scalar_invalid");
+        foreach (var observed in new[] { fact.TokenObservation, fact.CacheRatioObservation }.Where(value => value is not null))
+        {
+            if (observed!.ObservedCallCount < 0 || observed.ApplicableCallCount < observed.ObservedCallCount
+                || observed.Subtotal.State is not ("recorded" or "not_observed" or "inconsistent" or "oversized")
+                || (observed.Subtotal.State == "recorded" ? observed.Subtotal.Value is null or < 0 || observed.ObservedCallCount == 0 : observed.Subtotal.Value is not null)
+                || observed.PairedInput is < 0 || fact.Evidence.All(value => value.Reference is null))
+                throw new ArgumentException("local_comparison_token_observation_invalid");
+        }
+        if (fact.CacheRatioObservation is { } ratio && (ratio.Subtotal.Value > 10_000
+            || ratio.Subtotal.State == "recorded" && ratio.PairedInput is null or <= 0))
+            throw new ArgumentException("local_comparison_token_observation_invalid");
         if (fact is null || fact.Observation is null
             || fact.Evidence is null || fact.Evidence.Count < 1
             || fact.Evidence.Any(static item => item is null)
@@ -1354,7 +1393,8 @@ internal static class LocalComparisonApplicationValidation
                 StringComparer.Ordinal),
             source.Target,
             source.IsArchiveInclusionExplicit,
-            source.IsAssignedRepositoryArchived);
+            source.IsAssignedRepositoryArchived,
+            source.FactFrameVersion);
 
     private static LocalComparisonObservedScalar FreezeObserved(
         LocalComparisonObservedScalar source) =>
@@ -1368,7 +1408,7 @@ internal static class LocalComparisonApplicationValidation
                 .ThenBy(static item => item.Reference?.SpanId, StringComparer.Ordinal)
                 .ThenBy(static item => item.Reference?.EventId, StringComparer.Ordinal)
                 .ThenBy(static item => item.Reference?.RevisionSha256, StringComparer.Ordinal)
-                .ToArray()));
+                .ToArray())) { TokenObservation = source.TokenObservation, CacheRatioObservation = source.CacheRatioObservation };
 
     private static bool ExactKeys(IEnumerable<string> actual, IEnumerable<string> expected) =>
         actual.Order(StringComparer.Ordinal).SequenceEqual(expected.Order(StringComparer.Ordinal), StringComparer.Ordinal);
@@ -1383,20 +1423,21 @@ internal static class LocalComparisonApplicationValidation
 internal static class LocalComparisonFactFrame
 {
     private const string Domain =
-        "copilot-agent-observability/local-comparison-session-fact/v2";
+        "copilot-agent-observability/local-comparison-session-fact/v3";
+    private const string PreviousDomain = "copilot-agent-observability/local-comparison-session-fact/v2";
     private const string LegacyDomain =
         "copilot-agent-observability/local-comparison-session-fact/v1";
 
     internal static byte[] Create(LocalComparisonSessionFact session)
     {
         using var stream = new MemoryStream();
-        Write(Domain);
+        Write(session.FactFrameVersion switch { 1 => LegacyDomain, 2 => PreviousDomain, 3 => Domain, _ => throw new InvalidOperationException("local_comparison_fact_frame_invalid") });
         Write(session.SessionId);
         Write(session.RepositoryId);
         Write(session.WorkspaceRevision);
         Write(session.IsArchived ? "1" : "0");
         Write(session.IsArchiveInclusionExplicit ? "1" : "0");
-        Write(session.IsAssignedRepositoryArchived ? "1" : "0");
+        if (session.FactFrameVersion >= 2) Write(session.IsAssignedRepositoryArchived ? "1" : "0");
         Write(LocalComparisonApplicationService.StateToken(session.Target.ValueAvailabilityState));
         WriteReference(session.Target.ValueAvailabilityReference);
         Write(LocalComparisonApplicationService.StateToken(session.Target.ObservedAtState));
@@ -1463,6 +1504,11 @@ internal static class LocalComparisonFactFrame
                 Write(LocalComparisonApplicationService.StateToken(item.State));
                 WriteReference(item.Reference);
             }
+            if (session.FactFrameVersion >= 3)
+            {
+                Write(System.Text.Json.JsonSerializer.Serialize(fact.TokenObservation));
+                Write(System.Text.Json.JsonSerializer.Serialize(fact.CacheRatioObservation));
+            }
         }
         void WriteReference(LocalComparisonSourceReference? reference)
         {
@@ -1491,14 +1537,14 @@ internal static class LocalComparisonFactFrame
             Reject();
         var reader = new LocalComparisonFrameReader(frame);
         var domain = reader.Read();
-        if (domain is not Domain and not LegacyDomain)
+        if (domain is not Domain and not PreviousDomain and not LegacyDomain)
             Reject();
         var sessionId = reader.Read();
         var repositoryId = reader.Read();
         var workspaceRevision = reader.Read();
         var isArchived = ReadBoolean(ref reader);
         var archiveExplicit = ReadBoolean(ref reader);
-        var repositoryArchived = domain == Domain && ReadBoolean(ref reader);
+        var repositoryArchived = domain is Domain or PreviousDomain && ReadBoolean(ref reader);
         var target = new LocalComparisonSessionTargetFact(
             ReadState(ref reader),
             ReadReference(ref reader),
@@ -1508,7 +1554,7 @@ internal static class LocalComparisonFactFrame
         var scalars = new Dictionary<string, LocalComparisonObservedScalar>(StringComparer.Ordinal);
         foreach (var expectedKey in LocalComparisonRegistryV1.RequiredSessionScalarKeys)
         {
-            if (reader.Read() != expectedKey || !scalars.TryAdd(expectedKey, ReadObserved(ref reader)))
+            if (reader.Read() != expectedKey || !scalars.TryAdd(expectedKey, ReadObserved(ref reader, domain == Domain)))
                 Reject();
         }
         var families = new List<LocalComparisonNamedFamilyFact>();
@@ -1529,7 +1575,7 @@ internal static class LocalComparisonFactFrame
                 var values = new Dictionary<string, LocalComparisonObservedScalar>(StringComparer.Ordinal);
                 foreach (var field in LocalComparisonRegistryV1.NamedFieldKeys[definition.Key])
                 {
-                    if (reader.Read() != field || !values.TryAdd(field, ReadObserved(ref reader)))
+                    if (reader.Read() != field || !values.TryAdd(field, ReadObserved(ref reader, domain == Domain)))
                         Reject();
                 }
                 items[itemIndex] = new(
@@ -1566,7 +1612,8 @@ internal static class LocalComparisonFactFrame
             conditions,
             target,
             archiveExplicit,
-            repositoryArchived);
+            repositoryArchived,
+            domain == Domain ? 3 : domain == PreviousDomain ? 2 : 1);
         try
         {
             LocalComparisonApplicationValidation.ValidateSession(repositoryId, result);
@@ -1583,7 +1630,7 @@ internal static class LocalComparisonFactFrame
     }
 
     private static LocalComparisonObservedScalar ReadObserved(
-        ref LocalComparisonFrameReader reader)
+        ref LocalComparisonFrameReader reader, bool hasObservations)
     {
         var state = ReadState(ref reader);
         var valueText = reader.Read();
@@ -1607,11 +1654,13 @@ internal static class LocalComparisonFactFrame
         var evidence = new LocalComparisonFactEvidence[count];
         for (var index = 0; index < count; index++)
             evidence[index] = new(ReadState(ref reader), ReadReference(ref reader));
+        var observed = hasObservations ? System.Text.Json.JsonSerializer.Deserialize<LocalWorkspaceTokenObservationFact>(reader.Read()) : null;
+        var ratio = hasObservations ? System.Text.Json.JsonSerializer.Deserialize<LocalWorkspaceTokenObservationFact>(reader.Read()) : null;
         try
         {
             return new(
                 new LocalComparisonScalarObservation(state, value),
-                Array.AsReadOnly(evidence));
+                Array.AsReadOnly(evidence)) { TokenObservation = observed, CacheRatioObservation = ratio };
         }
         catch (ArgumentException exception)
         {

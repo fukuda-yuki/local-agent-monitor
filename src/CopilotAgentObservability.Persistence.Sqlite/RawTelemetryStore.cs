@@ -92,7 +92,35 @@ internal sealed partial class RawTelemetryStore
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
         new Retention.RetentionCatalogStore(databasePath, timeProvider).InitializeForWrite(connection, transaction);
+        QueueRetainedCacheWriteProjection(connection, transaction);
         transaction.Commit();
+    }
+
+    internal static void QueueRetainedCacheWriteProjection(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='monitor_ingestions');";
+        if (Convert.ToInt64(command.ExecuteScalar()) == 0) return;
+        command.CommandText = """
+            UPDATE monitor_ingestions SET span_projected_at=NULL
+            WHERE raw_record_id IN (
+              SELECT DISTINCT r.id FROM raw_records r
+              JOIN json_each(CASE WHEN json_valid(r.payload_json) THEN r.payload_json ELSE '{}' END,'$.resourceSpans') resource
+              JOIN json_each(CASE resource.type WHEN 'object' THEN resource.value ELSE '{}' END,'$.scopeSpans') scope
+              JOIN json_each(CASE scope.type WHEN 'object' THEN scope.value ELSE '{}' END,'$.spans') span
+              JOIN json_each(CASE span.type WHEN 'object' THEN span.value ELSE '{}' END,'$.attributes') attribute
+              JOIN monitor_spans m ON m.raw_record_id=r.id
+                AND m.trace_id=json_extract(CASE span.type WHEN 'object' THEN span.value ELSE '{}' END,'$.traceId') COLLATE BINARY
+                AND m.span_id=json_extract(CASE span.type WHEN 'object' THEN span.value ELSE '{}' END,'$.spanId') COLLATE BINARY
+              WHERE m.cache_creation_tokens IS NULL
+                AND json_extract(CASE attribute.type WHEN 'object' THEN attribute.value ELSE '{}' END,'$.key')='gen_ai.usage.cache_write.input_tokens'
+                AND CAST(json_extract(CASE attribute.type WHEN 'object' THEN attribute.value ELSE '{}' END,'$.value.intValue') AS TEXT)
+                  =CAST(CAST(json_extract(CASE attribute.type WHEN 'object' THEN attribute.value ELSE '{}' END,'$.value.intValue') AS INTEGER) AS TEXT)
+                AND CAST(json_extract(CASE attribute.type WHEN 'object' THEN attribute.value ELSE '{}' END,'$.value.intValue') AS INTEGER)>=0
+            );
+            """;
+        command.ExecuteNonQuery();
     }
 
     private void EnsureParentDirectory()
@@ -738,7 +766,7 @@ internal sealed partial class RawTelemetryStore
             insert.Transaction = transaction;
             insert.CommandText =
                 """
-                INSERT OR IGNORE INTO monitor_spans (
+                INSERT INTO monitor_spans (
                     raw_record_id, trace_id, span_id, parent_span_id, span_ordinal,
                     operation, category, tool_name, tool_type, mcp_tool_name,
                     mcp_server_hash, agent_name, request_model, response_model,
@@ -754,7 +782,10 @@ internal sealed partial class RawTelemetryStore
                     $cache_read_tokens, $cache_creation_tokens, $status, $error_type,
                     $finish_reasons, $conversation_id, $duration_ms, $start_time, $end_time,
                     $projected_at
-                );
+                ) ON CONFLICT(raw_record_id,span_ordinal) DO UPDATE SET cache_creation_tokens=excluded.cache_creation_tokens
+                  WHERE monitor_spans.cache_creation_tokens IS NULL AND excluded.cache_creation_tokens IS NOT NULL
+                    AND monitor_spans.trace_id=excluded.trace_id COLLATE BINARY
+                    AND monitor_spans.span_id=excluded.span_id COLLATE BINARY;
                 """;
             AddParameter(insert, "$raw_record_id", rawRecordId);
             AddParameter(insert, "$trace_id", span.TraceId);
@@ -903,6 +934,22 @@ internal sealed partial class RawTelemetryStore
             AddParameter(stamp, "$p", projectedAtText);
             AddParameter(stamp, "$id", rawRecordId);
             stamp.ExecuteNonQuery();
+        }
+
+        if (collectionFactsInstalled)
+        {
+            using var sessions = connection.CreateCommand();
+            sessions.Transaction = transaction;
+            sessions.CommandText = """
+                SELECT DISTINCT e.session_id FROM session_events e JOIN monitor_spans m
+                  ON e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                WHERE m.raw_record_id=$raw AND e.source_adapter='otel-exact' AND e.type='otel.span';
+                """;
+            AddParameter(sessions, "$raw", rawRecordId);
+            var sessionIds = new List<string>();
+            using (var reader = sessions.ExecuteReader()) while (reader.Read()) sessionIds.Add(reader.GetString(0));
+            LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(connection, transaction, sessionIds, publicationAt);
         }
 
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.BeforeCommit);

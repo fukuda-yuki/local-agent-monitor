@@ -299,7 +299,36 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         }
         await ReadPairs(connection, transaction, "capture", "SELECT DISTINCT session_id,'source_unsupported' FROM session_events WHERE content_state='unsupported' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id;", ids, byId,
             static (row, note) => row.AdditionalCaptureNotes.Add(note), statementObserver, cancellationToken);
-        var frozen = rows.Select(static row => row.Freeze()).ToArray();
+        var activityRanges = new Dictionary<string, LocalWorkspaceObservedActivity>(StringComparer.Ordinal);
+        using (var range = connection.CreateCommand())
+        {
+            range.Transaction = transaction;
+            range.CommandText = "SELECT EXISTS(SELECT 1 FROM pragma_table_info('monitor_spans') WHERE name='start_time');";
+            if (Convert.ToInt64(await range.ExecuteScalarAsync(cancellationToken)) != 0)
+            {
+                range.CommandText = """
+                    SELECT e.session_id,MIN(local_workspace_ticks(m.start_time)),
+                      MAX(COALESCE(local_workspace_ticks(m.end_time),local_workspace_ticks(m.start_time)))
+                    FROM session_events e JOIN monitor_spans m
+                      ON e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                    WHERE e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+                      AND e.source_adapter='otel-exact' AND e.type='otel.span'
+                      AND local_workspace_ticks(m.start_time) IS NOT NULL
+                      AND (m.end_time IS NULL OR local_workspace_ticks(m.end_time)>=local_workspace_ticks(m.start_time))
+                      AND (SELECT COUNT(*) FROM monitor_spans other WHERE lower(other.trace_id)=m.trace_id AND lower(other.span_id)=m.span_id)=1
+                    GROUP BY e.session_id;
+                    """;
+                range.Parameters.AddWithValue("$ids", ids);
+                using var reader = await range.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var start = reader.GetInt64(1); var end = reader.GetInt64(2);
+                    activityRanges[reader.GetString(0)] = new(new DateTimeOffset(start, TimeSpan.Zero).ToString("O"),
+                        new DateTimeOffset(end, TimeSpan.Zero).ToString("O"), (end - start) / 10_000);
+                }
+            }
+        }
+        var frozen = rows.Select(row => row.Freeze() with { ObservedActivity = activityRanges.GetValueOrDefault(row.SessionId) }).ToArray();
         if (frozen.Any(static row => !ValidClosedRow(row)))
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         return new(Array.AsReadOnly(frozen.Cast<ILocalRepositorySessionSnapshotRow>().ToArray()));
@@ -615,13 +644,13 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                          WHERE event.session_id=owner.session_id AND event.status='gap_before_capture' AND CASE kind.kind
                            WHEN 'tool' THEN event.type IN ('tool.execution_start','PreToolUse')
                            WHEN 'subagent' THEN event.type IN ('subagent.started','SubagentStart')
-                           WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed'
+                           WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "event")}
                            ELSE 0 END) THEN 'capture_gap'
                        WHEN EXISTS(SELECT 1 FROM session_events event
                          WHERE event.session_id=owner.session_id AND event.content_state='unsupported' AND CASE kind.kind
                            WHEN 'tool' THEN event.type IN ('tool.execution_start','PreToolUse')
                            WHEN 'subagent' THEN event.type IN ('subagent.started','SubagentStart')
-                           WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed'
+                           WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "event")}
                            ELSE 0 END) THEN 'source_unsupported'
                        WHEN kind.kind<>'retry' AND EXISTS(SELECT 1 FROM session_events event
                          WHERE event.session_id=owner.session_id AND CASE kind.kind
@@ -647,7 +676,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                                AND (event.source_application_version IS NOT NULL AND trim(event.source_application_version)<>''
                                  OR length(event.schema_fingerprint)=64 AND event.schema_fingerprint=lower(event.schema_fingerprint)
                                    AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')
-                           WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed'
+                           WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "event")}
                            ELSE 0 END) THEN 'recorded'
                        ELSE 'not_observed' END state
               FROM sessions owner CROSS JOIN activity_kinds kind
@@ -679,7 +708,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                              AND (event.source_application_version IS NOT NULL AND trim(event.source_application_version)<>''
                                OR length(event.schema_fingerprint)=64 AND event.schema_fingerprint=lower(event.schema_fingerprint)
                                  AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')
-                         WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed'
+                         WHEN 'error' THEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR event.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "event")}
                          ELSE 0 END) END count
               FROM activity_states state),
             expected_activity AS (
@@ -983,7 +1012,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         {
             if (tokens is null
                 || tokens.Authority is not ("session_run" or "llm_span" or "mixed" or "none")
-                || !ValidFactState(tokens.State)
+                || !ValidFactState(tokens.State) || !tokens.HasValidObservations()
                 || tokens.AvailableExecutionCount < 0 || tokens.TotalExecutionCount < 0
                 || tokens.AvailableExecutionCount > tokens.TotalExecutionCount
                 || !ValidValue(tokens.Input) || !ValidValue(tokens.Output) || !ValidValue(tokens.Total)
@@ -1068,6 +1097,14 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         return new(authority, input, output, total, reasoning, cache, creation);
     }
 
+    internal static LocalWorkspaceTokenFacts AggregateCalls(IEnumerable<LocalWorkspaceTokenFacts> calls) =>
+        ReadTokens(calls.Select(value => new TokenObservation(value.Authority, value.Input.Value, value.Output.Value,
+            value.Total.Value, value.Reasoning.Value, value.CacheRead.Value, value.CacheCreation.Value)).ToArray());
+
+    internal static LocalWorkspaceTokenFacts MergeCallTokens(params LocalWorkspaceTokenFacts[] sources) =>
+        ReadTokens([SelectCallTokens(sources.Select(value => new TokenObservation(value.Authority,
+            value.Input.Value, value.Output.Value, value.Total.Value, value.Reasoning.Value, value.CacheRead.Value, value.CacheCreation.Value)).ToArray())]);
+
     private static LocalWorkspaceTokenFacts ReadTokens(IReadOnlyList<TokenObservation> rows)
     {
         var total = rows.Count; var available = rows.Count(r => r.Values.Any(v => v is not null));
@@ -1089,7 +1126,34 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         if (inconsistent) derived = new("inconsistent", null); else if (input.State != "recorded" || cache.State != "recorded") derived = new(input.State == "capture_gap" || cache.State == "capture_gap" ? "capture_gap" : "not_observed", null); else derived = new("recorded", input.Value!.Value - cache.Value!.Value);
         LocalWorkspaceFact<long> ratio;
         if (inconsistent) ratio = new("inconsistent", null); else if (input.State != "recorded" || cache.State != "recorded" || input.Value == 0) ratio = new(input.State == "capture_gap" || cache.State == "capture_gap" ? "capture_gap" : "not_observed", null); else { var value = (BigInteger)cache.Value!.Value * 10_000 / input.Value!.Value; ratio = value > long.MaxValue ? new("oversized", null) : new("recorded", (long)value); }
-        return new(authority, overall, available, total, input, output, producerTotal, reasoning, cache, creation, derived, ratio);
+        LocalWorkspaceTokenObservationFact Observed(Func<TokenObservation, long?> select)
+        {
+            var values = rows.Select(select).Where(value => value.HasValue).ToArray();
+            LocalWorkspaceFact<long> subtotal;
+            try { subtotal = values.Length == 0 ? new("not_observed", null) : new("recorded", values.Aggregate(0L, (sum, value) => checked(sum + value!.Value))); }
+            catch (OverflowException) { subtotal = new("oversized", null); }
+            return new(subtotal, values.Length, total, null);
+        }
+        var observations = new Dictionary<string, LocalWorkspaceTokenObservationFact>(StringComparer.Ordinal)
+        {
+            ["input"] = Observed(row => row.Input), ["output"] = Observed(row => row.Output),
+            ["total"] = Observed(row => row.Total), ["reasoning"] = Observed(row => row.Reasoning),
+            ["cache_read"] = Observed(row => row.CacheRead), ["cache_creation"] = Observed(row => row.CacheCreation),
+        };
+        var pairs = rows.Where(row => row.Input.HasValue && row.CacheRead.HasValue).ToArray();
+        LocalWorkspaceFact<long> observedRatio;
+        long? pairedInput = null;
+        try
+        {
+            pairedInput = pairs.Aggregate(0L, (sum, row) => checked(sum + row.Input!.Value));
+            var pairedCache = pairs.Aggregate(0L, (sum, row) => checked(sum + row.CacheRead!.Value));
+            observedRatio = pairs.Any(row => row.CacheRead > row.Input) ? new("inconsistent", null)
+                : pairedInput == 0 ? new("not_observed", null)
+                : new("recorded", (long)(((BigInteger)pairedCache * 10_000 + pairedInput.Value / 2) / pairedInput.Value));
+        }
+        catch (OverflowException) { observedRatio = new("oversized", null); pairedInput = null; }
+        observations["cache_read_ratio_basis_points"] = new(observedRatio, pairs.Length, total, pairs.Length == 0 ? null : pairedInput);
+        return new(authority, overall, available, total, input, output, producerTotal, reasoning, cache, creation, derived, ratio) { Observations = observations };
     }
 
     private sealed record TokenObservation(string Authority, long? Input, long? Output, long? Total, long? Reasoning, long? CacheRead, long? CacheCreation)

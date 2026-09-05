@@ -2,6 +2,9 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed record LocalWorkspaceFact<T>(string State, T? Value) where T : struct;
 internal sealed record LocalWorkspaceSetFact(string State, IReadOnlyList<string> Values);
+internal sealed record LocalWorkspaceTokenObservationFact(
+    LocalWorkspaceFact<long> Subtotal, long ObservedCallCount, long ApplicableCallCount, long? PairedInput);
+internal sealed record LocalWorkspaceObservedActivity(string StartedAt, string EndedAt, long DurationMilliseconds);
 
 internal sealed record LocalWorkspaceActivityFacts(
     LocalWorkspaceFact<long> Skill,
@@ -22,7 +25,21 @@ internal sealed record LocalWorkspaceTokenFacts(
     LocalWorkspaceFact<long> CacheRead,
     LocalWorkspaceFact<long> CacheCreation,
     LocalWorkspaceFact<long> NewInput,
-    LocalWorkspaceFact<long> CacheReadRatioBasisPoints);
+    LocalWorkspaceFact<long> CacheReadRatioBasisPoints)
+{
+    public IReadOnlyDictionary<string, LocalWorkspaceTokenObservationFact>? Observations { get; init; }
+    internal bool HasValidObservations() => Observations is null || Observations.Count == 7
+        && new[] { "input", "output", "total", "reasoning", "cache_read", "cache_creation", "cache_read_ratio_basis_points" }.All(key =>
+            Observations.TryGetValue(key, out var value)
+            && value.ObservedCallCount >= 0 && value.ObservedCallCount <= value.ApplicableCallCount
+            && value.ApplicableCallCount == TotalExecutionCount
+            && (value.Subtotal.State == "recorded" ? value.Subtotal.Value is >= 0 && value.ObservedCallCount > 0
+                : value.Subtotal.State is "not_observed" or "inconsistent" or "oversized" && value.Subtotal.Value is null)
+            && (key == "cache_read_ratio_basis_points"
+                ? value.PairedInput is null or >= 0 && value.Subtotal.Value is null or <= 10_000
+                    && (value.Subtotal.State != "recorded" || value.PairedInput > 0)
+                : value.PairedInput is null));
+}
 
 internal sealed record LocalWorkspaceProjectionRow(
     string SessionId,
@@ -46,6 +63,7 @@ internal sealed record LocalWorkspaceProjectionRow(
     IReadOnlyList<string> SearchTexts,
     string RevisionSeed) : ILocalRepositorySessionSnapshotRow
 {
+    public LocalWorkspaceObservedActivity? ObservedActivity { get; init; }
     [System.Text.Json.Serialization.JsonIgnore]
     internal LocalWorkspaceFact<long>? CurrentSkillFilter { get; init; }
 

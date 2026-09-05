@@ -750,11 +750,13 @@ internal static class LocalWorkspaceProjectionSchemaV1
               """
             : string.Empty;
         var contentBindingValidation = TableExists(connection, transaction, "local_workspace_node_source_references")
-            ? """
+            ? $"""
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
                      WHERE c.store_kind<>'session_event_content' OR NOT (
                        (n.source_kind='session_event' AND n.source_identity=c.source_item_id)
-                       OR (n.source_kind='semantic_tool' AND EXISTS(SELECT 1 FROM local_workspace_node_source_references r WHERE r.node_id=n.node_id AND r.event_id=c.source_item_id))))
+                       OR (n.source_kind='semantic_tool' AND EXISTS(SELECT 1 FROM local_workspace_node_source_references r
+                         JOIN session_events e ON e.event_id=c.source_item_id AND e.session_id=n.session_id
+                         WHERE r.node_id=n.node_id AND (r.event_id=c.source_item_id OR {LocalWorkspaceProjectionStore.ExactOtelToolContentPredicate("e", "r")})))))
               """
             : "OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE c.store_kind<>'session_event_content' OR n.source_kind<>'session_event' OR n.source_identity<>c.source_item_id)";
         var spanFactValidation = TableExists(connection, transaction, "monitor_spans")

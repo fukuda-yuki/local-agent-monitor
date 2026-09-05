@@ -34,6 +34,7 @@ internal static class MonitorSpanProjectionBuilder
     [
         "gen_ai.usage.cache_creation.input_tokens",
         "gen_ai.usage.cache.creation_input_tokens",
+        "gen_ai.usage.cache_write.input_tokens",
     ];
 
     private static readonly string[] FinishReasonKeys =

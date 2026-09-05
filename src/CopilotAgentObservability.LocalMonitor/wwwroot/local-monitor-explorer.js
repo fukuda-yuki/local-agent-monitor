@@ -515,7 +515,7 @@
   }
 
   function validateItem(value) {
-    if (!exactKeys(value, ITEM_KEYS) || !UUID_V7.test(value.session_id)
+    if (!exactKeys(value, Object.hasOwn(value ?? {}, "observed_activity") ? ITEM_KEYS.flatMap(key => key === "session_id" ? [key, "observed_activity"] : [key]) : ITEM_KEYS) || !UUID_V7.test(value.session_id)
         || !REVISION.test(value.workspace_revision)
         || !STATUSES.has(value.status)
         || !new Set(["unbound", "partial", "rich", "full"]).has(value.completeness)) {
@@ -571,7 +571,12 @@
     if (!exactKeys(value.summary, SUMMARY_KEYS)) throw new TypeError("invalid session collection");
     for (const name of SUMMARY_KEYS) countFact(value.summary[name], "count");
     const tokens = value.tokens;
-    if (!exactKeys(tokens, TOKEN_KEYS)
+    const range = value.observed_activity;
+    if (range !== undefined && (!exactKeys(range, ["started_at", "ended_at", "duration_ms"])
+        || typeof range.started_at !== "string" || typeof range.ended_at !== "string"
+        || !timestamp(range.started_at) || !timestamp(range.ended_at) || range.ended_at < range.started_at
+        || !count(range.duration_ms))) throw new TypeError("invalid observed activity");
+    if (!exactKeys(tokens, Object.hasOwn(tokens ?? {}, "observed_components") ? [...TOKEN_KEYS, "observed_components"] : TOKEN_KEYS)
         || !new Set(["session_run", "llm_span", "mixed", "none"]).has(tokens.authority)
         || !FACT_STATES.has(tokens.state)
         || !count(tokens.available_execution_count)
@@ -580,6 +585,18 @@
     for (const name of ["input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input"])
       tokenComponent(tokens[name]);
     tokenComponent(tokens.cache_read_ratio_basis_points, 10000);
+    if (tokens.observed_components !== undefined) {
+      const keys = ["input", "output", "total", "reasoning", "cache_read", "cache_creation", "cache_read_ratio_basis_points"];
+      if (!exactKeys(tokens.observed_components, keys)) throw new TypeError("invalid token observations");
+      for (const key of keys) {
+        const item = tokens.observed_components[key];
+        if (!exactKeys(item, ["subtotal", "observed_call_count", "applicable_call_count", "paired_input"])
+            || !count(item.observed_call_count) || item.applicable_call_count !== tokens.total_execution_count
+            || greaterThan(item.observed_call_count, item.applicable_call_count)
+            || (key === "cache_read_ratio_basis_points" ? item.paired_input !== null && !count(item.paired_input) : item.paired_input !== null)) throw new TypeError("invalid token observations");
+        countFact(item.subtotal, "value", key === "cache_read_ratio_basis_points" ? 10000 : undefined);
+      }
+    }
     const input = tokens.input;
     const cacheRead = tokens.cache_read;
     const derivedInputsValid = input.state === "recorded" && count(input.value)
@@ -1160,56 +1177,20 @@
 
   function renderTokens(target, item) {
     const tokens = item.tokens;
-    if (tokens.total.state === "recorded" && count(tokens.total.value)) {
-      target.append(element("span", null, formatInteger(tokens.total.value)));
-      if (tokens.state === "recorded" && tokens.cache_read_ratio_basis_points.state === "recorded") {
-        const ratio = Number(tokens.cache_read_ratio_basis_points.value) / 100;
-        target.append(element("small", null, `キャッシュから読み込み ${ratio.toLocaleString("ja-JP")}%`));
-      } else {
-        const disclosure = element("details", "local-monitor-session-fact-disclosure");
-        const disclosureSummary = element("summary", null, "記録状態を確認");
-        const sessionLabel = item.label.state === "recorded" ? item.label.text : fallbackLabel(item);
-        disclosureSummary.setAttribute("aria-label", `${sessionLabel}: トークンの記録状態を確認`);
-        disclosure.append(disclosureSummary);
-        const panel = element("div", "local-monitor-session-fact-panel");
-        const ratioState = element("div", "local-monitor-session-named-fact");
-        ratioState.append(element("span", "local-monitor-session-fact-name", "キャッシュから読み込み: "));
-        if (tokens.cache_read_ratio_basis_points.state === "recorded") {
-          const ratio = Number(tokens.cache_read_ratio_basis_points.value) / 100;
-          ratioState.append(document.createTextNode(`${ratio.toLocaleString("ja-JP")}%`));
-        } else {
-          const factTarget = element("span", "local-monitor-session-fact");
-          renderCollectionFact(factTarget, { state: tokens.cache_read_ratio_basis_points.state, count: null });
-          ratioState.append(factTarget);
-        }
-        panel.append(ratioState);
-        if (tokens.state !== "recorded") {
-          const stateTarget = element("div", "local-monitor-session-named-fact");
-          stateTarget.append(element("span", "local-monitor-session-fact-name", "トークン全体: "));
-          const factTarget = element("span", "local-monitor-session-fact");
-          renderCollectionFact(factTarget, { state: tokens.state, count: null });
-          stateTarget.append(factTarget);
-          panel.append(stateTarget);
-        }
-        disclosure.append(panel);
-        target.append(disclosure);
-      }
-      return;
+    for (const [key, label] of [["input", "入力"], ["output", "出力"]]) {
+      const observation = tokens.observed_components?.[key];
+      const fact = observation?.subtotal ?? tokens[key];
+      const row = element("div");
+      if (fact.state === "recorded") row.append(element("span", null, `${label} ${formatInteger(fact.value)}`));
+      else renderFactDisclosure(row, item, label, factTarget => renderCollectionFact(factTarget, { state: fact.state, count: null }));
+      if (observation && observation.observed_call_count !== observation.applicable_call_count) row.append(element("small", null, `観測小計 ${formatInteger(observation.observed_call_count)}/${formatInteger(observation.applicable_call_count)} 呼出し`));
+      target.append(row);
     }
-    if (tokens.total.state === "recorded") {
-      renderFactDisclosure(target, item, "トークン合計", factTarget => {
-        window.LocalMonitorV1FactState.render(factTarget, {
-          state: "inconsistent", recordedCount: null, reasonText: "トークン合計の値を確定できません",
-        });
-      });
-    } else {
-      const unavailableState = tokens.state === "recorded" ? tokens.total.state : tokens.state;
-      renderFactDisclosure(target, item, "トークン合計", factTarget => {
-        renderCollectionFact(factTarget, { state: unavailableState, count: null });
-      });
-    }
+    const cache = tokens.observed_components?.cache_read;
+    const ratio = tokens.observed_components?.cache_read_ratio_basis_points;
+    if (cache?.subtotal.state === "recorded") target.append(element("small", null, `Cache ${formatInteger(cache.subtotal.value)} · ${formatInteger(cache.observed_call_count)}/${formatInteger(cache.applicable_call_count)} 呼出し`));
+    if (ratio?.subtotal.state === "recorded") target.append(element("small", null, `Cache比率 ${(Number(ratio.subtotal.value) / 100).toLocaleString("ja-JP")}% · 対応入力 ${formatInteger(ratio.paired_input)}`));
   }
-
   function cohortControl(item, cohort, label) {
     const wrapper = element("label", "local-monitor-session-cohort-option");
     const input = element("input");
@@ -1502,6 +1483,7 @@
         renderCollectionFact(factTarget, { state: item.timing.state, count: null });
       });
     }
+    if (item.observed_activity) started.append(element("small", null, `観測活動 ${localTime(item.observed_activity.started_at)} – ${localTime(item.observed_activity.ended_at)}（確定ライフサイクルとは別）`));
     const actions = element("td", "local-monitor-session-actions");
     actions.append(rowActions(item));
     row.append(compare, identity, sessionStatus, summaryCell, tokens, started, actions);

@@ -240,6 +240,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         LocalRepositoryScopeSessionSnapshot? revisionSession, CancellationToken token)
     {
         var sessionId = request.SessionId;
+        var otelExecutions = TableExists(connection, transaction, "monitor_spans")
+            ? LocalWorkspaceOtelExecutionProjection.Read(connection, transaction, sessionId) : null;
         await ValidateSourceOwnerBounds(connection, transaction, sessionId, token);
         var currentSkills = SkillProjectionReadService.ReadCurrentInvocationProjection(
             connection, transaction, [sessionId], acceptedAt, pinnedRegistry);
@@ -249,6 +251,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var registryIdentity = pinnedRegistry.CanonicalIdentity;
         var revision = await ReadCanonicalRevisionInput(
             connection, transaction, sessionId, acceptedAt, skillProjection, registryIdentity, token);
+        if (otelExecutions is not null) revision = "otel-agent-executions-v1|" + revision;
         var materializableSkillNodeIds = await ReadMaterializableCurrentSkillNodeIds(
             connection, transaction, sessionId, skillProjection, token);
         await ValidateBounds(connection, transaction, sessionId, materializableSkillNodeIds, token);
@@ -269,10 +272,10 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         var syntheticSkillTarget = IsCurrentSkillNode(request.NodeId, skillProjection);
         if (request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Content
-            && !syntheticSkillTarget)
+            && !syntheticSkillTarget && otelExecutions is null)
             await ValidateNodeAncestry(connection, transaction, request, token);
         var projectedNodes = NormalizeCurrentSkillNodes(
-            await ReadNodes(connection, transaction, request, skillProjection, token), skillProjection);
+            await ReadNodes(connection, transaction, request, skillProjection, token, otelExecutions is not null), skillProjection);
         var persistedNodeIds = await ReadPersistedCurrentSkillNodeIds(connection, transaction, sessionId, skillProjection, token);
         projectedNodes = await AddMissingCurrentSkillNodes(
             connection, transaction, request, projectedNodes, skillProjection, materializableSkillNodeIds, persistedNodeIds, token);
@@ -285,7 +288,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var nodes = projectedNodes.Except(excludedSkillNodes).ToArray();
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
         var executions = ApplyCurrentSkillActivity(
-            await ReadExecutions(connection, transaction, request, executionIds, skillProjection, token), skillProjection, synthesizedSkillNodes);
+            await ReadExecutions(connection, transaction, otelExecutions is null ? request : request with { Kind = LocalRepositorySessionDetailRequestKind.Summary }, executionIds, skillProjection, token), skillProjection, synthesizedSkillNodes);
         nodes = ApplyCurrentSkillActivity(nodes, executions, synthesizedSkillNodes);
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
         nodes = await ReadV5NodeFacts(connection, transaction, request, nodes, skillProjection, token);
@@ -331,8 +334,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                     throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
             }
         }
-        return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
+        var contribution = new LocalWorkspaceSessionDetailContribution(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+        return otelExecutions?.Apply(contribution, request) ?? contribution;
     }
 
     private static async Task<string?> ReadProjectedContentState(
@@ -735,7 +739,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     {
         LocalWorkspaceProjectionStore.RegisterProjectionFunctions(connection);
         var executionFactsInvalid = await SemanticGraphInvalid(
-            connection, transaction, sessionId, ExecutionFactsValidationSql, token);
+            connection, transaction, sessionId, ExecutionFactsValidationSql(LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "event")), token);
         var executionRetryFactsInvalid = await SemanticGraphInvalid(
             connection,
             transaction,
@@ -805,7 +809,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
     }
 
-    private const string ExecutionFactsValidationSql = """
+    private static string ExecutionFactsValidationSql(string otelFailurePredicate) => $"""
         WITH ranked_tokens AS (
           SELECT observation.*,
                  row_number() OVER(PARTITION BY observation.session_id,observation.execution_id ORDER BY
@@ -844,7 +848,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                          AND event.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
                    THEN event.event_id END) subagent_count,
                  COUNT(DISTINCT CASE WHEN event.type IN ('PostToolUseFailure','StopFailure','subagent.failed')
-                   OR event.terminal_outcome='failed' THEN event.event_id END) error_count
+                   OR event.terminal_outcome='failed' OR {otelFailurePredicate} THEN event.event_id END) error_count
           FROM local_workspace_execution_headers header
           LEFT JOIN session_events event ON event.session_id=header.session_id
             AND event.run_id=header.source_identity COLLATE BINARY
@@ -2627,10 +2631,10 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SqliteTransaction t,
         LocalRepositorySessionDetailRequest request,
         SkillProjectionCurrentInvocationProjection? skillProjection,
-        CancellationToken token)
+        CancellationToken token, bool allNodes = false)
     {
         statementObserver?.Invoke("detail-nodes");
-        var context = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
+        var context = !allNodes && request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
             ? await ReadTimelineContext(c, t, request, skillProjection, token)
             : [];
         var predicate = request.Kind switch
@@ -2652,7 +2656,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 OR node_id IN (SELECT related_node_id FROM local_workspace_node_edges WHERE node_id=$node_id AND relation_kind='recovery' ORDER BY source_ordinal,related_node_id LIMIT 201))
                 """
         };
-        if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.After is not null)
+        if (allNodes) predicate = "session_id=$session_id";
+        if (!allNodes && request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.After is not null)
         {
             predicate += " AND ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)>$after_group OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)>$after_ticks) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal>$after_ordinal) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal AND node_id>$after_node_id COLLATE BINARY))";
         }
@@ -2674,6 +2679,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LocalRepositorySessionDetailRequestKind.Compare => 4097,
             _ => request.Limit + 1
         };
+        if (allNodes) limit = MaximumNodes + 1;
         var orderPrefix = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ExecutionId is null
             ? ""
             : "execution_id,";
@@ -2701,7 +2707,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
         {
-            if (request.Kind == LocalRepositorySessionDetailRequestKind.Summary && rows.Count == MaximumExecutions
+            if (allNodes && rows.Count == MaximumNodes || !allNodes && request.Kind == LocalRepositorySessionDetailRequestKind.Summary && rows.Count == MaximumExecutions
                 || request.Kind is LocalRepositorySessionDetailRequestKind.Node or LocalRepositorySessionDetailRequestKind.Compare && rows.Count == MaximumNodes)
                 throw new LocalWorkspaceSessionDetailException("workspace_too_large");
             rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49),reader.GetInt64(50)));
@@ -2843,9 +2849,6 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var nativeIds = new List<string>();
         using (var command = Command(c,t,"SELECT DISTINCT native_session_id FROM session_native_ids WHERE session_id=$session_id ORDER BY native_session_id COLLATE BINARY LIMIT 4097;",sessionId))
         using (var reader = await command.ExecuteReaderAsync(token)) while(await reader.ReadAsync(token)) nativeIds.Add(reader.GetString(0));
-        var versions = new List<string>();
-        using (var command = Command(c,t,"SELECT value FROM (SELECT source_application_version value FROM session_events WHERE session_id=$session_id UNION SELECT adapter_version FROM session_events WHERE session_id=$session_id UNION SELECT normalization_version FROM session_events WHERE session_id=$session_id) WHERE value IS NOT NULL AND trim(value)<>'' ORDER BY value COLLATE BINARY;",sessionId))
-        using (var reader = await command.ExecuteReaderAsync(token)) while(await reader.ReadAsync(token)) versions.Add(reader.GetString(0));
         var labelCarriers = TableExists(c, t, "retention_items")
             ? """
               SELECT event.event_id,event.type,event.occurred_at,content.captured_at,
@@ -2907,7 +2910,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             """,sessionId))
         using (var reader = await command.ExecuteReaderAsync(token))
             if(await reader.ReadAsync(token)){source=reader.GetString(0);additional=reader.GetInt64(1);}
-        return new(Array.AsReadOnly(nativeIds.ToArray()),Array.AsReadOnly(versions.ToArray()),source,additional);
+        var observedVersions = await ReadComparisonVersions(c, t, sessionId, token);
+        return new(Array.AsReadOnly(nativeIds.ToArray()),
+            observedVersions.SourceApplicationVersions,source,additional);
     }
 
     private static async Task<ComparisonVersions> ReadComparisonVersions(
@@ -2919,9 +2924,22 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
 
         async Task<IReadOnlyList<string>> Read(string column)
         {
+            var observed = column == "source_application_version" && TableExists(c, t, "source_trace_version_observations")
+                ? """
+                  UNION SELECT v.source_application_version FROM source_trace_version_observations v
+                  JOIN source_schema_observations o ON o.id=v.source_observation_id
+                  JOIN monitor_spans m ON m.raw_record_id=o.raw_record_id AND m.trace_id=v.trace_id COLLATE BINARY
+                  JOIN session_events e ON e.session_id=$session_id AND e.source_adapter='otel-exact' AND e.type='otel.span'
+                    AND e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
+                  WHERE v.source_application_version IS NOT NULL
+                    AND (SELECT COUNT(*) FROM monitor_spans other WHERE lower(other.trace_id)=m.trace_id AND lower(other.span_id)=m.span_id)=1
+                    AND (SELECT COUNT(*) FROM session_events other WHERE other.source_adapter='otel-exact'
+                      AND lower(other.source_event_id)=m.trace_id||'/'||m.span_id)=1
+                  """ : "";
             using var command = Command(c, t, $"""
-                SELECT DISTINCT {column} FROM session_events
+                SELECT DISTINCT {column} FROM (SELECT {column} FROM session_events
                 WHERE session_id=$session_id AND {column} IS NOT NULL AND trim({column})<>''
+                {observed})
                 ORDER BY {column} COLLATE BINARY LIMIT 64;
                 """, sessionId);
             var values = new List<string>();
@@ -2967,6 +2985,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT m.* FROM local_workspace_subagent_lifecycle m JOIN local_workspace_nodes n ON n.node_id=m.node_id WHERE n.session_id=$session_id ORDER BY m.node_id",
             "SELECT x.* FROM local_workspace_content_tombstones x JOIN session_events e ON e.event_id=x.source_item_id WHERE e.session_id=$session_id ORDER BY x.store_kind,x.source_item_id,x.part",
         };
+        if (TableExists(c, t, "source_trace_version_observations"))
+            statements.Add("SELECT DISTINCT v.* FROM source_trace_version_observations v JOIN source_schema_observations o ON o.id=v.source_observation_id JOIN monitor_spans m ON m.raw_record_id=o.raw_record_id AND m.trace_id=v.trace_id COLLATE BINARY JOIN session_events e ON e.session_id=$session_id AND e.source_adapter='otel-exact' AND e.type='otel.span' AND e.trace_id=m.trace_id COLLATE BINARY AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY ORDER BY v.source_observation_id,v.trace_id");
         if (TableExists(c, t, "skill_projection_invocations"))
         {
             statements.Add("SELECT i.* FROM skill_projection_invocations i WHERE i.session_id=$session_id ORDER BY i.generation_id,i.invocation_id");
