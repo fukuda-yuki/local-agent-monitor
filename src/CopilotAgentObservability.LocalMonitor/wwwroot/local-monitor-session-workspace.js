@@ -590,14 +590,16 @@
         renderExecutions();
       });
       section.append(toggle);
-      if (unavailableFacts.length) {
+      if (memory.open && unavailableFacts.length) {
+        const disclosure = el("details", "local-monitor-session-execution-facts");
+        disclosure.append(el("summary", null, `記録状態を確認（${format(unavailableFacts.length)}項目）`));
         const facts = el("div"); facts.dataset.executionFactSummary = "";
         for (const [key, label, fact] of unavailableFacts) {
           const row = el("div"); row.dataset.executionFact = key; row.append(el("span", null, `${label}: `)); const presentation = row.appendChild(el("div")); renderFact(presentation, fact);
           if (!presentation.querySelector("p")) presentation.append(el("p", null, `${label}の記録状態はまだ確定していません。`));
           facts.append(row);
         }
-        section.append(facts);
+        disclosure.append(facts); section.append(disclosure);
       }
       if (memory.open) {
         const scroll = el("div", "local-monitor-session-execution-scroll"); scroll.dataset.executionScroll = ""; scroll.setAttribute("role", "tree"); scroll.setAttribute("aria-label", "実行タイムライン");
@@ -929,7 +931,7 @@
       setBackgroundInert(true);
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
-    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
+    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); openNarrowInspector(root.querySelector("[data-session-overview-open]")); });
     section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
     if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
@@ -1094,8 +1096,22 @@
     const close = el("button", "local-monitor-session-inspector-close", "閉じる"); close.type = "button"; close.dataset.inspectorClose = ""; close.setAttribute("aria-label", "インスペクターを閉じる"); close.addEventListener("click", closeInspector); return close;
   }
 
+  function openNarrowInspector(returnFocus = document.activeElement) {
+    if (!narrowInspector.matches) return;
+    inspectorReturnFocus = returnFocus;
+    if (!inspector.querySelector("[data-inspector-close]")) inspector.prepend(createInspectorClose());
+    inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
+    setBackgroundInert(true); requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
+  }
+
   function normalizeInspectorBreakpoint(event) {
     if (event.matches) {
+      if (state.selectedNodeId === null) {
+        inspector.setAttribute("aria-hidden", "true");
+        inspector.removeAttribute("role"); inspector.removeAttribute("aria-modal");
+        inspector.querySelector("[data-inspector-close]")?.remove();
+        setBackgroundInert(false); inspectorReturnFocus = null; return;
+      }
       inspectorReturnFocus = state.selectedNodeId ? { executionId: state.selectedExecutionId, nodeId: state.selectedNodeId } : document.activeElement;
       if (!inspector.querySelector("[data-inspector-close]")) inspector.prepend(createInspectorClose());
       inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
@@ -1113,7 +1129,7 @@
     root.querySelector("[data-session-breadcrumb]").textContent = sessionLabel;
     root.querySelector("[data-session-title]").textContent = sessionLabel;
     const context = root.querySelector("[data-session-context-content]");
-    context.replaceChildren(el("strong", null, sessionLabel), el("span", null, ` ${session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : STATUS_LABELS[session.status]}`));
+    context.replaceChildren(el("span", null, session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : STATUS_LABELS[session.status]));
     const source = el("span"); source.dataset.sessionSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
@@ -1203,6 +1219,10 @@
     applyRoute(event.detail);
   });
   root.querySelector("[data-session-executions]").addEventListener("keydown", handleTreeKey);
+  root.querySelector("[data-session-overview-open]").addEventListener("click", event => {
+    routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null });
+    fallbackSelection(false); openNarrowInspector(event.currentTarget);
+  });
   document.addEventListener("keydown", event => { if (event.key === "Escape" && narrowInspector.matches && inspector.getAttribute("aria-hidden") === "false") { event.preventDefault(); closeInspector(); } });
   inspector.addEventListener("keydown", event => {
     if (event.key !== "Tab" || !narrowInspector.matches || inspector.getAttribute("aria-hidden") === "true") return;

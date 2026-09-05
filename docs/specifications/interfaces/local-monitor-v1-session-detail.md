@@ -125,7 +125,12 @@ facts reuse the exact Session collection object graphs and property order.
 `{state,label,additional_count,content_available}`. State is
 `recorded|not_observed|not_captured|expired|invalid`; label is nonempty text only
 for recorded, additional count is a nonnegative integer only when it is
-authoritatively known, and content availability is true only when an exact raw
+authoritatively known. An available Copilot OTel user-message observation on an
+`agent_invocation` span is an envelope copy, rather than an additional logical
+instruction, only when a direct child `llm_call` span in the same Session and
+trace carries byte-identical available user-message content. All observations
+remain available in the timeline, and equal content on unrelated or sibling
+spans remains distinct. Content availability is true only when an exact raw
 reference is currently Retention-admissible. `timing` is exactly
 `{state,started_at,ended_at,last_seen_at,duration_ms}`. `last_seen_at` is an
 observation timestamp independent of native lifecycle: when start is absent,
