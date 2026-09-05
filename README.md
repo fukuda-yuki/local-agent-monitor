@@ -68,7 +68,15 @@ AI の未設定や失敗で、セッション調査や比較が使えなくな�
 
 「設定」には状態、受信、AI設定、リポジトリ、アーカイブ、保存・バックアップ、診断をまとめています。
 リポジトリとセッションのアーカイブは元に戻せる非表示操作で、削除や保存期間の延長ではありません。
-`--sanitized-only` で起動すると受信・health・対応する machine API 専用となり、人向け UI は提供しません。
+「保存・バックアップ」は作成と確認です。復元は意図した instance を停止したあとの CLI です。
+対象を省略した `stop.ps1` は日常 instance に作用します。隔離検証では同じ完全修飾
+`-RuntimeRoot` を start / status / stop に使い、start の URL / DB / install と restore の
+`--bundle` / `--database` を同じ対象に揃えます。
+`--sanitized-only` は receiver-only です。health と受信は残りますが、人向け画面の縮退表示では
+ありません。停止・復元の対象指定は
+[Local Monitor ユーザーガイド](docs/user-guide/local-monitor.md#runtime-backup-と-offline-restore)
+と [Windows scripts README](scripts/local-monitor/README.md#runtime-backup-and-offline-restore)
+を参照してください。
 
 操作手順と技術的なトレース詳細・履歴インポート等の導線は
 [Local Monitor ユーザーガイド](docs/user-guide/local-monitor.md) を参照してください。

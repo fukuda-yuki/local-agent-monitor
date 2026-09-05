@@ -44,6 +44,10 @@ Dry-run the generated task command without registering it:
 
 ## Start, Status, Stop
 
+These commands without `-RuntimeRoot` operate the default daily instance under
+`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\`. That is intentional
+startup-task maintenance, not an isolated-instance procedure.
+
 Release ZIP:
 
 ```powershell
@@ -155,7 +159,8 @@ and require process restart for already-running clients.
 ## Sanitized-Only Mode
 
 Use `-SanitizedOnly` when installing or starting the task if the always-on
-process should expose only receiver, health, and machine APIs:
+process should be receiver-only (health, `/v1/traces`, and permitted machine
+APIs):
 
 ```powershell
 .\scripts\local-monitor\install-startup-task.ps1 -SanitizedOnly -StartNow
@@ -163,8 +168,10 @@ process should expose only receiver, health, and machine APIs:
 
 Without `-SanitizedOnly`, LocalMonitor keeps its normal raw-default local UI
 posture. With `-SanitizedOnly`, it registers no Razor Pages, human static
-assets, human routes, or `/api/local-monitor/v1/*`; there is no per-screen
-metadata-only fallback.
+assets, human routes, `/api/local-monitor/v1/*`, Doctor UI, or runtime-backup
+web routes; those return empty `404` with `Cache-Control: no-store`. This is
+not a per-screen reduced UI. Unmatched raw-looking paths such as
+`/traces/.../raw` still use the existing `unsupported_endpoint` JSON fallback.
 
 ## Security Boundary
 
