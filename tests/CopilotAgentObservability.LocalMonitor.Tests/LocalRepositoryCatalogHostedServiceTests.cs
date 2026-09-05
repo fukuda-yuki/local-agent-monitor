@@ -165,28 +165,57 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
     {
         var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-08-02T00:00:00Z"));
         var checkpoints = new List<LocalRepositoryCatalogHostedServiceCheckpoint>();
-        var firstDelay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var secondDelay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checkpointGate = new object();
+        var firstDelayRegistered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondDelayRegistered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delayPass = 0;
+        time.TimerCreated = () =>
+        {
+            int observedDelayPass;
+            lock (checkpointGate) observedDelayPass = delayPass;
+
+            if (observedDelayPass == 1) firstDelayRegistered.TrySetResult();
+            else if (observedDelayPass == 2) secondDelayRegistered.TrySetResult();
+        };
         using var temp = new MonitorTempDirectory { TimeProvider = time };
         await using var app = MonitorHost.Build(
             new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes),
             QuietHost(checkpoint =>
             {
-                checkpoints.Add(checkpoint);
-                if (checkpoint == LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDelay)
+                lock (checkpointGate)
                 {
-                    if (checkpoints.Count(item => item == checkpoint) == 1) firstDelay.TrySetResult();
-                    else secondDelay.TrySetResult();
+                    checkpoints.Add(checkpoint);
+                    if (checkpoint == LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDelay) delayPass++;
                 }
-            }));
+            }, timeProvider: time, startLocalComparisonCleanupHostedService: false));
 
         await app.StartAsync();
-        await firstDelay.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(3, checkpoints.Count);
+        await firstDelayRegistered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        LocalRepositoryCatalogHostedServiceCheckpoint[] firstPass;
+        lock (checkpointGate) firstPass = [.. checkpoints];
+        Assert.Equal([
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDiscover,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeRunOnce,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDelay,
+        ], firstPass);
+
         time.Advance(TimeSpan.FromSeconds(1));
-        await secondDelay.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await app.StopAsync();
-        Assert.Equal(6, checkpoints.Count);
+        await secondDelayRegistered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        LocalRepositoryCatalogHostedServiceCheckpoint[] secondPass;
+        lock (checkpointGate) secondPass = [.. checkpoints];
+        Assert.Equal([
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDiscover,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeRunOnce,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDelay,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDiscover,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeRunOnce,
+            LocalRepositoryCatalogHostedServiceCheckpoint.BeforeDelay,
+        ], secondPass);
+
+        await app.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        LocalRepositoryCatalogHostedServiceCheckpoint[] afterStop;
+        lock (checkpointGate) afterStop = [.. checkpoints];
+        Assert.Equal(secondPass, afterStop);
     }
 
     [Fact]
@@ -343,13 +372,15 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
         bool startProjectionWorker = false,
         Action<LocalRepositoryCatalogCompositionSnapshot>? compositionObserver = null,
         ILocalRepositoryReconciliationCheckpoint? workerCheckpoint = null,
-        TimeProvider? timeProvider = null) => new()
+        TimeProvider? timeProvider = null,
+        bool startLocalComparisonCleanupHostedService = true) => new()
     {
         StartWriter = false,
         StartProjectionWorker = startProjectionWorker,
         StartSessionWriter = false,
         StartSessionOtelEnrichment = false,
         StartRetentionCleanupWorker = false,
+        StartLocalComparisonCleanupHostedService = startLocalComparisonCleanupHostedService,
         UseUserSecrets = false,
         LocalRepositoryCatalogHostedServiceCheckpoint = checkpoint,
         LocalRepositoryApplicationFactory = localRepositoryApplicationFactory,
