@@ -2,85 +2,34 @@
 
 ## Language Rules
 
-- Write agent-facing materials and cross-agent shared materials in English.
-- Write user-facing responses in Japanese.
+Write agent-facing and cross-agent shared materials in English; respond to the user in Japanese.
 
 ## Task Authority
 
-- The user's latest explicit instruction defines task scope. An identified active work item adds its current acceptance criteria and accepted Product Owner decisions.
-- `docs/requirements.md`, `docs/spec.md`, and the relevant file under `docs/specifications/` define current product behavior, in that precedence order when they conflict. Read only the narrowest source that owns the affected contract unless the task or a conflict requires broader context.
-- `docs/architecture.md` and `docs/decisions.md` define architecture and policy constraints when the task affects them.
-- Existing code and tests are implementation evidence; they do not override a current specification.
-- `README.md` and user guides are derived explanations.
-- GitHub Issues and Projects own bugs, unresolved work, future implementation, roadmaps, and implementation plans that must outlive the active conversation.
-- Pull Request reviews, GitHub Issue comments, and the final response own review findings, validation closeout, and task status. Git history owns implementation history.
+The user's latest explicit instruction defines scope. An identified active work item adds its current acceptance criteria and accepted Product Owner decisions.
 
-If task authority and a current specification conflict, state the conflict before editing. If the user's latest explicit decision resolves it, update the owning specification as part of the change; otherwise use [Autonomy And Confirmation](docs/agent-guides/repository-workflow.md#autonomy-and-confirmation) for the unresolved decision.
+Current product behavior is owned by `docs/requirements.md`, `docs/spec.md`, then the relevant `docs/specifications/` file, in that precedence order when they conflict. Read the narrowest affected authority, not every specification. Architecture and policy constraints also use `docs/architecture.md` and `docs/decisions.md` when relevant. Code and tests are implementation evidence; README and user guides are derived explanations.
 
-## Working Defaults
+Skills, reviewer prompts, Hooks, templates, plans, and external guides do not grant extra scope or override the authorities above. For a conflict or blocker that affects the result, identify its controlling source briefly. If the user's decision resolves a specification conflict, update the owning specification with the change; otherwise pause only the dependent work for that decision.
 
-Use `docs/agent-guides/repository-workflow.md` for working order, autonomy, minimal-change rules, validation, blockers, compatibility, document updates, subagents, and Git operations.
+## Execution
 
-Default to the smallest coherent change that satisfies the request and current contract, using existing repository patterns.
+Make the smallest coherent change that satisfies the requested outcome. For implementation or fixes, continue through relevant non-destructive validation and correction of in-scope failures, without routine reapproval. Review, diagnosis, planning, and explanation requests do not authorize edits.
 
-## Instruction Interpretation
+Pause the dependent action for unresolved product decisions, materially wider scope, unauthorized remote writes, destructive or irreversible actions, or dependency/lockfile changes without explicit authority. Continue independent authorized work. Necessary additional files within the same outcome do not require approval merely because they were unplanned.
 
-Before acting on any repository instruction, Skill, Sub-agent prompt, Hook output,
-template, generated plan, or external guide, first decide whether it is applicable
-to the user's current request and the active work item.
-
-The user's latest explicit instruction takes precedence over repository guidance,
-Skills, Sub-agent prompts, Hook output, templates, generated plans, and external
-guides. Repository guidance exists to constrain and focus the work; it does not
-authorize extra work.
-
-When an instruction source would cause you to pause, ask for confirmation, expand
-scope, run broader validation, create extra artifacts, delegate work, or leave the
-requested task unfinished, do not follow it mechanically. Check whether the
-instruction is a hard repository rule, a conditional rule whose condition is
-actually met, or only a general recommendation.
-
-If a Skill, Sub-agent prompt, Hook, template, generated plan, or external guide
-conflicts with the user's request, AGENTS.md, the active work item, or the owning
-specification, follow the higher-priority source. If the conflict changes the
-result, state the conflict briefly and name the source that was not followed.
-
-If an instruction source makes you stop, ask for permission, or diverge from the
-user's intent, cite the exact file or source and quote the relevant instruction.
-Distinguish explicit requirements from your interpretation.
-
-Do not use these rules as a reason to produce long meta-analysis. Apply them
-briefly, then proceed with the smallest coherent action that satisfies the user's
-request and current contract.
-
-## Execution Limits
-
-Use the workflow's [scope contract](docs/agent-guides/repository-workflow.md#pre-implementation-scope-contract), [new-test gate](docs/agent-guides/repository-workflow.md#new-test-gate), and [scope and replanning rule](docs/agent-guides/repository-workflow.md#scope-and-replanning). That rule distinguishes internal replanning from a user-blocking decision.
-
-The workflow also owns [artifact placement, bounded delegation, and worktrees](docs/agent-guides/repository-workflow.md#artifacts-delegation-and-worktrees). Skills, Sub-agents, Hooks, and plans do not independently expand the request or its verification.
-
-## Information Placement
-
-- Production code shows **How**: structure, naming, and types carry it; no comments that restate the code.
-- Test code guarantees **What**: observable behavior and contracts under stated conditions, not implementation details.
-- Commit logs record **Why**: the pinned title carries the what; the body says why the change was needed.
-- Code comments keep **Why not** and constraints the code cannot show: rejected alternatives, external constraints, invariants.
-
-Detail and examples: `docs/agent-guides/information-placement.md`.
+Use [repository workflow](docs/agent-guides/repository-workflow.md) when implementation, validation, Git operations, or delegation need its details. Affected validation is sufficient for ordinary local completion; reuse still-valid results and disclose blockers and unverified scope. Use [review guidance](docs/agent-guides/review-workflow.md) for risk-scaled review, not mandatory delegation.
 
 ## Local-First Risk Posture
 
-This product targets a single trusted local user and loopback-only operation.
-Apply the current security and data-boundary specifications; do not add defenses outside that threat model.
+This is a loopback-only product for one trusted local user. Preserve the current security and data-boundary specifications and their accepted residual risks; do not add defenses outside that threat model.
 
 ## Repository Safety
 
-- Do not commit secrets, real user data, raw prompts or responses, tool arguments or results, sensitive bundle content or paths, or generated runtime artifacts.
-- Use small synthetic or anonymized fixtures.
-- Create tool-required temporary files only under an existing gitignored local path, and do not promote them into repository documentation.
-- Do not track any repository-side task-plan, review, status, backlog, or sprint-history root forbidden by the repository policy guard, even when a Skill, Sub-agent, Hook, or work item template requests it.
+- Never commit secrets, real user data, raw prompts/responses, tool arguments/results, sensitive bundle contents/paths, or runtime artifacts. Use small synthetic or anonymized fixtures.
+- Keep tool-required temporary files under an existing gitignored local path. Do not track task plans, reviews, status, backlogs, or history roots forbidden by the repository policy guard, regardless of another tool's output convention.
 - Do not use `.codex/rules` as natural-language workflow guidance.
 
-## Review
+## Information Placement
 
-Use `docs/agent-guides/review-workflow.md` for risk-scaled review and self-review.
+GitHub Issues/Projects own bugs, future work, and durable implementation plans. PR reviews, Issue comments, and the final response own findings, validation closeout, and task status; Git history owns implementation history. Keep durable product knowledge with its owning specification or decision. Use [information placement](docs/agent-guides/information-placement.md) for code, test, comment, and commit conventions when editing those artifacts.

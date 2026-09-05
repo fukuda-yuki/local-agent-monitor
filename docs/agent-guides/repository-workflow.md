@@ -1,254 +1,100 @@
 # Repository Workflow Guidance
 
-This guide owns the detailed workflow for coding agents in this repository. It is repository guidance, not product behavior.
-
-Keep feature-specific contracts and smoke procedures with the owning specification, script README, or test project. Keep work tracking and implementation history in GitHub Issues, Pull Requests, and Git history. Do not copy them into this general guide.
+This guide owns execution details, not product behavior. Use the authority and essential safety boundaries in [AGENTS.md](../../AGENTS.md).
 
 ## Working Order
 
-Start with the smallest context that can establish the affected contract.
-
-Always inspect:
-
-1. The user's latest request.
-2. The target code or document and its nearest tests or checks.
-
-For implementation, fix, or contract work, also inspect:
-
-- the active work item when one is identified, including its current body and newest accepted Product Owner decision;
-- the narrowest current specification that owns the affected behavior; when current sources conflict, retain the precedence in `AGENTS.md`:
-  - `docs/requirements.md` for product-wide requirements;
-  - `docs/spec.md` for cross-cutting product contracts;
-  - the relevant file under `docs/specifications/` for an interface, layer, or bounded contract.
-
-Inspect only when the task affects them:
-
-- `docs/architecture.md` or `docs/decisions.md` for architecture, policy, security, or data-boundary changes;
-- user guides for user-workflow changes.
-
-Do not read all canonical documents by default.
-If task authority and a current specification disagree, report the conflict before editing. When the user's latest explicit decision resolves the conflict, update the owning specification before or together with the implementation. For an unresolved decision, follow [Autonomy And Confirmation](#autonomy-and-confirmation).
+Inspect the current request, target code or document, and nearest relevant checks. For implementation, fixes, or contracts, also read the active work item's current criteria and accepted Product Owner decisions and the narrowest owning specification. Read architecture, decisions, or user guides only when the affected contract requires them. Do not load all canonical documents by default.
 
 ## Autonomy And Confirmation
 
-For review, diagnosis, planning, or explanation requests, inspect and report without editing unless the user also requests changes.
-
-For implementation or fix requests, make the requested in-scope local changes and run relevant non-destructive validation without asking again.
-
-Pause the dependent action for a user decision only when it would:
-
-- perform a remote write that the user has not explicitly authorized for the exact target;
-- make a destructive or irreversible change;
-- add or update a runtime or development dependency or lockfile without explicit authority;
-- materially expand the requested scope;
-- require an unresolved product or specification decision.
-
-Minor, reversible, in-scope local edits do not require confirmation. A missing decision blocks only the dependent action; continue independent authorized work and report what remains blocked. Do not ask again for a decision already resolved by the user's latest explicit instruction.
+Apply the confirmation boundaries in AGENTS.md. A missing decision blocks only dependent work; continue independent authorized work and report the blocker. Do not ask again for an already resolved decision or routine in-scope implementation, validation, and correction.
 
 ## Simplicity And Change Scope
 
-Implement the smallest coherent change that satisfies the current request and contract.
-
-- Do not add features beyond the request.
-- Do not create abstractions for one use.
-- Do not add flexibility, configurability, alternate workflows, or impossible-scenario handling without a current requirement.
-- Do not refactor, reformat, or clean up adjacent code outside the task.
-- Match existing local style and patterns.
-- Remove only imports, variables, functions, documentation, or tests made obsolete by the current change.
-- Mention unrelated defects or dead code instead of fixing them without authority.
-- Every changed line must trace to the request, the affected contract, or required validation.
-
-If a change is materially larger than the problem, reduce it before continuing.
+Use the smallest coherent solution and existing local patterns. Do not add speculative features, one-use abstractions, configurability, impossible-scenario handling, or adjacent refactoring/formatting. Remove only code, documentation, or tests made obsolete by this change. Every changed line must serve the request, affected contract, or necessary validation; report unrelated defects rather than silently fixing them.
 
 ## Goal-Driven Execution
 
-Prioritize customer value and product quality when choosing work and judging acceptance. State evidence-backed disagreements, failures, and remaining gaps candidly; do not soften conclusions to reassure the user or justify prior investment.
-
-Define observable completion criteria before editing. For a multi-step task, use a brief plan that pairs each step with its verification.
-Do not broaden ambiguous wording into speculative product behavior. Resolve scope from the active work item and current specification; if they cannot resolve it, state the minimum explicit assumption that preserves the contract, or escalate the unresolved decision under [Autonomy And Confirmation](#autonomy-and-confirmation).
+Judge acceptance by customer value and product quality, not prior investment. Report evidence-backed disagreements and gaps candidly.
 
 ### Pre-implementation scope contract
 
-For a non-trivial task, establish this short scope contract before editing:
-
-```text
-Goal
-Non-goals
-Acceptance criteria
-Intended change surface
-What remains untouched
-Verification for each changed contract
-```
-
-Keep this scope contract in the conversation or active work item, following [artifact placement](#artifacts-delegation-and-worktrees). Update a current owning specification only when the durable product contract changes.
+Establish the intended outcome and observable completion criteria before editing. Use a brief plan for multi-step work; add boundaries, affected surfaces, or verification details only when useful. No fixed planning form is required. Resolve ambiguity from task authority and the current contract; state a narrow contract-preserving assumption or identify the unresolved decision.
 
 ### New-test gate
 
-Add a test only when all three questions have concrete answers:
-
-1. Which changed acceptance criterion or observable contract does it verify?
-2. Why would the existing tests not detect that regression?
-3. What is the smallest test case that detects it?
-
-Do not add a test mechanically for each new method or class, backfill coverage for an unchanged module, expand into future cases or a snapshot/parameter matrix, create a production abstraction only to enable a test, or add an unrelated E2E, OS, live, or long-running matrix.
+Add the smallest regression for a changed observable contract only when existing tests would not catch it. No separate questionnaire is required. Do not add tests per method/class, backfill unchanged modules, grow speculative parameter/snapshot matrices, create production abstractions solely for tests, or add unrelated E2E, OS, live, or long-running coverage.
 
 ### Scope and replanning
 
-This section owns scope-expansion decisions. Judge scope by the authorized outcome and current contract, not by whether every affected file was predicted.
-
-When investigation identifies another necessary file, subsystem, or verification step, reconsider the smallest coherent solution and update the brief plan internally. Continue without another approval when the outcome, contracts, and authorization remain unchanged. Necessary changes discovered during implementation or review are not defects merely because they were unplanned.
-
-If the proposed solution adds outcomes or machinery not required by the task, remove that expansion or choose a smaller design. Use [Autonomy And Confirmation](#autonomy-and-confirmation) when a retained proposal needs a user decision; do not bypass its dependency, destructive-action, or remote-write boundaries. Apply the [new-test gate](#new-test-gate) and [Impact-Based Validation](#impact-based-validation) rather than growing a test matrix to match file count. An eligible bounded delegation under the next section does not itself expand scope.
+Scope follows the authorized outcome and current contract, not a predicted file list. When another file, subsystem, or check is necessary for the same outcome, update the plan internally and continue. Remove unnecessary expansion; use the confirmation boundaries for retained proposals that need a decision. Newly discovered necessary work is not an over-implementation finding merely because it was unplanned.
 
 ### Artifacts, delegation, and worktrees
 
-- Keep task-specific design, planning, status, review, and closeout in the conversation or active GitHub Issue/PR. Do not create repository design drafts, implementation plans, review reports, status ledgers, or generated agent reports. A Skill's file-output convention does not override this rule.
-- Create a worktree only when the active work item, concurrent work, or branch isolation requires it.
-- Generic procedure in an executable plan does not override `AGENTS.md` or this guide.
+Keep task-specific planning, findings, and closeout in the conversation or active Issue/PR, not repository reports. Create a worktree only when the work item, concurrent work, or branch isolation requires it.
 
-This section is the single owner of the delegation policy. Codex may choose bounded delegation when an independent workstream is expected to reduce elapsed time or improve quality enough to justify coordination overhead; no separate delegation approval is required. Delegation is optional, not a completion gate. Prefer direct execution when it is the better approach, and honor a current explicit user restriction on delegation.
+This section is the single delegation-policy owner. Codex may choose bounded delegation when an independent workstream is expected to reduce elapsed time or improve quality enough to justify coordination overhead; no separate delegation approval is required. Delegation is optional, not a completion gate. Prefer direct execution when better, and honor current explicit user restrictions.
 
-Give each Sub-agent an independent scope, file ownership or read-only review surface, and a concrete expected result. Use only the workers needed; avoid competing edits and duplicated work. Briefly state the split and expected benefit, without creating another planning artifact. The primary agent owns coordination, assessment of returned findings/diffs, integration, verification, and the final answer.
+Give each worker an independent scope, file ownership or read-only review surface, and a concrete expected result. Use only needed workers; avoid competing edits and duplicate work. Briefly state the split and expected benefit without another planning artifact. The primary agent owns assessment of returned findings/diffs, integration, verification, and the final answer.
 
-Delegation does not grant wider task, data, dependency, destructive-action, or remote-write authority; the same constraints apply to the primary agent and every worker. Tool availability and concurrency ceilings are not instructions to fill all worker slots. Use only capabilities actually available on the active surface; do not claim a delegation that did not occur. If delegation is unavailable, continue work the primary agent can perform and distinguish self-review from independent review.
+Delegation grants no wider task, data, dependency, destructive-action, or remote-write authority. Tool/concurrency limits are ceilings, not worker-count targets. Use only available capabilities; when delegation is unavailable, continue directly and do not claim an independent review.
 
 #### Codex reviewer delivery
 
-The retained Markdown procedures below are reference documents for Codex, not automatically registered native Codex agents. Select only the procedure relevant to the bounded review; do not load or invoke all three by default.
+These are reference procedures, not automatically registered native Codex agents. Select only the relevant one:
 
-- [API contract reviewer](../../.agents/agents/api-contract-reviewer.md): affected specification, producer, and consumer wire contract.
-- [Async UI state reviewer](../../.agents/agents/async-ui-state-reviewer.md): affected asynchronous selection, response/render, and focus behavior.
-- [Local risk posture reviewer](../../.agents/agents/local-risk-posture-reviewer.md): affected HTTP, logging, artifact, and data boundaries under the documented local threat model.
+- [API contract reviewer](../../.agents/agents/api-contract-reviewer.md): changed specification/producer/consumer wire contracts.
+- [Async UI state reviewer](../../.agents/agents/async-ui-state-reviewer.md): changed request/render ordering and focus behavior.
+- [Local risk posture reviewer](../../.agents/agents/local-risk-posture-reviewer.md): changed HTTP, logging, artifact, and data boundaries.
 
-When delegating through the active surface's available agent tool, supply the repository root, exact selected procedure path, bounded review surface or diff, and expected result. Instruct the reviewer to read that procedure before reviewing. If it cannot access the file, provide its relevant procedure text explicitly; do not assume context or file access was inherited. An unread or undelivered procedure is an unverified review, not a successful one.
+Supply the repository root, exact procedure path, bounded review surface/diff, and expected result through the active surface's available agent tool. Require the reviewer to read the procedure; if inaccessible, deliver its relevant text explicitly. Do not assume inherited context or file access. An unread or undelivered procedure leaves the review unverified.
 
-Require no file edits or remote mutations and return findings to the primary agent. Markdown `tools:` metadata serves the Claude copies; it is not a Codex-enforced permission boundary. Inspect the target runtime's effective permissions, including inherited/session overrides, before claiming enforced read-only isolation. Report observed no-write behavior separately from permission enforcement. Keep canonical procedures and the existing `.claude/agents/` copies aligned without a new registration or synchronization framework.
+Require no file edits or remote mutations and return findings to the primary agent. Markdown `tools:` metadata serves Claude, not Codex permission enforcement. Inspect effective runtime permissions, including inherited/session overrides, before claiming enforced read-only isolation; observed no-write behavior is a separate fact. Keep canonical procedures and existing Claude copies aligned without new registration or synchronization machinery.
 
 ### Single ownership of responsibilities
 
-- A repository-wide rule belongs in exactly one place: `AGENTS.md` or the narrowest applicable guide under `docs/agent-guides/`.
-- Product behavior belongs in the current specification.
-- Feature-specific operation belongs in the relevant Skill, script README, or owning specification.
-- Do not copy the same normative rule into a Skill, Sub-agent, Hook, or plan document.
+Keep each shared rule in AGENTS.md or its narrowest existing guide. Product behavior belongs in its owning specification; feature operations belong in their existing Skill, script README, or specification. Reference those owners rather than copying their rules.
 
 ## Impact-Based Validation
 
-Validation must match the changed surface. Start narrow and expand only when the affected contract or acceptance criteria require it.
+Start with the nearest existing check that exercises the changed contract. A bounded task can complete locally with **Affected** validation:
 
-Reuse passing validation results obtained in the current task while the relevant files, inputs, and environment remain unchanged. Do not rerun validation merely because review, commit, or reporting begins. Revalidate when relevant changes, failures, unresolved risks, or explicit requirements warrant it. This reuse rule does not waive required Affected, Completion, Nightly, or live validation.
+- Documentation only: inspect Markdown/diff, paths, and references; no build unless generated or executable content requires it.
+- Local implementation: build/test the affected project and nearby regressions.
+- Shared libraries, interfaces, schemas, storage, serialization, or cross-process contracts: exercise all affected projects and contract tests.
+- Razor/browser behavior: run affected browser-facing tests and install Playwright when those tests require it.
 
-### 1. Local iteration and completion report — Affected
-
-During implementation and before the ordinary coding-agent completion report,
-run the nearest existing test or component-owned check that directly exercises
-the changed behavior or contract. A bounded task can complete with this
-Affected validation.
+For example:
 
 ```powershell
 dotnet test <test-project.csproj> --filter FullyQualifiedName~<test-or-class>
 ```
 
-Select the Affected boundary from the change:
+Reuse passing results while relevant files, inputs, and environment remain unchanged. Review, commit, or reporting alone does not require a rerun. Revalidate for relevant changes, failures, unresolved risks, or explicit requirements; reuse does not waive a required validation lane or live gate.
 
-- documentation-only changes: inspect the rendered Markdown or diff, paths, and references; no build is required unless the documentation change is generated or executable;
-- local implementation changes: build or test the affected project and run nearby regression tests;
-- shared libraries, public interfaces, schemas, storage, serialization, or cross-process contracts: run all affected project and contract tests;
-- Razor Pages or browser behavior: run the affected browser-facing tests and install Playwright when those tests require it.
+GitHub Actions owns **Completion CI** as the ordinary PR/main integration gate and **Nightly** as scheduled deep validation. Do not run either lane locally unless the user or active work item explicitly requires it. A directly changed E2E, OS-specific, or long-running test is Affected, not its entire lane. Diagnose failures at the failed project/class/test rather than automatically restarting full lanes. Use the existing [runner](../../scripts/test/run-validation.ps1) and [validation/release matrix](../specifications/validation-release-matrix.md) for lane mechanics and release requirements; these development rules do not replace release or operator-only live gates.
 
-Do not start the Completion or Nightly runner locally unless the user or active
-work item explicitly requires that lane. Direct changes to an E2E, OS-specific,
-or long-running test make that specific test Affected; they do not make the
-whole Nightly lane Affected.
+Keep automated tests deterministic and isolate external services, network access, and live machine state. Network-dependent checks must not be the only correctness evidence. Do not assume every existing test or local command is disposable or safe for a real installation.
 
-### 2. Pull Request / main integration — Completion CI
+During an Issue repair, relevant existing local data and the actual Monitor may be used for diagnosis and customer-facing acceptance without asking again merely because the data is real. Preserve originals; use consistent copies for experiments that modify data. This does not authorize destructive source-installation changes or raw-data publication. Keep working copies gitignored, and track a distilled fixture only when its regression value justifies it. Anonymization must preserve the failure-relevant identities/relationships, ordering, types, missing-versus-zero values, and failure states; inspect derived fixtures before sharing.
 
-GitHub Actions owns Completion validation for Pull Requests and pushes to
-`main`. Hosted validation runs `completion-discovery`, ten runner-defined
-matrix shards, and the stable aggregate `completion` check. Each shard receives
-only an opaque identifier; `run-validation.ps1` remains the single authority
-for project discovery, filters, selectors, expected identities, TRX evidence,
-and counts. The aggregate fails closed unless every required shard and its
-evidence match the discovery manifest.
+For repaired user-visible defects, revisit the original failure with the same records where available and trace the relevant data-to-UI path. Distinguish installed-path observations, replay/copy results, and mocked/component checks. A passing mock is not normal-user acceptance; absent UI data is not source absence. Real-data investigation is on demand, not a recurring test suite or separate preparation task.
 
-The unphased command below remains the monolithic local/operator compatibility
-entry. It uses the same runner-owned Fast and Critical Smoke authority as the
-hosted phases and does not run the smoke tests twice.
-
-```powershell
-pwsh scripts\test\run-validation.ps1 -Lane Completion
-```
-
-Completion CI is the ordinary integration gate. Do not require the same full
-gate locally before push unless the user or active work item says to do so.
-
-### 3. Scheduled deep validation — Nightly
-
-Scheduled GitHub Actions owns Nightly validation on Windows and Linux at 03:00
-JST. It runs all schedulable automated tests while excluding operator-only live
-validation.
-
-```powershell
-pwsh scripts\test\run-validation.ps1 -Lane Nightly -Partition Windows
-pwsh scripts\test\run-validation.ps1 -Lane Nightly -Partition Linux
-```
-
-Nightly does not run from Pull Requests or ordinary coding-agent completion,
-and it does not retry automatically. Operator-only live validation keeps its
-existing runbook and separate authorization.
-
-### 4. Failure diagnosis
-
-When Completion CI or Nightly fails, narrow diagnosis to the failed project,
-class, or test and reproduce only that Affected boundary. Do not automatically
-restart the entire Completion or Nightly lane during the same task.
-
-Release tags, manual releases, and cross-surface release candidates keep the
-validation required by their owning specification and existing release
-workflow; these development lanes do not replace those gates.
-
-Use component-owned specifications, scripts, READMEs, and test projects for feature-specific validation. This guide intentionally contains no feature- or Issue-specific smoke procedure.
-
-Keep automated tests deterministic and isolate external services, network access, and live machine state. Do not use network-dependent validation as the only proof of correctness. Follow the fixture and data-safety rules in `AGENTS.md`.
-
-During each Issue's repair, use relevant existing local data and the actual Local Monitor when they help diagnose the defect, debug the change, or establish customer-facing acceptance. The user authorizes this local use, including creating masked copies and distilling examples for unit-test fixtures or E2E mocks; do not ask again merely because the evidence is real user data. Preserve original records and use copies for experiments that modify data. This permission does not authorize publishing raw data or destructive changes to the source installation.
-
-Choose the smallest evidence approach that materially improves confidence. Real-data investigation is on demand, not a mandatory recurring test suite or a separate data-preparation task. Create a distilled fixture only when its diagnostic or regression value justifies the effort and the existing new-test gate is met. Anonymization must remove private content while preserving the failure-relevant structure, such as exact relationships, ordering, types, missing versus zero values, and failure states. Review derived fixtures before tracking or sharing them; keep real-data working copies in gitignored local storage.
-
-For a repaired user-visible defect, revisit the original failure with the same records where available and trace the relevant data-to-UI path. Distinguish actual installed-path observations, replay/copy results, and mocked/component tests in the closeout. A passing mock does not establish normal-user acceptance, and absent UI data does not establish source absence. Record only the necessary sanitized evidence and remaining limitations in the owning Issue or PR.
-
-If a required command fails, is skipped, or cannot run:
-
-- do not treat a different command as equivalent success;
-- use diagnostic commands only as additional evidence, not substitution;
-- report the exact failed or unavailable command, the result, and the remaining unverified scope.
+Report the exact failed, skipped, or unavailable command, its result, and unverified scope. Diagnostic commands add evidence; they do not substitute for a failed or unavailable required check. Put only necessary sanitized evidence in the Issue/PR.
 
 ## Blockers, Fallbacks, And Compatibility
 
-Use the path, command, schema, source, tool, and validation procedure specified by the request or current source of truth.
-If it is unavailable, name the exact blocker instead of silently switching routes.
+Use the specified path, command, schema, source, tool, and validation procedure. Name an unavailable required route rather than silently substituting another. Do not introduce fallback behavior, compatibility shims, dual paths, migrations, alternate/permissive parsers, defaults, or retries without current contract or explicit user authority.
 
-Do not add fallback behavior, compatibility shims, dual paths, migration layers, alternate parsers, permissive parsing, default fallbacks, or silent retry paths unless the current contract or the user's explicit instruction requires them.
-
-An existing documented public interface remains binding until the owning contract changes. When compatibility is required, keep it narrow and identify the exact interface being preserved. When an unreleased contract changes and no current specification requires retained data or behavior, update the single current path instead of adding migration or old/new modes.
+A documented public interface remains binding until its owner changes it. Preserve required compatibility narrowly. For an unreleased contract with no retention/compatibility requirement, update the single current path instead of inventing old/new modes.
 
 ## Project Document Updates
 
-Update only the document that owns the changed information.
-
-- Update the relevant current specification when product behavior or a public contract changes.
-- Update `docs/requirements.md` or `docs/spec.md` only when their broader contract actually changes.
-- Update user-facing guides only when their explanation or workflow becomes incorrect.
-- Put bugs, unresolved work, future implementation, roadmaps, and durable implementation plans in GitHub Issues or Projects.
-- Put review findings and validation closeout in Pull Request reviews, GitHub Issue comments, or the final response.
-- Do not duplicate the same normative rule across requirements, specifications, work tracking, and handoff material.
-
-If a required authoritative update cannot be made, do not claim the work complete. State the missing decision or authority.
+Update only the owner of changed information. Change requirements/spec.md only for their broader contracts, the relevant specification for product/public-contract changes, and user guides only when their explanation becomes wrong. Use [information placement](information-placement.md) for artifact ownership; do not duplicate normative rules. If a required authoritative update is blocked, name it and do not claim that work complete.
 
 ## Git Rules
 
-Create local commits in small, coherent steps after validation and review are complete. Do not wait for another request when a completed, verified step can be committed cleanly.
+Create small coherent local commits after relevant validation and review; no extra request is needed for a clean completed step. Remote writes require explicit user authorization for the exact action and target. Without it, do not push/tag, create/update PRs, merge, or move remote refs. Never rewrite remote history without explicit authority for that destructive action.
 
-Remote writes require explicit user authorization for the exact action and target. Without that authority, do not push or tag, create or update pull requests, merge, or move remote refs. Never rewrite remote history unless the user explicitly requests that exact destructive action.
-
-Commit messages must start with the active work item name and then follow Conventional Commits.
-For `feat`, `fix`, `refactor`, and `perf`, the body must record why the change was needed; see `docs/agent-guides/information-placement.md`.
+Use `<work item>: <type>(<scope>): <subject>` Conventional Commits. The body for `feat`, `fix`, `refactor`, and `perf` explains why; see [information placement](information-placement.md#commit-log-why).

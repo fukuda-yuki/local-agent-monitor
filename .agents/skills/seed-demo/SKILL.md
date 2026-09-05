@@ -1,61 +1,55 @@
 ---
 name: seed-demo
-description: Use when the user wants to see the Local Ingestion Monitor UI with synthetic demo data — seeding demo traces, visually verifying UI changes, or preparing a demo/screenshot session
+description: Prepare synthetic-data Local Monitor demos and UI screenshots on explicit request.
 ---
 
 # Seed Demo Data Into the Local Monitor
 
-Start a monitor on a fresh throwaway database, post the synthetic demo
-payloads, and point the user at the UI. Every payload under
-`scripts\demo\payloads\` is fully synthetic (demo-prefixed trace ids, fake
-identity). Seed only a monitor started on a fresh disposable database under
-`tmp\`.
+Use only for an explicit demo-data, visual-verification, or screenshot request. Synthetic OTLP still mutates its destination: never seed a real capture DB or stop the ordinary capture instance to prepare a demo.
 
-Invoke this skill only for an explicit demo-data, visual-verification, or screenshot-session request. It does not authorize product changes, broader testing, documentation, or cleanup.
+## Isolated procedure
 
-## Critical rules
+Run from the repository root. Use the existing lifecycle isolation in `scripts/local-monitor/README.md`: one new absolute runtime root under ignored `tmp`, an unused DB, and an available loopback HTTP URL. Keep these variables for the entire task. The example port is a candidate, not guaranteed free; a startup conflict means choose another URL and fresh root, never stop its owner or fall back to the default runtime.
 
-- **Never seed the real capture DB.** `scripts\local-monitor\start.ps1`
-  defaults `-DbPath` to the runtime `raw-store.db` (the user's real
-  captured data). Always pass a fresh path under `tmp\`.
-- **Seed each database once.** Re-seeding the same DB re-ingests the same
-  trace ids and duplicates spans in the projection. For a clean rerun:
-  stop the monitor, pick a new unused path under `tmp\`, and start again.
-- **Never reuse or automatically delete an existing DB.** If the example
-  path already exists, choose a new unused path before starting the monitor.
-- Loopback URLs only (the scripts enforce this).
+```powershell
+$runtimeRoot = Join-Path (Get-Location).Path ('tmp\monitor-demo-' + [guid]::NewGuid().ToString('N'))
+$dbPath = Join-Path $runtimeRoot 'monitor.db'
+$monitorUrl = 'http://127.0.0.1:4321'
+if (Test-Path -LiteralPath $runtimeRoot) { throw 'Choose a new unused demo runtime root.' }
 
-## Steps
+$started = @(pwsh scripts\local-monitor\start.ps1 -Mode DotnetRun -RuntimeRoot $runtimeRoot -DbPath $dbPath -Url $monitorUrl -NoBrowser -WaitReady)
+$startExit = $LASTEXITCODE
+$started
+if ($startExit -ne 0 -or -not ($started -cmatch '^started (ready|degraded)$')) {
+    throw 'Demo startup was not verified; do not seed.'
+}
 
-1. If a monitor is already running (`pwsh scripts\local-monitor\status.ps1`),
-   stop it first so seeding cannot hit the wrong database:
-   `pwsh scripts\local-monitor\stop.ps1`
-2. Check that `tmp\monitor-demo\monitor.db` does not exist. If it exists,
-   choose a new unused DB path under `tmp\` and use it in the command below.
-   Start on that fresh demo DB and wait for ready:
+$status = @(pwsh scripts\local-monitor\status.ps1 -RuntimeRoot $runtimeRoot)
+$statusExit = $LASTEXITCODE
+$status
+$expected = @('running: yes', "URL: $monitorUrl", "DB path: $dbPath", 'mode: dotnet-run')
+$missing = @($expected | Where-Object { $status -cnotcontains $_ })
+if ($statusExit -notin @(0, 3) -or $missing.Count -ne 0 -or -not ($status -cmatch '^readiness status: (ready|degraded)$')) {
+    throw 'Demo instance identity/readiness was not verified; do not seed.'
+}
 
-   ```powershell
-   pwsh scripts\local-monitor\start.ps1 -DbPath tmp\monitor-demo\monitor.db
-   ```
+pwsh scripts\demo\seed-monitor-mock-data.ps1 -MonitorUrl $monitorUrl
+if ($LASTEXITCODE -ne 0) { throw 'Seeding failed; do not reseed this DB or report success.' }
+```
 
-   Expected output: `started ready` (or `started degraded` right after boot).
-3. Seed the demo payloads:
+The explicit runtime root makes lifecycle commands validate state/PID/process ownership. Status code `3` reports a disabled startup task, not demo failure; accept it only with all identity/readiness fields above. A `runtime_state_mismatch`, `already_running`, failed start, or mismatched status is not permission to reuse a DB or seed an arbitrary reachable endpoint.
 
-   ```powershell
-   pwsh scripts\demo\seed-monitor-mock-data.ps1
-   ```
+Seed each DB once, including after partial failure. For another attempt choose a new unused root/DB; never automatically reuse or delete an existing DB. Do not change capture routing or register a startup task for this demo.
 
-   Expected: one `ok <payload>` line per file, then `Seeded 9 demo traces.`
-4. Tell the user to open `http://127.0.0.1:4320/` — overview KPIs, trace
-   list, drawer, and span detail should all show demo data.
-5. When done: `pwsh scripts\local-monitor\stop.ps1`. Use a new unused DB
-   path for the next demo; do not automatically delete the demo DB.
+## Evidence and handoff
 
-## Troubleshooting
+Distinguish POST acceptance, completed projection, and requested UI observations. `ok` output and the script's fixed sleep establish neither projection completion nor UI acceptance. Inspect relevant projection/readiness evidence and the actual requested surface under the current `docs/spec.md` / owning UI specification. `/` is Repository selection, not the retired Overview/trace-list/drawer promise. OTLP fixtures alone do not prove Session lifecycle, Skill invocation, Sub-agent coverage, or whole-product acceptance; report unavailable relationships without fabricating them.
 
-- `already_running` from start.ps1 — an instance is already up at that
-  URL; stop it before starting the demo instance (step 1).
-- `port_already_in_use` — something else owns 4320; pass the same
-  alternate loopback URL to both scripts (`-Url` / `-MonitorUrl`).
-- Seed script reports "not reachable" — the monitor is not started at
-  that URL yet; check step 2 output.
+For a browsable demo, leave this task-owned instance running and report its loopback URL, runtime identity, observed surface, and unverified scope. When cleanup is requested or the task requires a temporary-only run, stop only this verified task-owned instance:
+
+```powershell
+pwsh scripts\local-monitor\stop.ps1 -RuntimeRoot $runtimeRoot
+if ($LASTEXITCODE -ne 0) { throw 'Demo stop failed; report the remaining runtime state.' }
+```
+
+Keep the DB for explicit user-managed disposal; do not delete it automatically. This procedure bounds the instructed target; the seed script does not itself certify that a caller-supplied destination is disposable.
