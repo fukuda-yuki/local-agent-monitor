@@ -693,7 +693,7 @@
   function bindModelSelector(rootEl, startButtons) {
     const select = rootEl.querySelector("[data-ai-model-select]") ?? rootEl.querySelector("[data-session-ai-model-select]");
     const refresh = rootEl.querySelector("[data-ai-model-refresh]") ?? rootEl.querySelector("[data-session-ai-model-refresh]");
-    const status = rootEl.querySelector("[data-ai-model-status]") ?? rootEl.querySelector("[data-session-ai-status]");
+    const status = rootEl.querySelector("[data-ai-model-status]") ?? rootEl.querySelector("[data-session-ai-model-status]");
     let generation = 0;
     let selected = "";
     function setStarts(enabled) { startButtons().forEach(button => { if (button) button.disabled = !enabled; }); }
@@ -1009,7 +1009,8 @@
     const label = el("label", null, "分析に使うモデル"); label.setAttribute("for", `local-monitor-node-ai-model-${nodeId}`);
     const select = el("select"); select.id = `local-monitor-node-ai-model-${nodeId}`; select.dataset.aiModelSelect = ""; select.disabled = true; select.append(el("option", null, "モデルを選択")); select.firstChild.value = "";
     const refresh = el("button", null, "モデル一覧を更新"); refresh.type = "button"; refresh.dataset.aiModelRefresh = "";
-    model.append(label, select, refresh);
+    const modelStatus = el("div"); modelStatus.dataset.aiModelStatus = ""; modelStatus.setAttribute("role", "status"); modelStatus.setAttribute("aria-live", "polite");
+    model.append(label, select, refresh, modelStatus);
     const status = el("div"); status.dataset.nodeAiStatus = ""; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
     const result = el("div"); result.dataset.nodeAiResult = ""; const question = el("textarea"); question.setAttribute("aria-label", "追加の質問"); question.maxLength = 4096;
     const analyze = el("button", null, "この項目をAIで分析"); analyze.type = "button"; analyze.disabled = true; analyze.addEventListener("click", () => startNodeAi(surface, nodeId));
