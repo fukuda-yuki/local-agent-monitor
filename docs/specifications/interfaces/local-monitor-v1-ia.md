@@ -425,17 +425,23 @@ an explicit model-list request through the same authenticated GitHub Copilot
 SDK ownership as execution (`ListModelsAsync`). Discovery is not background
 polling, not a persistent catalogue, and not a generation probe. The UI shows
 loading, unauthenticated, empty, unavailable/failed, and ready states honestly
-and offers explicit refresh. A legacy `CopilotAnalysis` model may preselect
-only when that exact identifier is in the current usable discovered set;
-otherwise the user must select. `auto`, aliases, and silent fallback are
-forbidden. An unavailable or stale selection requires reselection and cannot
-start analysis.
+and offers explicit refresh. Those UI labels include `loading` and `stale`,
+which are not `/ai/models` wire states. Opening or restoring the Session AI
+dialog performs the same explicit discovery request as the header action. A
+legacy `CopilotAnalysis` model may preselect only when the selector has no
+current page-local selection and that exact identifier is in the current usable
+discovered set; otherwise the user must select. A later snapshot must not
+replace a current page-local selection with the legacy identifier. `auto`,
+aliases, and silent fallback are forbidden. An unavailable or stale selection
+requires reselection and cannot start analysis.
 
 The selected identifier is sent on the Session/node start request, validated
 against the current discovered set, stored on that run, hashed into that run's
 configuration identity, and passed to the provider session. Later page
-selections and concurrent runs must not change another run's model. Stale
-asynchronous discovery responses must not overwrite the current selector.
+selections and concurrent runs must not change another run's model. A later
+start or restore poll must not render, clear cancel, or write status for an
+older run after a newer run owns the surface. Stale asynchronous discovery
+responses must not overwrite the current selector.
 
 `GET /api/local-monitor/v1/ai/sessions/{sessionId}/reports` computes each
 required boolean `snapshot_changed` only by comparing the immutable saved

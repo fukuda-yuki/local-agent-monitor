@@ -704,6 +704,7 @@
       const previous = keepSelection ? selected : "";
       const eligibleLegacy = snapshot.legacy_eligible ? snapshot.legacy_configured_model : "";
       const next = options.some(item => item.id === previous) ? previous
+        : previous ? ""
         : options.some(item => item.id === eligibleLegacy) ? eligibleLegacy : "";
       selected = next;
       select.replaceChildren(el("option", null, "モデルを選択"));
@@ -819,16 +820,29 @@
     if (focus) heading.focus();
   }
 
+  function aiPollCurrent(scope, generation, runId, routeGenerationValue) {
+    return currentRouteGeneration(routeGenerationValue)
+      && (scope === "session" ? generation === sessionPollGeneration && activeSessionRun === runId : generation === nodePollGeneration);
+  }
+
   async function pollAiRun(runId, scope, generation = null, routeGenerationValue = null) {
-    const status = document.querySelector(scope === "session" ? "[data-session-ai-status]" : "[data-node-ai-status]");
+    const statusSelector = scope === "session" ? "[data-session-ai-status]" : "[data-node-ai-status]";
     const deadline = Date.now() + 610000;
-    while (Date.now() < deadline && currentRouteGeneration(routeGenerationValue) && (scope === "session" ? generation === sessionPollGeneration && activeSessionRun === runId : generation === nodePollGeneration)) {
+    while (Date.now() < deadline && aiPollCurrent(scope, generation, runId, routeGenerationValue)) {
       try {
         const response = await fetch(`/api/local-monitor/v1/ai/${scope}-runs/${runId}`, { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+        if (!aiPollCurrent(scope, generation, runId, routeGenerationValue)) return null;
         if (!response.ok) throw new Error("poll_failed");
-        const value = await response.json(); if (!currentRouteGeneration(routeGenerationValue)) return null; if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
+        const value = await response.json();
+        if (!aiPollCurrent(scope, generation, runId, routeGenerationValue)) return null;
+        const status = document.querySelector(statusSelector);
+        if (status) status.textContent = AI_STATE_LABELS[value.state] ?? "AI分析を確認できません";
         if (!["queued", "running"].includes(value.state)) return value;
-      } catch { if (!currentRouteGeneration(routeGenerationValue)) return null; if (status) status.textContent = "AI分析の状態を一時的に確認できません。再試行しています"; }
+      } catch {
+        if (!aiPollCurrent(scope, generation, runId, routeGenerationValue)) return null;
+        const status = document.querySelector(statusSelector);
+        if (status) status.textContent = "AI分析の状態を一時的に確認できません。再試行しています";
+      }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     return null;
@@ -887,6 +901,7 @@
     if (!currentRouteGeneration(routeGenerationValue)) return "canceled";
     const runId = run.run_id;
     showSessionDialog(document.querySelector("[data-session-ai-open]"));
+    sessionModelSelector.discover();
     if (["queued", "running"].includes(run.state)) {
       activeSessionRun = runId; const pollGeneration = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false;
       showSessionReport({ ...run, content_state: "status_only", snapshot_changed: false }, false);
@@ -965,6 +980,7 @@
       return;
     }
     const started = await response.json(); activeSessionRun = started.run_id; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: started.run_id }); const run = await pollAiRun(started.run_id, "session", generation);
+    if (generation !== sessionPollGeneration) return;
     activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
     if (run && ["succeeded", "zero_findings"].includes(run.state)) {
       const report = await findExactSessionReport(run.run_id); showSessionReport(report ?? { ...run, result: null, content_state: "status_only", snapshot_changed: false }, false, true);
@@ -990,7 +1006,7 @@
       if (error?.error === "model_unavailable") await selector.discover();
       return;
     }
-    const started = await response.json(); state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: state.selectedExecutionId, node: nodeId, analysis: started.run_id }); const generation = ++nodePollGeneration; const run = await pollAiRun(started.run_id, "node", generation); if (!run) return;
+    const started = await response.json(); state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: state.selectedExecutionId, node: nodeId, analysis: started.run_id }); const generation = ++nodePollGeneration; const run = await pollAiRun(started.run_id, "node", generation); if (generation !== nodePollGeneration || !run) return;
     if (["succeeded", "zero_findings"].includes(run.state) && run.result) {
       renderAiResult(section.querySelector("[data-node-ai-result]"), run.result, true); const answer = run.result.summary;
       if (new TextEncoder().encode(answer).length <= 32768) { nodeTranscript.push({ question: question ?? "", answer }); if (nodeTranscript.length > 16) nodeTranscript.shift(); }

@@ -284,14 +284,24 @@ AI execution crosses the local-only boundary.
   loopback/Host guarded, and same-origin; POST requires CSRF. GET returns the
   current in-memory discovery snapshot without calling the provider. POST is
   the explicit list/refresh and uses the same authenticated GitHub Copilot SDK
-  client ownership as Session/node execution (`ListModelsAsync`). Responses
-  expose only a closed `discovery_state`, `{id, display_name}` model rows,
-  optional legacy configured identifier, and whether that identifier is
-  currently eligible. They never include credentials, provider exception text,
-  billing, policy objects, raw catalogue payloads, or configuration-synthesized
-  stand-ins. In-memory reuse is process-local and replaced by the next explicit
-  refresh or an unauthenticated/unavailable result; there is no persistent
-  catalogue store or background poll;
+  client ownership as Session/node execution (`ListModelsAsync`). POST body is
+  the closed empty object `{}`. Success JSON is always HTTP `200` with this
+  closed object: `discovery_state` (string; exactly one of `not_checked`,
+  `unauthenticated`, `unavailable`, `failed`, `empty`, `ready`), `models`
+  (array of `{id, display_name}` strings; empty unless `ready`),
+  `legacy_configured_model` (string or JSON `null`; always present), and
+  `legacy_eligible` (boolean; true only when `discovery_state` is `ready` and
+  that exact identifier is in `models`). `loading` and `stale` are UI-only and
+  are not wire states. Responses never include credentials, provider exception
+  text, billing, policy objects, raw catalogue payloads, or
+  configuration-synthesized stand-ins. In-memory reuse is process-local and
+  replaced by the next explicit refresh or an unauthenticated/unavailable
+  result; there is no persistent catalogue store or background poll;
+- Session/node start `model` is a required string. Missing, non-string, `auto`,
+  or illegal-charset values are HTTP `400` `{"error":"invalid_request"}`. A
+  syntactically valid identifier that is not in the current usable discovered
+  set is HTTP `409` `{"error":"model_unavailable"}`. The server does not
+  substitute another model;
 - Repository selection requires a scope preview;
 - the provider receives only one bounded immutable snapshot and process-internal tools constrained to its evidence index;
 - the SQLite file and arbitrary SQL are never exposed;
