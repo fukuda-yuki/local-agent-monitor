@@ -2006,16 +2006,65 @@ internal static class LocalWorkspaceProjectionStore
         connection.CreateFunction<string, string?>("local_workspace_search", static text => text is null ? null : Search(text), isDeterministic: true);
         connection.CreateFunction<string, string, long>("local_workspace_future", static (expiry, instant) =>
             TryCanonicalFuture(expiry, DateTimeOffset.ParseExact(instant, "O", CultureInfo.InvariantCulture)) ? 1 : 0, isDeterministic: true);
+        var hasSpanRelationships = TableExists(connection, transaction, "monitor_spans");
+        var retentionEnvelopeDuplicateExclusion = hasSpanRelationships ? """
+                 AND NOT (e.source_adapter='copilot-otel' AND EXISTS (
+                   SELECT 1 FROM monitor_spans envelope
+                   JOIN monitor_spans child ON child.trace_id=envelope.trace_id
+                     AND child.parent_span_id=envelope.span_id COLLATE BINARY AND child.category='llm_call'
+                   JOIN session_events child_event ON child_event.session_id=e.session_id
+                     AND child_event.trace_id=e.trace_id COLLATE BINARY AND child_event.source_adapter='copilot-otel'
+                     AND child_event.type='user.message' AND child_event.content_state='available'
+                     AND child_event.source_event_id=child.trace_id||'/'||child.span_id||'/input/'||CAST(CAST(substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9)<>''
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) NOT GLOB '*[^0-9]*'
+                   JOIN session_event_content child_content ON child_content.event_id=child_event.event_id
+                   JOIN retention_items child_item ON child_item.store_kind='session_event_content'
+                     AND child_item.source_item_id=child_event.event_id AND child_item.expires_at=child_content.expires_at
+                   WHERE envelope.trace_id=e.trace_id COLLATE BINARY AND envelope.category='agent_invocation'
+                     AND e.source_event_id=envelope.trace_id||'/'||envelope.span_id||'/input/'||CAST(CAST(substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9)<>''
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) NOT GLOB '*[^0-9]*'
+                     AND child_item.state IN ('expiring','retained_by_policy') AND child_item.read_denied_at IS NULL
+                     AND child_item.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
+                     AND child_item.captured_at=child_content.captured_at AND child_item.expires_at=child_content.expires_at
+                     AND local_workspace_retention_receipt_matches(child_item.store_instance_id,child_event.event_id,child_content.content_kind,
+                       child_content.captured_at,child_content.expires_at,child_event.session_id,child_event.run_id,child_event.source_adapter,
+                       child_event.source_event_id,child_content.retention_owner_token,child_item.ownership_receipt)=1
+                     AND child_item.deleted_at IS NULL AND child_item.error_code IS NULL
+                     AND (child_item.state='retained_by_policy' OR local_workspace_future(child_item.expires_at,$now)=1)
+                     AND child_content.content_json=c.content_json COLLATE BINARY))
+            """ : string.Empty;
+        var envelopeDuplicateExclusion = hasSpanRelationships ? """
+                 AND NOT (e.source_adapter='copilot-otel' AND EXISTS (
+                   SELECT 1 FROM monitor_spans envelope
+                   JOIN monitor_spans child ON child.trace_id=envelope.trace_id
+                     AND child.parent_span_id=envelope.span_id COLLATE BINARY AND child.category='llm_call'
+                   JOIN session_events child_event ON child_event.session_id=e.session_id
+                     AND child_event.trace_id=e.trace_id COLLATE BINARY AND child_event.source_adapter='copilot-otel'
+                     AND child_event.type='user.message' AND child_event.content_state='available'
+                     AND child_event.source_event_id=child.trace_id||'/'||child.span_id||'/input/'||CAST(CAST(substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9)<>''
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) NOT GLOB '*[^0-9]*'
+                   JOIN session_event_content child_content ON child_content.event_id=child_event.event_id
+                   WHERE envelope.trace_id=e.trace_id COLLATE BINARY AND envelope.category='agent_invocation'
+                     AND e.source_event_id=envelope.trace_id||'/'||envelope.span_id||'/input/'||CAST(CAST(substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9)<>''
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) NOT GLOB '*[^0-9]*'
+                     AND local_workspace_future(child_content.expires_at,$now)=1
+                     AND child_content.content_json=c.content_json COLLATE BINARY))
+            """ : string.Empty;
         var candidates = TableExists(connection, transaction, "retention_items")
-            ? """
+            ? $"""
               SELECT e.session_id,e.event_id,e.type,e.occurred_at,c.captured_at,c.expires_at source_expires_at,
                      CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END effective_expires_at,
                      local_workspace_label(e.type,c.content_json) label_text
               FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
               JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
                 AND i.expires_at=c.expires_at
-              WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
-                AND i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
+               WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
+              {retentionEnvelopeDuplicateExclusion}
+                 AND i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
                 AND i.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
                 AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at
                 AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,
@@ -2024,11 +2073,12 @@ internal static class LocalWorkspaceProjectionStore
                 AND (i.state='retained_by_policy' OR local_workspace_future(i.expires_at,$now)=1)
                 AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
               """
-            : """
+            : $"""
               SELECT e.session_id,e.event_id,e.type,e.occurred_at,c.captured_at,c.expires_at source_expires_at,c.expires_at effective_expires_at,local_workspace_label(e.type,c.content_json) label_text
               FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
-              WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
-                AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+               WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
+              {envelopeDuplicateExclusion}
+                 AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
                 AND local_workspace_future(c.expires_at,$now)=1
               """;
         var proofUpdate = labelProofInstalled

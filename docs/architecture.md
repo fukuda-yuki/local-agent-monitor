@@ -801,8 +801,11 @@ receipts and catalog-owned raw-expiry metadata. The complete DC156-01–19
 contract is `READY_FOR_IMPLEMENTATION` under the [Repository catalog
 authority](specifications/interfaces/local-repository-catalog.md) and its
 [DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
-Repository identity is never derived from name, path, CWD, prompt, time or
-cardinality. Issue #152 remains unresolved.
+Repository identity is never derived from name, path text, CWD text, prompt,
+time or cardinality. Exact native Copilot CLI Session metadata may use its CWD
+only to locate Git authority; identity is the accepted GitHub locator or a
+domain-separated opaque Git common-directory locator. Issue #152 remains
+unresolved.
 
 Repository/Session/Run/Trace/Span/Event/raw-record identities remain opaque and
 exact. Missing facts remain missing. Archive changes default eligibility only;

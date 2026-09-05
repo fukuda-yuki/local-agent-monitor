@@ -917,7 +917,11 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 FROM local_repositories AS repositories
                 LEFT JOIN local_repository_locator_heads AS heads
                   ON heads.repository_id=repositories.repository_id
-                 AND heads.kind='github_repository'
+                 AND heads.locator_id=(
+                    SELECT selected.locator_id FROM local_repository_locator_heads selected
+                    WHERE selected.repository_id=repositories.repository_id
+                    ORDER BY CASE selected.kind WHEN 'github_repository' THEN 0 ELSE 1 END
+                    LIMIT 1)
                 ORDER BY repositories.repository_id COLLATE BINARY;
                 """;
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);

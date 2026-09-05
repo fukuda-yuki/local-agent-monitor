@@ -1267,7 +1267,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         AddTextCases(cases, "local_repository_locators", "locator_sha256", 64);
         AddLiteralCases(cases, "local_repository_locators", "source");
         AddAsciiCases(cases, "local_repository_locators", "display_owner", 39);
-        AddAsciiCases(cases, "local_repository_locators", "display_repository", 100);
+        AddTextCases(cases, "local_repository_locators", "display_repository", 100);
         AddTextCases(cases, "local_repository_locators", "created_at", 33);
 
         AddTextCases(cases, "local_repository_locator_heads", "repository_id", 36);
@@ -1290,7 +1290,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         AddNullableAsciiCases(cases, "session_repository_observations", "canonical_locator", 151);
         AddNullableTextCases(cases, "session_repository_observations", "locator_sha256", 64);
         AddNullableAsciiCases(cases, "session_repository_observations", "display_owner", 39);
-        AddNullableAsciiCases(cases, "session_repository_observations", "display_repository", 100);
+        AddNullableTextCases(cases, "session_repository_observations", "display_repository", 100);
         AddLiteralCases(cases, "session_repository_observations", "source_surface");
         AddNullableTextCases(cases, "session_repository_observations", "source_application_version", 64);
         AddTextCases(cases, "session_repository_observations", "observed_at", 33);

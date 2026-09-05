@@ -41,7 +41,7 @@ Related canonical contracts:
 
 ## Scope and non-goals
 
-The catalog provides exact local Repository identity, immutable GitHub locator
+The catalog provides exact local Repository identity, immutable GitHub or opaque local Git locator
 history, exact provenance for Repository observations, deterministic Session
 assignment, manual assignment overrides, and virtual Repository scopes.
 
@@ -49,7 +49,7 @@ The following are not Repository identity or assignment authorities:
 
 - display names;
 - observed labels;
-- filesystem paths or current working directories;
+- filesystem path or current-working-directory text, except as the exact native-Session Git lookup location defined below;
 - prompt or response content;
 - timestamps or temporal proximity;
 - cardinality;
@@ -214,10 +214,10 @@ production lifecycle and referential shape.
 
 - `locator_id` primary key;
 - `repository_id` foreign key;
-- `kind`, closed to `github_repository`;
+- `kind`, closed to `github_repository` or `local_git_repository`;
 - `canonical_locator`;
 - `locator_sha256`;
-- `source`, closed to `observed` or `manual`;
+- `source`, closed to `observed` or `manual`; `local_git_repository` is always `observed`;
 - `display_owner`;
 - `display_repository`;
 - `created_at`;
@@ -372,18 +372,40 @@ ordinary Copilot installation. The observed CLI 1.0.82 and VS Code Copilot Chat
 key; those inputs do not support automatic Repository assignment. This does
 not establish the capability of other versions or configurations. Branches,
 commits, and working directories are not Repository identity authorities.
-When no accepted URL is sent, users create a Repository with **Add Repository**
-and manually assign it from the Session workspace. No collection setting or
-local Git lookup is implied by this workflow.
+For Copilot CLI only, when no accepted URL is sent, the exact native Session ID
+may select only `~/.copilot/session-state/{nativeSessionId}/workspace.yaml`.
+The bounded file must contain one exact matching top-level `id` and one absolute
+top-level `cwd`. That cwd is only a Git lookup location. When configured remotes
+yield exactly one distinct accepted canonical GitHub locator, that locator is
+used. When they yield none, Git's single absolute common management directory is
+normalized, domain-separated, and SHA-256 hashed as
+`local-git:<64 lowercase hex>`. Windows normalization uses the uppercase
+ordinal-ignore-case equivalent. The path is not stored. Worktrees sharing a
+common directory share one Repository; separate clones remain separate.
+Missing files, mismatched IDs, malformed metadata, unavailable Git,
+multiple conflicting GitHub remotes, or invalid common-directory output produce no
+observation and leave the Session unassigned. Implementations do not scan
+session-state, read `events.jsonl`, or
+infer identity from cwd text, branch, commit, tool paths, names, or cardinality.
+Other sources without an accepted URL use **Add Repository** and manual
+assignment.
 
-v1 reads exactly these two attribute keys:
+The local resolution is represented as an admitted observation at the matching
+OTLP span context with reserved attribute ordinal 2147483647. Its provenance key
+is `native_workspace_git_remote` with locator kind `github_repository`, or
+`native_workspace_git_common_dir` with locator kind `local_git_repository`.
+Its `observed_at` is acquisition time. Received approved URL occurrences take
+precedence; local resolution is attempted only when the received payload has no
+approved-key occurrence. Existing conflict handling therefore remains closed.
+
+v1 reads exactly these two received attribute keys:
 
 ```text
 vcs.repository.url.full
 copilot_chat.repo.remote_url
 ```
 
-No other field is approved as a Repository locator. A field that a future
+The two `native_workspace_git_*` values above are catalog-owned provenance keys, not received attributes. No other received field is approved as a Repository locator. A field that a future
 manifest might approve is ignored until a later current contract explicitly
 adds it. Implementations MUST NOT infer Repository identity from #152 drift
 candidates, source names, or display labels. These locator-key rules do not
@@ -969,7 +991,7 @@ invalid. These accepted scalar and safety bounds do not authorize a source key,
 scope, precedence, deduplication rule, deterministic order, or collection
 cardinality.
 
-A label MUST NOT be synthesized from locator/display components, filesystem
+A received observed-label candidate MUST NOT be synthesized from locator/display components, filesystem
 paths, Repository names, workspace labels, prompts, or adjacent metadata.
 
 ### Provenance scalars

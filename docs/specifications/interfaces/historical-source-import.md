@@ -76,6 +76,12 @@ storage/cache/databases, Claude or Copilot internal databases not covered by a
 published format, and other same-machine files discovered by exploratory
 scanning. User ownership of the machine does not make those stores supported.
 
+The Local Repository catalog has one narrow non-import exception: after an
+exact product Session to Copilot CLI native Session-ID binding, it may read only
+the bounded `workspace.yaml` `id` and `cwd` fields described by the catalog
+contract to locate configured Git remotes or Git's exact common management directory. It does not read `events.jsonl`,
+produce historical candidates, or grant any historical-import field authority.
+
 ## Tier B source decisions
 
 The source profile documents under `historical-import/v1/profiles` are the

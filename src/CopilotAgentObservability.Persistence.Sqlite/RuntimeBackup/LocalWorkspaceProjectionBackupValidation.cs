@@ -25,7 +25,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
         SqliteTransaction transaction,
         DateTimeOffset? publicationTime = null,
         ISkillRegistryGenerationAuthority? skillRegistryAuthority = null,
-        SqliteConnection? canonicalReplica = null)
+        SqliteConnection? canonicalReplica = null,
+        bool validateCanonicalProjection = true)
     {
         try
         {
@@ -111,7 +112,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
             }
             ValidateDurableSemanticGraph(connection, transaction);
             ValidateSdkFactGraph(connection, transaction, publicationTime);
-            ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
+            if (validateCanonicalProjection)
+                ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
             ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)

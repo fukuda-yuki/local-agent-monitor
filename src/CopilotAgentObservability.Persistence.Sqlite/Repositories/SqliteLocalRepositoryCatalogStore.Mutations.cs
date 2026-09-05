@@ -184,9 +184,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             if (owner is not null && !string.Equals(owner.RepositoryId, mutation.RepositoryId, StringComparison.Ordinal))
                 return ValueTask.FromResult<LocalRepositoryMutationResult>(new LocalRepositoryMutationRejected(LocalRepositoryMutationFailure.LocatorConflict));
 
-            var current = frontier.CurrentLocatorId is null
+            var currentGitHubLocatorId = ReadLocatorHead(connection, transaction, mutation.RepositoryId, "github_repository");
+            var current = currentGitHubLocatorId is null
                 ? null
-                : frontier.Locators.Single(locator => locator.LocatorId == frontier.CurrentLocatorId);
+                : frontier.Locators.Single(locator => locator.LocatorId == currentGitHubLocatorId);
             var target = owner is null
                 ? null
                 : frontier.Locators.SingleOrDefault(locator => locator.LocatorId == owner.LocatorId);
@@ -199,10 +200,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                 var locatorId = target?.LocatorId ?? NextId(now);
                 if (target is null)
                     InsertManualLocator(connection, transaction, locatorId, mutation.RepositoryId, mutation.Locator, timestamp);
-                if (frontier.CurrentLocatorId is null)
+                if (currentGitHubLocatorId is null)
                     InsertLocatorHead(connection, transaction, mutation.RepositoryId, locatorId, timestamp);
                 else
-                    UpdateLocatorHead(connection, transaction, mutation.RepositoryId, frontier.CurrentLocatorId, locatorId, timestamp);
+                    UpdateLocatorHead(connection, transaction, mutation.RepositoryId, currentGitHubLocatorId, locatorId, timestamp);
                 var nextRevision = checked(frontier.Revision + 1);
                 UpdateRepository(connection, transaction, mutation.RepositoryId, frontier.Revision, frontier.DisplayName, nextRevision, timestamp);
                 InsertRepositoryHistory(
@@ -216,7 +217,9 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                     locatorId,
                     validOperationKey,
                     timestamp);
-                frontier = frontier with { Revision = nextRevision, UpdatedAt = now, CurrentLocatorId = locatorId };
+                var currentIds = new HashSet<string>(frontier.CurrentLocatorIds, StringComparer.Ordinal) { locatorId };
+                if (currentGitHubLocatorId is not null) currentIds.Remove(currentGitHubLocatorId);
+                frontier = frontier with { Revision = nextRevision, UpdatedAt = now, CurrentLocatorId = locatorId, CurrentLocatorIds = currentIds };
             }
             var snapshot = RepositorySnapshot(frontier);
             callbackActive = true;
@@ -337,7 +340,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                 throw new InvalidOperationException("local_repository_store_binding_mismatch");
             var items = new List<LocalRepositoryLocatorItem>(frontier.Locators.Count);
             foreach (var locator in frontier.Locators
-                .OrderByDescending(item => string.Equals(item.LocatorId, frontier.CurrentLocatorId, StringComparison.Ordinal))
+                .OrderByDescending(item => frontier.CurrentLocatorIds.Contains(item.LocatorId))
                 .ThenBy(static item => item.CreatedAt)
                 .ThenBy(static item => item.LocatorId, StringComparer.Ordinal))
             {
@@ -379,12 +382,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                 }
                 items.Add(new(
                     locator.LocatorId,
-                    "github_repository",
+                    locator.Kind,
                     locator.CanonicalLocator,
                     locator.DisplayOwner,
                     locator.DisplayRepository,
                     locator.Source,
-                    string.Equals(locator.LocatorId, frontier.CurrentLocatorId, StringComparison.Ordinal),
+                    frontier.CurrentLocatorIds.Contains(locator.LocatorId),
                     locator.CreatedAt,
                     projected));
             }
@@ -535,39 +538,44 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             while (reader.Read())
             {
                 if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(reader.GetString(0))
-                    || reader.GetString(1) != "github_repository"
                     || reader.GetString(4) is not ("manual" or "observed")
-                    || !HasExactLocator(reader.GetString(2), reader.GetString(3), reader.GetString(5), reader.GetString(6))
+                    || !HasExactLocator(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(5), reader.GetString(6))
                     || !TryTimestamp(reader.GetString(7), out var locatorCreatedAt))
                     throw new InvalidOperationException("local_repository_frontier_corrupt");
-                locators.Add(new(reader.GetString(0), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6), locatorCreatedAt));
+                locators.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6), locatorCreatedAt));
             }
         }
         if (locators.Count > MaximumLocatorCount)
             throw new InvalidOperationException("local_repository_frontier_corrupt");
 
         string? currentLocatorId = null;
+        var currentLocatorIds = new HashSet<string>(StringComparer.Ordinal);
         using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = "SELECT kind,locator_id FROM local_repository_locator_heads WHERE repository_id=$repository_id;";
+            command.CommandText = """
+                SELECT kind,locator_id
+                FROM local_repository_locator_heads
+                WHERE repository_id=$repository_id
+                ORDER BY CASE kind WHEN 'github_repository' THEN 0 WHEN 'local_git_repository' THEN 1 ELSE 2 END
+                """;
             command.Parameters.AddWithValue("$repository_id", repositoryId);
             using var reader = command.ExecuteReader();
-            if (reader.Read())
+            while (reader.Read())
             {
-                if (reader.GetString(0) != "github_repository"
+                if (reader.GetString(0) is not ("github_repository" or "local_git_repository")
                     || !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(reader.GetString(1))
-                    || locators.Count(locator => locator.LocatorId == reader.GetString(1)) != 1)
+                    || locators.Count(locator => locator.LocatorId == reader.GetString(1) && locator.Kind == reader.GetString(0)) != 1)
                     throw new InvalidOperationException("local_repository_frontier_corrupt");
-                currentLocatorId = reader.GetString(1);
-                if (reader.Read())
+                currentLocatorId ??= reader.GetString(1);
+                if (!currentLocatorIds.Add(reader.GetString(1)) || currentLocatorIds.Count > 2)
                     throw new InvalidOperationException("local_repository_frontier_corrupt");
             }
         }
 
         ValidateRepositoryHistory(connection, transaction, repositoryId, revision, locators, currentLocatorId);
         var observedProvenance = ReadObservedProvenance(connection, transaction, repositoryId, locators);
-        return new(repositoryId, displayName, revision, createdAt, updatedAt, currentLocatorId, locators.AsReadOnly(), observedProvenance);
+        return new(repositoryId, displayName, revision, createdAt, updatedAt, currentLocatorId, currentLocatorIds, locators.AsReadOnly(), observedProvenance);
     }
 
     private static void ValidateRepositoryHistory(
@@ -841,6 +849,16 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         command.ExecuteNonQuery();
     }
 
+    private static string? ReadLocatorHead(SqliteConnection connection, SqliteTransaction transaction, string repositoryId, string kind)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT locator_id FROM local_repository_locator_heads WHERE repository_id=$repository_id AND kind=$kind;";
+        command.Parameters.AddWithValue("$repository_id", repositoryId);
+        command.Parameters.AddWithValue("$kind", kind);
+        return command.ExecuteScalar() as string;
+    }
+
     private static void UpdateLocatorHead(SqliteConnection connection, SqliteTransaction transaction, string repositoryId, string previousLocatorId, string locatorId, string timestamp)
     {
         using var command = connection.CreateCommand();
@@ -917,8 +935,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         _ => false,
     };
 
-    private static bool HasExactLocator(string canonicalLocator, string locatorSha256, string displayOwner, string displayRepository) =>
-        GitHubRepositoryLocatorParser.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository);
+    private static bool HasExactLocator(string kind, string canonicalLocator, string locatorSha256, string displayOwner, string displayRepository) =>
+        kind == "github_repository"
+            ? GitHubRepositoryLocatorParser.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository)
+            : kind == "local_git_repository"
+                && LocalGitRepositoryLocator.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository);
 
     private static bool TryTimestamp(string value, out DateTimeOffset timestamp)
     {
@@ -934,6 +955,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
     private sealed record LocatorOwner(string LocatorId, string RepositoryId);
     private sealed record RepositoryLocatorRow(
         string LocatorId,
+        string Kind,
         string CanonicalLocator,
         string LocatorSha256,
         string Source,
@@ -947,6 +969,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         DateTimeOffset CreatedAt,
         DateTimeOffset UpdatedAt,
         string? CurrentLocatorId,
+        IReadOnlySet<string> CurrentLocatorIds,
         IReadOnlyList<RepositoryLocatorRow> Locators,
         IReadOnlyDictionary<string, ObservedProvenanceRow> ObservedProvenance);
     private sealed record ObservedProvenanceRow(
