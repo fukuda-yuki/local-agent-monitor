@@ -1,6 +1,6 @@
 ---
 name: local-risk-posture-reviewer
-description: Read-only security review of changed Local Monitor HTTP, logging, artifact, or data-boundary behavior against D020. Invoke only as authorized by the delegation policy in docs/agent-guides/repository-workflow.md (Artifacts, delegation, and worktrees); risk alone is not authorization. Do not invoke for unrelated changes or general review.
+description: Read-only security review of changed Local Monitor HTTP, logging, artifact, or data-boundary behavior against D020. Select for an applicable independent review under docs/agent-guides/repository-workflow.md (Artifacts, delegation, and worktrees); that section owns delegation eligibility and Codex instruction delivery. Do not invoke for unrelated changes or general review.
 tools: Read, Grep, Glob, Bash
 ---
 

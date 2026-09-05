@@ -1,6 +1,6 @@
 ---
 name: async-ui-state-reviewer
-description: Read-only review of changed async UI selection, fetch/render, tab-switching, or focus behavior. Invoke only as authorized by the delegation policy in docs/agent-guides/repository-workflow.md (Artifacts, delegation, and worktrees); risk alone is not authorization. Do not invoke for unrelated UI work or general review.
+description: Read-only review of changed async UI selection, fetch/render, tab-switching, or focus behavior. Select for an applicable independent review under docs/agent-guides/repository-workflow.md (Artifacts, delegation, and worktrees); that section owns delegation eligibility and Codex instruction delivery. Do not invoke for unrelated UI work or general review.
 tools: Read, Grep, Glob
 ---
 

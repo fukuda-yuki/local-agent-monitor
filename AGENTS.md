@@ -15,7 +15,7 @@
 - GitHub Issues and Projects own bugs, unresolved work, future implementation, roadmaps, and implementation plans that must outlive the active conversation.
 - Pull Request reviews, GitHub Issue comments, and the final response own review findings, validation closeout, and task status. Git history owns implementation history.
 
-If task authority and a current specification conflict, state the conflict before editing. If the user's latest explicit decision resolves it, update the owning specification as part of the change; otherwise stop for a product decision.
+If task authority and a current specification conflict, state the conflict before editing. If the user's latest explicit decision resolves it, update the owning specification as part of the change; otherwise use [Autonomy And Confirmation](docs/agent-guides/repository-workflow.md#autonomy-and-confirmation) for the unresolved decision.
 
 ## Working Defaults
 
@@ -55,13 +55,9 @@ request and current contract.
 
 ## Execution Limits
 
-- For a non-trivial task, identify the goal, non-goals, acceptance criteria, intended change surface, what remains untouched, and verification before editing.
-- Limit changes to the smallest coherent diff required by the request, acceptance criteria, and affected contract.
-- Do not add unrequested abstractions, configurability, dependencies, compatibility paths, fallbacks, dual paths, parallel implementations, or adjacent cleanup.
-- Do not commit task-specific design drafts, implementation plans, review reports, validation closeout, status ledgers, or generated agent reports. Keep temporary coordination in the active conversation; put durable work tracking in the active GitHub Issue.
-- Prefer existing tests. Add a test only when changed observable behavior is not already protected.
-- If the change unexpectedly needs another production file or subsystem, a public interface, dependency, config layer, compatibility path, or test matrix, reduce the scope or replan before continuing.
-- Do not let a Skill, Sub-agent, Hook, or plan document expand task, test, documentation, or delegation scope.
+Use the workflow's [scope contract](docs/agent-guides/repository-workflow.md#pre-implementation-scope-contract), [new-test gate](docs/agent-guides/repository-workflow.md#new-test-gate), and [scope and replanning rule](docs/agent-guides/repository-workflow.md#scope-and-replanning). That rule distinguishes internal replanning from a user-blocking decision.
+
+The workflow also owns [artifact placement, bounded delegation, and worktrees](docs/agent-guides/repository-workflow.md#artifacts-delegation-and-worktrees). Skills, Sub-agents, Hooks, and plans do not independently expand the request or its verification.
 
 ## Information Placement
 
