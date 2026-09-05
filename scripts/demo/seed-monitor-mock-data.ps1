@@ -5,18 +5,27 @@
 
 .DESCRIPTION
     Posts every OTLP JSON payload under scripts\demo\payloads\ to the
-    monitor's POST /v1/traces endpoint. All payloads are fully synthetic
-    (demo- prefixed trace ids, fake user identity), so the script is safe
-    to run against any local monitor instance.
+    monitor's POST /v1/traces endpoint. Synthetic data still mutates the
+    destination DB. Use only a task-owned Monitor started with a fresh,
+    unused disposable DB under tmp and an isolated -RuntimeRoot. Never
+    target the normal capture DB or stop its Monitor to prepare a demo.
+    This script checks loopback/reachability, not DB disposability.
+    Follow .agents/skills/seed-demo/SKILL.md for instance verification.
 
     Run this once per monitor database. Re-running against the same
     database re-ingests the same trace ids as new raw records, which
     duplicates their spans in the span projection. For a clean demo,
-    restart the monitor with a fresh --db path and seed again.
+    start a new isolated demo runtime with a fresh explicit -DbPath.
+    Do not reuse or automatically delete an existing DB, even after a
+    partial seed failure.
+
+    Successful POSTs and the fixed wait do not prove projection completion
+    or UI coverage. The current / page is Repository selection; OTLP alone
+    does not prove Session lifecycle, Skill invocation, or Sub-agent data.
 
 .EXAMPLE
-    pwsh scripts\demo\seed-monitor-mock-data.ps1
-    pwsh scripts\demo\seed-monitor-mock-data.ps1 -MonitorUrl http://127.0.0.1:4320
+    # After verifying the task-owned demo instance and its fresh DB:
+    pwsh scripts\demo\seed-monitor-mock-data.ps1 -MonitorUrl http://127.0.0.1:4321
 #>
 param(
     [string] $MonitorUrl = 'http://127.0.0.1:4320'

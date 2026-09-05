@@ -43,6 +43,27 @@ available, and reports findings in a fixed per-finding format.
 - The D045 history-resend follow-up chat works with this focus like any
   other focus.
 
+## Task-Specific Necessity
+
+A missing instruction merits a finding only when bounded evidence identifies a
+specific unresolved requirement, ambiguity, or unmet task need. Absence of
+generic testing, evidence, planning, or review boilerplate alone is not a
+defect. An error or retry alone does not prove that the user's instructions
+caused it; distinguish an instruction gap from agent execution failure,
+unavailable evidence, and environment failure.
+
+When clarification is warranted, prefer the smallest task-local clarification.
+Task-local evidence does not justify a permanent repository-wide rule. The
+qualification governs finding selection, not free-text generation: the fixed
+gap/instruction templates, candidate schemas/eligibility, and automatic-
+application boundaries below remain unchanged. A repository scope hint is not
+approval to adopt a rule.
+
+Preserve the taxonomy and category-specific evidence minima, exact references,
+accepted-submission requirement, and supported/weak/incomplete distinctions.
+Zero findings remains valid. Static prompt and protocol checks do not establish
+a measured reduction in model false positives.
+
 ## Finding Taxonomy v1
 
 Coupling rule: a category exists in this taxonomy only together with a

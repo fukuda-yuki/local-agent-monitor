@@ -475,6 +475,13 @@ public class MonitorAnalysisRouteTests
         Assert.Contains("user_instruction", prompt);
         Assert.Contains("conversation", prompt);
         Assert.Contains("exact evidence references", prompt);
+        Assert.Contains("concrete task-specific need", prompt);
+        Assert.Contains("boilerplate alone is not a defect", prompt);
+        Assert.Contains("An error or retry alone does not prove", prompt);
+        Assert.Contains("agent execution failures, unavailable evidence, and environment failures", prompt);
+        Assert.Contains("prefer the smallest task-local clarification", prompt);
+        Assert.Contains("task-local evidence does not justify a permanent repository-wide rule", prompt);
+        Assert.Contains("not the fixed templates, evidence minima, or submission contract", prompt);
     }
 
     [Fact]

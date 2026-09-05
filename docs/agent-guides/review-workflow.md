@@ -1,54 +1,29 @@
 # Review Workflow Guidance
 
-This guide defines how agents should review repository changes before declaring work complete.
-It is repository guidance, not product behavior.
+This guide owns review and reporting rules, not product behavior.
 
 ## Review Depth
 
-Review depth should match risk.
-
-Use a self-review for documentation-only, typo-only, formatting-only, and other minor reversible changes.
-Use a deeper review for implementation changes, behavior changes, public interface changes, security-sensitive changes, data-safety boundaries, workflow changes, and broad refactors.
+Scale review to risk: self-review is sufficient for minor reversible documentation/formatting edits; use deeper inspection for behavior, interfaces, security/data boundaries, workflows, or broad refactors. Depth alone does not require delegation.
 
 ## Required Perspectives
 
-Check these perspectives before completion:
-
-- Spec compliance and functional correctness.
-- Tests, edge cases, and regression risk.
-- Maintainability, readability, and unnecessary complexity.
-- Data safety when telemetry, raw content, credentials, generated artifacts, or dashboard publication are involved.
-- Documentation consistency when product behavior, public interfaces, or user workflows change.
-- Information placement: comments record constraints and rejected alternatives rather than restating code; commit bodies record why the change was needed (`docs/agent-guides/information-placement.md`).
+Inspect the actual diff against the current owning specification and requested outcome. Check functional correctness, relevant regressions/edge cases, maintainability, and unnecessary complexity. Include data safety for raw/credential/artifact changes and documentation consistency for changed contracts or user workflows. Apply [information placement](information-placement.md) to edited artifacts.
 
 ## Over-implementation blocking check
 
-Review the final diff against [Simplicity And Change Scope](repository-workflow.md#simplicity-and-change-scope) and the [new-test gate](repository-workflow.md#new-test-gate). Unnecessary behavior, unused machinery, duplicated coverage, and extra artifacts remain blocking findings.
-
-Use [Scope and replanning](repository-workflow.md#scope-and-replanning) for newly discovered changes. A necessary file or line within the same authorized outcome is not a reason to remove the fix or request approval solely because it was unplanned. Review Sub-agent output by the same standard.
-
-This workflow owns current-specification consistency review. Do not duplicate that responsibility in another Sub-agent.
+Apply [change scope](repository-workflow.md#simplicity-and-change-scope) and the [new-test gate](repository-workflow.md#new-test-gate): unnecessary behavior, unused machinery, duplicated coverage, and extra artifacts are blocking findings. A necessary unplanned file within the same authorized outcome is not one; use [scope and replanning](repository-workflow.md#scope-and-replanning). Apply the same standard to worker output. Current-specification consistency is owned here, not by an additional generic reviewer.
 
 ## Finding Placement
 
-Put review findings in the Pull Request review, the active GitHub Issue comment, or the final response. Do not commit `review.md`, `fix-review.md`, traceability packages, validation closeout, or other task-specific review records.
-
-Only a durable architecture or policy decision that cannot be reconstructed from the current code and specification belongs in the owning current document or `docs/decisions.md`.
+Keep task findings and closeout in the PR review, active Issue comment, or final response, never a repository review/status artifact. Only durable architectural or policy rationale not reconstructable from code/specifications belongs in the owning document or `docs/decisions.md`.
 
 ## Self-Review Format
 
-When reporting a self-review, include:
+Report the scope and files/behavior actually inspected, relevant validation commands/results, evidence-backed defects (or none found), and residual risks/unverified scope. Findings are confirmed defects; successful comparisons belong in a brief coverage summary, not individual `OK` findings. Unread, inaccessible, truncated, or unexecuted required evidence remains unverified, not a successful check or automatically a specification defect.
 
-- scope reviewed;
-- files or behavior checked;
-- validation commands and results;
-- findings, or a clear statement that no blocking issues were found;
-- residual risks or unverified scope.
-
-Keep review notes factual. Update the current owning specification when review identifies a product-contract change.
+A report can find no defects in the inspected surface while retaining an unverified required boundary. It must not turn that partial result into complete verification or a passed required gate. Keep static inspection distinct from runtime execution and primary-agent self-review distinct from independent review. Update the owning specification when an authorized product-contract change is identified.
 
 ## Review Execution
 
-Follow the single [delegation policy and Codex reviewer delivery procedure](repository-workflow.md#artifacts-delegation-and-worktrees). Review depth does not itself require a Sub-agent.
-Regardless of who performs the review, inspect the diff directly, compare it with the current sources of truth, and apply the validation and result-reuse rules in [Impact-Based Validation](repository-workflow.md#impact-based-validation).
-Do not describe a primary-agent self-review as independent or delegated review.
+Use the single [delegation and reviewer-delivery policy](repository-workflow.md#artifacts-delegation-and-worktrees) and [validation/result-reuse rules](repository-workflow.md#impact-based-validation). Assess returned findings against the diff and current authority before integrating; do not claim delegated work or permission enforcement that did not occur.
