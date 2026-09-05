@@ -150,9 +150,12 @@ PII は **既定で表示されます**（server-rendered、inert text）。trac
 表示され、`GET /traces/{rawRecordId}/raw` でも個別の raw JSON を確認できます。
 raw-bearing route は same-origin 限定（cross-site は `403`）、`Cache-Control: no-store`。
 
-- `--sanitized-only` を付けて起動すると receiver / health / machine API 専用になり、
-  Razor Pages、human static assets、人向け画面、raw-local route を登録しません。
-  `/api/local-monitor/v1/*` や画面ごとの metadata-only 表示も提供しません。
+- `--sanitized-only` を付けて起動すると receiver-only になります。health と
+  `POST /v1/traces`、対応する machine API は残ります。Razor Pages、human static assets、
+  人向け画面、Doctor UI、runtime-backup の Web route、`/api/local-monitor/v1/*` は
+  登録せず、空 `404` と `Cache-Control: no-store` を返します。画面ごとの縮退 UI は
+  ありません。一致しない `/traces/.../raw` のような raw 風 path は、空 404 ではなく
+  既存の `unsupported_endpoint` JSON フォールバックを使います。
 - raw / PII は repository-safe artifacts には決して出力しません。raw store や一時出力
   を repository に commit しないでください。
 

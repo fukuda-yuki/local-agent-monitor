@@ -110,10 +110,16 @@ Start immediately without registering startup:
 .\scripts\start.ps1 -Mode Published
 ```
 
-For one-shot isolated operation, pass the same non-empty absolute runtime root
-to all three lifecycle commands. This relocates the default app, database,
-logs, state, and PID paths for those invocations only; it is not persisted in
-the startup task:
+Omitting `-RuntimeRoot` selects the default daily instance under
+`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\`. That is intentional
+daily-instance maintenance, not an isolated procedure.
+
+For one-shot isolated verification, pass the same fully-qualified runtime root
+to `start.ps1`, `status.ps1`, and `stop.ps1`. Isolated start must also pass the
+matching `-Url`, `-DbPath`, and `-InstallRoot` for that root so they do not
+target the daily `http://127.0.0.1:4320` instance or its default database.
+This relocates the default app, database, logs, state, and PID paths for those
+invocations only; it is not persisted in the startup task.
 
 An explicit-root lifecycle command accepts a healthy endpoint only when state,
 PID, process, URL, DB/install paths, mode, repository, and executable identity
@@ -123,10 +129,16 @@ normal default URL when the explicit root has no state.
 
 ```powershell
 $runtimeRoot = 'C:\private\local-monitor-isolated'
-.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot
+$monitorUrl = 'http://127.0.0.1:4321'
+$db = Join-Path $runtimeRoot 'raw-store.db'
+$installRoot = Join-Path $runtimeRoot 'app'
+.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot -Url $monitorUrl -DbPath $db -InstallRoot $installRoot
 .\scripts\status.ps1 -RuntimeRoot $runtimeRoot
 .\scripts\stop.ps1 -RuntimeRoot $runtimeRoot -Force
 ```
+
+Do not present `stop.ps1 -Force` without `-RuntimeRoot` as the isolated
+procedure; that command stops the default daily instance.
 
 Uninstall keeps DB and logs by default:
 
@@ -144,10 +156,14 @@ Remove runtime data only when explicitly intended:
 
 The loopback page `http://127.0.0.1:4320/backup-restore` creates an online
 SQLite backup and inspects a selected archive. It intentionally cannot restore
-the live database. Runtime backup ZIPs may contain raw prompts, responses, tool
-arguments, results, and PII. They are not repository-safe and are not purged by
-retention cleanup; `retention_backup_not_purged` records that operator-owned
-file boundary.
+the live database. Restore is CLI after the **intended** instance is stopped.
+`runtime-backup restore` requires `--bundle` and `--database`. Runtime backup
+ZIPs may contain raw prompts, responses, tool arguments, results, and PII. They
+are not repository-safe and are not purged by retention cleanup;
+`retention_backup_not_purged` records that operator-owned file boundary. A ZIP
+whose inspect `row_counts` show `local_ai_runs=0` proves **non-AI** restore
+only. It is not Session AI report restore. Node analysis is transient and is
+not Session history.
 
 For an extracted release, run the packaged Config CLI directly:
 
@@ -162,6 +178,11 @@ $db = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\raw-st
 Restore is an offline operation. Set the start parameters to the intended
 installed instance before stopping it; `stop.ps1` removes ephemeral process
 state and must not be used as the source of restart configuration.
+
+The next sample is **daily-instance maintenance**. `stop.ps1 -Force` without
+`-RuntimeRoot` stops the default daily instance. Do not use it as the isolated
+procedure. Start `-Url` / `-DbPath` / `-InstallRoot` and restore `--bundle` /
+`--database` name that same daily instance.
 
 ```powershell
 $cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
@@ -200,6 +221,51 @@ if ($startExitCode -ne 0) {
 }
 ```
 
+Isolated verification uses the same fully-qualified `-RuntimeRoot` for
+`start.ps1`, `status.ps1`, and `stop.ps1`. Start `-Url` / `-DbPath` /
+`-InstallRoot` and restore `--bundle` / `--database` must name that isolated
+database, not the daily instance.
+
+```powershell
+$cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
+$stopScript = '.\scripts\stop.ps1'
+$startScript = '.\scripts\start.ps1'
+$runtimeRoot = 'C:\private\local-monitor-isolated'
+$monitorUrl = 'http://127.0.0.1:4321'
+$db = Join-Path $runtimeRoot 'raw-store.db'
+$installRoot = Join-Path $runtimeRoot 'app'
+$bundle = 'C:\private\local-monitor-isolated-backup.zip'
+$sanitizedOnly = $false # Use $true only when restoring a receiver-only instance.
+$startParameters = @{
+    Mode = 'Published'
+    RuntimeRoot = $runtimeRoot
+    Url = $monitorUrl
+    DbPath = $db
+    InstallRoot = $installRoot
+    SanitizedOnly = $sanitizedOnly
+    NoBrowser = $true
+    WaitReady = $true
+}
+
+& $stopScript -RuntimeRoot $runtimeRoot -Force
+$stopExitCode = $LASTEXITCODE
+if ($stopExitCode -ne 0) {
+    exit $stopExitCode
+}
+
+& $cli runtime-backup restore --bundle $bundle --database $db
+$restoreExitCode = $LASTEXITCODE
+if ($restoreExitCode -ne 0) {
+    exit $restoreExitCode
+}
+
+& $startScript @startParameters
+$startExitCode = $LASTEXITCODE
+if ($startExitCode -ne 0) {
+    exit $startExitCode
+}
+```
+
 Capture `$LASTEXITCODE` immediately after each command as shown. In particular,
 never invoke `start.ps1` after a failed restore. With `-WaitReady`, the Published
 start succeeds only after `/health/ready` reports canonical `ready` or accepted
@@ -215,6 +281,9 @@ credentials, executables, PID/state, and logs are excluded as host-bound or
 ephemeral state.
 
 ## Repository Development Usage
+
+These commands omit `-RuntimeRoot` and therefore operate the default local
+development instance, not an isolated RuntimeRoot.
 
 ```powershell
 .\scripts\local-monitor\start.ps1
@@ -246,8 +315,12 @@ For all newly started processes under the current Windows user, use:
 ```
 
 Use `-SanitizedOnly` on `start.ps1` or `install-startup-task.ps1` to run a
-receiver/health/machine-API-only host. It does not register Razor Pages, human
-static assets, human routes, or `/api/local-monitor/v1/*`.
+receiver-only host. Health and `/v1/traces` remain. It does not register Razor
+Pages, human static assets, human routes, `/api/local-monitor/v1/*`, Doctor UI,
+or runtime-backup web routes; those return empty `404` with
+`Cache-Control: no-store`. This is not a per-screen reduced UI. Unmatched
+raw-looking paths such as `/traces/.../raw` still use the existing
+`unsupported_endpoint` JSON fallback (`Only /v1/traces is supported.`).
 
 ## Packaging
 

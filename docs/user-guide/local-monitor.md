@@ -21,11 +21,13 @@ Local Monitor v1 の基本操作は、リポジトリを選ぶ → Session Explo
 | リポジトリ選択 | `http://127.0.0.1:4320/` | リポジトリのカード、すべてのセッション、リポジトリ未設定のセッション |
 | Session Explorer | `/repositories/{repositoryId}/sessions` | リポジトリ内のセッションを検索・絞り込み、直接開く |
 | すべてのセッション / 未設定 | `/sessions` / `/sessions/unassigned` | リポジトリを指定しない調査、手動割り当て |
-| セッション詳細 | `/sessions/{sessionId}` | トークン、階層タイムライン、選択した記録のインスペクタ |
+| セッション詳細 | `/sessions/{sessionId}`（任意で `execution` / `node` / `analysis` / `settings`） | 「セッションの概要」「最初の指示」、状態（**状態未観測** を含む）、**最終観測**、トークン、階層タイムライン、「技術情報」 |
 | 比較 | Explorer の「比較を作成」→ `/repositories/{repositoryId}/comparisons/{comparisonId}` | 基準と比較対象の固定指標、利用可能件数、根拠への移動 |
 | 設定 | ヘッダーの「設定」 | 状態 / 受信 / AI設定 / リポジトリ / アーカイブ / 保存・バックアップ / 診断 |
 
-旧 `/traces` 一覧と `/historical-analysis` は廃止され、404 を返します。
+旧 `/traces` 一覧と `/historical-analysis` は廃止され、空 body の `404` と
+`Cache-Control: no-store` を返します。これは後述する受信フォールバックの
+`unsupported_endpoint` JSON とは別です。
 `/traces/{traceId}` は正確なトレースを調べる技術情報の画面として残ります。
 `/diagnostics`、`/historical-import`、`/backup-restore` は管理の詳細画面、
 `/alerts`、`/costs`、`/sanitized-import` は個別の用途の画面として引き続き利用できます。
@@ -50,24 +52,29 @@ Canvas、CLI と以下の既存 machine API は、この画面構成の変更で
 | `GET /api/alert-center/v2/alerts` | receipt v1/v2、multi-Session cost scope、pricing evidence、budget suppression を含む version-aware sanitized snapshot |
 | `POST /api/alert-center/v1/evaluations` | 特定の Session + trace を利用者が明示指定する評価。自動評価ではなく、現行 source manifest では receipt を作らず抑制状況を記録 |
 | `/api/costs/v1/*` | Cost configuration preview/commit、明示 recalculation/poll、Session estimate history、bounded analytics（POST は CSRF header 必須） |
-| `GET /traces/{traceId}/spans/{spanId}/detail` | スパンインスペクタ用の raw-bearing span 詳細（`--sanitized-only` 時は 404） |
+| `GET /traces/{traceId}/spans/{spanId}/detail` | スパンインスペクタ用の raw-bearing span 詳細（`--sanitized-only` では人向け route 不在のため空 `404` + `no-store`） |
 | `/api/sanitized-import/v1/*` | sanitized bundle の preview / 明示取り込み / history（same-origin、POST は CSRF header 必須） |
 | `POST /api/runtime-backup/v1/backups` | 稼働中 DB の online backup を作成（exact `{}`、CSRF header 必須） |
 | `GET /api/runtime-backup/v1/backups/{backup_id}` | online backup の作成結果を取得 |
 | `GET /api/runtime-backup/v1/backups/{backup_id}/archive` | process-owned backup archive をダウンロード |
 | `POST /api/runtime-backup/v1/previews` | 選択した backup ZIP の互換性と offline restore 前提を preview（`application/zip`、CSRF header 必須） |
-| `/api/doctor/*` | source に依存しない Doctor evaluation / verification の 5 route（後述、UI なし） |
+| `/api/doctor/*` | source に依存しない Doctor evaluation / verification の 5 route |
+| `/api/doctor/ui/v1/*` | 診断画面向けの Doctor UI proxy。`--sanitized-only` では空 `404` + `no-store` |
 | `/api/historical-import/v1/*` | 履歴 import の preview / confirmation / result / history / observation（sanitized、no-store） |
 
-HTTP restore endpoint はありません。restore は Local Monitor を停止し、Config CLI の
-`runtime-backup restore` だけで実行します。
+HTTP restore endpoint はありません。`/backup-restore` は作成と確認だけです。restore は
+**意図した対象**を停止したあと、Config CLI の `runtime-backup restore` だけで実行します。
+`--bundle` と `--database` は必須です。
 
 凍結済みの `/api/monitor/*`、`/api/session-workspace/*` v1 と SSE は sanitized metadata を返します。
 これに対し `/api/local-monitor/v1/*` はローカルの人向け UI 用で、raw 内容を含むため共有用 API ではありません。
 記録された指示やツール入出力は、保存期間と取得状態が許す範囲でローカル画面から確認できます。
-`--sanitized-only` では受信・health・対応する machine API だけを提供し、Razor Pages、
-human static assets、raw-local route、`/api/local-monitor/v1/*` を登録しません。
-画面ごとの metadata-only 表示はありません。
+`--sanitized-only` は receiver-only です。health と `POST /v1/traces`、対応する machine API は
+残ります。Razor Pages、human static assets、人向け画面、`/api/local-monitor/v1/*`、
+Doctor UI、runtime-backup の Web route は登録せず、空 body の `404` と
+`Cache-Control: no-store` を返します。画面ごとの縮退 UI はありません。
+一致しない raw 風の path（例: `/traces/.../raw`）は、この空 404 ではなく、既存の
+`unsupported_endpoint` JSON フォールバック（`Only /v1/traces is supported.`）を使います。
 
 ## 必要なもの
 
@@ -103,8 +110,25 @@ Task Scheduler 登録もしません。
 今すぐ起動する場合は `start.ps1 -Mode Published` を実行します。次回ログオン時から
 自動起動したい場合だけ、別途 Task Scheduler 登録を行います。
 
-一時的に通常のユーザー領域と分離する場合は、空でない絶対パスを同じ
-`-RuntimeRoot` として `start.ps1`、`status.ps1`、`stop.ps1` に渡します。この指定は
+```powershell
+.\scripts\install-startup-task.ps1 -Mode Published
+.\scripts\set-startup-task.ps1 -Action Disable
+.\scripts\set-startup-task.ps1 -Action Enable
+```
+
+日常 instance の停止・解除は `-RuntimeRoot` を省略します。省略時の対象は既定の
+`%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` であり、実装欠陥ではありません。
+この例を隔離検証の手順として使わないでください。
+
+```powershell
+.\scripts\stop.ps1 -Force
+.\scripts\uninstall-startup-task.ps1 -StopRunning
+```
+
+一時的に日常 instance と分離して検証する場合は、空でない完全修飾パスを同じ
+`-RuntimeRoot` として `start.ps1`、`status.ps1`、`stop.ps1` に渡します。
+隔離先の `-Url`、`-DbPath`、`-InstallRoot` も start に明示し、日常 instance の
+`http://127.0.0.1:4320` や既定 DB と混ぜないでください。この指定は
 既定の app、DB、logs、state、PID の場所をその実行だけ切り替え、Task Scheduler には
 保存されません。
 
@@ -115,23 +139,17 @@ state も削除せず `runtime_state_mismatch` で終了します。state がな
 
 ```powershell
 $runtimeRoot = 'C:\private\local-monitor-isolated'
-.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot
+$monitorUrl = 'http://127.0.0.1:4321'
+$db = Join-Path $runtimeRoot 'raw-store.db'
+$installRoot = Join-Path $runtimeRoot 'app'
+.\scripts\start.ps1 -Mode Published -RuntimeRoot $runtimeRoot -Url $monitorUrl -DbPath $db -InstallRoot $installRoot
 .\scripts\status.ps1 -RuntimeRoot $runtimeRoot
 .\scripts\stop.ps1 -RuntimeRoot $runtimeRoot -Force
 ```
 
-```powershell
-.\scripts\install-startup-task.ps1 -Mode Published
-.\scripts\set-startup-task.ps1 -Action Disable
-.\scripts\set-startup-task.ps1 -Action Enable
-```
-
-停止・解除:
-
-```powershell
-.\scripts\stop.ps1 -Force
-.\scripts\uninstall-startup-task.ps1 -StopRunning
-```
+`-InstallRoot` は、その隔離 instance が実行する Published app を指します。隔離先へ
+コピーした app でも、意図して共有する既存 install でも構いません。対象を省略した
+`stop.ps1 -Force` は日常 instance を停止します。
 
 uninstall は既定で DB / logs を保持します。明示的に削除したい場合のみ
 `-RemoveData -Force` を付けます。
@@ -156,7 +174,7 @@ dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\mon
 |---|---|---|
 | `--db` | `data/raw-store.db` | SQLite raw store のパス |
 | `--url` | `http://127.0.0.1:4320` | ループバック bind URL（非ループバックは拒否） |
-| `--sanitized-only` | off | receiver / health / machine API 専用モード。Razor Pages、human static assets、人向け画面、raw-local route、`/api/local-monitor/v1/*` を登録しない任意 opt-out。 |
+| `--sanitized-only` | off | receiver-only。health と `/v1/traces`、対応する machine API は残し、Razor Pages、human static assets、人向け画面、Doctor UI、runtime-backup の Web route、`/api/local-monitor/v1/*` を登録しない任意 opt-out。画面ごとの縮退 UI ではない。 |
 | `--pricing-registry-override <absolute-file>` | なし | estimated-cost 用の trusted local override registry。最大8回まで指定でき、指定順で bundled registry の後へ追加します。 |
 | `--apply-root user_config=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル user-config root |
 | `--apply-root skill=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル Skill root |
@@ -232,7 +250,8 @@ Windows では、Task Scheduler の user-level task として LocalMonitor を�
 
 既定では `http://127.0.0.1:4320` で起動し、DB / logs / state は
 `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下に保存します。
-receiver / health / machine API 専用で常時起動したい場合は `-SanitizedOnly` を付けます。
+receiver-only で常時起動したい場合は `-SanitizedOnly` を付けます。人向け画面の縮退表示では
+ありません。
 
 ```powershell
 .\scripts\local-monitor\install-startup-task.ps1 -SanitizedOnly -StartNow
@@ -251,7 +270,7 @@ Task Scheduler 登録 script は VS Code 設定を書き換えません。クラ
 monitor に向ける設定は、次の Step 2 の user environment script または Config CLI
 出力を使います。
 
-停止・解除:
+停止・解除（日常 instance。`-RuntimeRoot` 省略）:
 
 ```powershell
 .\scripts\local-monitor\stop.ps1 -Force
@@ -488,8 +507,8 @@ Estimated cost は invoice、billing/chargeback、quality improvement、effect v
 
 First-trace Doctor は、12 個の明示的な fact 区分を評価し、固定された 20 state から
 診断結果を返す、source に依存しない core です。直接呼び出し、Config CLI、Local Monitor
-HTTP は同じ `doctor.v1` result を返します。現時点の Doctor 範囲には proxy、
-Razor / JavaScript / Canvas UI はありません。
+HTTP は同じ `doctor.v1` result を返します。人向けの Doctor UI は設定の「診断」から開き、
+additive な `/api/doctor/ui/v1/*` proxy を使います。独立した primary 画面ではありません。
 
 ### Fact snapshot を評価する
 
@@ -586,7 +605,8 @@ setup の静的成功、`doctor evaluate` の処理成功、verification start �
 
 Copilot を使わなくても、リポジトリ同梱の合成モックデータで技術的なトレース詳細を試せます。
 このデータは Local Monitor v1 の全セッション操作や比較を保証するものではありません。
-モックデータは完全な合成データで（trace id は `demo-` プレフィックス、
+合成モックや空の AI 履歴から、インストール済みの Session AI レポート復元成功とは
+言えません。モックデータは完全な合成データで（trace id は `demo-` プレフィックス、
 `user.email` はダミー値）、実プロンプトや PII を含みません。
 
 ```powershell
@@ -637,10 +657,14 @@ Copilot CLI では exact native Session の bounded `workspace.yaml` にある�
 
 ### Session Explorer
 
-一覧の列は「セッション / 状態 / 要約 / トークン合計 / 開始」です。
-指示のラベル、スキル、ツールの検索に加え、期間、取得元、モデル、状態、記録の有無で絞り込み、
-「次のページ」で続きを開きます。行を開くとセッション詳細へ移動します。
-検索語とモデル条件は現在のページだけに保持され、再読み込みや戻る・進むでリセットされます。
+一覧の列は「セッション / 状態 / 要約 / 入力・出力トークン / 開始 / 最終観測」です。
+指示のラベル、スキル、ツールの検索に加え、「期間（開始 / 最終観測）」、取得元、モデル、
+状態、記録の有無で絞り込み、「次のページ」で続きを開きます。行を開くとセッション詳細へ
+移動します。検索語とモデル条件は現在のページだけに保持され、再読み込みや戻る・進むで
+リセットされます。
+ネイティブの開始が無い行は「最終観測」を示します。「観測活動」は確定ライフサイクルとは
+別の観測区間です。「状態未観測」はネイティブ時刻が未観測な状態であり、観測活動や実行時間が
+欠けていることではありません。
 
 「要約」はスキル、ツール、サブエージェント、エラー、再試行の記録を示します。
 未記録・取得元の非対応・記録の欠落・取得の安定性が未確認の状態を区別し、欠けた値を 0 にしません。
@@ -668,14 +692,18 @@ Copilot CLI では exact native Session の bounded `workspace.yaml` にある�
 
 ### セッション詳細
 
-見出しで指示、状態、取得元、時刻、アーカイブ状態、記録の制限を確認します。
+インスペクタの初期表示は「セッションの概要」です。「最初の指示」、状態（ネイティブ時刻が
+未観測のときは **状態未観測**）、取得元、時刻（開始が無いときは **最終観測**）、
+アーカイブ状態、取得範囲、「技術情報」を確認します。
+
 「トークン合計」は入力と出力、「入力トークンの内訳」はキャッシュから読み込みと新規入力を示し、
 取得できた場合はキャッシュ書き込みも別に表示します。ノードを選んでも上部の値はセッション全体です。
 
-入力・出力が記録されていても、取得元が合計値を送っていない場合、合計は入力と出力を足して補いません。
-上部の集計はセッション全体が対象のため、一部の実行に記録が欠けていると欠落表示が残りますが、
-実行ごとの記録では取得できた入力・出力を確認できます。セッションの完了状態は Hook の終了信号などの
-終了記録で判定する別の情報です。終了記録を受信しても、欠けたトークン値が補われるわけではありません。
+入力・出力が記録されていても、取得元が合計値やキャッシュ書き込みを送っていない場合、欠けた値は
+0 にも足し算にもしません。上部の集計はセッション全体が対象のため、一部の実行に記録が欠けていると
+欠落表示が残りますが、実行ごとの記録では取得できた入力・出力を確認できます。セッションの完了状態は
+Hook の終了信号などの終了記録で判定する別の情報です。終了記録を受信しても、欠けたトークン値が
+補われるわけではありません。
 
 階層タイムラインには実行ごとの Agent、スキル、ツール、サブエージェント等を表示し、
 最新の実行が初めに展開されます。ノードを選ぶとインスペクタで入出力、状態、関連する記録を確認できます。
@@ -683,17 +711,33 @@ Copilot CLI では exact native Session の bounded `workspace.yaml` にある�
 スキルの実行時スナップショットと現在のファイルは別の内容として確認してください。
 現在のファイルを過去の実行内容の代わりには扱いません。
 
+タイムラインの `user.message` や「イベント内容」があっても、概要の「最初の指示」が取得済みとは
+限りません。Copilot はラベル付きプロンプトをイベント内容として保存することがあります。
+指示パートの取得可否とタイムラインのイベント内容は別です。ツール呼び出しだけの
+assistant メッセージが非対応でも、応答が無いことではありません。Tool の内容と最終テキストは
+別に取得できることがあります。記録状態の「この取得元では記録できません」は取得元の種類そのものでは
+ありません。
+
+VS Code の local-git Session は「リポジトリ未設定のセッション」になることがあります。
+CLI で一意の GitHub remote が認められると自動割り当てされます。フォルダ名から GitHub
+リポジトリを推測しません。
+
 ### 任意の AI 分析
 
 「設定」→「AI設定」で GitHub Copilot の認証と利用準備を確認します。
 準備ができると「AIで分析」等の操作が現れ、利用者が明示したときだけ実行します。
 明示的に AI 操作を開始したときに、選択した内容が GitHub Copilot に送信されます。SQLite ファイル全体や任意の SQL を渡す機能ではありません。
+接続確認の成功は、選択したモデルが使えることや分析成功を保証しません。
 
-セッション全体のレポートは履歴に残り、「再分析」は新しい snapshot と結果を作ります。
-過去の分析は上書きされませんが、保存期限に従います。ノードの結果は一時的で履歴には入りません。
-リポジトリの選択範囲は実行前に対象を確認します。リポジトリ選択と比較の結果は 24 時間の運用用保存で、
-恒久的な履歴やバックアップには入りません。比較 AI は計算済みの比較結果を解釈し、値を再計算しません。
+セッション全体のレポートは耐久的な履歴です。URL の `analysis=` は特定の run を指し、
+`latest` ではありません。「再分析」は新しい snapshot と結果を作ります。過去の分析は
+上書きされませんが、保存期限に従います。ノードの分析結果は一時的で、セッション履歴にも
+runtime backup の恒久対象にもなりません。
+
+リポジトリ範囲の AI と比較 AI は無効／延期です。決定的な比較そのものは AI なしで利用できます。
 AI の所見と観測された事実は区別し、根拠リンクから確認します。AI の失敗でも通常の調査・比較は続けられます。
+AI 実行が無い backup ZIP や合成モックから、インストール済みの Session AI レポート復元成功とは
+言えません。
 
 ### アーカイブと復元
 
@@ -742,7 +786,7 @@ trace を開くと、パンくず・プロンプト見出し・状態ピル（�
 - **raw タブ**: `GET /traces/{traceId}/spans/{spanId}/detail` から取得した
   OTLP span JSON 全文を表示します（「JSON をコピー」付き）。整形抽出が
   できないスパンでも raw タブは常に機能します。
-- `--sanitized-only` では画面自体を登録せず、detail route も 404 です。
+- `--sanitized-only` では画面自体を登録せず、detail route も空 `404` + `no-store` です。
 
 ### エラー解析モード
 
@@ -796,7 +840,8 @@ migration / writer / projection worker / ingestion queue）、readiness しき�
 「リポジトリメタデータ診断」では、最近の受信データに含まれる属性キー、件数、
 `resource` / `span` / `event` のスコープ、分類だけを確認できます。属性値、リポジトリ名、
 URL、owner、ローカルパス、ユーザー情報は表示されません。`--sanitized-only` では
-診断画面を登録しませんが、対応する sanitized machine API は利用できます。
+診断画面と Doctor UI を登録せず空 `404` + `no-store` を返しますが、対応する
+sanitized machine API は利用できます。
 
 状態は `metadata_present`、`url_fallback_used`、`metadata_not_present`、
 `unsupported_candidate_present`、`unsafe_value_rejected` の 5 種類です。
@@ -907,11 +952,13 @@ raw を表示するページと route は次を満たします:
 - `Cache-Control: no-store`
 - HTML エスケープされた、実行されない text として描画（スクリプト実行なし）
 
-`--sanitized-only` を付けて起動すると receiver / health / machine API 専用になり、
-セッション画面 / trace 詳細を含む Razor Pages、human static assets、Copilot 解析ドロワー、
-raw-local route、`/api/local-monitor/v1/*` は登録されません。既知の人向け GET / HEAD は
-空 body の `404` と `Cache-Control: no-store` を返します。画面ごとの metadata-only
-fallback はありません。
+`--sanitized-only` を付けて起動すると receiver-only になります。health と
+`POST /v1/traces`、対応する machine API は残ります。セッション画面 / trace 詳細を含む
+Razor Pages、human static assets、Copilot 解析ドロワー、Doctor UI、runtime-backup の
+Web route、`/api/local-monitor/v1/*` は登録されません。これらの人向け GET / HEAD は
+空 body の `404` と `Cache-Control: no-store` を返します。画面ごとの縮退 UI はありません。
+一致しない `/traces/.../raw` のような raw 風 path は、空 404 ではなく既存の
+`unsupported_endpoint` JSON フォールバックを返します。
 
 raw store や表示内容には prompt / response / tool 情報が含まれる場合があります。
 raw store ファイル（`data\monitor.db` 等）を repository に commit しないでください。
@@ -955,13 +1002,18 @@ raw store ファイル（`data\monitor.db` 等）を repository に commit し�
 `http://127.0.0.1:4320/backup-restore` では、稼働中の Local Monitor DB から
 SQLite online backup を作成し、ダウンロードできます。選択した backup archive の
 互換性と復元前条件も同じ画面で確認できますが、Web UI から restore は実行できません。
+restore は **意図した対象**を停止したあとの CLI だけです。
 
 runtime backup は prompt / response / tool arguments / results を含み得る raw backup です。
 repository-safe ではなく、Retention cleanup の対象にもなりません。作成した ZIP は
 operator-owned file として安全な private storage に保管し、不要になったら利用者が削除して
 ください。`retention_backup_not_purged` はこの責任境界を示す固定 warning です。
+inspect の `row_counts` で `local_ai_runs` が 0 の ZIP は、非 AI データの復元だけを示します。
+Session AI レポートの復元成功ではありません。ノード分析は一時的で、この backup の恒久対象では
+ありません。
 
-展開した Release ZIP から、同梱の self-contained Config CLI を使う例:
+展開した Release ZIP から、同梱の self-contained Config CLI を使う例。`--database` は
+操作対象の DB を明示します。
 
 ```powershell
 $cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
@@ -971,14 +1023,18 @@ $db = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\raw-st
 & $cli runtime-backup preview --bundle C:\private\local-monitor-backup.zip --database $db
 ```
 
-restore は Local Monitor を停止してから実行します。既存 DB を置換する場合は、既定で
+restore は意図した Local Monitor を停止してから実行します。既存 DB を置換する場合は、既定で
 `runtime-backups/` に pre-restore backup が作られます。preview が
 `requires_confirmation=true` を返すのは、現在は欠落している非終端 raw source を backup
 から再導入する場合だけです。そのときだけ表示された `confirmation_digest` を同じ archive
 に対して明示的に渡せます。現在の tombstone / read denial は confirmation で解除できず、
 復元先へ必ず引き継がれます。`stop.ps1` は一時的な process state を削除するため、停止前に
-同じ installed instance へ戻す `Url` / `DbPath` / `InstallRoot` / `SanitizedOnly` を明示して
-ください。
+同じ対象へ戻す `Url` / `DbPath` / `InstallRoot` / `SanitizedOnly` を明示してください。
+
+次の例は **日常 instance の保守**です。`-RuntimeRoot` を省略した `stop.ps1 -Force` は
+既定の日常 instance を停止します。隔離検証の手順として使わないでください。
+start の `-Url` / `-DbPath` / `-InstallRoot` と restore の `--bundle` / `--database` は
+同じ日常 instance を指します。
 
 ```powershell
 $cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
@@ -1017,6 +1073,51 @@ if ($startExitCode -ne 0) {
 }
 ```
 
+隔離 instance の検証では、`start.ps1` / `status.ps1` / `stop.ps1` に同じ完全修飾
+`-RuntimeRoot` を渡し、start の `-Url` / `-DbPath` / `-InstallRoot` と restore の
+`--bundle` / `--database` が同じ隔離 DB を指すことを確認します。日常 instance の URL や
+既定 DB を流用しないでください。
+
+```powershell
+$cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
+$stopScript = '.\scripts\stop.ps1'
+$startScript = '.\scripts\start.ps1'
+$runtimeRoot = 'C:\private\local-monitor-isolated'
+$monitorUrl = 'http://127.0.0.1:4321'
+$db = Join-Path $runtimeRoot 'raw-store.db'
+$installRoot = Join-Path $runtimeRoot 'app'
+$bundle = 'C:\private\local-monitor-isolated-backup.zip'
+$sanitizedOnly = $false # receiver-only instance を復元するときだけ $true
+$startParameters = @{
+    Mode = 'Published'
+    RuntimeRoot = $runtimeRoot
+    Url = $monitorUrl
+    DbPath = $db
+    InstallRoot = $installRoot
+    SanitizedOnly = $sanitizedOnly
+    NoBrowser = $true
+    WaitReady = $true
+}
+
+& $stopScript -RuntimeRoot $runtimeRoot -Force
+$stopExitCode = $LASTEXITCODE
+if ($stopExitCode -ne 0) {
+    exit $stopExitCode
+}
+
+& $cli runtime-backup restore --bundle $bundle --database $db
+$restoreExitCode = $LASTEXITCODE
+if ($restoreExitCode -ne 0) {
+    exit $restoreExitCode
+}
+
+& $startScript @startParameters
+$startExitCode = $LASTEXITCODE
+if ($startExitCode -ne 0) {
+    exit $startExitCode
+}
+```
+
 `$LASTEXITCODE` は各コマンドの直後に保存します。restore が非 0 なら Published start は
 実行しません。`-WaitReady` を指定した start は `/health/ready` が canonical `ready` または
 許容される `degraded` を返した場合だけ成功し、`not_ready` または到達不能なら失敗します。
@@ -1031,7 +1132,7 @@ Local Monitor release を先に install し、restore 後に setup を再実行�
 
 - `data\monitor.db`、`data\monitor-*.db` は local runtime artifact です。repository に commit しないでください。
 - Task Scheduler 起動時の既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下に保存されます。これらも repository に commit しないでください。
-- 既定で raw body（prompt / response / tool arguments / results）と PII が表示されます。画面を持たない receiver / health / machine API 専用運用が必要な場合は `--sanitized-only` を付けて起動できます。
+- 既定で raw body（prompt / response / tool arguments / results）と PII が表示されます。画面を持たない receiver-only 運用が必要な場合は `--sanitized-only` を付けて起動できます。人向け画面の縮退表示ではありません。
 - モニターはループバックにのみバインドします。非ループバック URL は起動時に拒否されます。
 - ログに raw prompt / response / tool arguments / results は出力しません。
 
@@ -1121,9 +1222,11 @@ Copilot CLI から参照できます。Canvas extension は
 ### Local Monitor 姿勢
 
 Canvas adapter は通常起動の raw default Local Monitor と併用できます。
-`--sanitized-only` は Canvas 用の必須設定ではなく、receiver / health / machine API
-専用にしたい場合の任意モードです。このモードでは Local Monitor の人向け画面は
-登録されませんが、Canvas adapter が使用する sanitized machine API は利用できます。
+`--sanitized-only` は Canvas 用の必須設定ではなく、receiver-only にしたい場合の
+任意モードです。このモードでは Local Monitor の人向け画面、Doctor UI、runtime-backup
+の Web route は空 `404` + `no-store` になりますが、Canvas adapter が使用する
+sanitized machine API は利用できます。一致しない raw 風 path の `unsupported_endpoint`
+JSON フォールバックは変わりません。
 
 ### 必要なもの
 
@@ -1138,8 +1241,8 @@ Canvas adapter は通常起動の raw default Local Monitor と併用できま�
    dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\monitor.db --url http://127.0.0.1:4320
    ```
 
-   必要に応じて `--sanitized-only` を追加すると人向け画面と raw-local route を
-   登録しない receiver / health / machine API 専用ホストになります。
+   必要に応じて `--sanitized-only` を追加すると receiver-only ホストになります。
+   人向け画面の縮退表示ではなく、人向け route 自体が空 `404` + `no-store` です。
 
    `/health/ready` が `200 ready` を返すことを確認してください。
 

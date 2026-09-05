@@ -93,6 +93,7 @@ pwsh scripts\local-monitor\setup.ps1 plan --adapter claude-code --target cli
 
 ヘッダーの「設定」から受信、任意の AI、リポジトリ、アーカイブ、保存・バックアップ、診断を管理します。
 アーカイブは元に戻せる非表示操作です。削除や保存期間の延長ではありません。
+保存・バックアップ画面は作成と確認だけです。復元は意図した対象を停止してから CLI で行います。
 詳しくは [画面ガイド](user-guide/local-monitor.md#画面ガイド)を参照してください。
 
 ## Static Dashboard の画面イメージ
