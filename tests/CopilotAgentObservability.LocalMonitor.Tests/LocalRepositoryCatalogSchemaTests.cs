@@ -275,6 +275,57 @@ public sealed class LocalRepositoryCatalogSchemaTests
     }
 
     [Fact]
+    public void ExactLegacyCatalogMigration_PreservesRowsAndRequeuesOnlyCompletedRowsWithoutObservation()
+    {
+        using var database = new TestDatabase();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        Assert.True(GitHubRepositoryLocatorParser.TryParse("https://github.com/example/repo", out var legacyLocator));
+        var legacySourceIdentity = LocalRepositoryIdentityHashing.SourceIdentity(
+            LocalRepositorySourceIdentityInput.Span(3, 0, 0, 0, 0, "vcs.repository.url.full"));
+        var queueFingerprint1 = LocalRepositoryIdentityHashing.ReconciliationFingerprint(LocalRepositoryReconciliationEvidence.PayloadSha256(1, new string('d', 64)));
+        var queueFingerprint2 = LocalRepositoryIdentityHashing.ReconciliationFingerprint(LocalRepositoryReconciliationEvidence.PayloadSha256(2, new string('d', 64)));
+        var queueFingerprint3 = LocalRepositoryIdentityHashing.ReconciliationFingerprint(LocalRepositoryReconciliationEvidence.PayloadSha256(3, new string('d', 64)));
+        var before = new Dictionary<string, string>(StringComparer.Ordinal);
+        using (var connection = Open(database.Path))
+        {
+            var legacySql = Assert.IsType<string>(typeof(LocalRepositoryCatalogSchemaV1)
+                .GetField("LegacySchemaSql", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .GetValue(null));
+            Execute(connection, legacySql);
+            foreach (var trigger in LocalRepositoryCatalogSchemaV1.TriggerDefinitions)
+                Execute(connection, trigger.Sql);
+            Execute(connection, $"""
+                INSERT INTO schema_version(component,version) VALUES('local_repository_catalog',1);
+                INSERT INTO local_repository_reconciliation_state VALUES('local-repository-catalog-v1',NULL,'1970-01-01T00:00:00.0000000+00:00');
+                INSERT INTO local_repositories VALUES('01900000-0000-7000-8000-000000000001','Repo',1,'2026-08-01T00:00:00.0000000+00:00','2026-08-01T00:00:00.0000000+00:00');
+                INSERT INTO local_repository_locators VALUES('01900000-0000-7000-8000-000000000002','01900000-0000-7000-8000-000000000001','github_repository','{legacyLocator!.CanonicalLocator}','{legacyLocator.LocatorSha256}','observed','{legacyLocator.DisplayOwner}','{legacyLocator.DisplayRepository}','2026-08-01T00:00:00.0000000+00:00');
+                INSERT INTO local_repository_locator_heads VALUES('01900000-0000-7000-8000-000000000001','github_repository','01900000-0000-7000-8000-000000000002','2026-08-01T00:00:00.0000000+00:00');
+                INSERT INTO local_repository_operation_receipts VALUES('lrc1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',201,'application/json; charset=utf-8','no-store',X'7B7D','2026-08-01T00:00:00.0000000+00:00');
+                INSERT INTO local_repository_history VALUES('01900000-0000-7000-8000-000000000003','01900000-0000-7000-8000-000000000001','create',0,1,NULL,'user_operation','lrc1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',NULL,'2026-08-01T00:00:00.0000000+00:00');
+                INSERT INTO session_repository_observations VALUES('01900000-0000-7000-8000-000000000004','{legacySourceIdentity}',3,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',0,0,0,0,'span','vcs.repository.url.full','admitted','github_repository','{legacyLocator.CanonicalLocator}','{legacyLocator.LocatorSha256}','{legacyLocator.DisplayOwner}','{legacyLocator.DisplayRepository}','github-copilot-cli',NULL,'2026-08-01T00:00:00.0000000+00:00');
+                INSERT INTO local_repository_reconciliation_queue VALUES
+                  ('01900000-0000-7000-8000-000000000010',1,'payload_sha256','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','local-repository-catalog:1','{queueFingerprint1}','completed',3,NULL,NULL,NULL,'2026-08-01T00:00:00.0000000+00:00','2026-08-01T00:00:00.0000000+00:00'),
+                  ('01900000-0000-7000-8000-000000000011',2,'payload_sha256','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','local-repository-catalog:1','{queueFingerprint2}','failed_terminal',4,NULL,NULL,'catalog_parse_failure','2026-08-01T00:00:00.0000000+00:00','2026-08-01T00:00:00.0000000+00:00'),
+                  ('01900000-0000-7000-8000-000000000012',3,'payload_sha256','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','local-repository-catalog:1','{queueFingerprint3}','completed',2,NULL,NULL,NULL,'2026-08-01T00:00:00.0000000+00:00','2026-08-01T00:00:00.0000000+00:00');
+                """);
+            foreach (var table in new[] { "local_repository_locators", "local_repository_locator_heads", "session_repository_observations", "session_repository_observation_contexts", "local_repository_history" })
+                before.Add(table, Snapshot(connection, table));
+        }
+        using var migrated = Open(database.Path);
+        LocalRepositoryCatalogSchemaV1.Ensure(migrated);
+
+        Assert.True(LocalRepositoryCatalogSchemaV1.HasExactOwnedSchema(migrated, null));
+        foreach (var item in before)
+            Assert.Equal(item.Value, Snapshot(migrated, item.Key));
+        Assert.Equal(1L, ScalarLong(migrated, "SELECT COUNT(*) FROM local_repository_history;"));
+        Assert.Equal("pending", ScalarText(migrated, "SELECT state FROM local_repository_reconciliation_queue WHERE raw_record_id=1;"));
+        Assert.Equal("failed_terminal", ScalarText(migrated, "SELECT state FROM local_repository_reconciliation_queue WHERE raw_record_id=2;"));
+        Assert.Equal("completed", ScalarText(migrated, "SELECT state FROM local_repository_reconciliation_queue WHERE raw_record_id=3;"));
+        Assert.Equal(0L, ScalarLong(migrated, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
+        Assert.Throws<SqliteException>(() => Execute(migrated, "DELETE FROM local_repository_locators;"));
+    }
+
+    [Fact]
     public void OperationKeyValidation_RequiresCanonicalUnpaddedBase64Url32Bytes()
     {
         Assert.True(LocalRepositoryCatalogValidation.IsOperationKey("lrc1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));

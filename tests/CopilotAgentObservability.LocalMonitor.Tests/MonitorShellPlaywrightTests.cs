@@ -572,13 +572,20 @@ public class MonitorShellPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         var sourceResponse = "empty";
+        var nextAction = "none";
         await page.RouteAsync("**/api/monitor/source-diagnostics?limit=1", route => route.FulfillAsync(new()
         {
             Status = sourceResponse == "error" ? 503 : 200,
             ContentType = "application/json",
-            Body = sourceResponse == "supported"
-                ? "{\"items\":[{\"observation_id\":\"observation-1\",\"ingest_batch_id\":\"batch-1\",\"source_surface\":\"claude-code\",\"source_application_version\":null,\"source_adapter\":\"claude-code-otel\",\"adapter_version\":\"1\",\"schema_fingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"inventory_hash\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compatibility_state\":\"supported\",\"reason_codes\":[],\"unknown_span_count\":0,\"unknown_event_count\":0,\"unknown_attribute_count\":0,\"observed_at\":\"2026-08-30T01:00:00.0000000+00:00\",\"next_action\":\"none\"}],\"next_cursor\":null}"
-                : "{\"items\":[],\"next_cursor\":null}",
+            Body = sourceResponse is "empty" or "error" ? "{\"items\":[],\"next_cursor\":null}" : System.Text.Json.JsonSerializer.Serialize(new
+            {
+                items = new[] { new { observation_id = "observation-1", ingest_batch_id = "batch-1", source_surface = "claude-code",
+                    source_application_version = (string?)null, source_adapter = "claude-code-otel", adapter_version = "1",
+                    schema_fingerprint = "sha256:" + new string('a',64), inventory_hash = "sha256:" + new string('b',64),
+                    compatibility_state = sourceResponse, reason_codes = Array.Empty<string>(), unknown_span_count = 0,
+                    unknown_event_count = 0, unknown_attribute_count = 0, observed_at = "2026-08-30T01:00:00.0000000+00:00", next_action = nextAction } },
+                next_cursor = (string?)null,
+            }),
         }));
 
         await page.GotoAsync($"{host.Url}/sessions?settings=receiver", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
@@ -595,6 +602,21 @@ public class MonitorShellPlaywrightTests
         await page.Locator("[data-settings-navigation='state']").ClickAsync();
         await page.Locator("[data-settings-navigation='receiver']").ClickAsync();
         await Expect(receiver).ToContainTextAsync("取得元の互換性を確認済みです。");
+        foreach (var (state, action, label) in new[]
+        {
+            ("supported_with_unknown_fields", "review_unknown_fields", "未対応の項目"),
+            ("schema_drift_detected", "capture_fixture_and_review_mapping", "記録形式に変更"),
+            ("unsupported_source_version", "use_compatible_source_or_update_adapter", "版には対応"),
+            ("recognized_record_drop_detected", "restore_mapping_or_update_versioned_golden", "取り込み漏れ"),
+            ("adapter_failure", "validate_payload_and_protocol", "変換処理に失敗"),
+            ("unknown_state", "none", "取得元の状態を読み込めませんでした。"),
+        })
+        {
+            sourceResponse = state; nextAction = action;
+            await page.Locator("[data-settings-navigation='state']").ClickAsync();
+            await page.Locator("[data-settings-navigation='receiver']").ClickAsync();
+            await Expect(receiver).ToContainTextAsync(label);
+        }
         await Expect(receiver.Locator("[data-fact-state]")).ToHaveCountAsync(0);
         await Expect(receiver).Not.ToContainTextAsync("今回の記録にはありません");
 

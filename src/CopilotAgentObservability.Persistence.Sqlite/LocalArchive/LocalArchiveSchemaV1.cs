@@ -74,11 +74,14 @@ internal static class LocalArchiveSchemaV1
     }
 
     internal static void Validate(SqliteConnection connection, SqliteTransaction? transaction)
+        => Validate(connection, transaction, allowLegacyRepositoryCatalog: false);
+
+    internal static void Validate(SqliteConnection connection, SqliteTransaction? transaction, bool allowLegacyRepositoryCatalog)
     {
         ArgumentNullException.ThrowIfNull(connection);
         if (ReadDeclaredVersion(connection, transaction) != Version)
             Reject();
-        ValidateDependencies(connection, transaction);
+        ValidateDependencies(connection, transaction, allowLegacyRepositoryCatalog);
         if (!HasExactOwnedSchema(connection, transaction))
             Reject();
     }
@@ -122,13 +125,19 @@ internal static class LocalArchiveSchemaV1
 
     private static void ValidateDependencies(
         SqliteConnection connection,
-        SqliteTransaction? transaction)
+        SqliteTransaction? transaction,
+        bool allowLegacyRepositoryCatalog = false)
     {
         if (!SqliteSessionStore.IsCurrentSchemaValid(connection, transaction))
             throw DependencyInvalid();
         try
         {
-            LocalRepositoryCatalogSchemaV1.Validate(connection, transaction);
+            if (allowLegacyRepositoryCatalog)
+            {
+                if (!LocalRepositoryCatalogSchemaV1.HasExactSupportedBackupSchema(connection, transaction))
+                    throw new InvalidOperationException();
+            }
+            else LocalRepositoryCatalogSchemaV1.Validate(connection, transaction);
         }
         catch (InvalidOperationException)
         {

@@ -281,6 +281,8 @@ internal static class LocalRepositoryJson
         var locatorIds = new HashSet<string>(StringComparer.Ordinal);
         var canonicalLocators = new HashSet<string>(StringComparer.Ordinal);
         var currentCount = 0;
+        var currentKinds = new HashSet<string>(StringComparer.Ordinal);
+        var historicalStarted = false;
         LocalRepositoryLocatorItem? previousHistorical = null;
         for (var index = 0; index < value.Locators.Count; index++)
         {
@@ -290,17 +292,19 @@ internal static class LocalRepositoryJson
                 throw new InvalidOperationException("local_repository_wire_snapshot_invalid");
             if (item.IsCurrent)
             {
-                if (index != 0 || ++currentCount != 1)
+                if (historicalStarted || !currentKinds.Add(item.Kind) || ++currentCount > 2)
                     throw new InvalidOperationException("local_repository_wire_snapshot_invalid");
                 continue;
             }
+
+            historicalStarted = true;
 
             if (previousHistorical is not null && CompareLocatorOrder(previousHistorical, item) >= 0)
                 throw new InvalidOperationException("local_repository_wire_snapshot_invalid");
             previousHistorical = item;
         }
 
-        if (value.Locators.Count > 0 && currentCount != 1)
+        if (value.Locators.Count > 0 && currentCount < 1)
             throw new InvalidOperationException("local_repository_wire_snapshot_invalid");
     }
 
@@ -308,14 +312,17 @@ internal static class LocalRepositoryJson
     {
         if (item is null
             || !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(item.LocatorId)
-            || item.Kind != "github_repository"
+            || item.Kind is not ("github_repository" or "local_git_repository")
             || item.Source is not ("manual" or "observed")
+            || item.Kind == "local_git_repository" && item.Source != "observed"
             || item.Source == "manual" && item.Provenance is not null
             || item.Source == "observed" && item.Provenance is null
             || !IsUtcTimestamp(item.CreatedAt))
             throw new InvalidOperationException("local_repository_wire_snapshot_invalid");
 
-        if (!GitHubRepositoryLocatorParser.IsExact(item.CanonicalLocator, item.DisplayOwner, item.DisplayRepository))
+        if (!(item.Kind == "github_repository"
+            ? GitHubRepositoryLocatorParser.IsExact(item.CanonicalLocator, item.DisplayOwner, item.DisplayRepository)
+            : LocalGitRepositoryLocator.IsDisplayExact(item.CanonicalLocator, item.DisplayOwner, item.DisplayRepository)))
             throw new InvalidOperationException("local_repository_wire_snapshot_invalid");
         if (item.Provenance is { } provenance
             && (provenance.SourceSurface is not ("github-copilot-cli" or "github-copilot-vscode")

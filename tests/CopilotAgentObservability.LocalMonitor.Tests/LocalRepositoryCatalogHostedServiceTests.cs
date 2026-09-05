@@ -2,6 +2,7 @@ using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Telemetry;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
@@ -30,10 +31,10 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
         using var response = await host.Client.PostAsync("/v1/traces",
             new StringContent(DefaultIngressPayload(source, hasLocator), Encoding.UTF8, "application/json"));
         response.EnsureSuccessStatusCode();
-        await WaitForTerminalQueueAsync(temp.DatabasePath);
+        await WaitForSettledQueueAsync(temp.DatabasePath);
 
         using var connection = Open(temp.DatabasePath);
-        Assert.Equal("completed", ScalarText(connection, "SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(source == "copilot-cli" && !hasLocator ? "waiting_session" : "completed", ScalarText(connection, "SELECT state FROM local_repository_reconciliation_queue;"));
         Assert.Equal("raw-otlp", ScalarText(connection, "SELECT source_surface FROM source_schema_observations;"));
         Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM source_schema_observations WHERE source_application_version IS NULL;"));
         Assert.Equal(hasLocator ? 1 : 0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repositories;"));
@@ -46,6 +47,9 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
             using var transaction = connection.BeginTransaction();
             var reconciliation = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction);
             SqliteLocalRepositoryCatalogStore.ValidateRestorableAutomaticAdmissionState(connection, transaction, reconciliation);
+            transaction.Rollback();
+            var preflight = new SqliteRuntimeBackupService().PreflightForMigration(temp.DatabasePath);
+            Assert.True(preflight.Success, preflight.ErrorCode);
         }
     }
 
@@ -91,6 +95,14 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var connection = Open(databasePath);
         while (ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue WHERE state IN ('completed','failed_terminal');") == 0)
+            await Task.Delay(20, timeout.Token);
+    }
+
+    private static async Task WaitForSettledQueueAsync(string databasePath)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var connection = Open(databasePath);
+        while (ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue WHERE state IN ('completed','failed_terminal','waiting_session');") == 0)
             await Task.Delay(20, timeout.Token);
     }
 

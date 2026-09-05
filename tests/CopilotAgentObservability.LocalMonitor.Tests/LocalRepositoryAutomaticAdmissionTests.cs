@@ -13,6 +13,68 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalRepositoryAutomaticAdmissionTests
 {
     [Fact]
+    public async Task LocatorlessCopilotCliSpan_UsesExactNativeSessionLocator()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture(nativeLocatorResolver: _ => LocalRepositoryAdmissionFixture.GitHubLocator("https://github.com/Example/NativeRepo.git"));
+
+        await fixture.RunAsync(
+            LocalRepositoryAdmissionFixture.LocatorlessSpanPayload(LocalRepositoryAdmissionFixture.Trace(1), LocalRepositoryAdmissionFixture.Span(1)),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        Assert.Equal("github.com/example/nativerepo", fixture.ScalarText("SELECT canonical_locator FROM local_repository_locators;"));
+        Assert.Equal("assigned", fixture.ScalarText("SELECT new_state FROM session_repository_assignment_history;"));
+    }
+
+    [Fact]
+    public async Task LocatorlessCopilotCliSpan_UsesLocalGitCommonDirectoryIdentity()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture(
+            nativeLocatorResolver: _ => LocalGitRepositoryLocator.Create(Path.GetTempPath(), "LocalRepo"));
+
+        await fixture.RunAsync(
+            LocalRepositoryAdmissionFixture.LocatorlessSpanPayload(LocalRepositoryAdmissionFixture.Trace(1), LocalRepositoryAdmissionFixture.Span(1)),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        Assert.Equal("local_git_repository", fixture.ScalarText("SELECT kind FROM local_repository_locators;"));
+        Assert.Equal("native_workspace_git_common_dir", fixture.ScalarText("SELECT attribute_key FROM session_repository_observations;"));
+        Assert.Equal("assigned", fixture.ScalarText("SELECT new_state FROM session_repository_assignment_history;"));
+        fixture.ValidateRestorableCatalog();
+    }
+
+    [Fact]
+    public async Task LocatorlessCopilotCliSpan_UnavailableNativeLocatorRemainsUnassigned()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture(nativeLocatorResolver: _ => null);
+
+        await fixture.RunAsync(
+            LocalRepositoryAdmissionFixture.LocatorlessSpanPayload(LocalRepositoryAdmissionFixture.Trace(1), LocalRepositoryAdmissionFixture.Span(1)),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM local_repositories;"));
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+    }
+
+    [Fact]
+    public async Task LocatorlessCopilotCliSpan_WaitsForNativeBindingThenAssignsOnRetry()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture(
+            nativeLocatorResolver: _ => LocalGitRepositoryLocator.Create(Path.GetTempPath(), "LocalRepo"));
+        var payload = LocalRepositoryAdmissionFixture.LocatorlessSpanPayload(
+            LocalRepositoryAdmissionFixture.Trace(1), LocalRepositoryAdmissionFixture.Span(1));
+        var prepared = fixture.Prepare(payload, []);
+
+        await fixture.RunPreparedAsync(prepared);
+
+        Assert.Equal("waiting_session", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        fixture.InsertEvents([LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+        fixture.ResetQueueToPending();
+        await fixture.RunPreparedAsync(prepared);
+
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal("assigned", fixture.ScalarText("SELECT new_state FROM session_repository_assignment_history;"));
+    }
+
+    [Fact]
     public async Task SingleMemberPublicationFencePublishesRows()
     {
         using var fixture = new LocalRepositoryAdmissionFixture();
@@ -670,13 +732,15 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
     private readonly ILocalRepositoryReconciliationCheckpoint? reconciliationCheckpoint;
     private readonly TimeProvider processorTimeProvider;
     private readonly Func<DateTimeOffset, string> idFactory;
+    private readonly Func<string, ILocalRepositoryLocator?>? nativeLocatorResolver;
     private PreparedInput? current;
 
     internal LocalRepositoryAdmissionFixture(
         ILocalRepositoryAdmissionCheckpoint? checkpoint = null,
         ILocalRepositoryReconciliationCheckpoint? reconciliationCheckpoint = null,
         TimeProvider? processorTimeProvider = null,
-        Func<DateTimeOffset, string>? idFactory = null)
+        Func<DateTimeOffset, string>? idFactory = null,
+        Func<string, ILocalRepositoryLocator?>? nativeLocatorResolver = null)
     {
         this.checkpoint = checkpoint;
         this.reconciliationCheckpoint = reconciliationCheckpoint;
@@ -704,6 +768,7 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
             reconciliationCheckpoint);
         this.processorTimeProvider = processorTimeProvider ?? temp.TimeProvider;
         this.idFactory = idFactory ?? ids.Next;
+        this.nativeLocatorResolver = nativeLocatorResolver;
     }
 
     internal string DatabasePath => temp.DatabasePath;
@@ -798,7 +863,8 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         new LocalRepositoryAssignmentResolver(idFactory),
         processorTimeProvider,
         idFactory,
-        checkpoint);
+        checkpoint,
+        nativeCopilotCliLocatorResolver: nativeLocatorResolver);
 
     internal async Task<LocalRepositoryMutationResult> AttemptManualCreateAsync(
         string displayName,
@@ -858,6 +924,25 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
             updated_at='{Clock.GetUtcNow():O}'
         WHERE queue_id='{current?.QueueId ?? throw new InvalidOperationException("No prepared input exists.")}';
         """);
+
+    internal void InsertEvents(IEnumerable<EventInput> events)
+    {
+        using var connection = Open();
+        foreach (var item in events)
+            InsertEvent(connection, item);
+    }
+
+    internal void ValidateRestorableCatalog()
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        foreach (var methodName in new[] { "ValidateAutomaticAdmissionObservations", "ValidateAutomaticAdmissionContexts", "ValidateObservedLocatorCreation" })
+        {
+            typeof(SqliteLocalRepositoryCatalogStore)
+                .GetMethod(methodName, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .Invoke(null, [connection, transaction]);
+        }
+    }
 
     internal long DomainRowCount() => ScalarLong("""
         SELECT (SELECT COUNT(*) FROM local_repositories)
@@ -926,6 +1011,15 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         var items = string.Join(",", spans.Select(item =>
             $"{{\"traceId\":\"{item.TraceId}\",\"spanId\":\"{item.SpanId}\",\"attributes\":[{{\"key\":\"vcs.repository.url.full\",\"value\":{{\"stringValue\":\"{item.Locator}\"}}}}]}}"));
         return $"{{\"resourceSpans\":[{{\"scopeSpans\":[{{\"spans\":[{items}]}}]}}]}}";
+    }
+
+    internal static string LocatorlessSpanPayload(string traceId, string spanId) =>
+        $"{{\"resourceSpans\":[{{\"scopeSpans\":[{{\"spans\":[{{\"traceId\":\"{traceId}\",\"spanId\":\"{spanId}\"}}]}}]}}]}}";
+
+    internal static GitHubRepositoryLocator GitHubLocator(string value)
+    {
+        Assert.True(GitHubRepositoryLocatorParser.TryParse(value, out var locator));
+        return locator!;
     }
 
     internal static string ResourcePayload(string locator, params (string TraceId, string SpanId)[] spans)
@@ -1082,7 +1176,7 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         command.ExecuteNonQuery();
     }
 
-    private static void InsertEvent(SqliteConnection connection, EventInput input)
+    private void InsertEvent(SqliteConnection connection, EventInput input)
     {
         if (input.Disposition == EventDisposition.Missing)
             return;
@@ -1114,6 +1208,19 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         command.Parameters.AddWithValue("$type", "otel.span");
         command.Parameters.AddWithValue("$at", ObservedAt);
         command.ExecuteNonQuery();
+        if (nativeLocatorResolver is not null && input.Disposition != EventDisposition.Conflicting)
+        {
+            using var native = connection.CreateCommand();
+            native.CommandText = """
+                INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+                VALUES($session_id,'copilot-cli',$native_session_id,'native',$at)
+                ON CONFLICT(source_surface,native_session_id) DO NOTHING;
+                """;
+            native.Parameters.AddWithValue("$session_id", input.SessionId);
+            native.Parameters.AddWithValue("$native_session_id", "5e11f25a-a93b-4629-8d5f-f4f0afa8d548");
+            native.Parameters.AddWithValue("$at", ObservedAt);
+            native.ExecuteNonQuery();
+        }
     }
 
     private static void InsertQueue(SqliteConnection connection, string queueId, long rawRecordId, string digest)

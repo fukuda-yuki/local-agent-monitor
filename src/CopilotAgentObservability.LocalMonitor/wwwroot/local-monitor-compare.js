@@ -43,6 +43,7 @@
     ["completeness", "記録の完全性"], ["metric_availability", "指標の利用可能件数"],
   ]);
   const VALUE_LABELS = new Map([
+    ["observed_call_count", "観測呼出し数"], ["applicable_call_count", "対象呼出し数"], ["paired_input", "比率の対応入力"],
     ["invocation_count", "呼び出し回数"], ["call_count", "呼び出し回数"], ["failure_count", "失敗回数"],
     ["start_count", "開始回数"], ["completed_count", "完了回数"], ["failed_count", "失敗回数"], ["recorded_tokens", "トークン合計"],
     ["session_count", "セッション数"], ["available_session_count", "利用可能件数"], ["available_count", "利用可能件数"],
@@ -214,7 +215,10 @@
         const match = /^([a-z_]+)=([1-9][0-9]*)$/.exec(entry);
         if (!match) { renderFactState(target, "projection_invalid"); return; }
         if (index > 0) target.append(document.createTextNode("、"));
-        const item = element("span"); renderFactState(item, match[1]); item.append(document.createTextNode(`（${match[2]}件）`)); target.append(item);
+        const item = element("span");
+        if (match[1] === "not_observed") item.textContent = "未記録";
+        else renderFactState(item, match[1]);
+        item.append(document.createTextNode(`（${match[2]}件）`)); target.append(item);
       }
       return;
     }
@@ -248,6 +252,7 @@
   }
 
   function renderFactState(target, token) {
+    if (token === "not_observed") { target.textContent = "この比較値は未記録です"; return; }
     const presentations = {
       recorded: { state: "observed_positive", recordedCount: 1n },
       explicit_zero: { state: "observed_zero", recordedCount: 0n, hasCompleteCoverageProof: true, sourceText: "保存済み比較", reasonText: "保存時点で明示的に 0 です" },
@@ -296,14 +301,16 @@
     ["指標", "基準", "比較対象", "差"].forEach(label => headerRow.append(element("th", null, label)));
     head.append(headerRow);
     const body = element("tbody");
-    for (const result of items) {
+    const available = result => result.values.some(pair => /^[ab]_(median|total|count|distribution)$/.test(pair.key) && !["not_available", "none"].includes(pair.value));
+    for (const result of [...items].sort((left, right) => Number(available(right)) - Number(available(left)))) {
       const row = element("tr", "local-monitor-compare-result-heading");
       const indicator = element("th");
       indicator.append(element("div", null, result.display_name ?? rowLabel(result.row_key)));
       const baseline = element("td");
       const comparison = element("td");
       const difference = element("td");
-      const actions = element("div", "local-monitor-compare-evidence-actions");
+      const actions = element("details", "local-monitor-compare-evidence-actions");
+      actions.append(element("summary", null, "根拠を確認"));
       actions.style.display = "grid";
       for (const field of evidenceFields(result)) {
         const button = element("button", null, `${EVIDENCE_LABELS.get(field)}の根拠を表示`);
@@ -313,18 +320,37 @@
         actions.append(button);
       }
       indicator.append(actions);
-      for (const pair of result.values) {
+      const missingShown = new Set();
+      for (const pair of [...result.values].sort((left, right) => Number(left.value === "not_available") - Number(right.value === "not_available"))) {
         if (pair.key === "display_name" || pair.key === "sort_key") continue;
+        if (pair.key.endsWith("_unavailable_states") && pair.value === "none") continue;
         const cohort = pair.key.startsWith("a_") ? "a" : pair.key.startsWith("b_") ? "b" : null;
         const structuralKey = cohort === null ? pair.key : pair.key.slice(2);
         const isDifference = structuralKey === "absolute_difference" || structuralKey === "relative_difference"
           || structuralKey === "relative_difference_percent" || structuralKey.endsWith("_absolute_difference")
           || structuralKey.endsWith("_relative_difference") || structuralKey.endsWith("_relative_difference_percent");
         const owner = cohort === "a" ? baseline : cohort === "b" ? comparison : isDifference ? difference : indicator;
+        if (pair.value === "not_available") {
+          if (missingShown.has(owner)) continue;
+          missingShown.add(owner);
+          const relativeBase = structuralKey.replace(/_?relative_difference(_percent)?$/, "");
+          const zeroBaseline = /relative_difference/.test(structuralKey)
+            && result.values.some(value => value.key === `a_${relativeBase ? `${relativeBase}_` : ""}median` && value.value === "0");
+          const reason = zeroBaseline ? "基準が0のため、相対差は計算できません。"
+            : isDifference ? "比較可能な値が揃っていません。"
+            : result.row_key === "session_duration" ? "確定したSessionの開始・終了が未記録です。観測活動範囲とは別の値です。"
+            : result.row_key.endsWith("versions") ? "取得元の版が未記録です。互換性の判定とは別です。"
+            : /tokens|cache|input/.test(result.row_key) ? "この成分の比較値が未記録です。記録された他の成分は利用できます。"
+            : "この呼出し・活動の比較値が未記録です。未使用やゼロとは断定できません。";
+          owner.append(element("p", null, reason));
+          continue;
+        }
         const fact = element("div", "local-monitor-compare-fact");
         fact.append(element("span", null, valueLabel(structuralKey)));
         const value = element("span");
-        renderStoredValue(value, pair);
+        if (result.row_key === "cache_read_ratio" && /^[ab]_(median|minimum|maximum)$/.test(pair.key) && /^\d+(\.\d+)?$/.test(pair.value))
+          value.textContent = `${(Number(pair.value) * 100).toFixed(2)}%`;
+        else renderStoredValue(value, pair);
         fact.append(value);
         owner.append(fact);
       }

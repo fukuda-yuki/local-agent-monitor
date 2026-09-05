@@ -176,7 +176,7 @@
   }
 
   function tokens(value) {
-    if (!(exact(value, TOKEN_KEYS) && oneOf(value.authority, ["session_run", "llm_span", "mixed", "none"])
+    if (!(exact(value, Object.hasOwn(value ?? {}, "observed_components") ? [...TOKEN_KEYS, "observed_components"] : TOKEN_KEYS) && oneOf(value.authority, ["session_run", "llm_span", "mixed", "none"])
       && FACT_STATES.has(value.state) && nonnegative(value.available_execution_count) && nonnegative(value.total_execution_count)
       && value.available_execution_count <= value.total_execution_count
       && ["input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input"].every(key => scalarFact(value[key], "value"))
@@ -191,6 +191,19 @@
         && (!derivedInputsValid || value.new_input.value !== value.input.value - value.cache_read.value)) return false;
     if (value.cache_read_ratio_basis_points.state === "recorded"
         && (!derivedInputsValid || value.input.value === 0)) return false;
+    if (value.observed_components !== undefined) {
+      const keys = ["input", "output", "total", "reasoning", "cache_read", "cache_creation", "cache_read_ratio_basis_points"];
+      if (!exact(value.observed_components, keys) || !keys.every(key => {
+        const item = value.observed_components[key];
+        return exact(item, ["subtotal", "observed_call_count", "applicable_call_count", "paired_input"])
+          && scalarFact(item.subtotal, "value", key === "cache_read_ratio_basis_points" ? 10000 : undefined)
+          && nonnegative(item.observed_call_count) && item.applicable_call_count === value.total_execution_count
+          && item.observed_call_count <= item.applicable_call_count
+          && (item.subtotal.state !== "recorded" || item.observed_call_count > 0)
+          && (key === "cache_read_ratio_basis_points" ? item.paired_input === null || nonnegative(item.paired_input) : item.paired_input === null)
+          && (key !== "cache_read_ratio_basis_points" || item.subtotal.state !== "recorded" || item.paired_input > 0);
+      })) return false;
+    }
     return true;
   }
 
@@ -228,10 +241,10 @@
       && value.candidate_repository_ids.length <= 128 && distinct(value.candidate_repository_ids)
       && sorted(value.candidate_repository_ids) && value.candidate_repository_ids.every(id => UUID_V7.test(id)))) return false;
     return value.state === "assigned" && oneOf(value.authority, ["automatic", "manual"])
-        && value.repository_id !== null && value.candidate_repository_ids.length === 0
-      || value.state === "unassigned" && value.authority === "none" && value.repository_id === null && value.candidate_repository_ids.length === 0
-      || value.state === "explicitly_unassigned" && value.authority === "manual" && value.repository_id === null && value.candidate_repository_ids.length === 0
-      || value.state === "conflict" && value.authority === "automatic" && value.repository_id === null && value.candidate_repository_ids.length >= 2;
+        && value.repository_id !== null
+      || value.state === "unassigned" && value.authority === "none" && value.repository_id === null
+      || value.state === "explicitly_unassigned" && value.authority === "manual" && value.repository_id === null
+      || value.state === "conflict" && value.authority === "automatic" && value.repository_id === null;
   }
 
   const archive = value => exact(value, ["state", "revision", "effectively_eligible", "exclusion_reason"])
@@ -258,7 +271,7 @@
 
   function validate(summary) {
     if (!exact(summary, ROOT_KEYS) || summary.schema_version !== "local-monitor-session-summary.response.v2"
-        || !REVISION.test(summary.workspace_revision) || !exact(summary.session, SESSION_KEYS)
+        || !REVISION.test(summary.workspace_revision) || !exact(summary.session, Object.hasOwn(summary.session ?? {}, "observed_activity") ? SESSION_KEYS.flatMap(key => key === "timing" ? [key, "observed_activity"] : [key]) : SESSION_KEYS)
         || summary.session.session_id !== root.dataset.sessionId || !UUID_V7.test(summary.session.session_id)
         || !oneOf(summary.session.status, ["active", "completed", "failed", "unknown"])
         || !oneOf(summary.session.completeness, ["unbound", "partial", "rich", "full"])
@@ -275,6 +288,10 @@
         || !distinct(summary.technical_references.native_session_ids) || !sorted(summary.technical_references.native_session_ids)
         || summary.technical_references.trace_ids.some(value => typeof value !== "string" || !/^[0-9a-f]{32}$/.test(value))
         || !distinct(summary.technical_references.trace_ids) || !sorted(summary.technical_references.trace_ids)) throw new TypeError("invalid Session summary");
+    const range = summary.session.observed_activity;
+    if (range !== undefined && (!exact(range, ["started_at", "ended_at", "duration_ms"])
+        || !instant(range.started_at) || !instant(range.ended_at) || range.ended_at < range.started_at
+        || !nonnegative(range.duration_ms))) throw new TypeError("invalid observed activity");
     let latest = 0;
     for (const execution of summary.executions) {
       if (!exact(execution, ["execution_id", "node_id", "latest", "source_ordinal", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"])
@@ -590,14 +607,16 @@
         renderExecutions();
       });
       section.append(toggle);
-      if (unavailableFacts.length) {
+      if (memory.open && unavailableFacts.length) {
+        const disclosure = el("details", "local-monitor-session-execution-facts");
+        disclosure.append(el("summary", null, `記録状態を確認（${format(unavailableFacts.length)}項目）`));
         const facts = el("div"); facts.dataset.executionFactSummary = "";
         for (const [key, label, fact] of unavailableFacts) {
           const row = el("div"); row.dataset.executionFact = key; row.append(el("span", null, `${label}: `)); const presentation = row.appendChild(el("div")); renderFact(presentation, fact);
           if (!presentation.querySelector("p")) presentation.append(el("p", null, `${label}の記録状態はまだ確定していません。`));
           facts.append(row);
         }
-        section.append(facts);
+        disclosure.append(facts); section.append(disclosure);
       }
       if (memory.open) {
         const scroll = el("div", "local-monitor-session-execution-scroll"); scroll.dataset.executionScroll = ""; scroll.setAttribute("role", "tree"); scroll.setAttribute("aria-label", "実行タイムライン");
@@ -929,7 +948,7 @@
       setBackgroundInert(true);
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
-    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); });
+    const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); openNarrowInspector(root.querySelector("[data-session-overview-open]")); });
     section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
     if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
@@ -949,7 +968,11 @@
     } else if (node.kind === "subagent") {
       for (const [key, label] of [["selected", "選択"], ["started", "開始"], ["completed", "完了"], ["failed", "失敗"], ["deselected", "選択解除"]]) appendInspectorFact(section, label, metadata.lifecycle[key]);
       for (const [key, label] of [["skill", "スキル活動"], ["tool", "ツール活動"], ["subagent", "サブエージェント活動"], ["error", "エラー活動"], ["retry", "再試行活動"]]) appendInspectorFact(section, label, metadata.activity[key], "count");
-      for (const [key, label] of [["input", "入力トークン"], ["output", "出力トークン"], ["total", "トークン合計"], ["reasoning", "推論トークン"], ["cache_read", "キャッシュから読み込み"], ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"]]) appendInspectorFact(section, label, metadata.tokens[key]);
+      for (const [key, label] of [["input", "入力トークン"], ["output", "出力トークン"], ["total", "トークン合計"], ["reasoning", "推論トークン"], ["cache_read", "キャッシュから読み込み"], ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"], ["cache_read_ratio_basis_points", "cache比率（basis points）"]]) {
+        const observed = metadata.tokens.observed_components?.[key];
+        appendInspectorFact(section, label, observed?.subtotal ?? metadata.tokens[key]);
+        if (observed) section.append(el("small", null, `観測小計 ${format(observed.observed_call_count)}/${format(observed.applicable_call_count)} 呼出し${observed.paired_input === null ? "" : ` · 対応入力 ${format(observed.paired_input)}`}`));
+      }
       appendInspectorFact(section, "子項目", metadata.children, "count");
     } else if (node.kind === "error") {
       appendInspectorFact(section, "エラーコード", metadata.error_code); appendInspectorFact(section, "状態", metadata.status, "value", value => STATUS_LABELS[value]);
@@ -964,6 +987,11 @@
     if (detail.parent_path.length) { section.append(el("h3", null, "親項目の経路")); const path = el("ol"); for (const item of detail.parent_path) path.append(el("li", null, item.name.state === "recorded" ? item.name.text : KIND_LABELS[item.kind])); section.append(path); }
     appendRelated(section, "再試行", detail.related.retry); appendRelated(section, "復旧", detail.related.recovery); appendRelated(section, "子項目", detail.related.children);
     const refs = node.technical_references; const technical = el("details"); const referenceLabels = { source_kind: "取得元の種類", source_identity: "取得元ID", trace_id: "トレースID", span_id: "スパンID", event_id: "イベントID" }; technical.append(el("summary", null, "技術情報")); for (const key of ["source_kind", "source_identity", "trace_id", "span_id", "event_id"]) if (refs[key] !== null) technical.append(el("p", null, `${referenceLabels[key]}: ${refs[key]}`)); section.append(technical);
+    if (refs.trace_id !== null) {
+      const evidence = el("a", null, "対応するトレースの証拠を開く");
+      evidence.href = `/traces/${encodeURIComponent(refs.trace_id)}${refs.span_id === null ? "" : `?span=${encodeURIComponent(refs.span_id)}`}`;
+      section.append(evidence);
+    }
     inspector.append(section);
     if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
@@ -1094,8 +1122,22 @@
     const close = el("button", "local-monitor-session-inspector-close", "閉じる"); close.type = "button"; close.dataset.inspectorClose = ""; close.setAttribute("aria-label", "インスペクターを閉じる"); close.addEventListener("click", closeInspector); return close;
   }
 
+  function openNarrowInspector(returnFocus = document.activeElement) {
+    if (!narrowInspector.matches) return;
+    inspectorReturnFocus = returnFocus;
+    if (!inspector.querySelector("[data-inspector-close]")) inspector.prepend(createInspectorClose());
+    inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
+    setBackgroundInert(true); requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
+  }
+
   function normalizeInspectorBreakpoint(event) {
     if (event.matches) {
+      if (state.selectedNodeId === null) {
+        inspector.setAttribute("aria-hidden", "true");
+        inspector.removeAttribute("role"); inspector.removeAttribute("aria-modal");
+        inspector.querySelector("[data-inspector-close]")?.remove();
+        setBackgroundInert(false); inspectorReturnFocus = null; return;
+      }
       inspectorReturnFocus = state.selectedNodeId ? { executionId: state.selectedExecutionId, nodeId: state.selectedNodeId } : document.activeElement;
       if (!inspector.querySelector("[data-inspector-close]")) inspector.prepend(createInspectorClose());
       inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
@@ -1113,7 +1155,7 @@
     root.querySelector("[data-session-breadcrumb]").textContent = sessionLabel;
     root.querySelector("[data-session-title]").textContent = sessionLabel;
     const context = root.querySelector("[data-session-context-content]");
-    context.replaceChildren(el("strong", null, sessionLabel), el("span", null, ` ${session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : STATUS_LABELS[session.status]}`));
+    context.replaceChildren(el("span", null, session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : STATUS_LABELS[session.status]));
     const source = el("span"); source.dataset.sessionSource = "";
     if (session.source.state === "recorded") source.textContent = session.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel).join(" / ");
     else renderFact(source, { state: session.source.state, count: null });
@@ -1123,6 +1165,7 @@
     else if (session.timing.last_seen_at !== null) time.textContent = `最終観測 ${session.timing.last_seen_at}`;
     else renderFact(time, { state: session.timing.state, count: null });
     context.append(source, time);
+    if (session.observed_activity) context.append(el("span", null, `観測活動範囲 ${session.observed_activity.started_at} – ${session.observed_activity.ended_at} · ${format(session.observed_activity.duration_ms)} ms（確定ライフサイクルとは別）`));
     if (session.archive.state !== "active") context.append(el("span", null, " アーカイブ済み"));
     if (session.capture.state !== "complete") context.append(el("span", null, " 記録に制限があります"));
     if (session.capture.notes.includes("source_unsupported")) context.append(el("span", null, " この取得元では、一部のメッセージ形式に対応していません"));
@@ -1135,7 +1178,9 @@
         && session.tokens.total.value === session.tokens.input.value + session.tokens.output.value) {
       renderBars(total, session.tokens.input, session.tokens.output, "local-monitor-token-bar", "入力", "出力");
     }
-    const cache = tokenMetric("入力トークンの内訳", session.tokens.cache_read_ratio_basis_points, value => `${format(value / 100)}%`);
+    const observedRatio = session.tokens.observed_components?.cache_read_ratio_basis_points;
+    const cache = tokenMetric("観測した入力のキャッシュ比率", observedRatio?.subtotal ?? session.tokens.cache_read_ratio_basis_points, value => `${format(value / 100)}%`);
+    if (observedRatio) cache.append(el("small", null, `${format(observedRatio.observed_call_count)}/${format(observedRatio.applicable_call_count)} 呼出し · 対応入力 ${observedRatio.paired_input === null ? "未記録" : format(observedRatio.paired_input)}`));
     if (session.tokens.input.state === "recorded" && session.tokens.cache_read.state === "recorded"
         && session.tokens.new_input.state === "recorded" && session.tokens.cache_read_ratio_basis_points.state === "recorded"
         && session.tokens.input.value === session.tokens.cache_read.value + session.tokens.new_input.value
@@ -1145,7 +1190,9 @@
     if (session.tokens.cache_creation.state === "recorded") cache.append(el("small", null, `キャッシュ書き込み ${format(session.tokens.cache_creation.value)}`));
     const input = namedFact("入力", session.tokens.input, "Input");
     const output = namedFact("出力", session.tokens.output, "Output");
-    const cacheRead = namedFact("キャッシュから読み込み", session.tokens.cache_read, "CacheRead");
+    const observedCache = session.tokens.observed_components?.cache_read;
+    const cacheRead = namedFact("キャッシュから読み込み", observedCache?.subtotal ?? session.tokens.cache_read, "CacheRead");
+    if (observedCache) cacheRead.append(el("small", null, `観測小計 · ${format(observedCache.observed_call_count)}/${format(observedCache.applicable_call_count)} 呼出し`));
     const newInput = namedFact("新規入力", session.tokens.new_input, "NewInput");
     const coverageCard = el("div", "local-monitor-session-summary-card"); coverageCard.dataset.sessionFixedCoverage = "";
     coverageCard.append(el("h2", null, "取得範囲"));
@@ -1158,6 +1205,19 @@
     }
     coverageCard.append(coverageList);
     summaryRoot.append(total, cache, input, output, cacheRead, newInput, coverageCard);
+    if (session.tokens.observed_components) {
+      const observed = el("div", "local-monitor-session-summary-card");
+      observed.append(el("h2", null, "成分別の観測範囲"));
+      for (const [key, label] of [["input", "入力"], ["output", "出力"], ["total", "producer合計"], ["reasoning", "推論"], ["cache_creation", "キャッシュ書き込み"]]) {
+        const item = session.tokens.observed_components[key];
+        const row = el("div"); row.append(el("span", null, `${label}: `));
+        row.append(el("span", null, item.subtotal.state === "recorded" ? format(item.subtotal.value)
+          : item.subtotal.state === "not_observed" ? "この成分は未記録です" : "この成分の値を確定できません"));
+        row.append(el("small", null, ` 観測小計 · ${format(item.observed_call_count)}/${format(item.applicable_call_count)} 呼出し`));
+        observed.append(row);
+      }
+      summaryRoot.append(observed);
+    }
     for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) {
       const card = el("div", "local-monitor-session-summary-card"); card.append(el("h2", null, label));
       renderFact(card.appendChild(el("div")), session.activity[key]); summaryRoot.append(card);
@@ -1203,6 +1263,10 @@
     applyRoute(event.detail);
   });
   root.querySelector("[data-session-executions]").addEventListener("keydown", handleTreeKey);
+  root.querySelector("[data-session-overview-open]").addEventListener("click", event => {
+    routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null });
+    fallbackSelection(false); openNarrowInspector(event.currentTarget);
+  });
   document.addEventListener("keydown", event => { if (event.key === "Escape" && narrowInspector.matches && inspector.getAttribute("aria-hidden") === "false") { event.preventDefault(); closeInspector(); } });
   inspector.addEventListener("keydown", event => {
     if (event.key !== "Tab" || !narrowInspector.matches || inspector.getAttribute("aria-hidden") === "true") return;

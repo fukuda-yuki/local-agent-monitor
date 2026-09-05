@@ -46,6 +46,8 @@ public class MonitorSpanProjectionBuilderTests
         Assert.Equal(50, span.ReasoningTokens);
         Assert.Equal(100, span.CacheReadTokens);
         Assert.Equal(30, span.CacheCreationTokens);
+        Assert.Equal(30, Assert.Single(MonitorSpanProjectionBuilder.Build(Record("aaaa",
+            payload.Replace("gen_ai.usage.cache_creation.input_tokens", "gen_ai.usage.cache_write.input_tokens", StringComparison.Ordinal)))).CacheCreationTokens);
         Assert.Equal("ok", span.Status);
         Assert.Null(span.ErrorType);
         Assert.Equal("stop", span.FinishReasons);

@@ -28,7 +28,7 @@ internal static class LocalArchiveBackupValidation
 
         try
         {
-            LocalArchiveSchemaV1.Validate(connection, transaction);
+            LocalArchiveSchemaV1.Validate(connection, transaction, allowLegacyRepositoryCatalog: true);
             RejectOrphans(connection, transaction);
             ValidateChains(connection, transaction);
             ValidateParents(

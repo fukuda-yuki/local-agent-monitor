@@ -330,7 +330,7 @@ public sealed class LocalComparisonInputProjectionTests
     }
 
     [Fact]
-    public void WorkspaceAdapterAdmitsSeventeenVersionsAndMapsProvedEmptyToExplicitZero()
+    public void WorkspaceAdapterAdmitsSeventeenVersionsAndKeepsMissingVersionUnobserved()
     {
         var session = ScopeSession("018f0000-0000-7000-8000-000000000001", archived: false);
         var detail = Detail(session.SessionId, unidentifiedSubagent: false);
@@ -343,8 +343,8 @@ public sealed class LocalComparisonInputProjectionTests
         Assert.Equal(17, fact.Conditions["source_versions"].Values.Count);
         Assert.Equal(LocalComparisonFactState.Recorded, fact.Conditions["source_versions"].State);
         Assert.Empty(fact.Conditions["adapter_versions"].Values);
-        Assert.Equal(LocalComparisonFactState.ExplicitZero, fact.Conditions["adapter_versions"].State);
-        Assert.NotNull(fact.Conditions["adapter_versions"].Reference);
+        Assert.Equal(LocalComparisonFactState.NotObserved, fact.Conditions["adapter_versions"].State);
+        Assert.Null(fact.Conditions["adapter_versions"].Reference);
         LocalComparisonApplicationValidation.ValidateSession(session.RepositoryId!, fact);
         var decoded = LocalComparisonFactFrame.Decode(LocalComparisonFactFrame.Create(fact));
         Assert.Equal(fact.Conditions["source_versions"].State, decoded.Conditions["source_versions"].State);

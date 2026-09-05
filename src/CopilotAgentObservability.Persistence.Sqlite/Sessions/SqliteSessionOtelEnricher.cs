@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
 public sealed class SqliteSessionOtelEnricher
 {
     public const string ProjectorKey = "session-otel-enrichment";
-    internal const string ContentProjectorKey = "session-copilot-otel-content-v1";
+    internal const string ContentProjectorKey = "session-copilot-otel-content-v2";
     private readonly string databasePath;
     private readonly ISessionStore store;
     private readonly RawTelemetryStore rawStore;
@@ -134,7 +134,8 @@ public sealed class SqliteSessionOtelEnricher
                                 var sourceId = $"{row.TraceId}/{row.SpanId}/{message.Direction}/{message.Ordinal}";
                                 if (FindEventBySourceIdentity("copilot-otel", sourceId) is not null) continue;
                                 var eventId = Guid.CreateVersion7();
-                                events.Add(new(eventId, owner.SessionId, owner.RunId, surface, null, row.TraceId, null,
+                                events.Add(new(eventId, owner.SessionId, owner.RunId, surface,
+                                    message.Direction is "tool_input" or "tool_result" ? owner.EventId : null, row.TraceId, null,
                                     "copilot-otel", sourceId, message.Type,
                                     message.Direction == "output" ? row.EndTime ?? row.StartTime ?? row.ProjectedAt : row.StartTime ?? row.ProjectedAt,
                                     message.State, MatchKind: SessionMatchKind.TraceContinuity));
@@ -370,14 +371,14 @@ public sealed class SqliteSessionOtelEnricher
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText =
-            "SELECT session_id,run_id FROM session_events WHERE source_adapter=$adapter AND source_event_id=$source_event_id COLLATE BINARY;";
+            "SELECT session_id,run_id,event_id FROM session_events WHERE source_adapter=$adapter AND source_event_id=$source_event_id COLLATE BINARY;";
         command.Parameters.AddWithValue("$adapter", sourceAdapter);
         command.Parameters.AddWithValue("$source_event_id", sourceEventId);
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var result = new ExistingSourceEvent(
             Guid.Parse(reader.GetString(0)),
-            reader.IsDBNull(1) ? null : Guid.Parse(reader.GetString(1)));
+            reader.IsDBNull(1) ? null : Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)));
         if (reader.Read()) throw new InvalidOperationException("Ambiguous Session event source identity.");
         return result;
     }
@@ -578,5 +579,5 @@ public sealed class SqliteSessionOtelEnricher
         ProjectedSpan Row,
         ClaudeExactBindingMatch? Binding);
 
-    private sealed record ExistingSourceEvent(Guid SessionId, Guid? RunId);
+    private sealed record ExistingSourceEvent(Guid SessionId, Guid? RunId, Guid EventId);
 }

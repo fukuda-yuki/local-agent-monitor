@@ -90,9 +90,13 @@ internal static class LocalWorkspaceContentAuthority
                   n.source_kind='session_event' AND n.source_identity=r.source_item_id
                   OR n.source_kind='semantic_tool' AND EXISTS(
                     SELECT 1 FROM local_workspace_node_source_references source
-                    WHERE source.node_id=n.node_id AND source.event_id=r.source_item_id))
+                    WHERE source.node_id=n.node_id AND (source.event_id=r.source_item_id
+                      OR {{LocalWorkspaceProjectionStore.ExactOtelToolContentPredicate("e", "source")}})))
                 OR NOT (
                   r.part='event_content' AND r.locator_kind='whole_event' AND r.json_pointer IS NULL
+                  OR e.source_adapter='copilot-otel' AND r.locator_kind='json_pointer' AND (
+                    e.type='otel.tool.input' AND r.part='tool_input' AND r.json_pointer='/tool_input'
+                    OR e.type='otel.tool.result' AND r.part='tool_result' AND r.json_pointer='/tool_response')
                   OR e.source_adapter='claude-code-hook' COLLATE BINARY
                     AND length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint)
                     AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'
@@ -191,7 +195,9 @@ internal static class LocalWorkspaceContentAuthority
                      row_number() OVER(PARTITION BY semantic.node_id,raw_ref.part ORDER BY event.event_id COLLATE BINARY) source_rank
               FROM local_workspace_nodes semantic
               JOIN local_workspace_node_source_references source ON source.node_id=semantic.node_id AND source.event_id IS NOT NULL
-              JOIN session_events event ON event.event_id=source.event_id AND event.session_id=semantic.session_id
+              JOIN session_events event ON (event.event_id=source.event_id
+                OR {{LocalWorkspaceProjectionStore.ExactOtelToolContentPredicate("event", "source")}})
+                AND event.session_id=semantic.session_id
               JOIN local_workspace_nodes raw ON raw.session_id=semantic.session_id AND raw.source_kind='session_event' AND raw.source_identity=event.event_id
               JOIN local_workspace_node_content_refs raw_ref ON raw_ref.node_id=raw.node_id
               WHERE semantic.session_id=$session_id AND semantic.source_kind='semantic_tool'

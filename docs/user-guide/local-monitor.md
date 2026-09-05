@@ -633,7 +633,7 @@ CLI の既定は `4319`（ConfigCli receiver）です。モニター（4320）�
 
 「リポジトリを追加」や設定の「リポジトリ」で管理し、Explorer の行の操作から手動で割り当てます。
 手動割り当ての変更・解除・自動割り当てへの復帰は元のテレメトリを書き換えません。
-名前、作業ディレクトリ、指示文、時刻の近さから所属を推測することはありません。
+Copilot CLI では exact native Session の bounded `workspace.yaml` にある明示的な CWD を Git の照会場所としてだけ使用します。GitHub remote が一意ならそれを使い、なければ Git common directory から path を保存しないローカル識別子を生成します。名前、CWD や path の文字列、指示文、時刻の近さから所属を推測することはありません。
 
 ### Session Explorer
 
@@ -803,7 +803,7 @@ URL、owner、ローカルパス、ユーザー情報は表示されません。
 `vcs.repository.name` が最優先です。これが存在せず、credential・query・fragment などを
 含まない canonical GitHub HTTPS URL の `vcs.repository.url.full` だけがある場合に限り、
 repository segment をラベルとして使用します。名前が危険な場合や、metadata 自体がない
-場合に prompt、CWD、path、時刻の近さからリポジトリを推測することはありません。
+場合に prompt、CWD、path、時刻の近さからラベルを推測することはありません。
 
 ### 履歴インポート
 

@@ -115,6 +115,29 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
     }
 
     [Fact]
+    public async Task ProductionCoordinatorValidatesRecordedOtelFailureActivity()
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string runId = "018f0000-0000-7000-8000-000000000010";
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, runId,
+            "018f0000-0000-7000-8000-000000000020");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, $"UPDATE monitor_spans SET status='error'; UPDATE session_runs SET status='failed' WHERE run_id='{runId}';");
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction,
+                DateTimeOffset.Parse("2026-08-26T00:10:00Z"), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+        }
+        var detail = await CreateRoundFiveService(temp.DatabasePath).ReadDetailAsync(
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+        var execution = Assert.Single(detail.Detail.Executions, value => value.SourceIdentity == runId);
+        Assert.Equal("recorded", execution.Activity.Error.State);
+        Assert.Equal(1, execution.Activity.Error.Value);
+    }
+
+    [Fact]
     public async Task ProductionCoordinatorKeepsAStandaloneSdkToolStartAsARawEvent()
     {
         using var temp = new MonitorTempDirectory();
@@ -849,14 +872,14 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Null(execution.Tokens.Total.Value);
 
         var session = Assert.IsType<LocalWorkspaceProjectionRow>(summary.Session.Session);
-        Assert.Equal("mixed", session.Tokens.Authority);
-        Assert.Equal("capture_gap", session.Tokens.State);
+        Assert.Equal("llm_span", session.Tokens.Authority);
+        Assert.Equal("recorded", session.Tokens.State);
         Assert.Equal(1, session.Tokens.AvailableExecutionCount);
-        Assert.Equal(2, session.Tokens.TotalExecutionCount);
-        Assert.Equal("capture_gap", session.Tokens.Input.State);
-        Assert.Null(session.Tokens.Input.Value);
-        Assert.Equal("capture_gap", session.Tokens.Output.State);
-        Assert.Null(session.Tokens.Output.Value);
+        Assert.Equal(1, session.Tokens.TotalExecutionCount);
+        Assert.Equal("recorded", session.Tokens.Input.State);
+        Assert.Equal(100, session.Tokens.Input.Value);
+        Assert.Equal("recorded", session.Tokens.Output.State);
+        Assert.Equal(20, session.Tokens.Output.Value);
         Assert.Equal("not_observed", session.Tokens.Total.State);
         Assert.Null(session.Tokens.Total.Value);
     }
@@ -1053,6 +1076,93 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
 
         Assert.Equal("018f0000-0000-7000-8000-000000000021", detail.InstructionSourceIdentity);
         Assert.Equal(1, detail.InstructionAdditionalCount);
+    }
+
+    [Theory]
+    [InlineData(true, true, 1, 0, "018f0000-0000-7000-8000-000000000022")]
+    [InlineData(true, false, 1, 0, "018f0000-0000-7000-8000-000000000021")]
+    [InlineData(false, true, 2, 1, "018f0000-0000-7000-8000-000000000021")]
+    public async Task ProjectionExcludesOnlyAnExactDirectChildCopyOfACopilotEnvelope(
+        bool directChild,
+        bool childAvailable,
+        int expectedInstructionCount,
+        int expectedAdditionalCount,
+        string expectedLabelSourceIdentity)
+    {
+        using var temp = new MonitorTempDirectory();
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        const string traceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string envelopeSpanId = "1111111111111111";
+        const string childSpanId = "2222222222222222";
+        InitializeLabelSummaryFixture(temp.DatabasePath, sessionId);
+        using var connection = OpenFile(temp.DatabasePath);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $$"""
+            UPDATE session_events SET source_surface='copilot-cli',source_adapter='copilot-otel',trace_id='{{traceId}}',
+              source_event_id=CASE event_id
+                WHEN '018f0000-0000-7000-8000-000000000021' THEN '{{traceId}}/{{envelopeSpanId}}/input/0'
+                ELSE '{{traceId}}/{{childSpanId}}/input/0' END;
+            UPDATE session_event_content SET content_json='{"value":"Same instruction"}';
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,status,projected_at)
+            VALUES
+              (1,'{{traceId}}','{{envelopeSpanId}}',NULL,0,'invoke_agent','agent_invocation','ok','2026-08-26T00:00:01.0000000+00:00'),
+              (1,'{{traceId}}','{{childSpanId}}','{{(directChild ? envelopeSpanId : "3333333333333333")}}',1,'chat','llm_call','ok','2026-08-26T00:00:02.0000000+00:00');
+            """);
+        foreach (var (eventId, itemId, sourceEventId, capturedAt) in new[]
+                 {
+                     ("018f0000-0000-7000-8000-000000000021", "label-item-1", $"{traceId}/{envelopeSpanId}/input/0", "2026-08-26T00:00:01.0000000+00:00"),
+                     ("018f0000-0000-7000-8000-000000000022", "label-item-2", $"{traceId}/{childSpanId}/input/0", "2026-08-26T00:00:02.0000000+00:00"),
+                 })
+        {
+            using var owner = connection.CreateCommand();
+            owner.CommandText = "SELECT i.store_instance_id,c.retention_owner_token FROM retention_items i JOIN session_event_content c ON c.event_id=i.source_item_id WHERE i.item_id=$item;";
+            owner.Parameters.AddWithValue("$item", itemId);
+            using var reader = owner.ExecuteReader();
+            Assert.True(reader.Read());
+            var storeId = reader.GetString(0);
+            var ownerToken = (byte[])reader.GetValue(1);
+            reader.Close();
+            var receipt = CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateSession(new(
+                storeId, eventId, "application/json", capturedAt, DateTimeOffset.Parse(capturedAt).UtcTicks,
+                "2026-09-01T00:00:00.0000000+00:00", DateTimeOffset.Parse("2026-09-01T00:00:00.0000000+00:00").UtcTicks,
+                sessionId, null, "copilot-otel", sourceEventId, ownerToken));
+            using var update = connection.CreateCommand();
+            update.CommandText = "UPDATE retention_items SET ownership_receipt=$receipt WHERE item_id=$item;";
+            update.Parameters.AddWithValue("$receipt", receipt);
+            update.Parameters.AddWithValue("$item", itemId);
+            Assert.Equal(1, update.ExecuteNonQuery());
+        }
+        if (!childAvailable)
+            LocalWorkspaceProjectionSchemaTests.Execute(connection,
+                "UPDATE retention_items SET read_denied_at='2026-08-26T00:05:00.0000000+00:00' WHERE item_id='label-item-2';");
+        using (var refresh = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(connection, refresh,
+                DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load());
+            refresh.Commit();
+        }
+
+        using (var projectedCount = connection.CreateCommand())
+        {
+            projectedCount.CommandText = "SELECT instruction_count FROM local_workspace_sessions;";
+            Assert.Equal(expectedInstructionCount, Convert.ToInt32(projectedCount.ExecuteScalar()));
+        }
+        using (var projectedOwner = connection.CreateCommand())
+        {
+            projectedOwner.CommandText = "SELECT label_source_identity FROM local_workspace_sessions;";
+            Assert.Equal(expectedLabelSourceIdentity, projectedOwner.ExecuteScalar());
+        }
+        using (var storedCount = connection.CreateCommand())
+        {
+            storedCount.CommandText = "SELECT COUNT(*) FROM session_events WHERE type='user.message';";
+            Assert.Equal(2, Convert.ToInt32(storedCount.ExecuteScalar()));
+        }
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var detail = await new LocalWorkspaceSessionDetailSnapshotContributor(
+            registryAuthority: FixedSkillRegistryGenerationAuthority.Load(),
+            timeProvider: new FixedTimeProvider(DateTimeOffset.Parse("2026-08-26T00:10:01Z"))).ReadAsync(
+            new DirectReadTransaction(connection, transaction),
+            new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+        Assert.Equal(expectedAdditionalCount, detail.InstructionAdditionalCount);
     }
 
     [Theory]

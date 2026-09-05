@@ -59,6 +59,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePayloadParsing);
         LocalRepositoryObservationParseResult? parsed = null;
         string? terminalReason = null;
+        var waitForNativeBinding = false;
         try
         {
             var observationSurface = provenance.SourceSurface;
@@ -86,6 +87,16 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                 observationSurface,
                 provenance.SourceApplicationVersion,
                 provenance.ObservedAt);
+            if (parsed.Occurrences.Count == 0
+                && observationSurface == "github-copilot-cli"
+                && nativeCopilotCliLocatorResolver is not null)
+            {
+                parsed = ResolveNativeCopilotCliObservation(
+                    suppliedRawRecordId,
+                    rawRecord.PayloadJson,
+                    provenance with { SourceSurface = observationSurface });
+                waitForNativeBinding = parsed is null;
+            }
         }
         catch (JsonException)
         {
@@ -98,7 +109,92 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
 
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.AfterPreparationBeforeHandoff);
         return ValueTask.FromResult<ILocalRepositoryPreparedRawRecord>(
-            new PreparedAutomaticAdmission(this, retentionLease.Grant, provenance, parsed, terminalReason));
+            new PreparedAutomaticAdmission(this, retentionLease.Grant, provenance, parsed, terminalReason, waitForNativeBinding));
+    }
+
+    private LocalRepositoryObservationParseResult? ResolveNativeCopilotCliObservation(
+        long rawRecordId,
+        string payloadJson,
+        LocalRepositoryCaptureProvenance provenance)
+    {
+        var contexts = new List<(string TraceId, string SpanId, int ResourceOrdinal, int ScopeOrdinal, int SpanOrdinal, string EventId, string SessionId)>();
+        using var document = JsonDocument.Parse(payloadJson);
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var resourceOrdinal = 0;
+        foreach (var resourceSpan in OtlpSpanReader.EnumerateArrayProperty(document.RootElement, "resourceSpans"))
+        {
+            var scopeOrdinal = 0;
+            foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
+            {
+                var spanOrdinal = 0;
+                foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
+                {
+                    var traceId = OtlpSpanReader.ReadString(span, "traceId") ?? string.Empty;
+                    var spanId = OtlpSpanReader.ReadString(span, "spanId") ?? string.Empty;
+                    var joined = LocalRepositorySessionEventJoin.ResolveContext(connection, transaction, provenance, traceId, spanId);
+                    if (joined.Status != LocalRepositorySessionEventJoinStatus.Matched
+                        || joined.SessionEventId is null || joined.SessionId is null)
+                    {
+                        transaction.Commit();
+                        return null;
+                    }
+                    contexts.Add((traceId, spanId, resourceOrdinal, scopeOrdinal, spanOrdinal, joined.SessionEventId, joined.SessionId));
+                    spanOrdinal++;
+                }
+                scopeOrdinal++;
+            }
+            resourceOrdinal++;
+        }
+        if (contexts.Count == 0)
+        {
+            transaction.Commit();
+            return new([], []);
+        }
+        var nativeIds = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var sessionId in contexts.Select(item => item.SessionId).Distinct(StringComparer.Ordinal))
+        {
+            using var native = connection.CreateCommand();
+            native.Transaction = transaction;
+            native.CommandText = "SELECT native_session_id FROM session_native_ids WHERE session_id=$session_id AND source_surface='copilot-cli' COLLATE BINARY AND binding_kind='native' COLLATE BINARY LIMIT 2;";
+            native.Parameters.AddWithValue("$session_id", sessionId);
+            using var reader = native.ExecuteReader();
+            if (!reader.Read() || reader.GetValue(0) is not string nativeSessionId || reader.Read())
+            {
+                transaction.Commit();
+                return null;
+            }
+            nativeIds.Add(sessionId, nativeSessionId);
+        }
+        transaction.Commit();
+        var occurrences = new List<LocalRepositoryPhysicalOccurrence>(contexts.Count);
+        var links = new List<LocalRepositoryObservationContextLink>(contexts.Count);
+        var acquiredAt = timeProvider.GetUtcNow().ToUniversalTime();
+        foreach (var group in contexts.GroupBy(context => context.SessionId, StringComparer.Ordinal))
+        {
+            var locator = nativeCopilotCliLocatorResolver!(nativeIds[group.Key]);
+            if (locator is null) continue;
+            var attributeKey = locator.Kind == "github_repository"
+                ? "native_workspace_git_remote"
+                : "native_workspace_git_common_dir";
+            foreach (var context in group)
+            {
+                var identity = LocalRepositorySourceIdentityInput.Span(
+                    rawRecordId, context.ResourceOrdinal, context.ScopeOrdinal, context.SpanOrdinal, int.MaxValue, attributeKey);
+                var occurrence = new LocalRepositoryPhysicalOccurrence(
+                    identity,
+                    LocalRepositoryIdentityHashing.SourceIdentity(identity),
+                    provenance.RawPayloadSha256,
+                    provenance.SourceSurface,
+                    provenance.SourceApplicationVersion,
+                    acquiredAt,
+                    LocalRepositoryOccurrenceClassification.Admitted,
+                    locator);
+                occurrences.Add(occurrence);
+                links.Add(new(occurrence, context.TraceId, context.SpanId, context.ScopeOrdinal, context.SpanOrdinal, LocalRepositoryAdmissionState.Admitted));
+            }
+        }
+        return new(occurrences, links);
     }
 
     public async ValueTask ProcessAsync(
@@ -124,6 +220,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         LocalRepositoryCaptureProvenance? preparedProvenance,
         LocalRepositoryObservationParseResult? parsed,
         string? terminalReason,
+        bool waitForNativeBinding,
         CancellationToken cancellationToken)
     {
         var suppliedRawRecordId = queueLease.RawRecordId;
@@ -136,6 +233,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             throw new InvalidOperationException("local_repository_store_binding_mismatch");
 
         var processingAt = timeProvider.GetUtcNow().ToUniversalTime();
+
+        if (waitForNativeBinding && preparedProvenance is not null)
+        {
+            CompleteQueueOnly(transaction, connection, queueLease, grant, suppliedRawRecordId, cancellationToken, waitForSession: true);
+            return ValueTask.CompletedTask;
+        }
 
         if (terminalReason is not null || preparedProvenance is null || parsed is null)
         {
@@ -282,10 +385,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         RetentionReadGrant grant,
         LocalRepositoryCaptureProvenance? provenance,
         LocalRepositoryObservationParseResult? parsed,
-        string? terminalReason) : ILocalRepositoryPreparedRawRecord
+        string? terminalReason,
+        bool waitForNativeBinding = false) : ILocalRepositoryPreparedRawRecord
     {
         public ValueTask FinalizeAsync(LocalRepositoryQueueLease queueLease, CancellationToken cancellationToken) =>
-            owner.FinalizePreparedAsync(queueLease, grant, provenance, parsed, terminalReason, cancellationToken);
+            owner.FinalizePreparedAsync(queueLease, grant, provenance, parsed, terminalReason, waitForNativeBinding, cancellationToken);
     }
 
     private static bool IsValidInputEnvelope(
@@ -501,10 +605,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         && left.Classification == right.Classification
         && SameLocator(left.Locator, right.Locator);
 
-    private static bool SameLocator(GitHubRepositoryLocator? left, GitHubRepositoryLocator? right) =>
+    private static bool SameLocator(ILocalRepositoryLocator? left, ILocalRepositoryLocator? right) =>
         left is null && right is null
         || left is not null && right is not null
         && left.CanonicalLocator == right.CanonicalLocator
+        && left.Kind == right.Kind
         && left.LocatorSha256 == right.LocatorSha256
         && left.DisplayOwner == right.DisplayOwner
         && left.DisplayRepository == right.DisplayRepository;
@@ -512,22 +617,23 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
     private static RepositoryOwner? ReadExistingOwner(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        GitHubRepositoryLocator locator)
+        ILocalRepositoryLocator locator)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             SELECT l.locator_id,l.repository_id,l.kind,l.canonical_locator,l.locator_sha256
             FROM local_repository_locators AS l
-            WHERE l.kind='github_repository' AND l.locator_sha256=$locator_sha256
+            WHERE l.kind=$kind AND l.locator_sha256=$locator_sha256
             LIMIT 2;
             """;
         command.Parameters.AddWithValue("$locator_sha256", locator.LocatorSha256);
+        command.Parameters.AddWithValue("$kind", locator.Kind);
         using var reader = command.ExecuteReader();
         if (!reader.Read())
             return null;
         var owner = new RepositoryOwner(reader.GetString(1), reader.GetString(0));
-        if (reader.GetString(2) != "github_repository"
+        if (reader.GetString(2) != locator.Kind
             || reader.GetString(3) != locator.CanonicalLocator
             || reader.GetString(4) != locator.LocatorSha256
             || reader.Read())
@@ -567,7 +673,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             || reader.GetString(7) != ScopeKind(occurrence.ScopeKind)
             || reader.GetString(8) != occurrence.AttributeKey
             || reader.GetString(9) != Classification(occurrence.Classification)
-            || NullableText(reader, 10) != (occurrence.Locator is null ? null : "github_repository")
+            || NullableText(reader, 10) != occurrence.Locator?.Kind
             || NullableText(reader, 11) != occurrence.Locator?.CanonicalLocator
             || NullableText(reader, 12) != occurrence.Locator?.LocatorSha256
             || NullableText(reader, 13) != occurrence.Locator?.DisplayOwner
@@ -809,11 +915,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                     locator_id,repository_id,kind,canonical_locator,locator_sha256,source,
                     display_owner,display_repository,created_at)
                 VALUES(
-                    $locator_id,$repository_id,'github_repository',$canonical_locator,
+                    $locator_id,$repository_id,$kind,$canonical_locator,
                     $locator_sha256,'observed',$display_owner,$display_repository,$at);
                 """;
             command.Parameters.AddWithValue("$locator_id", owner.Owner.LocatorId);
             command.Parameters.AddWithValue("$repository_id", owner.Owner.RepositoryId);
+            command.Parameters.AddWithValue("$kind", owner.Locator.Kind);
             command.Parameters.AddWithValue("$canonical_locator", owner.Locator.CanonicalLocator);
             command.Parameters.AddWithValue("$locator_sha256", owner.Locator.LocatorSha256);
             command.Parameters.AddWithValue("$display_owner", owner.Locator.DisplayOwner);
@@ -834,9 +941,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             command.Transaction = transaction;
             command.CommandText = """
                 INSERT INTO local_repository_locator_heads(repository_id,kind,locator_id,updated_at)
-                VALUES($repository_id,'github_repository',$locator_id,$at);
+                VALUES($repository_id,$kind,$locator_id,$at);
                 """;
             command.Parameters.AddWithValue("$repository_id", owner.Owner.RepositoryId);
+            command.Parameters.AddWithValue("$kind", owner.Locator.Kind);
             command.Parameters.AddWithValue("$locator_id", owner.Owner.LocatorId);
             command.Parameters.AddWithValue("$at", Timestamp(owner.ProcessingAt));
             command.ExecuteNonQuery();
@@ -904,7 +1012,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             command.Parameters.AddWithValue("$scope_kind", ScopeKind(occurrence.ScopeKind));
             command.Parameters.AddWithValue("$attribute_key", occurrence.AttributeKey);
             command.Parameters.AddWithValue("$value_classification", Classification(occurrence.Classification));
-            command.Parameters.AddWithValue("$locator_kind", occurrence.Locator is null ? DBNull.Value : "github_repository");
+            command.Parameters.AddWithValue("$locator_kind", occurrence.Locator?.Kind ?? (object)DBNull.Value);
             command.Parameters.AddWithValue("$canonical_locator", (object?)occurrence.Locator?.CanonicalLocator ?? DBNull.Value);
             command.Parameters.AddWithValue("$locator_sha256", (object?)occurrence.Locator?.LocatorSha256 ?? DBNull.Value);
             command.Parameters.AddWithValue("$display_owner", (object?)occurrence.Locator?.DisplayOwner ?? DBNull.Value);
@@ -1017,13 +1125,13 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         string repositoryId,
         string locatorId,
         string historyId,
-        GitHubRepositoryLocator locator,
+        ILocalRepositoryLocator locator,
         JoinedContext selectedContext,
         DateTimeOffset processingAt)
     {
         internal RepositoryOwner Owner { get; } = new(repositoryId, locatorId);
         internal string HistoryId { get; } = historyId;
-        internal GitHubRepositoryLocator Locator { get; } = locator;
+        internal ILocalRepositoryLocator Locator { get; } = locator;
         internal JoinedContext SelectedContext { get; } = selectedContext;
         internal DateTimeOffset ProcessingAt { get; } = processingAt;
         internal string ContextIdentitySha256 { get; set; } = string.Empty;

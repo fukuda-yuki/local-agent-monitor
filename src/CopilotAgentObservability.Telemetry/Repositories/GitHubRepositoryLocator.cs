@@ -1,6 +1,15 @@
 namespace CopilotAgentObservability.Telemetry.Repositories;
 
-public sealed class GitHubRepositoryLocator
+internal interface ILocalRepositoryLocator
+{
+    string Kind { get; }
+    string CanonicalLocator { get; }
+    string LocatorSha256 { get; }
+    string DisplayOwner { get; }
+    string DisplayRepository { get; }
+}
+
+public sealed class GitHubRepositoryLocator : ILocalRepositoryLocator
 {
     internal GitHubRepositoryLocator(
         string canonicalLocator,
@@ -15,6 +24,7 @@ public sealed class GitHubRepositoryLocator
     }
 
     public string CanonicalLocator { get; }
+    public string Kind => "github_repository";
     public string LocatorSha256 { get; }
     public string DisplayOwner { get; }
     public string DisplayRepository { get; }

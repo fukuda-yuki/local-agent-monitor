@@ -1,5 +1,6 @@
 using System.Globalization;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Telemetry.Repositories;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
@@ -47,6 +48,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalReposito
     private readonly Func<DateTimeOffset, string> uuidV7Factory;
     private readonly ILocalRepositoryAdmissionCheckpoint? checkpoint;
     private readonly ILocalRepositoryLocatorReadCheckpoint? locatorReadCheckpoint;
+    private readonly Func<string, ILocalRepositoryLocator?>? nativeCopilotCliLocatorResolver;
 
     internal SqliteLocalRepositoryCatalogStore(
         string databasePath,
@@ -55,7 +57,8 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalReposito
         TimeProvider? timeProvider = null,
         Func<DateTimeOffset, string>? uuidV7Factory = null,
         ILocalRepositoryAdmissionCheckpoint? checkpoint = null,
-        ILocalRepositoryLocatorReadCheckpoint? locatorReadCheckpoint = null)
+        ILocalRepositoryLocatorReadCheckpoint? locatorReadCheckpoint = null,
+        Func<string, ILocalRepositoryLocator?>? nativeCopilotCliLocatorResolver = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
@@ -73,6 +76,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalReposito
             ?? (static at => Guid.CreateVersion7(at).ToString("D", CultureInfo.InvariantCulture));
         this.checkpoint = checkpoint;
         this.locatorReadCheckpoint = locatorReadCheckpoint;
+        this.nativeCopilotCliLocatorResolver = nativeCopilotCliLocatorResolver;
     }
 
     private SqliteConnection Open()

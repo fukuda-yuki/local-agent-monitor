@@ -90,6 +90,22 @@ internal static class CopilotOtelMessages
             }
             catch (JsonException) { result.Add(new(direction, 0, type, SessionContentState.Unsupported, null)); }
         }
+        var operations = Attributes(matches[0].Span, "gen_ai.operation.name").ToArray();
+        if (operations is [{ ValueKind: JsonValueKind.String }] && operations[0].GetString() == "execute_tool")
+        {
+            foreach (var (attribute, direction, type, property) in new[]
+            {
+                ("gen_ai.tool.call.arguments", "tool_input", "otel.tool.input", "tool_input"),
+                ("gen_ai.tool.call.result", "tool_result", "otel.tool.result", "tool_response"),
+            })
+            {
+                var values = Attributes(matches[0].Span, attribute).ToArray();
+                if (values.Length == 0) continue;
+                var supported = values.Length == 1 && values[0].ValueKind == JsonValueKind.String;
+                result.Add(new(direction, 0, type, supported ? SessionContentState.Available : SessionContentState.Unsupported,
+                    supported ? JsonSerializer.Serialize(new Dictionary<string, string?> { [property] = values[0].GetString() }) : null));
+            }
+        }
         return result;
     }
 

@@ -117,6 +117,10 @@ executions, technical_references`.
 `session` property order is `session_id, status, completeness, assignment,
 archive, instruction, source, model, version, timing, tokens, activity,
 capture`.
+When exact OTel intervals are observed, `observed_activity` follows `timing`
+and uses the Session collection observed-activity object. It is independent of
+the native Session lifecycle interval. Agent nodes use their recorded Span
+interval and status, rather than the instant at which a Span event was ingested.
 
 `assignment`, `archive`, `source`, `model`, `tokens`, and the five activity
 facts reuse the exact Session collection object graphs and property order.
@@ -125,7 +129,12 @@ facts reuse the exact Session collection object graphs and property order.
 `{state,label,additional_count,content_available}`. State is
 `recorded|not_observed|not_captured|expired|invalid`; label is nonempty text only
 for recorded, additional count is a nonnegative integer only when it is
-authoritatively known, and content availability is true only when an exact raw
+authoritatively known. An available Copilot OTel user-message observation on an
+`agent_invocation` span is an envelope copy, rather than an additional logical
+instruction, only when a direct child `llm_call` span in the same Session and
+trace carries byte-identical available user-message content. All observations
+remain available in the timeline, and equal content on unrelated or sibling
+spans remains distinct. Content availability is true only when an exact raw
 reference is currently Retention-admissible. `timing` is exactly
 `{state,started_at,ended_at,last_seen_at,duration_ms}`. `last_seen_at` is an
 observation timestamp independent of native lifecycle: when start is absent,
@@ -150,6 +159,25 @@ then source ordinal ascending, then execution ID ascending. Missing time sorts
 after recorded; invalid time sorts after missing. Each object property order is
 `execution_id, node_id, latest, source_ordinal, source, model, lifecycle, status, timing, tokens,
 activity, child_count`.
+
+For exact OTel records, the primary execution unit is a recorded `invoke_agent`
+Span. A Span belongs to its nearest exact Agent ancestor, including across
+ingestion Runs. Run identifiers remain immutable source ownership identifiers;
+they do not determine the displayed execution count. Internal telemetry without
+user activity remains reachable through technical trace evidence but is omitted
+from the primary execution list. Missing or cyclic ancestry cannot establish an
+Agent or parent; such activity appears under an explicit unknown relationship.
+Recorded failures are counted once per exact Span in execution and Session
+activity; they do not imply Session completion, retry, or recovery.
+
+Tool argument and result events derived from a retained OTel Span bind to that
+Span's semantic Tool only through the exact Trace, Span, Session, and parent
+event identity. Each part retains its own content selector, Retention ownership,
+read limit, and availability. Both parts link back to the technical Span.
+Recorded producer versions come from Session source events or exact raw-source
+observation/Trace links, including unrecognised version tokens. Adapter and
+normalization versions are not producer versions. Version observation does not
+certify compatibility. Multiple recorded producer versions are preserved.
 
 `source_ordinal` is the nonnegative persisted source order used for tie-breaking;
 clients validate order with this number, never with the displayed source string.

@@ -65,7 +65,7 @@ internal static class LocalRepositoryCatalogBackupValidation
                 && SqliteSessionStore.IsCurrentSchemaValid(connection, transaction);
         if (!sessionIsValid
             || !HasExactComponentVersion(connection, transaction, LocalRepositoryCatalogSchemaV1.ComponentName, LocalRepositoryCatalogSchemaV1.Version)
-            || !LocalRepositoryCatalogSchemaV1.HasExactOwnedSchema(connection, transaction))
+            || !LocalRepositoryCatalogSchemaV1.HasExactSupportedBackupSchema(connection, transaction))
         {
             Reject();
         }
@@ -104,16 +104,16 @@ internal static class LocalRepositoryCatalogBackupValidation
             ("local_repository_locators", Join(
                 InvalidText("locator_id", 36, 36),
                 InvalidText("repository_id", 36, 36),
-                InvalidLiteral("kind", "'github_repository'"),
+                InvalidLiteral("kind", "'github_repository','local_git_repository'"),
                 InvalidAscii("canonical_locator", 1, 151),
                 InvalidText("locator_sha256", 64, 64),
                 InvalidLiteral("source", "'observed','manual'"),
                 InvalidAscii("display_owner", 1, 39),
-                InvalidAscii("display_repository", 1, 100),
+                InvalidText("display_repository", 1, 100),
                 InvalidText("created_at", 33, 33))),
             ("local_repository_locator_heads", Join(
                 InvalidText("repository_id", 36, 36),
-                InvalidLiteral("kind", "'github_repository'"),
+                InvalidLiteral("kind", "'github_repository','local_git_repository'"),
                 InvalidText("locator_id", 36, 36),
                 InvalidText("updated_at", 33, 33))),
             ("session_repository_observations", Join(
@@ -126,13 +126,13 @@ internal static class LocalRepositoryCatalogBackupValidation
                 InvalidNullableInteger("span_ordinal", "span_ordinal BETWEEN 0 AND 2147483647"),
                 InvalidInteger("attribute_ordinal", "attribute_ordinal BETWEEN 0 AND 2147483647"),
                 InvalidLiteral("scope_kind", "'resource','span'"),
-                InvalidLiteral("attribute_key", "'vcs.repository.url.full','copilot_chat.repo.remote_url'"),
+                InvalidLiteral("attribute_key", "'vcs.repository.url.full','copilot_chat.repo.remote_url','native_workspace_git_remote','native_workspace_git_common_dir'"),
                 InvalidLiteral("value_classification", "'admitted','invalid_locator','invalid_type','duplicate_key'"),
-                InvalidNullableLiteral("locator_kind", "'github_repository'"),
+                InvalidNullableLiteral("locator_kind", "'github_repository','local_git_repository'"),
                 InvalidNullableAscii("canonical_locator", 1, 151),
                 InvalidNullableText("locator_sha256", 64, 64),
                 InvalidNullableAscii("display_owner", 1, 39),
-                InvalidNullableAscii("display_repository", 1, 100),
+                InvalidNullableText("display_repository", 1, 100),
                 InvalidLiteral("source_surface", "'github-copilot-cli','github-copilot-vscode'"),
                 InvalidNullableText("source_application_version", 1, 64),
                 InvalidText("observed_at", 33, 33))),
@@ -226,7 +226,7 @@ internal static class LocalRepositoryCatalogBackupValidation
             InvalidInteger("raw_record_id", "raw_record_id>0"),
             InvalidLiteral("input_evidence_kind", "'payload_sha256'"),
             InvalidText("raw_payload_sha256", 64, 64),
-            InvalidLiteral("source_surface", "'github-copilot-cli','github-copilot-vscode'"),
+            InvalidLiteral("source_surface", "'raw-otlp','github-copilot-cli','github-copilot-vscode'"),
             InvalidNullableText("source_application_version", 1, 64),
             InvalidText("observed_at", 33, 33)),
             "EXISTS(SELECT 1 FROM session_repository_observations o WHERE o.raw_record_id=source_schema_observations.raw_record_id)");

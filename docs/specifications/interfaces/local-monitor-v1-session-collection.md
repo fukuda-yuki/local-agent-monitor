@@ -123,13 +123,39 @@ value is preferred; otherwise the first recorded exact-linked LLM span value
 in source-identity order is used. Run and span values for the same call are
 never added together. Authority is `mixed` when selected components come from
 both sources. Each component is summed only when every applicable call has
-that component; partial coverage remains `capture_gap` with a null value.
+that component; an unavailable full aggregate remains `capture_gap` with a null
+value, independently of the recorded subtotal below.
+Token aggregates publish `observed_components` for input, output, producer
+total, reasoning, cache-read, cache-creation, and cache-read ratio. Each entry
+contains `subtotal` (a state/value fact), `observed_call_count`,
+`applicable_call_count`, and nullable `paired_input`. Recorded subtotals remain
+visible with their coverage even when another call or component is missing.
+Explicit zero is recorded; an absent component has no subtotal. The ratio uses
+only calls containing both input and cache-read, reports their input denominator
+in `paired_input`, and never uses the input total from a different call set.
+The observed ratio is rounded to the nearest basis point, with midpoint rounding up.
+Any pair with cache-read greater than input makes that ratio inconsistent;
+zero input has no ratio. Arithmetic overflow has no subtotal. Parent Agent
+rollups are not added to their child LLM calls.
+`gen_ai.usage.cache_write.input_tokens` denotes input tokens written to cache
+and maps to the existing cache-creation component. Retained normalized spans
+are repaired through the ordinary retained-raw projection publication boundary.
 A component absent from every call remains `not_observed`, including producer
 total. The two execution counts describe applicable calls with any recorded
 usage and all applicable calls respectively. Execution and node facts retain
 their own authority and remain usable when a Session aggregate is unavailable.
 
 ### Timing, capture and revision
+
+An optional `observed_activity` object (`started_at`, `ended_at`, `duration_ms`)
+reports the envelope of valid exact-linked recorded Span intervals. It is absent
+when no such interval is recorded. This observation range is independently
+labelled and never supplies missing native Session lifecycle facts.
+
+Explorer's primary token column shows input and output independently. Recorded
+subtotals include component coverage. A leading recognised `current_datetime`
+envelope is omitted only from the identifying instruction label; raw content
+and evidence remain byte-preserved.
 
 `started_at`, `ended_at`, and `duration_ms` remain native Session lifecycle facts.
 `last_seen_at` is the latest persisted observation timestamp, not a Session

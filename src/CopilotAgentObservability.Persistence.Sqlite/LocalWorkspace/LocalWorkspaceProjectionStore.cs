@@ -11,6 +11,22 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class LocalWorkspaceProjectionStore
 {
+    internal static string RecordedOtelFailurePredicate(SqliteConnection connection, SqliteTransaction transaction, string eventAlias)
+        => TableExists(connection, transaction, "monitor_spans") ? $$"""
+            ({{eventAlias}}.type='otel.span' COLLATE BINARY AND {{eventAlias}}.source_adapter='otel-exact' COLLATE BINARY
+             AND EXISTS(SELECT 1 FROM monitor_spans failure
+               WHERE failure.trace_id={{eventAlias}}.trace_id COLLATE BINARY
+                 AND {{eventAlias}}.source_event_id=failure.trace_id||'/'||failure.span_id COLLATE BINARY
+                 AND failure.status='error' COLLATE BINARY
+                 AND length(failure.trace_id)=32 AND failure.trace_id=lower(failure.trace_id) AND failure.trace_id NOT GLOB '*[^0-9a-f]*'
+                 AND length(failure.span_id)=16 AND failure.span_id=lower(failure.span_id) AND failure.span_id NOT GLOB '*[^0-9a-f]*'
+                 AND (SELECT COUNT(*) FROM monitor_spans owner WHERE lower(owner.trace_id)=failure.trace_id COLLATE BINARY
+                   AND lower(owner.span_id)=failure.span_id COLLATE BINARY)=1
+                 AND (SELECT COUNT(*) FROM session_events owner WHERE owner.source_adapter='otel-exact' COLLATE BINARY
+                   AND owner.type='otel.span' COLLATE BINARY AND lower(owner.trace_id)=failure.trace_id COLLATE BINARY
+                   AND lower(owner.source_event_id)=failure.trace_id||'/'||failure.span_id COLLATE BINARY)=1))
+            """ : "0";
+
     internal static void CompleteSessionEventContentDeletion(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -51,6 +67,7 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now, ISkillRegistryGenerationAuthority skillRegistryAuthority)
     {
+        RawTelemetryStore.QueueRetainedCacheWriteProjection(connection, transaction);
         using var pinnedAuthority = PinnedSkillRegistryGenerationAuthority.Create(skillRegistryAuthority);
         RefreshAllSessionBatches(connection, transaction, now, pinnedAuthority);
         Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
@@ -75,6 +92,7 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static void RefreshStructural(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
     {
+        RawTelemetryStore.QueueRetainedCacheWriteProjection(connection, transaction);
         RefreshAllSessionBatches(connection, transaction, now, null);
         Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
     }
@@ -209,11 +227,11 @@ internal static class LocalWorkspaceProjectionStore
                 WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.status='gap_before_capture' AND CASE a.kind
                   WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse')
                   WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart')
-                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) THEN 'capture_gap'
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "e")} ELSE 0 END) THEN 'capture_gap'
                 WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.content_state='unsupported' AND CASE a.kind
                   WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse')
                   WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart')
-                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) THEN 'source_unsupported'
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "e")} ELSE 0 END) THEN 'source_unsupported'
                 WHEN a.kind<>'retry' AND EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind
                   WHEN 'tool' THEN
                     (e.type='tool.execution_start' AND e.source_adapter='copilot-sdk-stream' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>'')
@@ -229,7 +247,7 @@ internal static class LocalWorkspaceProjectionStore
                       AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
                       AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
                         OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
-                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) THEN 'recorded'
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "e")} ELSE 0 END) THEN 'recorded'
                 ELSE 'not_observed' END,
               count=CASE WHEN a.kind<>'retry' THEN (SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END
                 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind
@@ -247,7 +265,7 @@ internal static class LocalWorkspaceProjectionStore
                       AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
                       AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'')
                         OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*')))
-                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) END
+                  WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "e")} ELSE 0 END) END
               WHERE a.kind IN ('tool','subagent','error','retry')
                 AND a.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             UPDATE local_workspace_session_activity SET count=NULL
@@ -409,7 +427,7 @@ internal static class LocalWorkspaceProjectionStore
                 DELETE FROM local_workspace_semantic_receipts WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
                 """, idsJson);
         }
-        ExecuteWithIds(connection, transaction, """
+        ExecuteWithIds(connection, transaction, $"""
             DELETE FROM local_workspace_node_content_refs WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
             DELETE FROM local_workspace_node_edges WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))) OR related_node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
             DELETE FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
@@ -500,7 +518,7 @@ internal static class LocalWorkspaceProjectionStore
             SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes
             WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND parent_node_id IS NOT NULL AND relationship_authority IN ('exact','explicit');
             """, ("$ids", idsJson));
-        Execute(connection, transaction, """
+        Execute(connection, transaction, $"""
             WITH ranked AS (
               SELECT o.*,row_number() OVER(PARTITION BY o.session_id,o.execution_id ORDER BY
                 CASE WHEN o.input_tokens IS NULL AND o.output_tokens IS NULL AND o.total_tokens IS NULL
@@ -532,8 +550,8 @@ internal static class LocalWorkspaceProjectionStore
                 (e.type='SubagentStart' AND e.source_surface='claude-code' AND e.source_adapter='claude-code-hook' AND e.source_event_id IS NOT NULL AND trim(e.source_event_id)<>''
                   AND e.adapter_version IS NOT NULL AND trim(e.adapter_version)<>'' AND e.normalization_version IS NOT NULL AND trim(e.normalization_version)<>''
                   AND ((e.source_application_version IS NOT NULL AND trim(e.source_application_version)<>'') OR (length(e.schema_fingerprint)=64 AND e.schema_fingerprint=lower(e.schema_fingerprint) AND e.schema_fingerprint NOT GLOB '*[^0-9a-f]*'))))),
-              error_activity_state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed')) THEN 'recorded' ELSE 'not_observed' END,
-              error_activity_count=(SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END FROM session_events e WHERE e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed')),
+              error_activity_state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "e")})) THEN 'recorded' ELSE 'not_observed' END,
+              error_activity_count=(SELECT CASE WHEN COUNT(DISTINCT e.event_id)=0 THEN NULL ELSE COUNT(DISTINCT e.event_id) END FROM session_events e WHERE e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' OR {LocalWorkspaceProjectionStore.RecordedOtelFailurePredicate(connection, transaction, "e")})),
               retry_activity_state='not_observed',
               retry_activity_count=NULL,
               token_authority=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 'none'
@@ -825,6 +843,22 @@ internal static class LocalWorkspaceProjectionStore
             RefreshSemanticProjection(connection, transaction, idsJson);
             RestoreSemanticProjection(connection, transaction, "[]");
             RefreshOtelSemanticFacts(connection, transaction, idsJson);
+            ExecuteWithIds(connection, transaction, $"""
+                INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,
+                  json_pointer,selected_utf8_bytes,revision_input,retention_item_id,retention_store_instance_id,
+                  source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token,availability_state)
+                SELECT semantic.node_id,content.part,content.store_kind,content.source_item_id,content.locator_kind,
+                  content.json_pointer,content.selected_utf8_bytes,content.revision_input,content.retention_item_id,
+                  content.retention_store_instance_id,content.source_captured_at,content.source_expires_at,
+                  content.retention_revision,content.retention_ownership_receipt,content.retention_owner_token,content.availability_state
+                FROM local_workspace_nodes semantic
+                JOIN local_workspace_node_source_references source ON source.node_id=semantic.node_id
+                JOIN session_events event ON event.session_id=semantic.session_id AND {ExactOtelToolContentPredicate("event", "source")}
+                JOIN local_workspace_nodes raw ON raw.source_kind='session_event' AND raw.source_identity=event.event_id
+                JOIN local_workspace_node_content_refs content ON content.node_id=raw.node_id
+                WHERE semantic.source_kind='semantic_tool' AND content.part IN ('tool_input','tool_result')
+                  AND semantic.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson);
         }
 
         ExecuteWithIds(connection, transaction, """
@@ -1949,11 +1983,26 @@ internal static class LocalWorkspaceProjectionStore
         _ => "event_content",
     };
 
+    internal static string ExactOtelToolContentPredicate(string eventAlias, string referenceAlias) => $"""
+        ({referenceAlias}.source_kind='otel_span' AND {eventAlias}.source_adapter='copilot-otel'
+         AND {eventAlias}.parent_event_id={referenceAlias}.event_id
+         AND {eventAlias}.trace_id={referenceAlias}.trace_id COLLATE BINARY
+         AND {eventAlias}.source_event_id={referenceAlias}.trace_id||'/'||{referenceAlias}.span_id||
+           CASE {eventAlias}.type WHEN 'otel.tool.input' THEN '/tool_input/0' WHEN 'otel.tool.result' THEN '/tool_result/0' END COLLATE BINARY)
+        """;
+
     internal static (string Pointer, string Property, JsonValueKind RequiredKind)? ContentSelectorCandidate(
         string? adapter,
         string? fingerprint,
         string type)
     {
+        if (adapter == "copilot-otel")
+            return type switch
+            {
+                "otel.tool.input" => ("/tool_input", "tool_input", JsonValueKind.String),
+                "otel.tool.result" => ("/tool_response", "tool_response", JsonValueKind.String),
+                _ => null,
+            };
         if (!string.Equals(adapter, "claude-code-hook", StringComparison.Ordinal)
             || fingerprint is null || fingerprint.Length != 64)
             return null;
@@ -2006,16 +2055,65 @@ internal static class LocalWorkspaceProjectionStore
         connection.CreateFunction<string, string?>("local_workspace_search", static text => text is null ? null : Search(text), isDeterministic: true);
         connection.CreateFunction<string, string, long>("local_workspace_future", static (expiry, instant) =>
             TryCanonicalFuture(expiry, DateTimeOffset.ParseExact(instant, "O", CultureInfo.InvariantCulture)) ? 1 : 0, isDeterministic: true);
+        var hasSpanRelationships = TableExists(connection, transaction, "monitor_spans");
+        var retentionEnvelopeDuplicateExclusion = hasSpanRelationships ? """
+                 AND NOT (e.source_adapter='copilot-otel' AND EXISTS (
+                   SELECT 1 FROM monitor_spans envelope
+                   JOIN monitor_spans child ON child.trace_id=envelope.trace_id
+                     AND child.parent_span_id=envelope.span_id COLLATE BINARY AND child.category='llm_call'
+                   JOIN session_events child_event ON child_event.session_id=e.session_id
+                     AND child_event.trace_id=e.trace_id COLLATE BINARY AND child_event.source_adapter='copilot-otel'
+                     AND child_event.type='user.message' AND child_event.content_state='available'
+                     AND child_event.source_event_id=child.trace_id||'/'||child.span_id||'/input/'||CAST(CAST(substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9)<>''
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) NOT GLOB '*[^0-9]*'
+                   JOIN session_event_content child_content ON child_content.event_id=child_event.event_id
+                   JOIN retention_items child_item ON child_item.store_kind='session_event_content'
+                     AND child_item.source_item_id=child_event.event_id AND child_item.expires_at=child_content.expires_at
+                   WHERE envelope.trace_id=e.trace_id COLLATE BINARY AND envelope.category='agent_invocation'
+                     AND e.source_event_id=envelope.trace_id||'/'||envelope.span_id||'/input/'||CAST(CAST(substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9)<>''
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) NOT GLOB '*[^0-9]*'
+                     AND child_item.state IN ('expiring','retained_by_policy') AND child_item.read_denied_at IS NULL
+                     AND child_item.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
+                     AND child_item.captured_at=child_content.captured_at AND child_item.expires_at=child_content.expires_at
+                     AND local_workspace_retention_receipt_matches(child_item.store_instance_id,child_event.event_id,child_content.content_kind,
+                       child_content.captured_at,child_content.expires_at,child_event.session_id,child_event.run_id,child_event.source_adapter,
+                       child_event.source_event_id,child_content.retention_owner_token,child_item.ownership_receipt)=1
+                     AND child_item.deleted_at IS NULL AND child_item.error_code IS NULL
+                     AND (child_item.state='retained_by_policy' OR local_workspace_future(child_item.expires_at,$now)=1)
+                     AND child_content.content_json=c.content_json COLLATE BINARY))
+            """ : string.Empty;
+        var envelopeDuplicateExclusion = hasSpanRelationships ? """
+                 AND NOT (e.source_adapter='copilot-otel' AND EXISTS (
+                   SELECT 1 FROM monitor_spans envelope
+                   JOIN monitor_spans child ON child.trace_id=envelope.trace_id
+                     AND child.parent_span_id=envelope.span_id COLLATE BINARY AND child.category='llm_call'
+                   JOIN session_events child_event ON child_event.session_id=e.session_id
+                     AND child_event.trace_id=e.trace_id COLLATE BINARY AND child_event.source_adapter='copilot-otel'
+                     AND child_event.type='user.message' AND child_event.content_state='available'
+                     AND child_event.source_event_id=child.trace_id||'/'||child.span_id||'/input/'||CAST(CAST(substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9)<>''
+                     AND substr(child_event.source_event_id,length(child.trace_id)+length(child.span_id)+9) NOT GLOB '*[^0-9]*'
+                   JOIN session_event_content child_content ON child_content.event_id=child_event.event_id
+                   WHERE envelope.trace_id=e.trace_id COLLATE BINARY AND envelope.category='agent_invocation'
+                     AND e.source_event_id=envelope.trace_id||'/'||envelope.span_id||'/input/'||CAST(CAST(substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) AS INTEGER) AS TEXT) COLLATE BINARY
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9)<>''
+                     AND substr(e.source_event_id,length(envelope.trace_id)+length(envelope.span_id)+9) NOT GLOB '*[^0-9]*'
+                     AND local_workspace_future(child_content.expires_at,$now)=1
+                     AND child_content.content_json=c.content_json COLLATE BINARY))
+            """ : string.Empty;
         var candidates = TableExists(connection, transaction, "retention_items")
-            ? """
+            ? $"""
               SELECT e.session_id,e.event_id,e.type,e.occurred_at,c.captured_at,c.expires_at source_expires_at,
                      CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END effective_expires_at,
                      local_workspace_label(e.type,c.content_json) label_text
               FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
               JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
                 AND i.expires_at=c.expires_at
-              WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
-                AND i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
+               WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
+              {retentionEnvelopeDuplicateExclusion}
+                 AND i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
                 AND i.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
                 AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at
                 AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,
@@ -2024,11 +2122,12 @@ internal static class LocalWorkspaceProjectionStore
                 AND (i.state='retained_by_policy' OR local_workspace_future(i.expires_at,$now)=1)
                 AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
               """
-            : """
+            : $"""
               SELECT e.session_id,e.event_id,e.type,e.occurred_at,c.captured_at,c.expires_at source_expires_at,c.expires_at effective_expires_at,local_workspace_label(e.type,c.content_json) label_text
               FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
-              WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
-                AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+               WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
+              {envelopeDuplicateExclusion}
+                 AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
                 AND local_workspace_future(c.expires_at,$now)=1
               """;
         var proofUpdate = labelProofInstalled
@@ -2211,7 +2310,14 @@ internal static class LocalWorkspaceProjectionStore
             var property = type == "user.message" ? "value" : "prompt";
             if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) return false;
             var builder = new StringBuilder(); var previousSpace = false;
-            foreach (var rune in value.GetString()!.EnumerateRunes())
+            var instruction = value.GetString()!.TrimStart();
+            const string dateStart = "<current_datetime>";
+            const string dateEnd = "</current_datetime>";
+            if (instruction.StartsWith(dateStart, StringComparison.Ordinal)
+                && instruction.IndexOf(dateEnd, StringComparison.Ordinal) is var dateEndIndex && dateEndIndex >= dateStart.Length
+                && DateTimeOffset.TryParse(instruction[dateStart.Length..dateEndIndex].Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+                instruction = instruction[(dateEndIndex + dateEnd.Length)..].TrimStart();
+            foreach (var rune in instruction.EnumerateRunes())
             {
                 if (rune.Value is '\r' or '\n' or 0x0085 or 0x2028 or 0x2029 || Rune.IsWhiteSpace(rune)) { if (builder.Length != 0 && !previousSpace) builder.Append(' '); previousSpace = true; continue; }
                 builder.Append(rune); previousSpace = false;

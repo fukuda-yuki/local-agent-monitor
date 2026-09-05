@@ -14,6 +14,110 @@ public sealed class SessionOtelEnrichmentTests
     private static readonly DateTimeOffset ObservedAt = DateTimeOffset.Parse("2026-07-12T00:00:00Z");
 
     [Fact]
+    public async Task ProcessNextBatch_AgentExecutionPreservesCrossRunToolParentAndExcludesStartup()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        const string trace = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        IngestCopilot(temp, trace, "copilot-chat", "agent-session", "question", "answer", spanId: "0000000000000001", operation: "invoke_agent");
+        IngestCopilot(temp, trace, "copilot-chat", "agent-session", "question", "answer", spanId: "0000000000000002", parentSpanId: "0000000000000001");
+        IngestCopilot(temp, trace, "copilot-chat", "agent-session", "question", "answer", spanId: "0000000000000003", parentSpanId: "0000000000000002", operation: "execute_tool", statusCode: 2);
+        IngestCopilot(temp, trace, "copilot-chat", "agent-session", "question", "answer", spanId: "0000000000000004", operation: "startup");
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(4, enricher.ProcessNextBatch());
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, ObservedAt, FixedSkillRegistryGenerationAuthority.Load());
+        }
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+            LocalArchiveSchemaV1.Ensure(connection, transaction);
+            transaction.Commit();
+        }
+        var service = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(clock, registryAuthority: authority), SqliteLocalArchiveFactSnapshotContributor.Instance,
+            detailContributor: new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: clock), skillRegistryAuthority: authority);
+        var sessionId = Assert.Single(store.ListMostRecent(10)).SessionId.ToString();
+        var summary = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, sessionId), CancellationToken.None);
+        var execution = Assert.Single(summary.Detail.Executions);
+        Assert.Equal(1, execution.Activity.Error.Value);
+        var agent = Assert.Single(summary.Detail.Nodes, value => value.Kind == "agent");
+        Assert.Equal("completed", agent.Status);
+        Assert.Equal(1000, agent.DurationMilliseconds);
+        var tool = Assert.Single(summary.Detail.Nodes, value => value.Kind == "tool");
+        Assert.Equal(execution.ExecutionId, tool.ExecutionId);
+        Assert.Equal("exact", tool.RelationshipAuthority);
+        Assert.Equal("0000000000000002", Assert.Single(summary.Detail.Nodes, value => value.NodeId == tool.ParentNodeId).SpanId);
+        var inspector = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Node, sessionId, NodeId: tool.NodeId), CancellationToken.None);
+        Assert.Equal(tool.ParentNodeId, Assert.Single(inspector.Detail.Nodes, value => value.NodeId == tool.NodeId).ParentNodeId);
+    }
+
+    [Fact]
+    public void ProcessNextBatch_RetainedToolPartsReachTheirExactSemanticNode()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
+        store.CreateSchema();
+        IngestCopilot(temp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "copilot-chat", "tool-session", "question", "answer",
+            spanId: "0000000000000001", operation: "execute_tool");
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
+        Assert.Equal(1, enricher.ProcessNextBatch());
+        Assert.Equal(0, enricher.ProcessNextBatch());
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ObservedAt, FixedSkillRegistryGenerationAuthority.Load());
+        var sessionId = Assert.Single(store.ListMostRecent(10)).SessionId.ToString();
+        using var transaction = connection.BeginTransaction();
+        Assert.True(LocalWorkspaceContentAuthority.ValidateSessionGraph(connection, transaction, sessionId, ObservedAt));
+        transaction.Commit();
+        Assert.Equal(["tool_input|available", "tool_result|available"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT c.part||'|'||c.availability_state FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id WHERE n.kind='tool' ORDER BY c.part;"));
+        Assert.Equal(2, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_events WHERE type IN ('otel.tool.input','otel.tool.result');"));
+    }
+
+    [Fact]
+    public void ProcessNextBatch_RecordedOtelFailuresReachSessionAndExecutionActivity()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var clock = new FixedTimeProvider(ObservedAt);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, clock);
+        store.CreateSchema();
+        for (var index = 1; index <= 6; index++)
+            IngestCopilot(temp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "copilot-chat", "failure-session", "question", "answer",
+                spanId: index.ToString("x16"), statusCode: index <= 5 ? 2 : 1);
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(6, enricher.ProcessNextBatch());
+        Assert.Equal(0, enricher.ProcessNextBatch());
+        Assert.Single(store.ListMostRecent(10));
+
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ObservedAt, authority);
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, ObservedAt, authority);
+            transaction.Commit();
+        }
+        Assert.Equal(["recorded|5"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT state||'|'||COALESCE(CAST(count AS TEXT),'missing') FROM local_workspace_session_activity WHERE kind='error';"));
+        Assert.Equal(5, Count(temp.DatabasePath,
+            "SELECT SUM(error_activity_count) FROM local_workspace_execution_headers;"));
+        Assert.Equal(1, Count(temp.DatabasePath,
+            "SELECT COUNT(*) FROM local_workspace_execution_headers WHERE error_activity_state='not_observed' AND error_activity_count IS NULL;"));
+    }
+
+    [Fact]
     public void ProcessNextBatch_CopilotFirstObservationPreservesContentAndSourceScopedContinuity()
     {
         using var temp = new MonitorTempDirectory();
@@ -210,7 +314,7 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
     }
 
-    private static void IngestCopilot(MonitorTempDirectory temp, string traceId, string service, string nativeId, string prompt, string answer, string? inputMessages = null, string spanId = "span-1", string? outputMessages = null)
+    private static void IngestCopilot(MonitorTempDirectory temp, string traceId, string service, string nativeId, string prompt, string answer, string? inputMessages = null, string spanId = "span-1", string? outputMessages = null, int statusCode = 1, string operation = "chat", string? parentSpanId = null)
     {
         static object Attribute(string key, string value) => new { key, value = new { stringValue = value } };
         var input = inputMessages ?? System.Text.Json.JsonSerializer.Serialize(new[] { new { role = "user", parts = new[] { new { type = "text", content = prompt } } } });
@@ -222,8 +326,11 @@ public sealed class SessionOtelEnrichmentTests
                 resource = new { attributes = new[] { Attribute("service.name", service) } },
                 scopeSpans = new[] { new { spans = new[] { new
                 {
-                    traceId, spanId, name = "chat", startTimeUnixNano = "1783814400000000000", endTimeUnixNano = "1783814401000000000",
-                    attributes = new[] { Attribute("gen_ai.operation.name", "chat"), Attribute("gen_ai.conversation.id", nativeId), Attribute("gen_ai.input.messages", input), Attribute("gen_ai.output.messages", output) },
+                    traceId, spanId, parentSpanId, name = "chat", startTimeUnixNano = "1783814400000000000", endTimeUnixNano = "1783814401000000000",
+                    status = new { code = statusCode },
+                    attributes = new[] { Attribute("gen_ai.operation.name", operation), Attribute("gen_ai.conversation.id", nativeId) }
+                        .Concat(operation is "chat" or "invoke_agent" ? [Attribute("gen_ai.input.messages", input), Attribute("gen_ai.output.messages", output)] : [])
+                        .Concat(operation == "execute_tool" ? [Attribute("gen_ai.tool.name", "read_file"), Attribute("gen_ai.tool.call.arguments", "{\"path\":\"example.txt\"}"), Attribute("gen_ai.tool.call.result", "example content")] : []).ToArray(),
                 } } } },
             } },
         });

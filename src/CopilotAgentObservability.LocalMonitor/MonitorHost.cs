@@ -564,7 +564,8 @@ internal static class MonitorHost
                 options.DatabasePath,
                 localRepositoryQueue,
                 localRepositoryResolver,
-                timeProvider);
+                timeProvider,
+                nativeCopilotCliLocatorResolver: CopilotCliNativeRepositoryLocatorResolver.Resolve);
             var localRepositoryWorker = new LocalRepositoryReconciliationWorker(
                 localRepositoryQueue,
                 localRepositoryRawAvailability,

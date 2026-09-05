@@ -266,9 +266,7 @@ public sealed class LocalComparisonApplicationTests
             snapshot.Results.Select(row => row.SectionOrdinal));
         Assert.NotEmpty(snapshot.Results[0].Payload);
         Assert.Equal("receipt", snapshot.Results[0].RowKind);
-        Assert.Equal(
-            "9683191244a2c4109b395794e401aecf42ff57f7154e2d136a3b6fe0a6f609cd",
-            snapshot.Results[0].PayloadSha256);
+        Assert.Equal("c2b7ff96ff37c943071940cac424055c8660526fd025e6a3b538ff53b45e9c52", snapshot.Results[0].PayloadSha256);
         Assert.Equal(snapshot.Results[0].Payload,
             Assert.IsType<LocalComparisonSnapshotWrite>(repeated.Snapshot).Results[0].Payload);
         Assert.DoesNotContain(snapshot.Results,
@@ -917,6 +915,36 @@ public sealed class LocalComparisonApplicationTests
 
     private static byte[] ScopeConditionDigest() => Convert.FromHexString(
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+
+    [Fact]
+    public void PartialTokenCoverageSurvivesFrameAndSnapshotWithoutChangingOlderFrames()
+    {
+        var reference = new LocalComparisonSourceReference("workspace_session", SessionA, null, null, null, RevisionA);
+        var cache = new LocalComparisonObservedScalar(new(LocalComparisonFactState.CaptureGap, null), reference)
+        {
+            TokenObservation = new(new("recorded", 258048), 7, 8, null),
+            CacheRatioObservation = new(new("recorded", 9433), 7, 8, 273560),
+        };
+        var a = Session(SessionA, RevisionA, reference, Recorded(306666, reference), cache, []);
+        var decoded = LocalComparisonFactFrame.Decode(LocalComparisonFactFrame.Create(a));
+        Assert.Equal(cache.TokenObservation, decoded.Scalars["cache_read_tokens"].TokenObservation);
+        Assert.Equal(cache.CacheRatioObservation, decoded.Scalars["cache_read_tokens"].CacheRatioObservation);
+        var referenceB = reference with { SourceIdentity = SessionB, RevisionSha256 = RevisionB };
+        var b = Session(SessionB, RevisionB, referenceB, Recorded(100, referenceB), ExplicitZero(referenceB), []);
+        var previous = LocalComparisonFactFrame.Create(b with { FactFrameVersion = 2 });
+        Assert.Equal(previous, LocalComparisonFactFrame.Create(LocalComparisonFactFrame.Decode(previous)));
+        var service = new LocalComparisonApplicationService(null, new FixedTimeProvider(CreatedAt), _ => ComparisonId);
+        var prepared = service.Prepare(new(RepositoryId, new([decoded], 0), new([b], 0), ScopeConditionDigest()));
+        Assert.Equal(LocalComparisonCreateStatus.Accepted, prepared.Status);
+        var snapshot = Assert.IsType<LocalComparisonSnapshotWrite>(prepared.Snapshot);
+        var cacheRow = Assert.Single(snapshot.Results, row => row.RowKey == "cache_read_tokens");
+        Assert.Equal("258048", Value(cacheRow, "a_total"));
+        Assert.Equal("7", Value(cacheRow, "a_observed_call_count"));
+        Assert.Equal("8", Value(cacheRow, "a_applicable_call_count"));
+        var ratioRow = Assert.Single(snapshot.Results, row => row.RowKey == "cache_read_ratio");
+        Assert.Equal("0.9433", Value(ratioRow, "a_median"));
+        Assert.Equal("273560", Value(ratioRow, "a_paired_input"));
+    }
 
     private static object CreateFact(
         Type factType,
