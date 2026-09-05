@@ -813,6 +813,33 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
     }
 
     [Fact]
+    public async Task RepositoryScopeAcceptsAnAutomaticAssignmentWithItsRetainedCandidate()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(includeRepository: true));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var document = JsonNode.Parse(await FinalGoldenAsync())!.AsObject();
+        var assignment = document["items"]![0]!["assignment"]!;
+        assignment["state"] = "assigned";
+        assignment["authority"] = "automatic";
+        assignment["repository_id"] = RepositoryId;
+        assignment["candidate_repository_ids"] = new JsonArray(RepositoryId);
+        await page.RouteAsync("**/api/local-monitor/v1/sessions", route =>
+            route.FulfillAsync(Json(Canonical(document))));
+
+        await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("1件を表示しています");
+        var row = page.Locator($"[data-session-row][data-session-id='{SessionId}']");
+        await Expect(row).ToHaveCountAsync(1);
+        await Expect(row.Locator("[data-session-open]")).ToHaveAttributeAsync("href", $"/sessions/{SessionId}");
+    }
+
+    [Fact]
     [Trait("ValidationLane", "Nightly")]
     public async Task CompletedAndActiveRecordedTimingRenderTogetherWithoutInventingActiveDuration()
     {

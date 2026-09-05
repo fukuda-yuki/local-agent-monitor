@@ -91,7 +91,8 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                     || currentObservationSurface != row.SourceSurface
                     || currentProvenance.SourceSurface != "raw-otlp" && currentProvenance.SourceSurface != row.SourceSurface
                     || currentProvenance.SourceApplicationVersion != row.SourceApplicationVersion
-                    || currentProvenance.ObservedAt.ToString("O", CultureInfo.InvariantCulture) != row.ObservedAt)
+                    || row.AttributeKey is not ("native_workspace_git_remote" or "native_workspace_git_common_dir")
+                        && currentProvenance.ObservedAt.ToString("O", CultureInfo.InvariantCulture) != row.ObservedAt)
                 {
                     RejectAutomaticAdmission();
                 }
@@ -133,10 +134,26 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             || !LocalRepositoryCatalogValidation.IsLowerSha256(row.RawPayloadSha256)
             || row.ResourceSpanOrdinal < 0
             || row.AttributeOrdinal < 0
-            || row.AttributeKey is not ("vcs.repository.url.full" or "copilot_chat.repo.remote_url")
+            || row.AttributeKey is not ("vcs.repository.url.full" or "copilot_chat.repo.remote_url" or "native_workspace_git_remote" or "native_workspace_git_common_dir")
             || row.SourceSurface is not ("github-copilot-cli" or "github-copilot-vscode")
             || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(row.ObservedAt)
             || !row.HasContext)
+        {
+            return false;
+        }
+
+        var isNative = row.AttributeKey is "native_workspace_git_remote" or "native_workspace_git_common_dir";
+        if (isNative)
+        {
+            if (row.SourceSurface != "github-copilot-cli"
+                || row.ScopeKind != "span"
+                || row.AttributeOrdinal != int.MaxValue
+                || row.ValueClassification != "admitted"
+                || row.AttributeKey == "native_workspace_git_remote" && row.LocatorKind != "github_repository"
+                || row.AttributeKey == "native_workspace_git_common_dir" && row.LocatorKind != "local_git_repository")
+                return false;
+        }
+        else if (row.LocatorKind is not (null or "github_repository"))
         {
             return false;
         }
@@ -177,12 +194,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
 
         if (row.ValueClassification == "admitted")
         {
+            if (row.CanonicalLocator is null || row.LocatorSha256 is null || row.DisplayOwner is null || row.DisplayRepository is null)
+                return false;
             return row.LocatorKind == "github_repository"
-                && GitHubRepositoryLocatorParser.IsExact(
-                    row.CanonicalLocator,
-                    row.LocatorSha256,
-                    row.DisplayOwner,
-                    row.DisplayRepository);
+                ? GitHubRepositoryLocatorParser.IsExact(row.CanonicalLocator, row.LocatorSha256, row.DisplayOwner, row.DisplayRepository)
+                : row.LocatorKind == "local_git_repository"
+                    && LocalGitRepositoryLocator.IsExact(row.CanonicalLocator, row.LocatorSha256, row.DisplayOwner, row.DisplayRepository);
         }
 
         return row.ValueClassification is "invalid_locator" or "invalid_type" or "duplicate_key"
@@ -210,7 +227,8 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                        o.resource_span_ordinal,o.scope_kind,o.value_classification,
                        o.locator_kind,o.canonical_locator,o.locator_sha256,o.display_owner,
                        o.display_repository,o.source_surface,o.source_application_version,o.observed_at,
-                       l.kind,l.canonical_locator,l.locator_sha256,l.source,l.display_owner,l.display_repository
+                       l.kind,l.canonical_locator,l.locator_sha256,l.source,l.display_owner,l.display_repository,
+                       o.attribute_key
                 FROM session_repository_observation_contexts c
                 JOIN session_repository_observations o ON o.observation_id=c.observation_id
                 LEFT JOIN local_repository_locators l
@@ -247,7 +265,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         reader.GetString(16), NullableText(reader, 17), NullableText(reader, 18), NullableText(reader, 19),
         NullableText(reader, 20), NullableText(reader, 21), reader.GetString(22), NullableText(reader, 23),
         reader.GetString(24), NullableText(reader, 25), NullableText(reader, 26), NullableText(reader, 27),
-        NullableText(reader, 28), NullableText(reader, 29), NullableText(reader, 30));
+        NullableText(reader, 28), NullableText(reader, 29), NullableText(reader, 30), reader.GetString(31));
 
     private static void ValidateAutomaticAdmissionContext(
         SqliteConnection connection,
@@ -282,12 +300,15 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             RejectAutomaticAdmission();
         }
 
-        var provenance = new LocalRepositoryCaptureProvenance(
+        var currentProvenance = LocalRepositorySessionEventJoin.ReadCaptureProvenance(
+            connection,
+            transaction,
             row.RawRecordId,
-            row.RawPayloadSha256,
-            row.SourceSurface,
-            row.SourceApplicationVersion,
-            DateTimeOffset.ParseExact(row.ObservationObservedAt, "O", CultureInfo.InvariantCulture));
+            row.RawPayloadSha256);
+        if (currentProvenance.Status != LocalRepositoryCaptureProvenanceStatus.Valid
+            || currentProvenance.Provenance is null)
+            RejectAutomaticAdmission();
+        var provenance = currentProvenance.Provenance! with { SourceSurface = row.SourceSurface };
         var joined = LocalRepositorySessionEventJoin.ResolveContext(
             connection,
             transaction,
@@ -299,6 +320,13 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             || joined.SessionId != row.SessionId)
         {
             RejectAutomaticAdmission();
+        }
+        if (row.AttributeKey is "native_workspace_git_remote" or "native_workspace_git_common_dir")
+        {
+            using var native = AdmissionCommand(connection, transaction, "SELECT COUNT(*) FROM session_native_ids WHERE session_id=$session_id AND source_surface='copilot-cli' COLLATE BINARY AND binding_kind='native' COLLATE BINARY;");
+            native.Parameters.AddWithValue("$session_id", row.SessionId);
+            if (Convert.ToInt64(native.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                RejectAutomaticAdmission();
         }
 
         var hasHigherPrecedenceSpan = HasHigherPrecedenceSpan(connection, transaction, row);
@@ -323,7 +351,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         {
             if (row.RepositoryId is null
                 || row.LocatorId is null
-                || row.ObservationLocatorKind != "github_repository"
+                || row.ObservationLocatorKind is not ("github_repository" or "local_git_repository")
                 || row.OwnedLocatorKind != row.ObservationLocatorKind
                 || row.OwnedCanonicalLocator != row.ObservationCanonicalLocator
                 || row.OwnedLocatorSha256 != row.ObservationLocatorSha256
@@ -398,13 +426,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             {
                 if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(row.LocatorId)
                     || !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(row.RepositoryId)
-                    || row.Kind != "github_repository"
+                    || row.Kind is not ("github_repository" or "local_git_repository")
                     || row.Source != "observed"
-                    || !GitHubRepositoryLocatorParser.IsExact(
-                        row.CanonicalLocator,
-                        row.LocatorSha256,
-                        row.DisplayOwner,
-                        row.DisplayRepository)
+                    || !(row.Kind == "github_repository"
+                        ? GitHubRepositoryLocatorParser.IsExact(row.CanonicalLocator, row.LocatorSha256, row.DisplayOwner, row.DisplayRepository)
+                        : LocalGitRepositoryLocator.IsExact(row.CanonicalLocator, row.LocatorSha256, row.DisplayOwner, row.DisplayRepository))
                     || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(row.LocatorCreatedAt)
                     || !LocalRepositoryCatalogValidation.IsDisplayName(row.RepositoryDisplayName)
                     || row.RepositoryRevision < 1
@@ -706,7 +732,8 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         string? OwnedLocatorSha256,
         string? OwnedLocatorSource,
         string? OwnedDisplayOwner,
-        string? OwnedDisplayRepository);
+        string? OwnedDisplayRepository,
+        string AttributeKey);
 
     private sealed record ObservedLocatorRow(
         string LocatorId,

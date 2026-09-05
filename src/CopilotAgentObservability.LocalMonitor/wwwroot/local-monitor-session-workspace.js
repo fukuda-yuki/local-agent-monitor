@@ -228,10 +228,10 @@
       && value.candidate_repository_ids.length <= 128 && distinct(value.candidate_repository_ids)
       && sorted(value.candidate_repository_ids) && value.candidate_repository_ids.every(id => UUID_V7.test(id)))) return false;
     return value.state === "assigned" && oneOf(value.authority, ["automatic", "manual"])
-        && value.repository_id !== null && value.candidate_repository_ids.length === 0
-      || value.state === "unassigned" && value.authority === "none" && value.repository_id === null && value.candidate_repository_ids.length === 0
-      || value.state === "explicitly_unassigned" && value.authority === "manual" && value.repository_id === null && value.candidate_repository_ids.length === 0
-      || value.state === "conflict" && value.authority === "automatic" && value.repository_id === null && value.candidate_repository_ids.length >= 2;
+        && value.repository_id !== null
+      || value.state === "unassigned" && value.authority === "none" && value.repository_id === null
+      || value.state === "explicitly_unassigned" && value.authority === "manual" && value.repository_id === null
+      || value.state === "conflict" && value.authority === "automatic" && value.repository_id === null;
   }
 
   const archive = value => exact(value, ["state", "revision", "effectively_eligible", "exclusion_reason"])

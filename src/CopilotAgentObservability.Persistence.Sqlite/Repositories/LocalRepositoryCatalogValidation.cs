@@ -81,13 +81,13 @@ internal static class LocalRepositoryCatalogValidation
 
     private static void ValidateLocatorRows(SqliteConnection connection, SqliteTransaction? transaction)
     {
-        using var command = Command(connection, transaction, "SELECT locator_id,repository_id,canonical_locator,locator_sha256,display_owner,display_repository,created_at FROM local_repository_locators;");
+        using var command = Command(connection, transaction, "SELECT locator_id,repository_id,kind,canonical_locator,locator_sha256,display_owner,display_repository,created_at FROM local_repository_locators;");
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
             if (!IsCanonicalUuidV7(reader.GetString(0)) || !IsCanonicalUuidV7(reader.GetString(1))
-                || !HasExactLocatorFields(reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5))
-                || !IsCanonicalTimestamp(reader.GetString(6)))
+                || !HasExactLocatorFields(reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6))
+                || !IsCanonicalTimestamp(reader.GetString(7)))
                 Reject();
         }
     }
@@ -104,14 +104,16 @@ internal static class LocalRepositoryCatalogValidation
             if (!IsCanonicalUuidV7(reader.GetString(0)) || !IsLowerSha256(reader.GetString(1)) || reader.GetString(1) != sourceIdentity || !IsLowerSha256(reader.GetString(3))
                 || !IsApprovedObservationAttributeKey(reader.GetString(9))
                 || (!reader.IsDBNull(10) && !IsVisibleVersion(reader.GetString(10))) || !IsCanonicalTimestamp(reader.GetString(11))
-                || (reader.GetString(12) == "admitted" && (!"github_repository".Equals(reader.GetString(13), StringComparison.Ordinal)
-                    || !HasExactLocatorFields(reader.GetString(14), reader.GetString(15), reader.GetString(16), reader.GetString(17)))))
+                || (reader.GetString(12) == "admitted" && !HasExactLocatorFields(reader.GetString(13), reader.GetString(14), reader.GetString(15), reader.GetString(16), reader.GetString(17))))
                 Reject();
         }
     }
 
-    private static bool HasExactLocatorFields(string canonicalLocator, string locatorSha256, string displayOwner, string displayRepository) =>
-        GitHubRepositoryLocatorParser.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository);
+    private static bool HasExactLocatorFields(string kind, string canonicalLocator, string locatorSha256, string displayOwner, string displayRepository) =>
+        kind == "github_repository"
+            ? GitHubRepositoryLocatorParser.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository)
+            : kind == "local_git_repository"
+                && LocalGitRepositoryLocator.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository);
 
     private static void ValidateContextRows(SqliteConnection connection, SqliteTransaction? transaction)
     {
@@ -396,7 +398,9 @@ internal static class LocalRepositoryCatalogValidation
     }
 
     private static bool IsVisibleVersion(string value) => value.Length is >= 1 and <= 64 && value.All(character => character is >= '!' and <= '~' && character is not '/' and not '\\');
-    private static bool IsApprovedObservationAttributeKey(string value) => value is "vcs.repository.url.full" or "copilot_chat.repo.remote_url";
+    private static bool IsApprovedObservationAttributeKey(string value) => value is
+        "vcs.repository.url.full" or "copilot_chat.repo.remote_url" or
+        "native_workspace_git_remote" or "native_workspace_git_common_dir";
     private static bool HasUnpairedSurrogate(string value)
     {
         for (var index = 0; index < value.Length; index++)

@@ -537,13 +537,12 @@
     }
     const validAssignment = assignment.state === "assigned"
         && (assignment.authority === "automatic" || assignment.authority === "manual")
-        && assignment.repository_id !== null && assignment.candidate_repository_ids.length === 0
+        && assignment.repository_id !== null
       || assignment.state === "unassigned" && assignment.authority === "none"
-        && assignment.repository_id === null && assignment.candidate_repository_ids.length === 0
+        && assignment.repository_id === null
       || assignment.state === "explicitly_unassigned" && assignment.authority === "manual"
-        && assignment.repository_id === null && assignment.candidate_repository_ids.length === 0
-      || assignment.state === "conflict" && assignment.authority === "automatic"
-        && assignment.repository_id === null && assignment.candidate_repository_ids.length >= 2;
+        && assignment.repository_id === null
+      || assignment.state === "conflict" && assignment.authority === "automatic" && assignment.repository_id === null;
     if (!validAssignment) throw new TypeError("invalid session collection");
     const archive = value.archive;
     if (!exactKeys(archive, ARCHIVE_KEYS)

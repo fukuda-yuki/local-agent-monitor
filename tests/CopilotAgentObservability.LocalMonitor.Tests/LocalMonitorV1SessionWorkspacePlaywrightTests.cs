@@ -1270,8 +1270,11 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         var calls = 0;
-        var summary = await File.ReadAllTextAsync(Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "TestData", "LocalMonitorV1SessionDetail", "summary-full.json")));
+        var summary = JsonNode.Parse(await File.ReadAllTextAsync(Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "TestData", "LocalMonitorV1SessionDetail", "summary-full.json"))))!
+            .AsObject();
+        summary["session"]!["assignment"]!["candidate_repository_ids"] =
+            new JsonArray("018f0000-0000-7000-8000-000000000101");
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route =>
         {
             calls++;
@@ -1280,7 +1283,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
                 Status = 200,
                 ContentType = "application/json; charset=utf-8",
                 Headers = new Dictionary<string, string> { ["Cache-Control"] = "no-store" },
-                Body = summary,
+                Body = summary.ToJsonString(),
             });
         });
         var emptyTimeline = JsonNode.Parse(Summary("timeline-empty.json"))!.AsObject();

@@ -1726,7 +1726,7 @@ public sealed class SqliteRuntimeBackupService
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_ai_analysis") && (!LocalAiAnalysisSchemaV1.IsValid(connection, componentTransaction) || !ValidateLocalAiRows(connection,componentTransaction,localAiValidationTime??publicationTime??DateTimeOffset.UtcNow,allowDeniedContent:workspaceShapeOnly||allowDeniedLocalAiContent))) return false;
                 if (versions.ContainsKey("local_comparison"))
-                    LocalComparisonSchemaV1.Validate(connection, componentTransaction);
+                    LocalComparisonSchemaV1.Validate(connection, componentTransaction, allowLegacyRepositoryCatalog: true);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
                     if (workspaceShapeOnly && versions["local_workspace_projection"] == 4)

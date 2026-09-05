@@ -48,6 +48,8 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
 
         await page.GotoAsync(host.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
+        await Expect(page.Locator("#local-monitor-repository-selection"))
+            .ToContainTextAsync("GitHub URL、または Copilot CLI が記録したワークスペースの Git 情報");
         var cards = page.Locator("[data-repository-card]");
         await Expect(cards).ToHaveCountAsync(2);
         await Expect(cards.Nth(0).Locator("[data-repository-name]")).ToHaveTextAsync(hostileName);
@@ -180,6 +182,77 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
             Assert.Equal("local-monitor", request.Headers["x-monitor-csrf"]);
             Assert.False(request.Headers.ContainsKey("idempotency-key"));
         });
+    }
+
+    [Fact]
+    public async Task Settings_ShowsLocalGitIdentityWithoutExposingItsOpaqueLocatorOrTreatingItAsGitHub()
+    {
+        const string repositoryId = "018f0000-0000-7000-8000-000000000101";
+        const string locatorId = "018f0000-0000-7000-8000-000000000201";
+        const string opaqueLocator = "local-git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string privateWorkingDirectory = "C:\\Users\\person\\source\\PrivateWorkspace";
+        var repositories = new[]
+        {
+            new LocalRepositoryCatalogSnapshot(repositoryId, "PrivateWorkspace", 1, null, 1, LocalArchiveState.Active, 0),
+        };
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(new FixedSnapshotService(new(
+                new(LocalRepositoryScopeKind.All, null), repositories, []))));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync($"**/api/local-monitor/v1/repositories/{repositoryId}/locators", route =>
+            route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    schema_version = "local-repository-locators.v1",
+                    repository_id = repositoryId,
+                    repository_revision = 1,
+                    locators = new[]
+                    {
+                        new
+                        {
+                            locator_id = locatorId,
+                            kind = "local_git_repository",
+                            canonical_locator = opaqueLocator,
+                            display_owner = "Local",
+                            display_repository = "PrivateWorkspace",
+                            source = "observed",
+                            is_current = true,
+                            created_at = "2026-09-05T01:02:03.0000000+00:00",
+                            provenance = new
+                            {
+                                source_surface = "github-copilot-cli",
+                                source_application_version = "1.0.0",
+                                trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                span_id = "bbbbbbbbbbbbbbbb",
+                                observed_at = "2026-09-05T01:02:03.0000000+00:00",
+                                source_content_availability = "available",
+                            },
+                        },
+                    },
+                }),
+            }));
+
+        await page.GotoAsync(host.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator("[data-repository-manage]").ClickAsync();
+
+        var identity = page.Locator("[data-repository-identity-kind='local_git_repository']");
+        await Expect(identity).ToContainTextAsync("ローカル Git / PrivateWorkspace");
+        await Expect(identity).ToContainTextAsync("現在");
+        await Expect(identity.Locator("a")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#repository-create-github-locator")).ToHaveValueAsync("");
+        await Expect(page.Locator("[data-repository-open]"))
+            .ToHaveAttributeAsync("href", $"/repositories/{repositoryId}/sessions");
+        var body = await page.Locator("body").InnerTextAsync();
+        Assert.DoesNotContain(opaqueLocator, body, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateWorkingDirectory, body, StringComparison.Ordinal);
     }
 
     [Fact]

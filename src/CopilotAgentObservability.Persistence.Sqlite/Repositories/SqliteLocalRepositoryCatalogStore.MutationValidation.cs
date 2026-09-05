@@ -137,7 +137,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             SELECT 1 FROM local_repository_locators a
             JOIN local_repository_locators b
               ON b.kind=a.kind AND b.locator_sha256=a.locator_sha256 AND b.locator_id<>a.locator_id
-            LIMIT 1;
+            LIMIT 1
             """))
         {
             Reject();
@@ -164,21 +164,26 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         using (var command = Command(connection, transaction, """
             SELECT kind,locator_id,updated_at
             FROM local_repository_locator_heads
-            WHERE repository_id=$repository_id;
+            WHERE repository_id=$repository_id
+            ORDER BY CASE kind WHEN 'github_repository' THEN 0 WHEN 'local_git_repository' THEN 1 ELSE 2 END
             """))
         {
             command.Parameters.AddWithValue("$repository_id", repository.RepositoryId);
             using var reader = command.ExecuteReader();
-            if (reader.Read())
+            var headCount = 0;
+            while (reader.Read())
             {
-                if (reader.GetString(0) != "github_repository"
+                if (reader.GetString(0) is not ("github_repository" or "local_git_repository")
                     || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(reader.GetString(2)))
                 {
                     Reject();
                 }
-                locatorHead = reader.GetString(1);
-                if (!locators.ContainsKey(locatorHead) || reader.Read())
+                var candidate = reader.GetString(1);
+                if (!locators.TryGetValue(candidate, out var headLocator)
+                    || headLocator.Kind != reader.GetString(0))
                     Reject();
+                locatorHead ??= candidate;
+                if (++headCount > 2) Reject();
             }
         }
 
@@ -406,13 +411,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
                 reader.GetString(6),
                 reader.GetString(7));
             if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(locator.LocatorId)
-                || locator.Kind != "github_repository"
                 || locator.Source is not ("manual" or "observed")
-                || !GitHubRepositoryLocatorParser.IsExact(
-                    locator.CanonicalLocator,
-                    locator.LocatorSha256,
-                    locator.DisplayOwner,
-                    locator.DisplayRepository)
+                || locator.Kind == "local_git_repository" && locator.Source != "observed"
+                || !(locator.Kind == "github_repository"
+                    ? GitHubRepositoryLocatorParser.IsExact(locator.CanonicalLocator, locator.LocatorSha256, locator.DisplayOwner, locator.DisplayRepository)
+                    : locator.Kind == "local_git_repository"
+                        && LocalGitRepositoryLocator.IsExact(locator.CanonicalLocator, locator.LocatorSha256, locator.DisplayOwner, locator.DisplayRepository))
                 || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(locator.CreatedAt)
                 || !locators.TryAdd(locator.LocatorId, locator))
             {

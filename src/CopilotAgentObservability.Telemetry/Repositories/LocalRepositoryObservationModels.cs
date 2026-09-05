@@ -143,7 +143,7 @@ internal sealed record LocalRepositoryPhysicalOccurrence(
     string? SourceApplicationVersion,
     DateTimeOffset ObservedAt,
     LocalRepositoryOccurrenceClassification Classification,
-    GitHubRepositoryLocator? Locator)
+    ILocalRepositoryLocator? Locator)
 {
     public long RawRecordId => SourceIdentityInput.RawRecordId;
     public int ResourceSpanOrdinal => SourceIdentityInput.ResourceSpanOrdinal;

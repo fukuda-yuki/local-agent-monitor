@@ -61,6 +61,8 @@ internal static class LocalRepositoryCatalogSchemaV1
         var objects = ReadOwnedObjects(connection, transaction);
         if (declared is not null || objects.Count != 0)
         {
+            if (declared == Version && SqliteOwnedSchemaAuthority.Equal(objects, LegacyExpectedObjects))
+                MigrateLegacyCatalog(connection, transaction);
             Validate(connection, transaction);
             return;
         }
@@ -95,6 +97,13 @@ internal static class LocalRepositoryCatalogSchemaV1
 
     internal static bool HasExactOwnedSchema(SqliteConnection connection, SqliteTransaction? transaction) =>
         SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects);
+
+    internal static bool HasExactSupportedBackupSchema(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        var objects = ReadOwnedObjects(connection, transaction);
+        return SqliteOwnedSchemaAuthority.Equal(objects, ExpectedObjects)
+            || SqliteOwnedSchemaAuthority.Equal(objects, LegacyExpectedObjects);
+    }
 
     private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction) =>
         SqliteOwnedSchemaAuthority.Read(connection, transaction, static (name, table) =>
@@ -180,21 +189,21 @@ internal static class LocalRepositoryCatalogSchemaV1
           created_at TEXT COLLATE BINARY NOT NULL CHECK({{Timestamp("created_at")}}), updated_at TEXT COLLATE BINARY NOT NULL CHECK({{Timestamp("updated_at")}}));
         CREATE TABLE local_repository_locators(
           locator_id TEXT COLLATE BINARY PRIMARY KEY CHECK({{Uuid("locator_id")}}), repository_id TEXT COLLATE BINARY NOT NULL CHECK({{Uuid("repository_id")}}),
-          kind TEXT COLLATE BINARY NOT NULL CHECK(typeof(kind)='text' AND kind='github_repository'), canonical_locator TEXT COLLATE BINARY NOT NULL CHECK(typeof(canonical_locator)='text'),
-          locator_sha256 TEXT COLLATE BINARY NOT NULL CHECK({{Hex("locator_sha256", 64)}}), source TEXT COLLATE BINARY NOT NULL CHECK(typeof(source)='text' AND source IN ('observed','manual')),
+          kind TEXT COLLATE BINARY NOT NULL CHECK(typeof(kind)='text' AND kind IN ('github_repository','local_git_repository')), canonical_locator TEXT COLLATE BINARY NOT NULL CHECK(typeof(canonical_locator)='text'),
+          locator_sha256 TEXT COLLATE BINARY NOT NULL CHECK({{Hex("locator_sha256", 64)}}), source TEXT COLLATE BINARY NOT NULL CHECK(typeof(source)='text' AND source IN ('observed','manual') AND (kind='github_repository' OR source='observed')),
           display_owner TEXT COLLATE BINARY NOT NULL CHECK(typeof(display_owner)='text'), display_repository TEXT COLLATE BINARY NOT NULL CHECK(typeof(display_repository)='text'), created_at TEXT COLLATE BINARY NOT NULL CHECK({{Timestamp("created_at")}}),
           UNIQUE(kind,locator_sha256), UNIQUE(repository_id,kind,locator_id), UNIQUE(repository_id,locator_id),
           FOREIGN KEY(repository_id) REFERENCES local_repositories(repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT);
         CREATE TABLE local_repository_locator_heads(
-          repository_id TEXT COLLATE BINARY NOT NULL CHECK({{Uuid("repository_id")}}), kind TEXT COLLATE BINARY NOT NULL CHECK(typeof(kind)='text' AND kind='github_repository'), locator_id TEXT COLLATE BINARY NOT NULL CHECK({{Uuid("locator_id")}}), updated_at TEXT COLLATE BINARY NOT NULL CHECK({{Timestamp("updated_at")}}),
+          repository_id TEXT COLLATE BINARY NOT NULL CHECK({{Uuid("repository_id")}}), kind TEXT COLLATE BINARY NOT NULL CHECK(typeof(kind)='text' AND kind IN ('github_repository','local_git_repository')), locator_id TEXT COLLATE BINARY NOT NULL CHECK({{Uuid("locator_id")}}), updated_at TEXT COLLATE BINARY NOT NULL CHECK({{Timestamp("updated_at")}}),
           PRIMARY KEY(repository_id,kind), FOREIGN KEY(repository_id) REFERENCES local_repositories(repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
           FOREIGN KEY(repository_id,kind,locator_id) REFERENCES local_repository_locators(repository_id,kind,locator_id) ON UPDATE RESTRICT ON DELETE RESTRICT);
         CREATE TABLE session_repository_observations(
           observation_id TEXT COLLATE BINARY PRIMARY KEY CHECK({{Uuid("observation_id")}}),
           source_identity_sha256 TEXT COLLATE BINARY NOT NULL UNIQUE CHECK({{Hex("source_identity_sha256", 64)}}), raw_record_id INTEGER NOT NULL CHECK(typeof(raw_record_id)='integer' AND raw_record_id>0), raw_payload_sha256 TEXT COLLATE BINARY NOT NULL CHECK({{Hex("raw_payload_sha256", 64)}}),
           resource_span_ordinal INTEGER NOT NULL CHECK(typeof(resource_span_ordinal)='integer' AND resource_span_ordinal BETWEEN 0 AND 2147483647), scope_span_ordinal INTEGER NULL CHECK(scope_span_ordinal IS NULL OR (typeof(scope_span_ordinal)='integer' AND scope_span_ordinal BETWEEN 0 AND 2147483647)), span_ordinal INTEGER NULL CHECK(span_ordinal IS NULL OR (typeof(span_ordinal)='integer' AND span_ordinal BETWEEN 0 AND 2147483647)), attribute_ordinal INTEGER NOT NULL CHECK(typeof(attribute_ordinal)='integer' AND attribute_ordinal BETWEEN 0 AND 2147483647),
-          scope_kind TEXT COLLATE BINARY NOT NULL CHECK(typeof(scope_kind)='text' AND scope_kind IN ('resource','span')), attribute_key TEXT COLLATE BINARY NOT NULL CHECK(typeof(attribute_key)='text' AND attribute_key IN ('vcs.repository.url.full','copilot_chat.repo.remote_url')), value_classification TEXT COLLATE BINARY NOT NULL CHECK(typeof(value_classification)='text' AND value_classification IN ('admitted','invalid_locator','invalid_type','duplicate_key')),
-          locator_kind TEXT COLLATE BINARY NULL CHECK(locator_kind IS NULL OR (typeof(locator_kind)='text' AND locator_kind='github_repository')), canonical_locator TEXT COLLATE BINARY NULL CHECK(canonical_locator IS NULL OR typeof(canonical_locator)='text'), locator_sha256 TEXT COLLATE BINARY NULL CHECK(locator_sha256 IS NULL OR ({{Hex("locator_sha256", 64)}})), display_owner TEXT COLLATE BINARY NULL CHECK(display_owner IS NULL OR typeof(display_owner)='text'), display_repository TEXT COLLATE BINARY NULL CHECK(display_repository IS NULL OR typeof(display_repository)='text'),
+          scope_kind TEXT COLLATE BINARY NOT NULL CHECK(typeof(scope_kind)='text' AND scope_kind IN ('resource','span')), attribute_key TEXT COLLATE BINARY NOT NULL CHECK(typeof(attribute_key)='text' AND attribute_key IN ('vcs.repository.url.full','copilot_chat.repo.remote_url','native_workspace_git_remote','native_workspace_git_common_dir')), value_classification TEXT COLLATE BINARY NOT NULL CHECK(typeof(value_classification)='text' AND value_classification IN ('admitted','invalid_locator','invalid_type','duplicate_key')),
+          locator_kind TEXT COLLATE BINARY NULL CHECK(locator_kind IS NULL OR (typeof(locator_kind)='text' AND locator_kind IN ('github_repository','local_git_repository'))), canonical_locator TEXT COLLATE BINARY NULL CHECK(canonical_locator IS NULL OR typeof(canonical_locator)='text'), locator_sha256 TEXT COLLATE BINARY NULL CHECK(locator_sha256 IS NULL OR ({{Hex("locator_sha256", 64)}})), display_owner TEXT COLLATE BINARY NULL CHECK(display_owner IS NULL OR typeof(display_owner)='text'), display_repository TEXT COLLATE BINARY NULL CHECK(display_repository IS NULL OR typeof(display_repository)='text'),
           source_surface TEXT COLLATE BINARY NOT NULL CHECK(typeof(source_surface)='text' AND source_surface IN ('github-copilot-cli','github-copilot-vscode')), source_application_version TEXT COLLATE BINARY NULL CHECK(source_application_version IS NULL OR typeof(source_application_version)='text'), observed_at TEXT COLLATE BINARY NOT NULL CHECK({{Timestamp("observed_at")}}),
           CHECK((scope_kind='resource' AND scope_span_ordinal IS NULL AND span_ordinal IS NULL) OR (scope_kind='span' AND scope_span_ordinal IS NOT NULL AND span_ordinal IS NOT NULL)),
           CHECK((value_classification='admitted' AND locator_kind IS NOT NULL AND canonical_locator IS NOT NULL AND locator_sha256 IS NOT NULL AND display_owner IS NOT NULL AND display_repository IS NOT NULL) OR (value_classification<>'admitted' AND locator_kind IS NULL AND canonical_locator IS NULL AND locator_sha256 IS NULL AND display_owner IS NULL AND display_repository IS NULL)));
@@ -227,16 +236,27 @@ internal static class LocalRepositoryCatalogSchemaV1
         """;
 
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> InstallDefinitions =
-        BuildInstallDefinitions();
+        BuildInstallDefinitions(SchemaSql);
+
+    private static readonly string LegacySchemaSql = SchemaSql
+        .Replace("kind IN ('github_repository','local_git_repository')", "kind='github_repository'", StringComparison.Ordinal)
+        .Replace(" AND (kind='github_repository' OR source='observed')", string.Empty, StringComparison.Ordinal)
+        .Replace("attribute_key IN ('vcs.repository.url.full','copilot_chat.repo.remote_url','native_workspace_git_remote','native_workspace_git_common_dir')", "attribute_key IN ('vcs.repository.url.full','copilot_chat.repo.remote_url')", StringComparison.Ordinal)
+        .Replace("locator_kind IN ('github_repository','local_git_repository')", "locator_kind='github_repository'", StringComparison.Ordinal);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> LegacyExpectedObjects =
+        SqliteOwnedSchemaAuthority.Compile(
+            BuildInstallDefinitions(LegacySchemaSql).Concat(TriggerDefinitions.Select(static trigger =>
+                new SqliteOwnedSchemaDefinition("trigger", trigger.Name, trigger.Table, trigger.Sql))).ToArray());
 
     private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ExpectedObjects =
         SqliteOwnedSchemaAuthority.Compile(
             InstallDefinitions.Concat(TriggerDefinitions.Select(static trigger =>
                 new SqliteOwnedSchemaDefinition("trigger", trigger.Name, trigger.Table, trigger.Sql))).ToArray());
 
-    private static IReadOnlyList<SqliteOwnedSchemaDefinition> BuildInstallDefinitions()
+    private static IReadOnlyList<SqliteOwnedSchemaDefinition> BuildInstallDefinitions(string sql)
     {
-        var statements = SplitStatements(SchemaSql);
+        var statements = SplitStatements(sql);
         if (statements.Count != TableNames.Length + IndexNames.Length)
             throw new InvalidOperationException("local_repository_catalog_schema_definitions_invalid");
         var definitions = new List<SqliteOwnedSchemaDefinition>(statements.Count);
@@ -261,6 +281,60 @@ internal static class LocalRepositoryCatalogSchemaV1
                 statements[TableNames.Length + index]));
         }
         return definitions.AsReadOnly();
+    }
+
+    private static void MigrateLegacyCatalog(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var tables = new[]
+        {
+            "local_repository_locators", "local_repository_locator_heads",
+            "session_repository_observations", "session_repository_observation_contexts",
+            "local_repository_history",
+        };
+        foreach (var trigger in TriggerDefinitions.Where(trigger => tables.Contains(trigger.Table, StringComparer.Ordinal)))
+            Execute(connection, transaction, $"DROP TRIGGER {trigger.Name};");
+        foreach (var definition in BuildInstallDefinitions(LegacySchemaSql).Where(definition => definition.Type == "index" && tables.Contains(definition.Table, StringComparer.Ordinal)))
+            Execute(connection, transaction, $"DROP INDEX {definition.Name};");
+        foreach (var table in tables.Reverse())
+            Execute(connection, transaction, $"ALTER TABLE {table} RENAME TO {table}_legacy_native_locator;");
+        foreach (var table in new[]
+        {
+            "local_repository_locators", "session_repository_observations",
+            "local_repository_locator_heads", "session_repository_observation_contexts",
+            "local_repository_history",
+        })
+            Execute(connection, transaction, InstallDefinitions.Single(definition => definition.Type == "table" && definition.Name == table).Sql);
+        foreach (var table in new[]
+        {
+            "local_repository_locators", "session_repository_observations",
+            "local_repository_locator_heads", "session_repository_observation_contexts",
+            "local_repository_history",
+        })
+            Execute(connection, transaction, $"INSERT INTO {table} SELECT * FROM {table}_legacy_native_locator;");
+        foreach (var table in new[]
+        {
+            "local_repository_history", "session_repository_observation_contexts",
+            "local_repository_locator_heads", "session_repository_observations",
+            "local_repository_locators",
+        })
+            Execute(connection, transaction, $"DROP TABLE {table}_legacy_native_locator;");
+        foreach (var definition in InstallDefinitions.Where(definition => definition.Type == "index" && tables.Contains(definition.Table, StringComparer.Ordinal)))
+            Execute(connection, transaction, definition.Sql);
+        foreach (var trigger in TriggerDefinitions.Where(trigger => tables.Contains(trigger.Table, StringComparer.Ordinal)))
+            Execute(connection, transaction, trigger.Sql);
+        using (var foreignKeys = connection.CreateCommand())
+        {
+            foreignKeys.Transaction = transaction;
+            foreignKeys.CommandText = "PRAGMA foreign_key_check;";
+            using var reader = foreignKeys.ExecuteReader();
+            if (reader.Read()) throw new InvalidOperationException("local_repository_catalog_legacy_migration_failed");
+        }
+        Execute(connection, transaction, """
+            UPDATE local_repository_reconciliation_queue
+            SET state='pending',updated_at=strftime('%Y-%m-%dT%H:%M:%f0000+00:00','now')
+            WHERE state='completed'
+              AND NOT EXISTS(SELECT 1 FROM session_repository_observations observation WHERE observation.raw_record_id=local_repository_reconciliation_queue.raw_record_id);
+            """);
     }
 
     private static IReadOnlyList<string> SplitStatements(string sql)

@@ -22,6 +22,10 @@
     "schema_version", "repository_id", "display_name", "revision", "created_at", "updated_at",
   ];
   const LOCATOR_ROOT_KEYS = ["schema_version", "repository_id", "repository_revision", "locators"];
+  const LOCATOR_KEYS = [
+    "locator_id", "kind", "canonical_locator", "display_owner", "display_repository",
+    "source", "is_current", "created_at", "provenance",
+  ];
   const ARCHIVE_ACTION_KEYS = ["schema_version", "action", "target_kind", "targets"];
   const ARCHIVE_TARGET_KEYS = ["target_id", "state", "revision", "archived_at", "updated_at"];
   const rootState = {
@@ -47,6 +51,7 @@
     numericGeneration: 0,
     numericController: null,
     numericRevision: null,
+    locators: [],
     customInvoker: null,
     pendingFocus: null,
   };
@@ -177,7 +182,34 @@
         || value.locators.length > 128) {
       throw new TypeError("invalid repository revision response");
     }
-    return value.repository_revision;
+    const locators = value.locators.map(locator => {
+      const kind = locator?.kind;
+      const isLocal = kind === "local_git_repository";
+      if (!hasExactKeys(locator, LOCATOR_KEYS)
+          || !UUID_V7.test(locator.locator_id)
+          || kind !== "github_repository" && !isLocal
+          || typeof locator.canonical_locator !== "string"
+          || isLocal && !/^local-git:[0-9a-f]{64}$/.test(locator.canonical_locator)
+          || !isDisplayName(locator.display_owner)
+          || isLocal && locator.display_owner !== "Local"
+          || !isDisplayName(locator.display_repository)
+          || locator.source !== "manual" && locator.source !== "observed"
+          || typeof locator.is_current !== "boolean"
+          || !isTimestamp(locator.created_at)
+          || locator.created_at === null
+          || locator.source === "manual" && locator.provenance !== null
+          || locator.source === "observed"
+            && (!locator.provenance || typeof locator.provenance !== "object" || Array.isArray(locator.provenance))) {
+        throw new TypeError("invalid repository locator response");
+      }
+      return Object.freeze({
+        kind,
+        displayOwner: locator.display_owner,
+        displayRepository: locator.display_repository,
+        isCurrent: locator.is_current,
+      });
+    });
+    return Object.freeze({ revision: value.repository_revision, locators: Object.freeze(locators) });
   }
 
   function validateArchiveAction(value, action, repositoryId) {
@@ -443,6 +475,9 @@
     manager.hidden = true;
     const managerHeading = element("h4", null, "リポジトリを管理");
     managerHeading.dataset.repositoryManagerName = "";
+    const identitiesHeading = element("h5", null, "識別情報");
+    const identities = element("div", "local-monitor-repository-settings-list");
+    identities.dataset.repositoryIdentities = "";
     const renameStatus = element("p", "local-monitor-repository-settings-status");
     renameStatus.setAttribute("aria-live", "polite");
     const renameForm = element("form", "local-monitor-repository-rename-form");
@@ -467,7 +502,8 @@
     archiveSubmit.dataset.repositoryArchive = "";
     archiveSubmit.setAttribute("aria-describedby", archiveNote.id);
     archiveSubmit.disabled = true;
-    manager.append(managerHeading, renameStatus, renameForm, archiveNote, archiveConfirmation, archiveSubmit);
+    manager.append(managerHeading, identitiesHeading, identities, renameStatus, renameForm,
+      archiveNote, archiveConfirmation, archiveSubmit);
     repositoriesSection.append(repositoriesHeading, createForm, repositoriesStatus, unassignedEntry,
       repositoriesList, repositoriesLoadMore, manager);
     const archiveSection = element("section", "local-monitor-repository-settings-section");
@@ -494,7 +530,8 @@
       repositoriesNav, archiveNav, repositoriesSection, repositoriesHeading,
       createForm, createDisplay: createDisplay.input, createLocator: createLocator.input,
       createSubmit, repositoriesStatus, unassignedEntry, repositoriesList, repositoriesLoadMore,
-      manager, managerHeading, renameStatus, renameForm, renameDisplay: renameDisplay.input,
+      manager, managerHeading, identitiesHeading, identities, renameStatus, renameForm,
+      renameDisplay: renameDisplay.input,
       renameSubmit, archiveConfirm, archiveSubmit, archiveSection, archiveHeading, archiveStatus,
       archiveList, archiveLoadMore, result,
     };
@@ -575,6 +612,21 @@
     }
     settingsDom.manager.hidden = false;
     settingsDom.managerHeading.textContent = selected.display_name;
+    const identities = settingsState.locators.map(locator => {
+      const row = element("div", "local-monitor-repository-settings-item");
+      row.dataset.repositoryIdentityKind = locator.kind;
+      const prefix = locator.kind === "local_git_repository"
+        ? "ローカル Git" : `GitHub · ${locator.displayOwner}`;
+      row.append(element("span", "local-monitor-repository-settings-name",
+        `${prefix} / ${locator.displayRepository}`));
+      row.append(element("span", "local-monitor-repository-settings-status",
+        locator.isCurrent ? "現在" : "履歴"));
+      return row;
+    });
+    settingsDom.identities.replaceChildren(...identities);
+    const identitiesHidden = settingsState.numericRevision === null || identities.length === 0;
+    settingsDom.identitiesHeading.hidden = identitiesHidden;
+    settingsDom.identities.hidden = identitiesHidden;
     if (document.activeElement !== settingsDom.renameDisplay) settingsDom.renameDisplay.value = selected.display_name;
     settingsDom.renameSubmit.disabled = settingsState.numericRevision === null;
     setSettingsStatus(settingsDom.renameStatus, settingsState.numericRevision === null
@@ -685,21 +737,24 @@
     settingsState.numericController = controller;
     const generation = ++settingsState.numericGeneration;
     settingsState.numericRevision = null;
+    settingsState.locators = [];
     renderManager();
     try {
       const response = await fetch(`/api/local-monitor/v1/repositories/${repository.repository_id}/locators`,
         { cache: "no-store", credentials: "same-origin", signal: controller.signal });
       if (!response.ok) throw new ApiFailure(response.status, null);
-      const revision = validateNumericRevision(await response.json(), repository.repository_id);
+      const snapshot = validateNumericRevision(await response.json(), repository.repository_id);
       if (controller.signal.aborted || generation !== settingsState.numericGeneration
           || settingsState.selectedRepository?.repository_id !== repository.repository_id
           || !settingsState.renameAuthorized) return false;
-      settingsState.numericRevision = revision;
+      settingsState.numericRevision = snapshot.revision;
+      settingsState.locators = [...snapshot.locators];
       renderManager();
       return true;
     } catch {
       if (controller.signal.aborted || generation !== settingsState.numericGeneration) return false;
       settingsState.numericRevision = null;
+      settingsState.locators = [];
       settingsDom.renameSubmit.disabled = true;
       setSettingsStatus(settingsDom.renameStatus, "変更に必要な情報を読み込めませんでした。",
         () => loadNumericRevision(repository));
@@ -945,6 +1000,7 @@
   function openRepositoryManagement(item, invoker) {
     settingsState.numericController?.abort();
     settingsState.numericRevision = null;
+    settingsState.locators = [];
     settingsState.selectedRepository = item;
     settingsState.renameAuthorized = true;
     if (settingsDom) {
@@ -960,6 +1016,7 @@
     supersedeMutation();
     settingsState.numericGeneration++;
     settingsState.numericRevision = null;
+    settingsState.locators = [];
     settingsState.selectedRepository = null;
     settingsState.renameAuthorized = false;
     if (!settingsDom) return;

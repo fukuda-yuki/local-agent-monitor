@@ -13,9 +13,10 @@ below as unresolved.
 The Local Monitor v1 Contract Index registers this authority; the complete
 `local_repository_catalog:1` contract is `READY_FOR_IMPLEMENTATION`.
 
-This is one pre-release path. No old catalog schema, compatibility reader, dual
-writer, alternate queue trigger, fallback parser, heuristic binding, migration
-shim, or backfill obligation is introduced.
+Startup performs one exact legacy-v1 catalog migration that widens locator and
+provenance kinds, preserves catalog and history rows, and requeues completed
+rows with no observation once. Terminal failures remain terminal. No
+compatibility reader, dual writer, or heuristic binding is introduced.
 
 All exact-identity, no-heuristic, raw-local, sanitized-only, archive, Retention,
 backup, frozen API/SSE, and Issue #152 boundaries from the base contract remain
@@ -23,7 +24,7 @@ unchanged.
 
 ## DC156-12 — automatic Repository creation and binding lifecycle
 
-An admitted exact GitHub locator automatically resolves to one local Repository.
+An admitted exact GitHub locator or opaque local Git locator automatically resolves to one local Repository.
 There is no durable `unbound locator` state.
 
 For every distinct admitted `locator_sha256` in one reconciliation operation:
@@ -43,7 +44,7 @@ Automatic Repository, locator, history, observation, context, queue, and event
 IDs are locally generated canonical lowercase UUIDv7 values.
 
 A missing locator creates exactly one Repository at revision 1. Its display
-name is the validated original-casing `display_repository` segment from the
+name is the validated `display_repository` from the
 first admitted context in this deterministic order:
 
 ```text
@@ -254,7 +255,8 @@ is committed. Exact Session lookup and catalog writes use the same SQLite
 connection and transaction snapshot.
 
 Session assignment is never inferred from trace time, source label, Repository
-locator, Repository name, path, workspace, CWD, prompt, or cardinality.
+name, path text, workspace label, CWD text, prompt, or cardinality. The base
+contract's exact native Session metadata may locate Git authority.
 
 A resource-level occurrence is contextualized once for each exact matching span
 Event. Repeated contexts for the same Session and locator are retained as exact
@@ -484,7 +486,7 @@ Backup restores `leased` as `pending`; other terminal states remain terminal.
 
 ### Observed label candidates
 
-V1 has no accepted source attribute for an observed Repository label. Locator
+V1 has no accepted received source attribute for an observed Repository label. Locator
 segments, Repository display names, paths, CWD, prompts, workspace labels, and
 other metadata are not label evidence.
 
