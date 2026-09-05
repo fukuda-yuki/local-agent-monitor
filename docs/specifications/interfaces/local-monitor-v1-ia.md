@@ -414,9 +414,28 @@ There are no page-level `整形 / raw` tabs.
 - Session header action;
 - durable immutable report history;
 - latest successful retained report by default;
-- `再分析` creates a new snapshot/run;
+- a reusable page-local model selector shared with exact-node analysis;
+- `再分析` creates a new snapshot/run using the currently selected discovered model;
 - `過去の分析` remains in the same surface;
 - follow-up chat is not persisted.
+
+Session and exact-node analysis do not use `/api/analysis/options` or a
+configuration-synthesized list as the account catalogue. The human UI performs
+an explicit model-list request through the same authenticated GitHub Copilot
+SDK ownership as execution (`ListModelsAsync`). Discovery is not background
+polling, not a persistent catalogue, and not a generation probe. The UI shows
+loading, unauthenticated, empty, unavailable/failed, and ready states honestly
+and offers explicit refresh. A legacy `CopilotAnalysis` model may preselect
+only when that exact identifier is in the current usable discovered set;
+otherwise the user must select. `auto`, aliases, and silent fallback are
+forbidden. An unavailable or stale selection requires reselection and cannot
+start analysis.
+
+The selected identifier is sent on the Session/node start request, validated
+against the current discovered set, stored on that run, hashed into that run's
+configuration identity, and passed to the provider session. Later page
+selections and concurrent runs must not change another run's model. Stale
+asynchronous discovery responses must not overwrite the current selector.
 
 `GET /api/local-monitor/v1/ai/sessions/{sessionId}/reports` computes each
 required boolean `snapshot_changed` only by comparing the immutable saved
@@ -439,8 +458,14 @@ the same route returns the same durable history normally with each
 
 - inspector action;
 - exact node anchor;
+- the same reusable page-local model selector and discovery states as Session reports;
 - timeline remains visible;
 - result is transient and is not inserted into Session report history.
+
+Mismatch and other provider failures preserve the failed run. Recovery is an
+explicit refresh/reselection and a new user-initiated run. Requested/effective
+identity checks, result/evidence validation, consent, and diagnostic
+restrictions remain. The UI does not reconstruct an unrecorded effective model.
 
 ### Repository selection / Compare
 
@@ -535,6 +560,10 @@ provider, selected model, selected configuration, closed readiness and
 last-check states, and the fixed provider-egress notice. The POST action
 `接続を確認` uses the owned Copilot SDK status and runtime identity certifier;
 it creates no analysis run, SDK session, snapshot, result or retained item.
+The `selected_model` fact is the legacy configured identifier, not the
+account-discovered catalogue and not a per-run selection. Authentication
+`ready` does not mean a listed model is executable or that analysis will
+succeed. Session/node model discovery and selection stay on the analysis UI.
 
 The raw-default `保存・バックアップ` section reads the exact same-origin,
 no-store `GET /api/local-monitor/v1/settings/storage` aggregate. It reports

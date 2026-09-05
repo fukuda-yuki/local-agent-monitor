@@ -25,7 +25,14 @@
 <dialog class="local-monitor-ai-dialog" data-session-ai-dialog aria-labelledby="local-monitor-session-ai-title">
     <div class="local-monitor-ai-dialog-frame">
         <header><h2 id="local-monitor-session-ai-title">セッションのAI分析</h2><button type="button" data-session-ai-close>閉じる</button></header>
-        <p>選択したセッションと利用可能な記録内容は GitHub Copilot へ送信される場合があります。</p>
+        <p>選択したセッションと利用可能な記録内容は GitHub Copilot へ送信される場合があります。接続確認の成功は、選択したモデルが使えることや分析成功を保証しません。</p>
+        <div data-session-ai-model class="local-monitor-ai-model">
+            <label for="local-monitor-session-ai-model">分析に使うモデル</label>
+            <select id="local-monitor-session-ai-model" data-session-ai-model-select disabled>
+                <option value="">モデルを選択</option>
+            </select>
+            <button type="button" data-session-ai-model-refresh>モデル一覧を更新</button>
+        </div>
         <div data-session-ai-status role="status" aria-live="polite"></div>
         <nav data-session-ai-history aria-label="過去のセッション分析"></nav>
         <div data-session-ai-report></div>

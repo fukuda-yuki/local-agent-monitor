@@ -18,6 +18,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Sanitized-only receiver posture | #159 | #168 |
 | Session/Repository archive | [`local-archive.md`](local-archive.md), #160, D082 | #161 |
 | Optional AI snapshots/results/history | #162 plus the run-ID route amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #163/#164 |
+| Shared Session/node model discovery and per-run selection | [`local-monitor-v1-ia.md`](local-monitor-v1-ia.md), [`local-monitor-v1-product-definition.md`](local-monitor-v1-product-definition.md), [`local-monitor-v1-security.md`](local-monitor-v1-security.md), #279 as the bounded #242 shared-capability tranche | #279 |
 | Repository Session Compare | [`local-monitor-v1-comparison.md`](local-monitor-v1-comparison.md), #165, plus shared transport in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
 | Session collection success response | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md), composing #133 semantics and [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) request/transport/cursor rules | #134 |
 | Other Repository/Session Workspace reads | #133 semantic requirements and the execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #134 |

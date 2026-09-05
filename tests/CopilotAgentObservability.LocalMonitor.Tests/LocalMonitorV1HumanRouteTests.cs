@@ -55,6 +55,7 @@ public sealed class LocalMonitorV1HumanRouteTests
         }
         Assert.Contains("/api/local-monitor/v1/ai/session-runs", host.RoutePatterns);
         Assert.Contains("/api/local-monitor/v1/ai/node-runs", host.RoutePatterns);
+        Assert.Contains("/api/local-monitor/v1/ai/models", host.RoutePatterns);
         using var restored = await host.Client.GetAsync($"/repositories/{RepositoryId}/sessions?analysis={runId}");
         Assert.Equal(repositoryEnabled ? HttpStatusCode.OK : HttpStatusCode.NotFound, restored.StatusCode);
         ai.Run = ai.Run! with { ScopeKind = "comparison", ComparisonId = ComparisonId };

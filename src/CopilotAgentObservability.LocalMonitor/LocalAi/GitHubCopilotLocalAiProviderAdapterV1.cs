@@ -10,7 +10,6 @@ namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
 internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     Func<IOwnedCopilotClientV1?> clientFactory,
-    string model,
     TextWriter? diagnosticOutput = null) : ILocalAiProviderAdapterV1
 {
     private const string StructuredResultInstruction = """
@@ -49,6 +48,14 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
                     Convert.ToBase64String(await request.RawReads.ReadAsync(evidence_id, token).ConfigureAwait(false)),
                 new CopilotToolOptions { SkipPermission = true },
                 new AIFunctionFactoryOptions { Name = "read_exact_evidence", Description = "Read one exact retained raw body by its raw_content handle. Cite raw_content.citation_ref in the result." });
+            var model = request.Run.Model;
+            if (!LocalAiModelIdentityV1.IsSupportedId(model))
+            {
+                Diagnose(request.Run.RunId, "effective_model", "effective_model_absent");
+                outcome = LocalAiProviderOutcomeV1.Failed();
+            }
+            else
+            {
             var availableTools = new ToolSet(); availableTools.AddCustom("read_exact_evidence");
             var config = new SessionConfig
             {
@@ -84,6 +91,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
             }
             else
                 outcome = LocalAiProviderOutcomeV1.Complete(Encoding.UTF8.GetBytes(response.Content));
+            }
         }
         catch (Exception failure)
         {

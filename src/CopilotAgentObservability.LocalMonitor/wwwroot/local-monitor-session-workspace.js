@@ -679,6 +679,76 @@
     scope_too_large: "分析対象が上限を超えています", invalid_result: "AI結果を安全に確認できません",
     invalid_evidence: "証拠を確認できないため結果を表示できません",
   });
+  const MODEL_DISCOVERY_LABELS = Object.freeze({
+    loading: "利用できるモデルを読み込んでいます",
+    not_checked: "モデル一覧を読み込んでください",
+    unauthenticated: "GitHub Copilot にサインインしてください",
+    unavailable: "モデル一覧を取得できません。再読み込みしてください",
+    failed: "モデル一覧を取得できません。再読み込みしてください",
+    empty: "このアカウントで利用できるモデルはありません",
+    ready: "分析に使うモデルを選んでください",
+    stale: "選択したモデルは現在利用できません。選び直してください",
+  });
+
+  function bindModelSelector(rootEl, startButtons) {
+    const select = rootEl.querySelector("[data-ai-model-select]") ?? rootEl.querySelector("[data-session-ai-model-select]");
+    const refresh = rootEl.querySelector("[data-ai-model-refresh]") ?? rootEl.querySelector("[data-session-ai-model-refresh]");
+    const status = rootEl.querySelector("[data-ai-model-status]") ?? rootEl.querySelector("[data-session-ai-status]");
+    let generation = 0;
+    let selected = "";
+    function setStarts(enabled) { startButtons().forEach(button => { if (button) button.disabled = !enabled; }); }
+    function currentValue() { return selected; }
+    function canStart() { return selected !== ""; }
+    function applySnapshot(snapshot, keepSelection) {
+      const options = snapshot.discovery_state === "ready" ? snapshot.models : [];
+      const previous = keepSelection ? selected : "";
+      const eligibleLegacy = snapshot.legacy_eligible ? snapshot.legacy_configured_model : "";
+      const next = options.some(item => item.id === previous) ? previous
+        : options.some(item => item.id === eligibleLegacy) ? eligibleLegacy : "";
+      selected = next;
+      select.replaceChildren(el("option", null, "モデルを選択"));
+      select.firstChild.value = "";
+      for (const item of options) {
+        const option = el("option", null, item.display_name || item.id); option.value = item.id; select.append(option);
+      }
+      select.value = next;
+      select.disabled = snapshot.discovery_state !== "ready" || options.length === 0;
+      if (snapshot.discovery_state === "ready" && next) status.textContent = "";
+      else if (snapshot.discovery_state === "ready" && previous && !next) status.textContent = MODEL_DISCOVERY_LABELS.stale;
+      else if (snapshot.discovery_state === "ready") status.textContent = MODEL_DISCOVERY_LABELS.ready;
+      else status.textContent = MODEL_DISCOVERY_LABELS[snapshot.discovery_state] ?? MODEL_DISCOVERY_LABELS.unavailable;
+      setStarts(canStart());
+    }
+    async function discover() {
+      const current = ++generation;
+      status.textContent = MODEL_DISCOVERY_LABELS.loading;
+      select.disabled = true;
+      setStarts(false);
+      try {
+        const response = await aiPost("/api/local-monitor/v1/ai/models", {});
+        if (current !== generation) return;
+        if (!response.ok) { applySnapshot({ discovery_state: "failed", models: [], legacy_configured_model: null, legacy_eligible: false }, true); return; }
+        const snapshot = await response.json();
+        if (current !== generation) return;
+        if (!snapshot || typeof snapshot.discovery_state !== "string" || !Array.isArray(snapshot.models)) {
+          applySnapshot({ discovery_state: "failed", models: [], legacy_configured_model: null, legacy_eligible: false }, true);
+          return;
+        }
+        applySnapshot(snapshot, true);
+      } catch {
+        if (current !== generation) return;
+        applySnapshot({ discovery_state: "failed", models: [], legacy_configured_model: null, legacy_eligible: false }, true);
+      }
+    }
+    select?.addEventListener("change", () => {
+      selected = select.value;
+      if (selected) status.textContent = "";
+      setStarts(canStart());
+    });
+    refresh?.addEventListener("click", () => discover());
+    setStarts(false);
+    return { discover, currentValue, canStart };
+  }
 
   function aiPost(path, body) {
     return fetch(path, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: JSON.stringify(body) });
@@ -875,6 +945,7 @@
 
   async function openSessionAi(invoker) {
     showSessionDialog(invoker);
+    sessionModelSelector.discover();
     const reportsState = !sessionReports.length ? await readSessionReports(null, false) : true;
     if (sessionReports[0]) showSessionReport(sessionReports[0]);
     else document.querySelector("[data-session-ai-status]").textContent = reportsState === "projection_unavailable"
@@ -883,8 +954,16 @@
   }
 
   async function startSessionAi() {
-    const response = await aiPost("/api/local-monitor/v1/ai/session-runs", { session_id: root.dataset.sessionId });
-    if (!response.ok) { document.querySelector("[data-session-ai-status]").textContent = "AI分析を開始できませんでした"; return; }
+    if (!sessionModelSelector.canStart()) { document.querySelector("[data-session-ai-status]").textContent = MODEL_DISCOVERY_LABELS.stale; return; }
+    const response = await aiPost("/api/local-monitor/v1/ai/session-runs", { session_id: root.dataset.sessionId, model: sessionModelSelector.currentValue() });
+    if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      document.querySelector("[data-session-ai-status]").textContent = error?.error === "model_unavailable"
+        ? MODEL_DISCOVERY_LABELS.stale
+        : "AI分析を開始できませんでした";
+      if (error?.error === "model_unavailable") await sessionModelSelector.discover();
+      return;
+    }
     const started = await response.json(); activeSessionRun = started.run_id; const generation = ++sessionPollGeneration; document.querySelector("[data-session-ai-cancel]").hidden = false; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ analysis: started.run_id }); const run = await pollAiRun(started.run_id, "session", generation);
     activeSessionRun = null; document.querySelector("[data-session-ai-cancel]").hidden = true;
     if (run && ["succeeded", "zero_findings"].includes(run.state)) {
@@ -897,11 +976,20 @@
 
   async function startNodeAi(section, nodeId, question = null) {
     if (nodeAiContext !== nodeId || question === null) { nodeTranscript = []; nodeAiContext = nodeId; }
-    const body = { session_id: root.dataset.sessionId, node_id: nodeId }; if (question !== null) { body.question = question; body.prior_turns = nodeTranscript; }
+    const selector = section._modelSelector;
+    if (!selector?.canStart()) { section.querySelector("[data-node-ai-status]").textContent = MODEL_DISCOVERY_LABELS.stale; return; }
+    const body = { session_id: root.dataset.sessionId, node_id: nodeId, model: selector.currentValue() }; if (question !== null) { body.question = question; body.prior_turns = nodeTranscript; }
     if (new TextEncoder().encode(JSON.stringify(body)).length > 262144 || question !== null && new TextEncoder().encode(question).length > 4096 || nodeTranscript.length > 16) {
       section.querySelector("[data-node-ai-status]").textContent = "質問が送信可能な上限を超えています"; return;
     }
-    const response = await aiPost("/api/local-monitor/v1/ai/node-runs", body); if (!response.ok) { section.querySelector("[data-node-ai-status]").textContent = "AI分析を開始できませんでした"; return; }
+    const response = await aiPost("/api/local-monitor/v1/ai/node-runs", body); if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      section.querySelector("[data-node-ai-status]").textContent = error?.error === "model_unavailable"
+        ? MODEL_DISCOVERY_LABELS.stale
+        : "AI分析を開始できませんでした";
+      if (error?.error === "model_unavailable") await selector.discover();
+      return;
+    }
     const started = await response.json(); state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: state.selectedExecutionId, node: nodeId, analysis: started.run_id }); const generation = ++nodePollGeneration; const run = await pollAiRun(started.run_id, "node", generation); if (!run) return;
     if (["succeeded", "zero_findings"].includes(run.state) && run.result) {
       renderAiResult(section.querySelector("[data-node-ai-result]"), run.result, true); const answer = run.result.summary;
@@ -917,11 +1005,20 @@
     section.querySelector("[data-node-ai-surface]")?.remove();
     const surface = el("section", "local-monitor-node-ai"); surface.dataset.nodeAiSurface = "";
     surface.append(el("h3", null, "この項目のAI分析"));
+    const model = el("div", "local-monitor-ai-model");
+    const label = el("label", null, "分析に使うモデル"); label.setAttribute("for", `local-monitor-node-ai-model-${nodeId}`);
+    const select = el("select"); select.id = `local-monitor-node-ai-model-${nodeId}`; select.dataset.aiModelSelect = ""; select.disabled = true; select.append(el("option", null, "モデルを選択")); select.firstChild.value = "";
+    const refresh = el("button", null, "モデル一覧を更新"); refresh.type = "button"; refresh.dataset.aiModelRefresh = "";
+    model.append(label, select, refresh);
     const status = el("div"); status.dataset.nodeAiStatus = ""; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
     const result = el("div"); result.dataset.nodeAiResult = ""; const question = el("textarea"); question.setAttribute("aria-label", "追加の質問"); question.maxLength = 4096;
-    const ask = el("button", null, "質問する"); ask.type = "button"; ask.addEventListener("click", () => startNodeAi(surface, nodeId, question.value));
+    const analyze = el("button", null, "この項目をAIで分析"); analyze.type = "button"; analyze.disabled = true; analyze.addEventListener("click", () => startNodeAi(surface, nodeId));
+    const ask = el("button", null, "質問する"); ask.type = "button"; ask.disabled = true; ask.addEventListener("click", () => startNodeAi(surface, nodeId, question.value));
     const close = el("button", null, "AI分析を閉じる"); close.type = "button"; close.addEventListener("click", () => { closeNodeAi(section); const action = section.querySelector("[data-node-ai-start] button"); if (action) { action.disabled = false; action.focus(); } });
-    surface.append(status, result, question, ask, close); const anchor = section.querySelector("[data-node-ai-start]"); if (anchor) anchor.after(surface); else section.append(surface); return surface;
+    surface.append(model, status, result, question, analyze, ask, close); const anchor = section.querySelector("[data-node-ai-start]"); if (anchor) anchor.after(surface); else section.append(surface);
+    surface._modelSelector = bindModelSelector(surface, () => [analyze, ask]);
+    surface._modelSelector.discover();
+    return surface;
   }
 
   function appendNodeAi(section, nodeId) {
@@ -931,7 +1028,7 @@
     const action = el("button", null, "この項目をAIで分析"); action.type = "button";
     action.addEventListener("click", async () => {
       action.disabled = true;
-      await startNodeAi(createNodeAiSurface(section, nodeId), nodeId);
+      createNodeAiSurface(section, nodeId);
     });
     start.append(action); section.append(start);
   }
@@ -1283,6 +1380,7 @@
     const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   const sessionAiDialog = document.querySelector("[data-session-ai-dialog]");
+  const sessionModelSelector = bindModelSelector(sessionAiDialog, () => [document.querySelector("[data-session-ai-regenerate]")]);
   document.addEventListener("focusin", () => { pendingSessionAiFocus = null; });
   function closeSessionAi(restoreFocus = true) {
     pendingSessionAiFocus = null;

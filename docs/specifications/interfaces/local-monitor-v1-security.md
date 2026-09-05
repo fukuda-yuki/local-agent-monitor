@@ -280,6 +280,18 @@ AI execution crosses the local-only boundary.
   no-store; POST requires same-origin and CSRF, and both return only the closed
   Settings readiness facts without credentials, paths, provider responses,
   exception text or runtime versions;
+- raw-default GET and POST `/api/local-monitor/v1/ai/models` are no-store,
+  loopback/Host guarded, and same-origin; POST requires CSRF. GET returns the
+  current in-memory discovery snapshot without calling the provider. POST is
+  the explicit list/refresh and uses the same authenticated GitHub Copilot SDK
+  client ownership as Session/node execution (`ListModelsAsync`). Responses
+  expose only a closed `discovery_state`, `{id, display_name}` model rows,
+  optional legacy configured identifier, and whether that identifier is
+  currently eligible. They never include credentials, provider exception text,
+  billing, policy objects, raw catalogue payloads, or configuration-synthesized
+  stand-ins. In-memory reuse is process-local and replaced by the next explicit
+  refresh or an unauthenticated/unavailable result; there is no persistent
+  catalogue store or background poll;
 - Repository selection requires a scope preview;
 - the provider receives only one bounded immutable snapshot and process-internal tools constrained to its evidence index;
 - the SQLite file and arbitrary SQL are never exposed;

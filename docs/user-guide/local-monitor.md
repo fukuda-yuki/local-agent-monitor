@@ -726,8 +726,14 @@ CLI で一意の GitHub remote が認められると自動割り当てされま�
 
 「設定」→「AI設定」で GitHub Copilot の認証と利用準備を確認します。
 準備ができると「AIで分析」等の操作が現れ、利用者が明示したときだけ実行します。
-明示的に AI 操作を開始したときに、選択した内容が GitHub Copilot に送信されます。SQLite ファイル全体や任意の SQL を渡す機能ではありません。
+セッション全体と個別項目の分析では、分析画面でモデル一覧を読み込み、使うモデルを選びます。
+一覧は GitHub Copilot の現在のアカウントから明示的に取得します。設定の接続確認や
+`CopilotAnalysis:Model` の残存値、ヘルプに載っている例は、利用可能なモデルの証明ではありません。
+残っている設定モデルは、一覧に同じ ID があるときだけ初期選択になります。無い場合は選び直します。
+選んだモデルはその実行だけに記録され、共有 User Secrets の編集やモニター再起動は不要です。
 接続確認の成功は、選択したモデルが使えることや分析成功を保証しません。
+分析に失敗した実行は残ります。モデル一覧を更新して選び直し、新しい分析を開始してください。
+明示的に AI 操作を開始したときに、選択した内容が GitHub Copilot に送信されます。SQLite ファイル全体や任意の SQL を渡す機能ではありません。
 
 セッション全体のレポートは耐久的な履歴です。URL の `analysis=` は特定の run を指し、
 `latest` ではありません。「再分析」は新しい snapshot と結果を作ります。過去の分析は
@@ -1181,7 +1187,7 @@ Local Monitor は .NET GitHub Copilot SDK の BYOK provider 設定を
 ```powershell
 dotnet user-secrets init --project src\CopilotAgentObservability.LocalMonitor
 dotnet user-secrets set "CopilotAnalysis:Enabled" "true" --project src\CopilotAgentObservability.LocalMonitor
-dotnet user-secrets set "CopilotAnalysis:Model" "glm-5.2" --project src\CopilotAgentObservability.LocalMonitor
+dotnet user-secrets set "CopilotAnalysis:Model" "<model-id>" --project src\CopilotAgentObservability.LocalMonitor
 dotnet user-secrets set "CopilotAnalysis:Provider:Type" "openai" --project src\CopilotAgentObservability.LocalMonitor
 dotnet user-secrets set "CopilotAnalysis:Provider:BaseUrl" "https://<endpoint>/v1" --project src\CopilotAgentObservability.LocalMonitor
 dotnet user-secrets set "CopilotAnalysis:Provider:WireApi" "completions" --project src\CopilotAgentObservability.LocalMonitor

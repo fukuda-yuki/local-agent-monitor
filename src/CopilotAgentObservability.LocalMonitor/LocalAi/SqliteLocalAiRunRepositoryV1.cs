@@ -8,17 +8,17 @@ using Microsoft.Data.Sqlite;
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
 internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string model,
-    string configurationSha256, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null) : ILocalAiRunRepositoryV1
+    string profile, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null) : ILocalAiRunRepositoryV1
     , ILocalAiAcceptedSnapshotRepositoryV1
 {
     private readonly LocalAiAnalysisStoreV1 store = new(databasePath, retentionCatalog, timeProvider);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
 
     internal static SqliteLocalAiRunRepositoryV1 Create(string databasePath, string model,
-        string configurationSha256, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null)
+        string profile, TimeProvider? timeProvider = null, RetentionCatalogStore? retentionCatalog = null)
     {
         using var connection = Open(databasePath); LocalAiAnalysisSchemaV1.Ensure(connection);
-        return new(databasePath, model, configurationSha256, timeProvider, retentionCatalog);
+        return new(databasePath, model, profile, timeProvider, retentionCatalog);
     }
 
     internal int CleanupExpiredTransientRuns() => store.DeleteExpiredTransientRuns(clock.GetUtcNow());
@@ -39,12 +39,15 @@ internal sealed class SqliteLocalAiRunRepositoryV1(string databasePath, string m
         catch(SqliteException exception) when(exception.SqliteErrorCode is 5 or 6){throw new LocalRepositoryScopeSnapshotException(LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",exception);}
     }
 
-    public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout)
+    public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout, string? runModel = null)
     {
+        var selected = runModel ?? model;
+        var configurationSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"local-ai-v1\0{selected}\0{profile}")));
         store.InsertSnapshot(new(snapshot.SnapshotId, snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId,
             snapshot.AnchorId, snapshot.PayloadCanonicalJson, snapshot.EvidenceIndexCanonicalJson,snapshot.RepositoryId,snapshot.ComparisonId,snapshot.ExpiresAt));
         var run = store.CreateRun(new(snapshot.SnapshotId, snapshot.ScopeKind, snapshot.SessionId, snapshot.NodeId,
-            "github_copilot_sdk", model, configurationSha256, snapshot.ScopeKind switch
+            "github_copilot_sdk", selected, configurationSha256, snapshot.ScopeKind switch
             { "repository_selection"=>"local-ai-repository-v1", "comparison"=>"local-ai-comparison-v1", _=>"local-ai-session-node-v1" },
             clock.GetUtcNow(), timeout,snapshot.RepositoryId,snapshot.ComparisonId));
         return Read(run.RunId);
