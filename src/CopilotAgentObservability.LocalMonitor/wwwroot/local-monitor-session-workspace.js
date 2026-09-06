@@ -712,8 +712,11 @@
       const item = catalog.find(entry => entry.id === id);
       if (!item) { destination.hidden = true; destination.textContent = ""; return; }
       const notice = EGRESS_NOTICES[item.egress_notice] ?? "";
-      const provider = item.provider_name ? `選択中: ${item.provider_name} / ${item.display_name || item.id}。` : "";
-      destination.textContent = `${provider}${notice}`.trim();
+      const label = item.display_name || item.id;
+      const selected = item.provider_name && label && !label.startsWith(`${item.provider_name} /`) && !label.startsWith(`${item.provider_name}/`)
+        ? `選択中: ${item.provider_name} / ${label}。`
+        : label ? `選択中: ${label}。` : "";
+      destination.textContent = `${selected}${notice}`.trim();
       destination.hidden = destination.textContent === "";
     }
     function applySnapshot(snapshot, keepSelection) {
