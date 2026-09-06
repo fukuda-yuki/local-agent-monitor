@@ -44,6 +44,24 @@ public sealed class CopilotByokConnectionTests
     }
 
     [Fact]
+    public void Bind_ConfiguredWireModel_IsPreservedSeparatelyFromModelId()
+    {
+        using var home = new TempCopilotHome();
+        home.WriteRegistry(wireModel: "deployment-luna");
+        var resolver = new MapResolver { [ProviderId] = "synthetic-key" };
+        var connection = new CopilotByokConnectionV1(new CopilotCliByokRegistryV1(home.Path), resolver);
+        var listed = Assert.Single(connection.ListModels());
+        Assert.Equal(SelectionId, listed.SelectionId);
+        Assert.Equal(ModelId, listed.ModelId);
+        Assert.Equal("deployment-luna", listed.WireModel);
+        var bound = connection.Bind(SelectionId);
+        Assert.Equal(CopilotByokBindStatusV1.Bound, bound.Status);
+        Assert.Equal(ModelId, bound.Provider?.ModelId);
+        Assert.Equal("deployment-luna", bound.Provider?.WireModel);
+        Assert.Equal(SelectionId, bound.Model?.SelectionId);
+    }
+
+    [Fact]
     public void Bind_RegistryPresentWithoutCredential_IsCredentialUnavailable()
     {
         using var home = new TempCopilotHome();
@@ -75,7 +93,7 @@ public sealed class CopilotByokConnectionTests
 
         public TempCopilotHome() => Directory.CreateDirectory(Path);
 
-        public void WriteRegistry(bool includeGitHub = false)
+        public void WriteRegistry(bool includeGitHub = false, string? wireModel = null)
         {
             var database = System.IO.Path.Combine(Path, "data.db");
             using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = database, Pooling = false }.ToString());
@@ -106,12 +124,13 @@ public sealed class CopilotByokConnectionTests
                 );
                 INSERT INTO model_providers(id, name, type, settings_json)
                 VALUES ($id, 'Open-AI-API', 'openai', '{"authKind":"api_key","baseUrl":"https://example.invalid/v1","wireApi":"responses","headersJson":"{}"}');
-                INSERT INTO provider_models(id, provider_id, model_id, display_name)
-                VALUES ($modelRow, $id, $model, 'gpt-5.6-luna');
+                INSERT INTO provider_models(id, provider_id, model_id, wire_model, display_name)
+                VALUES ($modelRow, $id, $model, $wire, 'gpt-5.6-luna');
                 """;
             command.Parameters.AddWithValue("$id", ProviderId);
             command.Parameters.AddWithValue("$modelRow", Guid.NewGuid().ToString("D"));
             command.Parameters.AddWithValue("$model", ModelId);
+            command.Parameters.AddWithValue("$wire", (object?)wireModel ?? DBNull.Value);
             command.ExecuteNonQuery();
             if (!includeGitHub) return;
             using var github = connection.CreateCommand();

@@ -105,6 +105,11 @@ from the existing CLI provider registry (`provider-id/model-id`) and resolve
 credentials from the same OS store the CLI already uses. Discovery and
 execution bind the same connection through singular `SessionConfig.Provider`,
 not named providers that stay additive to GitHub authentication. The selected
+route and non-secret connection identity are retained from discovery through
+execution; a missing or changed registry row is rejected rather than sent to
+GitHub-hosted inference or another destination. A configured registry
+`wire_model` is the provider inference name; `SessionConfig.Model` remains the
+provider model id. The selected
 identifier is captured immutably on that run, including any provider prefix. Changing the page-local
 selection does not edit `CopilotAnalysis:*` or restart the process.
 Repository/Compare AI remain outside this tranche. The monitor does not own a

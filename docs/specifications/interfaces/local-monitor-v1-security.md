@@ -315,7 +315,16 @@ AI execution crosses the local-only boundary.
   syntactically valid identifier that is not in the current usable discovered
   set is HTTP `409` `{"error":"model_unavailable"}`. A discovered BYOK
   identifier whose OS credential cannot be resolved is HTTP `409`
-  `{"error":"credential_unavailable"}`. The server does not
+  `{"error":"credential_unavailable"}`. A discovered BYOK identifier whose
+  registry row is missing or whose non-secret connection identity changed
+  (provider id/type, endpoint, wire API, model id, configured `wire_model`,
+  Azure API version) is HTTP `409` `{"error":"model_unavailable"}` before run
+  create. Execution re-binds only that captured identity; disappearance or
+  incompatible change fails the run before provider-less or GitHub-hosted
+  generation. Bind copies a configured registry `wire_model` into
+  `ProviderConfig.WireModel` and uses the pinned SDK fallback to `ModelId`
+  only when it is absent. Effective-model comparison uses `SessionConfig.Model`
+  and does not rewrite the provider response. The server does not
   substitute another model, copy secrets into the owned Copilot home, or treat
   `~/.copilot` as a cleanup target;
 - Repository selection requires a scope preview;

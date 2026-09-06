@@ -144,6 +144,153 @@ public sealed class LocalAiModelSelectionTests
     }
 
     [Fact]
+    public async Task SessionStart_ByokRegistryMissingBeforeAdmission_DoesNotCreateGitHubHostedRun()
+    {
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        const string selection = "14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna";
+        var session = new LocalAiSession("github-hosted-model");
+        var client = new CatalogClient(["github-hosted-model"], session);
+        var byok = new ScriptedByokConnection(selection);
+        await using var host = await Host(temp, client, byok: byok, scope: scope);
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        byok.Hide();
+        using var response = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"{{selection}}"}"""));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("model_unavailable", json.RootElement.GetProperty("error").GetString());
+        Assert.Null(client.LastSessionConfig);
+        using var connection = Open(temp.DatabasePath);
+        using var count = connection.CreateCommand();
+        count.CommandText = "SELECT count(*) FROM local_ai_runs;";
+        Assert.Equal(0L, count.ExecuteScalar());
+    }
+
+    [Fact]
+    public async Task SessionStart_ByokConnectionChangedBeforeAdmission_DoesNotBindAlternateDestination()
+    {
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        const string selection = "14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna";
+        var session = new LocalAiSession("github-hosted-model");
+        var client = new CatalogClient(["github-hosted-model"], session);
+        var byok = new ScriptedByokConnection(selection);
+        await using var host = await Host(temp, client, byok: byok, scope: scope);
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        byok.ChangeBaseUrl("https://other.invalid/v1");
+        using var response = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"{{selection}}"}"""));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("model_unavailable", json.RootElement.GetProperty("error").GetString());
+        Assert.Null(client.LastSessionConfig);
+        using var connection = Open(temp.DatabasePath);
+        using var count = connection.CreateCommand();
+        count.CommandText = "SELECT count(*) FROM local_ai_runs;";
+        Assert.Equal(0L, count.ExecuteScalar());
+    }
+
+    [Fact]
+    public async Task SessionStart_ByokRegistryMissingBetweenAdmissionAndExecution_DoesNotCreateGitHubHostedSession()
+    {
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        const string selection = "14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna";
+        var session = new LocalAiSession("github-hosted-model");
+        var client = new CatalogClient(["github-hosted-model"], session);
+        var byok = new ScriptedByokConnection(selection, gateExecutionBind: true);
+        await using var host = await Host(temp, client, byok: byok, scope: scope);
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        var runId = await Start(host.Client, "/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"{{selection}}"}""");
+        byok.Hide();
+        byok.ReleaseExecutionBind();
+        var status = await Poll(host.Client, $"/api/local-monitor/v1/ai/session-runs/{runId}");
+        Assert.Equal("provider_failed", status.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, status.GetProperty("result").ValueKind);
+        Assert.Null(client.LastSessionConfig);
+    }
+
+    [Fact]
+    public async Task SessionStart_ByokConnectionChangedBetweenAdmissionAndExecution_DoesNotBindAlternateDestination()
+    {
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        const string selection = "14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna";
+        var session = new LocalAiSession("github-hosted-model");
+        var client = new CatalogClient(["github-hosted-model"], session);
+        var byok = new ScriptedByokConnection(selection, gateExecutionBind: true);
+        await using var host = await Host(temp, client, byok: byok, scope: scope);
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        var runId = await Start(host.Client, "/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"{{selection}}"}""");
+        byok.ChangeBaseUrl("https://other.invalid/v1");
+        byok.ReleaseExecutionBind();
+        var status = await Poll(host.Client, $"/api/local-monitor/v1/ai/session-runs/{runId}");
+        Assert.Equal("provider_failed", status.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, status.GetProperty("result").ValueKind);
+        Assert.Null(client.LastSessionConfig);
+    }
+
+    [Fact]
+    public async Task SessionStart_ByokDistinctWireModel_KeepsConfiguredSessionModelAndProvenance()
+    {
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        const string selection = "14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna";
+        var session = new LocalAiSession("gpt-5.6-luna");
+        var client = new CatalogClient(CatalogBehavior.Unauthenticated, session);
+        var byok = new FixedByokConnection(selection, credential: true, wireModel: "deployment-luna");
+        await using var host = await Host(temp, client, byok: byok, scope: scope);
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        var runId = await Start(host.Client, "/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"{{selection}}"}""");
+        var status = await Poll(host.Client, $"/api/local-monitor/v1/ai/session-runs/{runId}");
+        Assert.Equal("zero_findings", status.GetProperty("state").GetString());
+        Assert.Equal(selection, status.GetProperty("result").GetProperty("provenance").GetProperty("model").GetString());
+        Assert.NotNull(client.LastSessionConfig);
+        Assert.Equal("gpt-5.6-luna", client.LastSessionConfig!.Model);
+        Assert.Equal("gpt-5.6-luna", client.LastSessionConfig.Provider?.ModelId);
+        Assert.Equal("deployment-luna", client.LastSessionConfig.Provider?.WireModel);
+    }
+
+    [Fact]
     public async Task DiscoveryRefreshReturnsAccountIdsAndLegacyEligibility()
     {
         using var temp = new MonitorTempDirectory();
@@ -523,11 +670,11 @@ public sealed class LocalAiModelSelectionTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class FixedByokConnection(string selectionId, bool credential) : ICopilotByokConnectionV1
+    private sealed class FixedByokConnection(string selectionId, bool credential, string? wireModel = null) : ICopilotByokConnectionV1
     {
         private readonly CopilotByokModelV1 model = new(
             selectionId, "Open-AI-API / gpt-5.6-luna", "14da1935-7eb4-4685-aaa9-e24fad400e03",
-            "Open-AI-API", "openai", "responses", "https://example.invalid/v1", "gpt-5.6-luna", null);
+            "Open-AI-API", "openai", "responses", "https://example.invalid/v1", "gpt-5.6-luna", null, wireModel);
         public bool RegistryPresent => true;
         public IReadOnlyList<CopilotByokModelV1> ListModels() => [model];
         public bool IsByokSelection(string id) => string.Equals(id, selectionId, StringComparison.Ordinal);
@@ -543,8 +690,53 @@ public sealed class LocalAiModelSelectionTests
                     WireApi = model.WireApi,
                     ApiKey = "synthetic-key",
                     ModelId = model.ModelId,
+                    WireModel = string.IsNullOrWhiteSpace(model.WireModel) ? model.ModelId : model.WireModel,
+                });
+        }
+    }
+
+    private sealed class ScriptedByokConnection(string selectionId, bool gateExecutionBind = false) : ICopilotByokConnectionV1
+    {
+        private CopilotByokModelV1 model = new(
+            selectionId, "Open-AI-API / gpt-5.6-luna", "14da1935-7eb4-4685-aaa9-e24fad400e03",
+            "Open-AI-API", "openai", "responses", "https://example.invalid/v1", "gpt-5.6-luna", null);
+        private volatile bool present = true;
+        private int lookups;
+        private int binds;
+        private readonly ManualResetEventSlim executionGate = new(false);
+
+        public bool RegistryPresent => true;
+        public IReadOnlyList<CopilotByokModelV1> ListModels() => present ? [model] : [];
+        public bool IsByokSelection(string id)
+        {
+            WaitForExecutionProbe(ref lookups);
+            return present && string.Equals(id, selectionId, StringComparison.Ordinal);
+        }
+        public void Hide() => present = false;
+        public void ChangeBaseUrl(string baseUrl) => model = model with { BaseUrl = baseUrl };
+        public void ReleaseExecutionBind() => executionGate.Set();
+        public CopilotByokBindResultV1 Bind(string id)
+        {
+            WaitForExecutionProbe(ref binds);
+            if (!present || !string.Equals(id, model.SelectionId, StringComparison.Ordinal))
+                return new(CopilotByokBindStatusV1.UnknownModel, null, null);
+            return new(CopilotByokBindStatusV1.Bound, model,
+                new GitHub.Copilot.ProviderConfig
+                {
+                    Type = model.ProviderType,
+                    BaseUrl = model.BaseUrl,
+                    WireApi = model.WireApi,
+                    ApiKey = "synthetic-key",
+                    ModelId = model.ModelId,
                     WireModel = model.ModelId,
                 });
+        }
+
+        private void WaitForExecutionProbe(ref int counter)
+        {
+            if (gateExecutionBind && Interlocked.Increment(ref counter) > 1
+                && !executionGate.Wait(TimeSpan.FromSeconds(30)))
+                throw new TimeoutException("execution probe was not released");
         }
     }
 

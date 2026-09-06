@@ -10,7 +10,8 @@ internal sealed record LocalAiDiscoveredModelV1(
     string ProviderName = "GitHub Copilot",
     string ProviderType = "github_copilot",
     string EgressNotice = "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action",
-    string UsageLimits = "github_hosted_allowance");
+    string UsageLimits = "github_hosted_allowance",
+    CopilotByokConnectionIdentityV1? Connection = null);
 
 internal sealed record LocalAiModelDiscoverySnapshotV1(
     string State,
@@ -93,7 +94,8 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
                     LocalAiModelIdentityV1.SanitizeDisplayName(entry.ProviderName, entry.ProviderId),
                     entry.ProviderType,
                     "selected_content_may_be_sent_to_the_selected_byok_provider_only_after_explicit_ai_action",
-                    "byok_provider_limits"));
+                    "byok_provider_limits",
+                    CopilotByokConnectionIdentityV1.From(entry)));
             }
 
             client = clientFactory();

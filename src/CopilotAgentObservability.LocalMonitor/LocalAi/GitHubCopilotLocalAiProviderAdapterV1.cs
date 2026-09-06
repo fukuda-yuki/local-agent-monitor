@@ -52,23 +52,32 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
             var requested = request.Run.Model ?? "";
             var configuredModel = requested;
             GitHub.Copilot.ProviderConfig? sessionProvider = null;
-            if (byok is not null && byok.IsByokSelection(requested))
+            if (request.ExpectedConnection is { } expected)
             {
-                var bind = byok.Bind(requested);
-                if (bind.Status == CopilotByokBindStatusV1.CredentialUnavailable)
-                {
-                    Diagnose(request.Run.RunId, "session_create", "byok_credential_unavailable");
-                    outcome = LocalAiProviderOutcomeV1.Failed();
-                }
-                else if (bind.Status != CopilotByokBindStatusV1.Bound || bind.Provider is null || bind.Model is null)
+                if (byok is null)
                 {
                     Diagnose(request.Run.RunId, "session_create", "client_unavailable");
                     outcome = LocalAiProviderOutcomeV1.Failed();
                 }
                 else
                 {
-                    configuredModel = bind.Model.ModelId;
-                    sessionProvider = bind.Provider;
+                    var bind = byok.Bind(expected.SelectionId);
+                    if (bind.Status == CopilotByokBindStatusV1.CredentialUnavailable)
+                    {
+                        Diagnose(request.Run.RunId, "session_create", "byok_credential_unavailable");
+                        outcome = LocalAiProviderOutcomeV1.Failed();
+                    }
+                    else if (bind.Status != CopilotByokBindStatusV1.Bound || bind.Provider is null || bind.Model is null
+                        || !expected.Matches(bind.Model))
+                    {
+                        Diagnose(request.Run.RunId, "session_create", "client_unavailable");
+                        outcome = LocalAiProviderOutcomeV1.Failed();
+                    }
+                    else
+                    {
+                        configuredModel = bind.Model.ModelId;
+                        sessionProvider = bind.Provider;
+                    }
                 }
             }
             if (outcome is null && !LocalAiModelIdentityV1.IsSupportedId(configuredModel))

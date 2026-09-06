@@ -14,7 +14,8 @@ internal sealed record CopilotByokModelV1(
     string WireApi,
     string BaseUrl,
     string ModelId,
-    string? AzureApiVersion);
+    string? AzureApiVersion,
+    string? WireModel = null);
 
 internal enum CopilotByokBindStatusV1
 {
@@ -28,6 +29,32 @@ internal sealed record CopilotByokBindResultV1(
     CopilotByokBindStatusV1 Status,
     CopilotByokModelV1? Model,
     GitHub.Copilot.ProviderConfig? Provider);
+
+internal sealed record CopilotByokConnectionIdentityV1(
+    string SelectionId,
+    string ProviderId,
+    string ProviderType,
+    string BaseUrl,
+    string WireApi,
+    string ModelId,
+    string? WireModel,
+    string? AzureApiVersion)
+{
+    internal static CopilotByokConnectionIdentityV1 From(CopilotByokModelV1 model) => new(
+        model.SelectionId, model.ProviderId, model.ProviderType, model.BaseUrl,
+        model.WireApi, model.ModelId, model.WireModel, model.AzureApiVersion);
+
+    internal bool Matches(CopilotByokModelV1? model) =>
+        model is not null
+        && string.Equals(SelectionId, model.SelectionId, StringComparison.Ordinal)
+        && string.Equals(ProviderId, model.ProviderId, StringComparison.Ordinal)
+        && string.Equals(ProviderType, model.ProviderType, StringComparison.Ordinal)
+        && string.Equals(BaseUrl, model.BaseUrl, StringComparison.Ordinal)
+        && string.Equals(WireApi, model.WireApi, StringComparison.Ordinal)
+        && string.Equals(ModelId, model.ModelId, StringComparison.Ordinal)
+        && string.Equals(WireModel, model.WireModel, StringComparison.Ordinal)
+        && string.Equals(AzureApiVersion, model.AzureApiVersion, StringComparison.Ordinal);
+}
 
 internal interface ICopilotByokCredentialResolverV1
 {
@@ -81,6 +108,8 @@ internal sealed class CopilotCliByokRegistryV1(string copilotHome)
                 var settingsJson = reader.IsDBNull(3) ? null : reader.GetString(3);
                 var modelId = reader.GetString(4);
                 var displayName = reader.IsDBNull(5) ? modelId : reader.GetString(5);
+                var wireModel = reader.IsDBNull(6) ? null : reader.GetString(6);
+                if (string.IsNullOrWhiteSpace(wireModel)) wireModel = null;
                 if (string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(modelId)
                     || providerId.Contains('/', StringComparison.Ordinal)
                     || !LocalAiModelIdentityV1.IsSupportedId(providerId)
@@ -93,7 +122,7 @@ internal sealed class CopilotCliByokRegistryV1(string copilotHome)
                 if (string.IsNullOrWhiteSpace(baseUrl)) continue;
                 var label = string.IsNullOrWhiteSpace(displayName) ? modelId : displayName;
                 models.Add(new(selection, providerName + " / " + label, providerId, providerName, providerType,
-                    wireApi, baseUrl, modelId, azureApiVersion));
+                    wireApi, baseUrl, modelId, azureApiVersion, wireModel));
             }
             return models;
         }
@@ -173,7 +202,7 @@ internal sealed class CopilotByokConnectionV1(
             WireApi = model.WireApi,
             ApiKey = apiKey,
             ModelId = model.ModelId,
-            WireModel = model.ModelId,
+            WireModel = string.IsNullOrWhiteSpace(model.WireModel) ? model.ModelId : model.WireModel,
         };
         if (model.AzureApiVersion is not null)
             provider.Azure = new AzureOptions { ApiVersion = model.AzureApiVersion };
