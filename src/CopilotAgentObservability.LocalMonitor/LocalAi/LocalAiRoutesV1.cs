@@ -271,12 +271,22 @@ internal static class LocalAiRoutesV1
     private static Task StartResponse(HttpContext context,LocalAiStartResponseV1 result)=>result.ErrorCode is null
         ? Json(context,201,new{run_id=result.RunId}) : Error(context,result.ErrorCode switch
         {"provider_unavailable" or "projection_unavailable"=>503,"session_not_found" or "node_not_found" or "comparison_not_found" or "snapshot_not_found"=>404,
-         "persistence_busy"=>503,"snapshot_expired" or "comparison_expired"=>410,"invalid_request"=>400,_=>409},result.ErrorCode);
+         "persistence_busy"=>503,"snapshot_expired" or "comparison_expired"=>410,"invalid_request"=>400,
+         "credential_unavailable"=>409,_=>409},result.ErrorCode);
     private static Task WriteModels(HttpContext context, LocalAiModelDiscoverySnapshotV1 snapshot) =>
         Json(context, 200, new
         {
             discovery_state = snapshot.State,
-            models = snapshot.Models.Select(item => new { id = item.Id, display_name = item.DisplayName }),
+            models = snapshot.Models.Select(item => new
+            {
+                id = item.Id,
+                display_name = item.DisplayName,
+                route = item.Route,
+                provider_name = item.ProviderName,
+                provider_type = item.ProviderType,
+                egress_notice = item.EgressNotice,
+                usage_limits = item.UsageLimits,
+            }),
             legacy_configured_model = snapshot.LegacyConfiguredModel,
             legacy_eligible = snapshot.LegacyEligible,
         });

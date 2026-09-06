@@ -66,6 +66,84 @@ public sealed class LocalAiModelSelectionTests
     }
 
     [Fact]
+    public async Task DiscoveryRefreshIncludesByokWithoutGitHubAuthentication()
+    {
+        using var temp = new MonitorTempDirectory();
+        var byok = new FixedByokConnection("14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna", credential: true);
+        await using var host = await Host(temp, new CatalogClient(CatalogBehavior.Unauthenticated), byok: byok);
+        using var response = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        using var json = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("ready", json.RootElement.GetProperty("discovery_state").GetString());
+        var model = Assert.Single(json.RootElement.GetProperty("models").EnumerateArray());
+        Assert.Equal("14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna", model.GetProperty("id").GetString());
+        Assert.Equal("byok", model.GetProperty("route").GetString());
+        Assert.Equal("byok_provider_limits", model.GetProperty("usage_limits").GetString());
+        Assert.Equal(0, CatalogClient.ListCalls);
+    }
+
+    [Fact]
+    public async Task SessionStart_ByokMissingCredential_IsCredentialUnavailable()
+    {
+        using var temp = new MonitorTempDirectory();
+        var byok = new FixedByokConnection("14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna", credential: false);
+        await using var host = await Host(temp, new CatalogClient(CatalogBehavior.Unauthenticated), byok: byok);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        using var response = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna"}"""));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("credential_unavailable", json.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task DiscoveryRefreshIncludesByokWhenGitHubCatalogFails()
+    {
+        using var temp = new MonitorTempDirectory();
+        var byok = new FixedByokConnection("14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna", credential: true);
+        await using var host = await Host(temp, new CatalogClient(CatalogBehavior.Failed), byok: byok);
+        using var response = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        using var json = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("ready", json.RootElement.GetProperty("discovery_state").GetString());
+        var model = Assert.Single(json.RootElement.GetProperty("models").EnumerateArray());
+        Assert.Equal("14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna", model.GetProperty("id").GetString());
+        Assert.Equal("byok", model.GetProperty("route").GetString());
+    }
+
+    [Fact]
+    public async Task SessionStart_ByokBound_ReachesExecutionWithSameSelection()
+    {
+        using var temp = new MonitorTempDirectory();
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        const string selection = "14da1935-7eb4-4685-aaa9-e24fad400e03/gpt-5.6-luna";
+        var session = new LocalAiSession("gpt-5.6-luna");
+        var client = new CatalogClient(CatalogBehavior.Unauthenticated, session);
+        var byok = new FixedByokConnection(selection, credential: true);
+        await using var host = await Host(temp, client, byok: byok, scope: scope);
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using var refresh = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        var runId = await Start(host.Client, "/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"{{selection}}"}""");
+        var status = await Poll(host.Client, $"/api/local-monitor/v1/ai/session-runs/{runId}");
+        Assert.Equal("zero_findings", status.GetProperty("state").GetString());
+        Assert.Equal(selection, status.GetProperty("result").GetProperty("provenance").GetProperty("model").GetString());
+        Assert.NotNull(client.LastSessionConfig);
+        Assert.Equal("gpt-5.6-luna", client.LastSessionConfig!.Model);
+        Assert.Equal("openai", client.LastSessionConfig.Provider?.Type);
+        Assert.Equal("gpt-5.6-luna", client.LastSessionConfig.Provider?.ModelId);
+#pragma warning disable GHCP001
+        Assert.Null(client.LastSessionConfig.Providers);
+        Assert.Null(client.LastSessionConfig.Models);
+#pragma warning restore GHCP001
+    }
+
+    [Fact]
     public async Task DiscoveryRefreshReturnsAccountIdsAndLegacyEligibility()
     {
         using var temp = new MonitorTempDirectory();
@@ -282,13 +360,15 @@ public sealed class LocalAiModelSelectionTests
 
     private static Task<RunningMonitorHost> Host(MonitorTempDirectory temp, CatalogClient client,
         IReadOnlyDictionary<string, string?>? configuration = null,
-        SqliteLocalRepositoryScopeSnapshotService? scope = null) =>
+        SqliteLocalRepositoryScopeSnapshotService? scope = null,
+        ICopilotByokConnectionV1? byok = null) =>
         MonitorTestHost.StartAsync(temp, repositoryAiEnabled: false, compareAiEnabled: false, testOptions: new()
         {
             StartWriter = false,
             StartProjectionWorker = false,
             LocalRepositoryScopeSnapshotService = scope,
             SettingsAiReadinessClientFactory = () => client,
+            LocalAiByokConnection = byok,
             ConfigurationValues = configuration,
             TimeProvider = temp.TimeProvider,
         });
@@ -396,6 +476,7 @@ public sealed class LocalAiModelSelectionTests
         private readonly string[] ids;
         private readonly CatalogBehavior behavior;
         private readonly IOwnedCopilotSessionV1? session;
+        internal SessionConfig? LastSessionConfig { get; private set; }
         public CatalogClient(params string[] ids) : this(ids, CatalogBehavior.Ready, null) { }
         public CatalogClient(string[] ids, IOwnedCopilotSessionV1 session) : this(ids, CatalogBehavior.Ready, session) { }
         public CatalogClient(CatalogBehavior behavior = CatalogBehavior.Ready, IOwnedCopilotSessionV1? session = null)
@@ -412,8 +493,11 @@ public sealed class LocalAiModelSelectionTests
         public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) => Task.FromResult(
             behavior == CatalogBehavior.Unavailable ? null
             : new CopilotRuntimeStatusObservationV1("1.0.75", 3, null, behavior != CatalogBehavior.Unauthenticated));
-        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
-            Task.FromResult(session ?? throw new NotSupportedException());
+        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken)
+        {
+            LastSessionConfig = config;
+            return Task.FromResult(session ?? throw new NotSupportedException());
+        }
         public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<IReadOnlyList<CopilotModelCatalogEntryV1>?> ListModelsAsync(CancellationToken cancellationToken)
         {
@@ -437,6 +521,31 @@ public sealed class LocalAiModelSelectionTests
             Task.FromResult<OwnedCopilotFinalResponseV1?>(new(
                 "{\"summary\":\"ok\",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[]}", effectiveModel));
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class FixedByokConnection(string selectionId, bool credential) : ICopilotByokConnectionV1
+    {
+        private readonly CopilotByokModelV1 model = new(
+            selectionId, "Open-AI-API / gpt-5.6-luna", "14da1935-7eb4-4685-aaa9-e24fad400e03",
+            "Open-AI-API", "openai", "responses", "https://example.invalid/v1", "gpt-5.6-luna", null);
+        public bool RegistryPresent => true;
+        public IReadOnlyList<CopilotByokModelV1> ListModels() => [model];
+        public bool IsByokSelection(string id) => string.Equals(id, selectionId, StringComparison.Ordinal);
+        public CopilotByokBindResultV1 Bind(string id)
+        {
+            if (!IsByokSelection(id)) return new(CopilotByokBindStatusV1.UnknownModel, null, null);
+            if (!credential) return new(CopilotByokBindStatusV1.CredentialUnavailable, model, null);
+            return new(CopilotByokBindStatusV1.Bound, model,
+                new GitHub.Copilot.ProviderConfig
+                {
+                    Type = model.ProviderType,
+                    BaseUrl = model.BaseUrl,
+                    WireApi = model.WireApi,
+                    ApiKey = "synthetic-key",
+                    ModelId = model.ModelId,
+                    WireModel = model.ModelId,
+                });
+        }
     }
 
     private sealed class RecordingProvider : ILocalAiProviderAdapterV1

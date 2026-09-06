@@ -599,7 +599,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", async r => { await readiness.Task; await r.FulfillAsync(Json(Readiness())); }); await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}"""))); await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs", r => { starts++; return r.AbortAsync(); });
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6"); await Expect(page.Locator("[data-timeline-node][aria-selected=true]")).ToHaveCountAsync(1); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" })).ToHaveCountAsync(0);
-        readiness.SetResult(); var action = page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }); await Expect(action).ToBeVisibleAsync(); await Expect(page.Locator("[data-node-ai-start]")).ToContainTextAsync("GitHub Copilot"); Assert.Equal(0, starts); await Expect(page.Locator("[data-timeline-node][aria-selected=true]")).ToHaveCountAsync(1);
+        readiness.SetResult(); var action = page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }); await Expect(action).ToBeVisibleAsync(); await Expect(page.Locator("[data-node-ai-start]")).ToContainTextAsync("送信先のサービスと利用上限"); Assert.Equal(0, starts); await Expect(page.Locator("[data-timeline-node][aria-selected=true]")).ToHaveCountAsync(1);
     }
 
     [Fact]
@@ -669,14 +669,16 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var readiness = "unconfigured"; var firstReadinessResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var reports = 0; var starts = 0; var raw = "<img src=x onerror=window.__aiExecuted=true>";
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json"))));
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", async r => { var response = readiness; await r.FulfillAsync(Json($$"""{"provider":"github_copilot","selected_model":null,"selected_configuration":null,"readiness_state":"{{response}}","last_check_result":"not_checked","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""")); if (response == "unconfigured") firstReadinessResponse.TrySetResult(); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json(Models())));
         await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => { reports++; return r.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult(raw)}},"snapshot_changed":true}],"next_cursor":"Y3Vyc29y"}""")); });
         await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs", r => { starts++; return r.FulfillAsync(new RouteFulfillOptions { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" }); });
         await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult(raw)}}}""")));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         var action = page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }); await Expect(action).ToHaveCountAsync(0); await firstReadinessResponse.Task.WaitAsync(TimeSpan.FromSeconds(5)); Assert.Equal(0, reports);
         readiness = "ready"; await page.ReloadAsync(); await Expect(action).ToBeVisibleAsync(); Assert.Equal(1, reports);
-        await action.ClickAsync(); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" }); await Expect(dialog).ToContainTextAsync("GitHub Copilot"); await Expect(dialog).ToContainTextAsync(raw); await Expect(dialog).ToContainTextAsync("前回の分析後に記録が更新されています");
+        await action.ClickAsync(); var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" }); await Expect(dialog).ToContainTextAsync("送信先のサービスと利用上限"); await Expect(dialog).ToContainTextAsync(raw); await Expect(dialog).ToContainTextAsync("前回の分析後に記録が更新されています");
         Assert.False(await page.EvaluateAsync<bool>("() => Boolean(window.__aiExecuted)")); Assert.Contains($"analysis={AiRunId}", page.Url); Assert.Equal(0, starts);
+        await Expect(dialog.Locator("[data-session-ai-model-select]")).ToHaveValueAsync("synthetic");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync(); Assert.Equal(1, starts);
         await dialog.GetByRole(AriaRole.Button, new() { Name = "閉じる" }).ClickAsync(); await Expect(action).ToBeFocusedAsync();
     }
@@ -689,11 +691,14 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var (summary, timeline, node, _) = InspectorDocuments("event"); var bodies = new List<string>(); var run = 0;
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json("""{"provider":"github_copilot","selected_model":"synthetic","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json(Models())));
         await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}""")));
         await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs", r => { bodies.Add(r.Request.PostData!); run++; return r.FulfillAsync(new RouteFulfillOptions { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"018f0000-0000-7000-8000-00000000007{{run}}"}""" }); });
         await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs/*", r => r.FulfillAsync(Json($$"""{"run_id":"018f0000-0000-7000-8000-00000000007{{run}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{AiResult("answer", "node-a8a773d6614d5030f505ff195b452dd6")}}}""")));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var action = page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }); await Expect(action).ToBeVisibleAsync(); await action.ClickAsync();
-        var surface = page.Locator("[data-node-ai-surface]"); await Expect(page.Locator("[data-node-ai-start]")).ToContainTextAsync("GitHub Copilot"); await Expect(page.Locator("[data-session-executions]")).ToBeVisibleAsync();
+        var surface = page.Locator("[data-node-ai-surface]"); await Expect(page.Locator("[data-node-ai-start]")).ToContainTextAsync("送信先のサービスと利用上限"); await Expect(page.Locator("[data-session-executions]")).ToBeVisibleAsync();
+        await Expect(surface.Locator("[data-ai-model-select]")).ToHaveValueAsync("synthetic");
+        await surface.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
         await surface.GetByRole(AriaRole.Textbox).FillAsync("why?"); await surface.GetByRole(AriaRole.Button, new() { Name = "質問する" }).ClickAsync();
         Assert.Equal(2, bodies.Count); Assert.DoesNotContain("prior_turns", bodies[0]); Assert.Contains("\"question\":\"why?\"", bodies[1]); Assert.Contains("\"prior_turns\":[{\"question\":\"\",\"answer\":\"answer\"}]", bodies[1]);
         Assert.DoesNotContain("answer", page.Url); Assert.Null(await page.EvaluateAsync<string?>("() => localStorage.getItem('local-ai') ?? sessionStorage.getItem('local-ai')")); await Expect(page.GetByText("過去の分析")).ToHaveCountAsync(0);
@@ -715,7 +720,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync($"**/api/local-monitor/v1/ai/node-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{AiResult("restored node")}}}""")));
 
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6");
-        await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        await StartNodeAnalysisAsync(page);
         await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6&analysis={AiRunId}");
         await Expect(page.Locator("[data-node-ai-result]")).ToContainTextAsync("restored node"); Assert.Equal(1, starts);
         await page.ReloadAsync(); await Expect(page.Locator("[data-node-ai-result]")).ToContainTextAsync("restored node"); Assert.Equal(1, starts);
@@ -776,7 +781,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs", r => r.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" }));
         await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs/*", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{FullAiResult()}}}""")));
 
-        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); await StartNodeAnalysisAsync(page);
         var result = page.Locator("[data-node-ai-result]");
         foreach (var expected in new[] { "node", "snapshot-coverage", "finding-id", "根拠あり", "finding limitation", "suggestion-id", "スキル", "target label", "rationale", "concrete change", "expected effect", "risk detail", "top limitation", "github_copilot_sdk", "synthetic-model", "configuration-hash", "template-v1", "2026-08-30T01:00:00", "対象件数: 1", "除外件数: 0", "記録内容: 利用できます" }) await Expect(result).ToContainTextAsync(expected);
         await Expect(result).Not.ToContainTextAsync("supported"); await Expect(result).Not.ToContainTextAsync("skill");
@@ -964,6 +969,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var raw = kind == "subagent" ? "Claude delegated prompt without identifier" : $"{kind} raw"; var requestCount = 0; var console = new List<string>(); page.Console += (_, message) => console.Add(message.Text);
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
         await page.RouteAsync("**/content?*", r => { requestCount++; var response = ContentDocument(revision, part, raw); return r.FulfillAsync(Json(response.ToJsonString())); });
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json("""{"provider":"github_copilot","selected_model":null,"selected_configuration":null,"readiness_state":"unconfigured","last_check_result":"not_checked","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""")));
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var inspector = page.Locator($"[data-inspector-kind={kind}]"); await Expect(inspector).ToContainTextAsync(expected); await Expect(inspector).ToContainTextAsync("親項目の経路"); await Expect(inspector).ToContainTextAsync("技術情報"); await Expect(inspector).ToContainTextAsync("再試行"); await Expect(inspector).ToContainTextAsync("復旧");
         if (kind == "retry") await Expect(inspector).ToContainTextAsync("復旧: はい");
         if (kind == "error") await Expect(inspector).ToContainTextAsync("状態: 失敗");
@@ -2139,10 +2145,18 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         + ",\"findings\":[],\"improvement_suggestions\":[],\"limitations\":[],\"provenance\":{\"provider\":\"github_copilot_sdk\",\"model\":\"synthetic\"}}";
 
     private static string Readiness() => """{"provider":"github_copilot","selected_model":"synthetic","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""";
+    private static string Models() => """{"discovery_state":"ready","models":[{"id":"synthetic","display_name":"synthetic","route":"github_hosted","provider_name":"GitHub Copilot","provider_type":"github_copilot","egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action","usage_limits":"github_hosted_allowance"}],"legacy_configured_model":"synthetic","legacy_eligible":true}""";
     private static async Task ReadyAi(IPage page)
     {
         await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json(Readiness())));
-        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json("""{"discovery_state":"ready","models":[{"id":"synthetic","display_name":"synthetic"}],"legacy_configured_model":"synthetic","legacy_eligible":true}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json(Models())));
+    }
+    private static async Task StartNodeAnalysisAsync(IPage page)
+    {
+        await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        var surface = page.Locator("[data-node-ai-surface]");
+        await Expect(surface.Locator("[data-ai-model-select]")).ToHaveValueAsync("synthetic");
+        await surface.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
     }
 
     private static string ArtifactPath(string name)

@@ -105,6 +105,11 @@ internal sealed class OwnedCopilotSdkClientV1 : IOwnedCopilotClientV1, ICopilotS
         ownedClient = null;
         if (environmentEntryPresent("COPILOT_CLI_PATH")) return false;
 
+        // Empty mode keeps the tool surface closed and sets COPILOT_DISABLE_KEYTAR=1 so
+        // the spawned runtime will not use the process-wide keychain. Session/output
+        // files stay in ownedDirectory. BYOK reuse is SessionConfig.Provider plus the
+        // CLI registry/credential resolvers, not CopilotCli ambient defaults or named
+        // providers (those remain additive to Copilot API authentication).
         var client = clientFactory(new CopilotClientOptions
         {
             Mode = CopilotClientMode.Empty,

@@ -87,19 +87,28 @@ An optional AI action may interpret the deterministic comparison receipt, but it
 
 ## Optional AI
 
-The v1 provider is GitHub Copilot SDK.
+The v1 execution transport is GitHub Copilot SDK. That transport label is not
+the inference or billing provider. GitHub-hosted models still require GitHub
+authentication. An existing CLI-managed BYOK connection may be selected for
+Session/node analysis without GitHub-hosted allowance and without copying
+secrets into the monitor home.
 
-AI is visible only when the provider is authenticated and starts only from an
-explicit user action. Settings connection-check is authentication-only; it is
-not selected-model availability or analysis success.
+AI starts only from an explicit user action. Settings connection-check remains
+GitHub authentication-only; it is not selected-model availability, BYOK
+readiness, or analysis success. Session/node analysis can open when Copilot
+analysis is configured so a BYOK list refresh does not depend on GitHub ready.
 
 Session reports and exact-node analysis share one model-discovery/selection
-capability on that same authenticated GitHub Copilot path. The user chooses a
-model in the existing analysis UI from an explicit SDK model list for the
-current identity. The selected identifier is captured immutably on that run.
-Changing the page-local selection does not edit `CopilotAnalysis:*` or restart
-the process. Repository/Compare AI and BYOK credential ownership are outside
-this shared-capability tranche.
+surface. The user chooses a discovered identifier from an explicit refresh.
+GitHub-hosted ids come from authenticated SDK `ListModelsAsync`. BYOK ids come
+from the existing CLI provider registry (`provider-id/model-id`) and resolve
+credentials from the same OS store the CLI already uses. Discovery and
+execution bind the same connection through singular `SessionConfig.Provider`,
+not named providers that stay additive to GitHub authentication. The selected
+identifier is captured immutably on that run, including any provider prefix. Changing the page-local
+selection does not edit `CopilotAnalysis:*` or restart the process.
+Repository/Compare AI remain outside this tranche. The monitor does not own a
+new credential-management system.
 
 Supported scopes:
 

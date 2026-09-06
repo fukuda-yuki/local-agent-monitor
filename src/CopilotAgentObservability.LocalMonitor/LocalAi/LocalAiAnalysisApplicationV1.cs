@@ -75,7 +75,8 @@ internal sealed class LocalAiAnalysisApplicationV1(
     ILocalAiRepositorySnapshotAdapterV1? repositories = null,
     bool repositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
     bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
-    ILocalAiModelDiscoveryV1? models = null) : ILocalAiAnalysisApplicationV1, IHostedService
+    ILocalAiModelDiscoveryV1? models = null,
+    ICopilotByokConnectionV1? byok = null) : ILocalAiAnalysisApplicationV1, IHostedService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
@@ -135,6 +136,13 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         if (timeout is < 1 or > 600 || !LocalAiModelIdentityV1.IsSupportedId(model)) return new(null, "invalid_request");
         if (models is not null && !models.IsSelectable(model)) return new(null, "model_unavailable");
+        var byokModel = byok is not null && byok.IsByokSelection(model);
+        if (byokModel)
+        {
+            var bind = byok!.Bind(model);
+            if (bind.Status == CopilotByokBindStatusV1.CredentialUnavailable) return new(null, "credential_unavailable");
+            if (bind.Status != CopilotByokBindStatusV1.Bound) return new(null, "model_unavailable");
+        }
         var admissionId = Guid.CreateVersion7().ToString();
         var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token));
         lock (lifecycleGate)
@@ -144,7 +152,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         }
         try
         {
-            if (!await providerReady(admission.Cancellation.Token).ConfigureAwait(false))
+            if (!byokModel && !await providerReady(admission.Cancellation.Token).ConfigureAwait(false))
             { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
         }
         catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)

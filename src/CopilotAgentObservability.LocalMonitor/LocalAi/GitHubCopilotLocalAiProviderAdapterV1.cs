@@ -10,7 +10,8 @@ namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
 internal sealed class GitHubCopilotLocalAiProviderAdapterV1(
     Func<IOwnedCopilotClientV1?> clientFactory,
-    TextWriter? diagnosticOutput = null) : ILocalAiProviderAdapterV1
+    TextWriter? diagnosticOutput = null,
+    ICopilotByokConnectionV1? byok = null) : ILocalAiProviderAdapterV1
 {
     private const string StructuredResultInstruction = """
 Return raw JSON only: no Markdown, code fences, or surrounding prose.
@@ -48,18 +49,39 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
                     Convert.ToBase64String(await request.RawReads.ReadAsync(evidence_id, token).ConfigureAwait(false)),
                 new CopilotToolOptions { SkipPermission = true },
                 new AIFunctionFactoryOptions { Name = "read_exact_evidence", Description = "Read one exact retained raw body by its raw_content handle. Cite raw_content.citation_ref in the result." });
-            var model = request.Run.Model;
-            if (!LocalAiModelIdentityV1.IsSupportedId(model))
+            var requested = request.Run.Model ?? "";
+            var configuredModel = requested;
+            GitHub.Copilot.ProviderConfig? sessionProvider = null;
+            if (byok is not null && byok.IsByokSelection(requested))
+            {
+                var bind = byok.Bind(requested);
+                if (bind.Status == CopilotByokBindStatusV1.CredentialUnavailable)
+                {
+                    Diagnose(request.Run.RunId, "session_create", "byok_credential_unavailable");
+                    outcome = LocalAiProviderOutcomeV1.Failed();
+                }
+                else if (bind.Status != CopilotByokBindStatusV1.Bound || bind.Provider is null || bind.Model is null)
+                {
+                    Diagnose(request.Run.RunId, "session_create", "client_unavailable");
+                    outcome = LocalAiProviderOutcomeV1.Failed();
+                }
+                else
+                {
+                    configuredModel = bind.Model.ModelId;
+                    sessionProvider = bind.Provider;
+                }
+            }
+            if (outcome is null && !LocalAiModelIdentityV1.IsSupportedId(configuredModel))
             {
                 Diagnose(request.Run.RunId, "effective_model", "effective_model_absent");
                 outcome = LocalAiProviderOutcomeV1.Failed();
             }
-            else
+            else if (outcome is null)
             {
             var availableTools = new ToolSet(); availableTools.AddCustom("read_exact_evidence");
             var config = new SessionConfig
             {
-                Model = model,
+                Model = configuredModel,
                 Streaming = false,
                 EnableSkills = false,
                 Tools = [rawTool],
@@ -73,6 +95,8 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
                     Content = StructuredResultInstruction
                 },
             };
+            if (sessionProvider is not null)
+                config.Provider = sessionProvider;
             session = await client.CreateSessionAsync(config, token).ConfigureAwait(false);
             sessionId = session.SessionId;
             stage = "send_read";
@@ -83,7 +107,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
                 Diagnose(request.Run.RunId, stage, "final_content_absent");
                 outcome = LocalAiProviderOutcomeV1.Partial();
             }
-            else if (string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, model, StringComparison.Ordinal))
+            else if (string.IsNullOrWhiteSpace(response.Model) || !string.Equals(response.Model, configuredModel, StringComparison.Ordinal))
             {
                 Diagnose(request.Run.RunId, "effective_model",
                     string.IsNullOrWhiteSpace(response.Model) ? "effective_model_absent" : "effective_model_mismatch");

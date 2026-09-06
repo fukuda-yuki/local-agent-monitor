@@ -685,22 +685,40 @@
     unauthenticated: "GitHub Copilot にサインインしてください",
     unavailable: "モデル一覧を取得できません。再読み込みしてください",
     failed: "モデル一覧を取得できません。再読み込みしてください",
-    empty: "このアカウントで利用できるモデルはありません",
+    empty: "GitHub カタログと BYOK 接続のどちらにも、今使えるモデルはありません",
     ready: "分析に使うモデルを選んでください",
     stale: "選択したモデルは現在利用できません。選び直してください",
+  });
+  const EGRESS_NOTICES = Object.freeze({
+    selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action:
+      "選択した内容は GitHub Copilot へ送信されます。利用上限は GitHub のホステッド枠です。",
+    selected_content_may_be_sent_to_the_selected_byok_provider_only_after_explicit_ai_action:
+      "選択した内容は設定済み BYOK プロバイダーへ送信されます。利用上限は GitHub Copilot ではなく、そのプロバイダーのものです。",
   });
 
   function bindModelSelector(rootEl, startButtons) {
     const select = rootEl.querySelector("[data-ai-model-select]") ?? rootEl.querySelector("[data-session-ai-model-select]");
     const refresh = rootEl.querySelector("[data-ai-model-refresh]") ?? rootEl.querySelector("[data-session-ai-model-refresh]");
     const status = rootEl.querySelector("[data-ai-model-status]") ?? rootEl.querySelector("[data-session-ai-model-status]");
+    const destination = rootEl.querySelector("[data-ai-model-destination]");
     let generation = 0;
     let selected = "";
+    let catalog = [];
     function setStarts(enabled) { startButtons().forEach(button => { if (button) button.disabled = !enabled; }); }
     function currentValue() { return selected; }
     function canStart() { return selected !== ""; }
+    function writeDestination(id) {
+      if (!destination) return;
+      const item = catalog.find(entry => entry.id === id);
+      if (!item) { destination.hidden = true; destination.textContent = ""; return; }
+      const notice = EGRESS_NOTICES[item.egress_notice] ?? "";
+      const provider = item.provider_name ? `選択中: ${item.provider_name} / ${item.display_name || item.id}。` : "";
+      destination.textContent = `${provider}${notice}`.trim();
+      destination.hidden = destination.textContent === "";
+    }
     function applySnapshot(snapshot, keepSelection) {
       const options = snapshot.discovery_state === "ready" ? snapshot.models : [];
+      catalog = options;
       const previous = keepSelection ? selected : "";
       const eligibleLegacy = snapshot.legacy_eligible ? snapshot.legacy_configured_model : "";
       const next = options.some(item => item.id === previous) ? previous
@@ -718,6 +736,7 @@
       else if (snapshot.discovery_state === "ready" && previous && !next) status.textContent = MODEL_DISCOVERY_LABELS.stale;
       else if (snapshot.discovery_state === "ready") status.textContent = MODEL_DISCOVERY_LABELS.ready;
       else status.textContent = MODEL_DISCOVERY_LABELS[snapshot.discovery_state] ?? MODEL_DISCOVERY_LABELS.unavailable;
+      writeDestination(next);
       setStarts(canStart());
     }
     async function discover() {
@@ -744,6 +763,7 @@
     select?.addEventListener("change", () => {
       selected = select.value;
       if (selected) status.textContent = "";
+      writeDestination(selected);
       setStarts(canStart());
     });
     refresh?.addEventListener("click", () => discover());
@@ -811,7 +831,7 @@
     if (result.limitations.length) { target.append(el("h4", null, "制約")); for (const limitation of result.limitations) target.append(el("p", null, String(limitation))); }
     if (result.provenance && typeof result.provenance === "object") {
       const provenance = el("section"); provenance.append(el("h4", null, "分析の技術情報"));
-      for (const [key, label] of [["provider", "プロバイダー"], ["model", "モデル"], ["configuration_sha256", "設定のSHA-256"], ["prompt_template_version", "テンプレート"], ["requested_at", "依頼日時"], ["started_at", "開始日時"], ["completed_at", "完了日時"], ["snapshot_id", "スナップショットID"], ["snapshot_sha256", "内容のSHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
+      for (const [key, label] of [["provider", "SDK"], ["model", "モデル"], ["configuration_sha256", "設定のSHA-256"], ["prompt_template_version", "テンプレート"], ["requested_at", "依頼日時"], ["started_at", "開始日時"], ["completed_at", "完了日時"], ["snapshot_id", "スナップショットID"], ["snapshot_sha256", "内容のSHA-256"]]) appendAiField(provenance, label, result.provenance[key]);
       if (result.provenance.coverage && typeof result.provenance.coverage === "object") {
         appendAiField(provenance, "対象件数", result.provenance.coverage.included); appendAiField(provenance, "除外件数", result.provenance.coverage.excluded); appendAiField(provenance, "記録内容", result.provenance.coverage.content_available ? "利用できます" : "利用できません");
       }
@@ -993,6 +1013,8 @@
       if (!sessionAiOwns(generation)) return;
       document.querySelector("[data-session-ai-status]").textContent = error?.error === "model_unavailable"
         ? MODEL_DISCOVERY_LABELS.stale
+        : error?.error === "credential_unavailable"
+          ? "選択した BYOK 接続の資格情報を解決できません"
         : "AI分析を開始できませんでした";
       if (error?.error === "model_unavailable") await sessionModelSelector.discover();
       return;
@@ -1027,6 +1049,8 @@
       if (!nodeAiOwns(generation)) return;
       section.querySelector("[data-node-ai-status]").textContent = error?.error === "model_unavailable"
         ? MODEL_DISCOVERY_LABELS.stale
+        : error?.error === "credential_unavailable"
+          ? "選択した BYOK 接続の資格情報を解決できません"
         : "AI分析を開始できませんでした";
       if (error?.error === "model_unavailable") await selector.discover();
       return;
@@ -1052,7 +1076,8 @@
     const select = el("select"); select.id = `local-monitor-node-ai-model-${nodeId}`; select.dataset.aiModelSelect = ""; select.disabled = true; select.append(el("option", null, "モデルを選択")); select.firstChild.value = "";
     const refresh = el("button", null, "モデル一覧を更新"); refresh.type = "button"; refresh.dataset.aiModelRefresh = "";
     const modelStatus = el("div"); modelStatus.dataset.aiModelStatus = ""; modelStatus.setAttribute("role", "status"); modelStatus.setAttribute("aria-live", "polite");
-    model.append(label, select, refresh, modelStatus);
+    const destination = el("p"); destination.dataset.aiModelDestination = ""; destination.hidden = true;
+    model.append(label, select, refresh, modelStatus, destination);
     const status = el("div"); status.dataset.nodeAiStatus = ""; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
     const result = el("div"); result.dataset.nodeAiResult = ""; const question = el("textarea"); question.setAttribute("aria-label", "追加の質問"); question.maxLength = 4096;
     const analyze = el("button", null, "この項目をAIで分析"); analyze.type = "button"; analyze.disabled = true; analyze.addEventListener("click", () => startNodeAi(surface, nodeId));
@@ -1067,7 +1092,7 @@
   function appendNodeAi(section, nodeId) {
     if (section.querySelector("[data-node-ai-start]")) return;
     const start = el("section", "local-monitor-node-ai-start"); start.dataset.nodeAiStart = "";
-    start.append(el("p", null, "選択した項目と利用可能な記録内容は GitHub Copilot へ送信される場合があります。"));
+    start.append(el("p", null, "モデルを選ぶと、送信先のサービスと利用上限の対象が表示されます。"));
     const action = el("button", null, "この項目をAIで分析"); action.type = "button";
     action.addEventListener("click", async () => {
       action.disabled = true;
@@ -1389,7 +1414,7 @@
   async function checkAiReadiness() {
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } }); const value = response.ok ? await response.json() : null;
-      aiReady = value?.readiness_state === "ready"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady;
+      aiReady = value?.readiness_state && value.readiness_state !== "unconfigured"; const action = document.querySelector("[data-session-ai-open]"); action.hidden = !aiReady;
       const pending = pendingSessionAiFocus; pendingSessionAiFocus = null;
       const route = window.LocalMonitorV1History.current();
       if (aiReady && pending?.invoker === action && action.isConnected && pending.generation === routeGeneration
