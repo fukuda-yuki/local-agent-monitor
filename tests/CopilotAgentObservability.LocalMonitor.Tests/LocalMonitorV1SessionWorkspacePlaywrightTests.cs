@@ -117,6 +117,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-ai-model-select] >> option[value='stale-model']")).ToHaveCountAsync(0);
         await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
         Assert.Contains(posts, body => body.Contains("\"model\":\"fresh-model\"", StringComparison.Ordinal));
+        Assert.Contains(posts, body => body.Contains("\"timeout_seconds\":600", StringComparison.Ordinal));
         Assert.DoesNotContain(posts, body => body.Contains("stale-model", StringComparison.Ordinal));
     }
 

@@ -5,9 +5,9 @@ using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
-internal sealed record LocalAiSessionStartRequestV1(string SessionId, string Model, int TimeoutSeconds = 60);
+internal sealed record LocalAiSessionStartRequestV1(string SessionId, string Model, int TimeoutSeconds = 600);
 internal sealed record LocalAiPriorTurnV1(string Question, string Answer);
-internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, string Model, int TimeoutSeconds = 60,
+internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, string Model, int TimeoutSeconds = 600,
     string? Question = null, IReadOnlyList<LocalAiPriorTurnV1>? PriorTurns = null);
 internal sealed record LocalAiStartResponseV1(string? RunId, string? ErrorCode);
 internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string? SessionId,

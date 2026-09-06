@@ -209,7 +209,7 @@ internal static class LocalAiRoutesV1
     {
         request=null; if(!TryObject(bytes,["session_id","model","timeout_seconds"], ["session_id","model"],out var root))return false;
         if(!TryUuid(root.GetProperty("session_id"),out var session)||!TryModel(root,out var model))return false;
-        var timeout=60;if(root.TryGetProperty("timeout_seconds",out var value)&&(value.ValueKind!=JsonValueKind.Number||!value.TryGetInt32(out timeout)))return false;
+        var timeout=600;if(root.TryGetProperty("timeout_seconds",out var value)&&(value.ValueKind!=JsonValueKind.Number||!value.TryGetInt32(out timeout)))return false;
         if(timeout is <1 or >600)return false; request=new(session!,model!,timeout); return true;
     }
 
@@ -218,7 +218,7 @@ internal static class LocalAiRoutesV1
         request=null; if(!TryObject(bytes,["session_id","node_id","model","timeout_seconds","question","prior_turns"],["session_id","node_id","model"],out var root))return false;
         if(!TryUuid(root.GetProperty("session_id"),out var session)||root.GetProperty("node_id").ValueKind!=JsonValueKind.String||!TryModel(root,out var model))return false;
         var node=root.GetProperty("node_id").GetString(); if(!CanonicalNodeId(node))return false;
-        var timeout=60;if(root.TryGetProperty("timeout_seconds",out var timeoutValue)&&(timeoutValue.ValueKind!=JsonValueKind.Number||!timeoutValue.TryGetInt32(out timeout)))return false;
+        var timeout=600;if(root.TryGetProperty("timeout_seconds",out var timeoutValue)&&(timeoutValue.ValueKind!=JsonValueKind.Number||!timeoutValue.TryGetInt32(out timeout)))return false;
         string? question=null; if(root.TryGetProperty("question",out var q)){if(q.ValueKind!=JsonValueKind.String)return false;question=q.GetString();}
         var turns=new List<LocalAiPriorTurnV1>(); if(root.TryGetProperty("prior_turns",out var prior))
         { if(prior.ValueKind!=JsonValueKind.Array)return false; foreach(var item in prior.EnumerateArray())

@@ -1006,7 +1006,7 @@
   async function startSessionAi() {
     if (!sessionModelSelector.canStart()) { document.querySelector("[data-session-ai-status]").textContent = MODEL_DISCOVERY_LABELS.stale; return; }
     const generation = ++sessionPollGeneration;
-    const response = await aiPost("/api/local-monitor/v1/ai/session-runs", { session_id: root.dataset.sessionId, model: sessionModelSelector.currentValue() });
+    const response = await aiPost("/api/local-monitor/v1/ai/session-runs", { session_id: root.dataset.sessionId, model: sessionModelSelector.currentValue(), timeout_seconds: 600 });
     if (!sessionAiOwns(generation)) return;
     if (!response.ok) {
       const error = await response.json().catch(() => null);
@@ -1039,7 +1039,7 @@
     if (nodeAiContext !== nodeId || question === null) { nodeTranscript = []; nodeAiContext = nodeId; }
     const selector = section._modelSelector;
     if (!selector?.canStart()) { section.querySelector("[data-node-ai-status]").textContent = MODEL_DISCOVERY_LABELS.stale; return; }
-    const body = { session_id: root.dataset.sessionId, node_id: nodeId, model: selector.currentValue() }; if (question !== null) { body.question = question; body.prior_turns = nodeTranscript; }
+    const body = { session_id: root.dataset.sessionId, node_id: nodeId, model: selector.currentValue(), timeout_seconds: 600 }; if (question !== null) { body.question = question; body.prior_turns = nodeTranscript; }
     if (new TextEncoder().encode(JSON.stringify(body)).length > 262144 || question !== null && new TextEncoder().encode(question).length > 4096 || nodeTranscript.length > 16) {
       section.querySelector("[data-node-ai-status]").textContent = "質問が送信可能な上限を超えています"; return;
     }
