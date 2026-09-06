@@ -272,10 +272,13 @@ request/security boundary composes with the accepted exact success wire in
 
 AI execution crosses the local-only boundary.
 
-- provider is GitHub Copilot SDK in v1;
-- actions are visible only when provider-ready;
+- execution transport is GitHub Copilot SDK in v1; GitHub-hosted inference still
+  requires GitHub authentication, while an existing CLI-managed BYOK connection
+  may run without GitHub-hosted allowance;
 - the user starts every run explicitly;
-- Settings permanently explains that selected content may be sent to GitHub Copilot;
+- Settings permanently explains GitHub Copilot egress for the GitHub-hosted
+  route; Session/node analysis shows the selected provider/model and whether
+  GitHub-hosted allowance or the BYOK provider's limits apply;
 - raw-default GET and POST `/api/local-monitor/v1/settings/ai-readiness` are
   no-store; POST requires same-origin and CSRF, and both return only the closed
   Settings readiness facts without credentials, paths, provider responses,
@@ -283,12 +286,19 @@ AI execution crosses the local-only boundary.
 - raw-default GET and POST `/api/local-monitor/v1/ai/models` are no-store,
   loopback/Host guarded, and same-origin; POST requires CSRF. GET returns the
   current in-memory discovery snapshot without calling the provider. POST is
-  the explicit list/refresh and uses the same authenticated GitHub Copilot SDK
-  client ownership as Session/node execution (`ListModelsAsync`). POST body is
+  the explicit list/refresh. GitHub-hosted ids use authenticated SDK
+  `ListModelsAsync`. BYOK ids are read from the existing CLI registry and bound
+  with the same OS credential target the CLI already uses, then injected as
+  singular `SessionConfig.Provider` (the SDK hook that bypasses Copilot API
+  authentication). Named `SessionConfig.Providers`/`Models` are not used.
+  GitHub authentication is not required for that route. POST body is
   the closed empty object `{}`. Success JSON is always HTTP `200` with this
   closed object: `discovery_state` (string; exactly one of `not_checked`,
   `unauthenticated`, `unavailable`, `failed`, `empty`, `ready`), `models`
-  (array of `{id, display_name}` strings; empty unless `ready`),
+  (array of `{id, display_name, route, provider_name, provider_type,
+  egress_notice, usage_limits}` strings; empty unless `ready`; `route` is
+  `github_hosted` or `byok`; `egress_notice` and `usage_limits` are the closed
+  tokens defined with this object),
   `legacy_configured_model` (string or JSON `null`; always present), and
   `legacy_eligible` (boolean; true only when `discovery_state` is `ready` and
   that exact identifier is in `models`). `loading` and `stale` are UI-only and
@@ -303,8 +313,20 @@ AI execution crosses the local-only boundary.
 - Session/node start `model` is a required string. Missing, non-string, `auto`,
   or illegal-charset values are HTTP `400` `{"error":"invalid_request"}`. A
   syntactically valid identifier that is not in the current usable discovered
-  set is HTTP `409` `{"error":"model_unavailable"}`. The server does not
-  substitute another model;
+  set is HTTP `409` `{"error":"model_unavailable"}`. A discovered BYOK
+  identifier whose OS credential cannot be resolved is HTTP `409`
+  `{"error":"credential_unavailable"}`. A discovered BYOK identifier whose
+  registry row is missing or whose non-secret connection identity changed
+  (provider id/type, endpoint, wire API, model id, configured `wire_model`,
+  Azure API version) is HTTP `409` `{"error":"model_unavailable"}` before run
+  create. Execution re-binds only that captured identity; disappearance or
+  incompatible change fails the run before provider-less or GitHub-hosted
+  generation. Bind copies a configured registry `wire_model` into
+  `ProviderConfig.WireModel` and uses the pinned SDK fallback to `ModelId`
+  only when it is absent. Effective-model comparison uses `SessionConfig.Model`
+  and does not rewrite the provider response. The server does not
+  substitute another model, copy secrets into the owned Copilot home, or treat
+  `~/.copilot` as a cleanup target;
 - Repository selection requires a scope preview;
 - the provider receives only one bounded immutable snapshot and process-internal tools constrained to its evidence index;
 - the SQLite file and arbitrary SQL are never exposed;
@@ -318,7 +340,8 @@ UUID, a closed stage (`client_factory`, `client_start`, `session_create`,
 `send_read`, `effective_model`, `session_dispose`, `session_delete`,
 `client_dispose`), and a closed reason (`client_unavailable`, `exception`,
 `timeout`, `cancellation_requested`, `cancellation_unrequested`,
-`final_content_absent`, `effective_model_absent`, `effective_model_mismatch`).
+`final_content_absent`, `effective_model_absent`, `effective_model_mismatch`,
+`byok_credential_unavailable`).
 Cancellation reasons describe whether the run token is canceled when observed;
 they do not infer an authentication, quota, or provider root cause.
 Diagnostics contain no exception object/message/type, provider or model value,

@@ -421,13 +421,20 @@ There are no page-level `整形 / raw` tabs.
 
 Session and exact-node analysis do not use `/api/analysis/options` or a
 configuration-synthesized list as the account catalogue. The human UI performs
-an explicit model-list request through the same authenticated GitHub Copilot
-SDK ownership as execution (`ListModelsAsync`). Discovery is not background
-polling, not a persistent catalogue, and not a generation probe. The UI shows
-loading, unauthenticated, empty, unavailable/failed, and ready states honestly
-and offers explicit refresh. Those UI labels include `loading` and `stale`,
-which are not `/ai/models` wire states. Opening or restoring the Session AI
-dialog performs the same explicit discovery request as the header action. A
+an explicit model-list request. GitHub-hosted ids use authenticated SDK
+`ListModelsAsync`. BYOK ids reuse the existing CLI provider registry and OS
+credential store; GitHub authentication is not a prerequisite for that route.
+The UI shows the selected provider and model and which service receives the
+selected data and whose usage limits apply. An SDK transport label is not the
+inference provider. Discovery is not background polling, not a persistent
+catalogue, and not a generation probe. The UI shows loading, unauthenticated,
+empty, unavailable/failed, and ready states honestly and offers explicit
+refresh. Empty means the refresh produced no usable GitHub-hosted or BYOK
+identifier; it does not mean “the account has no models.” Those UI labels
+include `loading` and `stale`, which are not `/ai/models` wire states. Opening
+or restoring the Session AI dialog performs the same explicit discovery request
+as the header action. The Session AI action may appear when analysis is
+configured, not only after Settings GitHub ready. A
 legacy `CopilotAnalysis` model may preselect only when the selector has no
 current page-local selection and that exact identifier is in the current usable
 discovered set; otherwise the user must select. A later snapshot must not

@@ -3,7 +3,15 @@ using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
-internal sealed record LocalAiDiscoveredModelV1(string Id, string DisplayName);
+internal sealed record LocalAiDiscoveredModelV1(
+    string Id,
+    string DisplayName,
+    string Route = "github_hosted",
+    string ProviderName = "GitHub Copilot",
+    string ProviderType = "github_copilot",
+    string EgressNotice = "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action",
+    string UsageLimits = "github_hosted_allowance",
+    CopilotByokConnectionIdentityV1? Connection = null);
 
 internal sealed record LocalAiModelDiscoverySnapshotV1(
     string State,
@@ -47,7 +55,8 @@ internal static class LocalAiModelIdentityV1
 
 internal sealed class LocalAiModelDiscoveryServiceV1(
     Func<IOwnedCopilotClientV1?> clientFactory,
-    string? legacyConfiguredModel) : ILocalAiModelDiscoveryV1
+    string? legacyConfiguredModel,
+    ICopilotByokConnectionV1? byok = null) : ILocalAiModelDiscoveryV1
 {
     private readonly object gate = new();
     private int admitted;
@@ -71,19 +80,36 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
         int ticket;
         lock (gate) ticket = ++admitted;
         IOwnedCopilotClientV1? client = null;
+        var models = new List<LocalAiDiscoveredModelV1>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         try
         {
+            foreach (var entry in byok?.ListModels() ?? [])
+            {
+                if (!seen.Add(entry.SelectionId)) continue;
+                models.Add(new(
+                    entry.SelectionId,
+                    LocalAiModelIdentityV1.SanitizeDisplayName(entry.DisplayName, entry.SelectionId),
+                    "byok",
+                    LocalAiModelIdentityV1.SanitizeDisplayName(entry.ProviderName, entry.ProviderId),
+                    entry.ProviderType,
+                    "selected_content_may_be_sent_to_the_selected_byok_provider_only_after_explicit_ai_action",
+                    "byok_provider_limits",
+                    CopilotByokConnectionIdentityV1.From(entry)));
+            }
+
             client = clientFactory();
-            if (client is null) return Publish(ticket, "unavailable", []);
+            if (client is null)
+                return Publish(ticket, models.Count == 0 ? "unavailable" : "ready", models);
             await client.StartAsync(token).ConfigureAwait(false);
             var status = await client.GetStatusAsync(token).ConfigureAwait(false);
             if (status is null || !CopilotRuntimeIdentityCertifierV1.TryCertify(status, out _))
-                return Publish(ticket, "unavailable", []);
-            if (!status.IsAuthenticated) return Publish(ticket, "unauthenticated", []);
+                return Publish(ticket, models.Count == 0 ? "unavailable" : "ready", models);
+            if (!status.IsAuthenticated)
+                return Publish(ticket, models.Count == 0 ? "unauthenticated" : "ready", models);
             var listed = await client.ListModelsAsync(token).ConfigureAwait(false);
-            if (listed is null) return Publish(ticket, "unavailable", []);
-            var models = new List<LocalAiDiscoveredModelV1>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
+            if (listed is null)
+                return Publish(ticket, models.Count == 0 ? "unavailable" : "ready", models);
             foreach (var entry in listed)
             {
                 if (!LocalAiModelIdentityV1.IsSupportedId(entry.Id) || !seen.Add(entry.Id)) continue;
@@ -97,7 +123,7 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
         }
         catch
         {
-            return Publish(ticket, "failed", []);
+            return Publish(ticket, models.Count == 0 ? "failed" : "ready", models);
         }
         finally
         {

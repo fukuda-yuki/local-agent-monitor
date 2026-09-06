@@ -622,13 +622,23 @@ internal static class MonitorHost
                 services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
             if (settingsAiReadiness is not null && localAiClientFactory is not null && localAiOptions is not null)
             {
+                ICopilotByokConnectionV1 byokConnection;
+                if (testOptions?.LocalAiByokConnection is { } configuredByok)
+                    byokConnection = configuredByok;
+                else if (testOptions is not null)
+                    byokConnection = new CopilotByokConnectionV1(
+                        new CopilotCliByokRegistryV1(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "absent-copilot-home")),
+                        WindowsByokCredentialResolverV1.Instance);
+                else
+                    byokConnection = new CopilotByokConnectionV1(
+                        CopilotCliByokRegistryV1.FromUserProfile(), WindowsByokCredentialResolverV1.Instance);
                 var modelDiscovery = testOptions?.LocalAiModelDiscovery
-                    ?? new LocalAiModelDiscoveryServiceV1(localAiClientFactory, localAiOptions.DefaultModel);
+                    ?? new LocalAiModelDiscoveryServiceV1(localAiClientFactory, localAiOptions.DefaultModel, byokConnection);
                 builder.Services.AddSingleton<ILocalAiModelDiscoveryV1>(modelDiscovery);
                 var runRepository = SqliteLocalAiRunRepositoryV1.Create(
                     options.DatabasePath, localAiOptions.DefaultModel, localAiOptions.DefaultProfile, timeProvider, retentionCatalog);
                 var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
-                    localAiClientFactory, Console.Error);
+                    localAiClientFactory, Console.Error, byokConnection);
                 var localAiRawReader = new LocalAiRetentionRawReaderV1(
                     new LocalWorkspaceNodeContentReader(retentionContext, timeProvider));
                 builder.Services.AddSingleton<ILocalAiAnalysisApplicationV1>(services =>
@@ -646,7 +656,8 @@ internal static class MonitorHost
                         new LocalAiRepositorySnapshotAdapterV1(services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(),services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),services.GetRequiredService<IHistoricalEvidenceSnapshotSourceV1>(),timeProvider),
                         options.RepositoryAiEnabled,
                         options.CompareAiEnabled,
-                        modelDiscovery));
+                        modelDiscovery,
+                        byokConnection));
                 if (testOptions?.LocalAiAnalysisApplication is null)
                     builder.Services.AddHostedService(services =>
                         (LocalAiAnalysisApplicationV1)services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
@@ -3166,6 +3177,8 @@ internal sealed class MonitorHostTestOptions
     public ILocalAiAnalysisApplicationV1? LocalAiAnalysisApplication { get; init; }
 
     public ILocalAiModelDiscoveryV1? LocalAiModelDiscovery { get; init; }
+
+    public ICopilotByokConnectionV1? LocalAiByokConnection { get; init; }
 
     public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
 

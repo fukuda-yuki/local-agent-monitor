@@ -5,9 +5,9 @@ using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
-internal sealed record LocalAiSessionStartRequestV1(string SessionId, string Model, int TimeoutSeconds = 60);
+internal sealed record LocalAiSessionStartRequestV1(string SessionId, string Model, int TimeoutSeconds = 600);
 internal sealed record LocalAiPriorTurnV1(string Question, string Answer);
-internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, string Model, int TimeoutSeconds = 60,
+internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, string Model, int TimeoutSeconds = 600,
     string? Question = null, IReadOnlyList<LocalAiPriorTurnV1>? PriorTurns = null);
 internal sealed record LocalAiStartResponseV1(string? RunId, string? ErrorCode);
 internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string? SessionId,
@@ -19,7 +19,8 @@ internal sealed record LocalAiReportItemResponseV1(string RunId, string State, b
 internal sealed record LocalAiReportPageResponseV1(IReadOnlyList<LocalAiReportItemResponseV1> Reports, string? NextCursor);
 
 internal sealed record LocalAiProviderRequestV1(LocalAiSnapshotProjectionV1 Snapshot,
-    LocalAiRunStatusV1 Run, LocalAiRawReadCapabilityV1 RawReads, string? Question, IReadOnlyList<LocalAiPriorTurnV1> PriorTurns);
+    LocalAiRunStatusV1 Run, LocalAiRawReadCapabilityV1 RawReads, string? Question, IReadOnlyList<LocalAiPriorTurnV1> PriorTurns,
+    CopilotByokConnectionIdentityV1? ExpectedConnection = null);
 
 internal enum LocalAiProviderOutcomeKindV1 { Complete, Partial, Failed }
 internal sealed record LocalAiProviderOutcomeV1(LocalAiProviderOutcomeKindV1 Kind, byte[]? ResultJson)
@@ -75,7 +76,8 @@ internal sealed class LocalAiAnalysisApplicationV1(
     ILocalAiRepositorySnapshotAdapterV1? repositories = null,
     bool repositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
     bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
-    ILocalAiModelDiscoveryV1? models = null) : ILocalAiAnalysisApplicationV1, IHostedService
+    ILocalAiModelDiscoveryV1? models = null,
+    ICopilotByokConnectionV1? byok = null) : ILocalAiAnalysisApplicationV1, IHostedService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
@@ -135,8 +137,27 @@ internal sealed class LocalAiAnalysisApplicationV1(
     {
         if (timeout is < 1 or > 600 || !LocalAiModelIdentityV1.IsSupportedId(model)) return new(null, "invalid_request");
         if (models is not null && !models.IsSelectable(model)) return new(null, "model_unavailable");
+        var selected = models?.Current().Models.FirstOrDefault(item =>
+            string.Equals(item.Id, model, StringComparison.Ordinal));
+        var byokRoute = selected is not null
+            ? string.Equals(selected.Route, "byok", StringComparison.Ordinal)
+            : byok is not null && byok.IsByokSelection(model);
+        CopilotByokConnectionIdentityV1? expected = null;
+        if (byokRoute)
+        {
+            if (byok is null) return new(null, "model_unavailable");
+            var bind = byok.Bind(model);
+            if (bind.Status == CopilotByokBindStatusV1.CredentialUnavailable) return new(null, "credential_unavailable");
+            if (bind.Status != CopilotByokBindStatusV1.Bound || bind.Model is null) return new(null, "model_unavailable");
+            if (selected?.Connection is not null && !selected.Connection.Matches(bind.Model))
+                return new(null, "model_unavailable");
+            expected = CopilotByokConnectionIdentityV1.From(bind.Model);
+        }
         var admissionId = Guid.CreateVersion7().ToString();
-        var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token));
+        var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            ExpectedConnection = expected,
+        };
         lock (lifecycleGate)
         {
             if (!accepting) { admission.Cancellation.Dispose(); return new(null, "provider_unavailable"); }
@@ -144,7 +165,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         }
         try
         {
-            if (!await providerReady(admission.Cancellation.Token).ConfigureAwait(false))
+            if (expected is null && !await providerReady(admission.Cancellation.Token).ConfigureAwait(false))
             { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
         }
         catch (OperationCanceledException) when (admission.Cancellation.IsCancellationRequested)
@@ -198,7 +219,9 @@ internal sealed class LocalAiAnalysisApplicationV1(
                     ? rawReader(evidence.SessionId ?? snapshot.SessionId!, evidence, cancellationToken)
                     : ValueTask.FromException<byte[]>(new LocalAiRawReadException("raw_unavailable")));
             var startedRun = runs.Read(runId);
-            var outcome = await provider.ExecuteAsync(new(snapshot, startedRun, raw, question, priorTurns), admission.Cancellation.Token).ConfigureAwait(false);
+            var outcome = await provider.ExecuteAsync(
+                new(snapshot, startedRun, raw, question, priorTurns, admission.ExpectedConnection),
+                admission.Cancellation.Token).ConfigureAwait(false);
             if (snapshot.ScopeKind is "session" or "node" && !await snapshots.IsCurrentAsync(snapshot, CancellationToken.None).ConfigureAwait(false)
                 || snapshot.ScopeKind=="repository_selection"&&repositories is not null&&!await repositories.IsCurrentAsync(snapshot,CancellationToken.None).ConfigureAwait(false))
                 runs.Fail(runId, "stale_snapshot");
@@ -289,6 +312,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
         internal CancellationTokenSource Cancellation { get; } = cancellation;
         internal TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal string? RunId { get; set; }
+        internal CopilotByokConnectionIdentityV1? ExpectedConnection { get; set; }
     }
 }
 
