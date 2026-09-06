@@ -142,6 +142,68 @@ public sealed class LocalAiModelSelectionTests
     }
 
     [Fact]
+    public async Task OlderRefreshDoesNotOverwriteNewerAuthoritativeSnapshotOrStartAdmission()
+    {
+        using var temp = new MonitorTempDirectory();
+        var listed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposals = 0;
+        var calls = 0;
+        IOwnedCopilotClientV1 Factory()
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+                return new DelayedReadyClient(listed, release, () => Interlocked.Increment(ref disposals), "stale-model");
+            return new ImmediateStatusClient(authenticated: false, disposed: () => Interlocked.Increment(ref disposals));
+        }
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var scope = new SqliteLocalRepositoryScopeSnapshotService(temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider, registryAuthority: authority),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: authority, timeProvider: temp.TimeProvider),
+            skillRegistryAuthority: authority, timeProvider: temp.TimeProvider);
+        await using var host = await MonitorTestHost.StartAsync(temp, repositoryAiEnabled: false, compareAiEnabled: false,
+            testOptions: new()
+            {
+                StartWriter = false,
+                StartProjectionWorker = false,
+                LocalRepositoryScopeSnapshotService = scope,
+                SettingsAiReadinessClientFactory = Factory,
+                TimeProvider = temp.TimeProvider,
+            });
+        LocalWorkspaceSessionDetailSnapshotTests.InitializeRoundFiveSemanticFixture(temp.DatabasePath, SessionId, RunA, RunB);
+        using (var connection = Open(temp.DatabasePath)) LocalAiAnalysisSchemaV1.Ensure(connection);
+
+        var refreshA = host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        await listed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        using var refreshB = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/models", "{}"));
+        using var bJson = JsonDocument.Parse(await refreshB.Content.ReadAsByteArrayAsync());
+        Assert.Equal("unauthenticated", bJson.RootElement.GetProperty("discovery_state").GetString());
+        using var getAfterB = await host.Client.GetAsync("/api/local-monitor/v1/ai/models");
+        using var afterB = JsonDocument.Parse(await getAfterB.Content.ReadAsByteArrayAsync());
+        Assert.Equal("unauthenticated", afterB.RootElement.GetProperty("discovery_state").GetString());
+        Assert.Equal(0, afterB.RootElement.GetProperty("models").GetArrayLength());
+        var discovery = host.Services.GetRequiredService<ILocalAiModelDiscoveryV1>();
+        Assert.False(discovery.IsSelectable("stale-model"));
+        using var startAfterB = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"stale-model"}"""));
+        Assert.Equal(HttpStatusCode.Conflict, startAfterB.StatusCode);
+        Assert.Equal("{\"error\":\"model_unavailable\"}", await startAfterB.Content.ReadAsStringAsync());
+
+        release.TrySetResult();
+        using var refreshAResponse = await refreshA;
+        using var aJson = JsonDocument.Parse(await refreshAResponse.Content.ReadAsByteArrayAsync());
+        Assert.Equal("unauthenticated", aJson.RootElement.GetProperty("discovery_state").GetString());
+        using var getAfterA = await host.Client.GetAsync("/api/local-monitor/v1/ai/models");
+        using var afterA = JsonDocument.Parse(await getAfterA.Content.ReadAsByteArrayAsync());
+        Assert.Equal("unauthenticated", afterA.RootElement.GetProperty("discovery_state").GetString());
+        Assert.False(discovery.IsSelectable("stale-model"));
+        using var startAfterA = await host.Client.SendAsync(Post("/api/local-monitor/v1/ai/session-runs",
+            $$"""{"session_id":"{{SessionId}}","model":"stale-model"}"""));
+        Assert.Equal(HttpStatusCode.Conflict, startAfterA.StatusCode);
+        Assert.Equal(2, Volatile.Read(ref disposals));
+    }
+
+    [Fact]
     public async Task MissingAutoAndUndiscoveredModelsAreRejectedWithoutRuns()
     {
         using var temp = new MonitorTempDirectory();
@@ -284,6 +346,48 @@ public sealed class LocalAiModelSelectionTests
         public LocalAiModelDiscoverySnapshotV1 Current() => snapshot;
         public ValueTask<LocalAiModelDiscoverySnapshotV1> RefreshAsync(CancellationToken token) => ValueTask.FromResult(snapshot);
         public bool IsSelectable(string model) => snapshot.Models.Any(item => item.Id == model);
+    }
+
+    private sealed class DelayedReadyClient(
+        TaskCompletionSource listed,
+        TaskCompletionSource release,
+        Action disposed,
+        string id) : IOwnedCopilotClientV1
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<CopilotRuntimeStatusObservationV1?>(new("1.0.75", 3, null, true));
+        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
+        public async Task<IReadOnlyList<CopilotModelCatalogEntryV1>?> ListModelsAsync(CancellationToken cancellationToken)
+        {
+            listed.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return [new CopilotModelCatalogEntryV1(id, id)];
+        }
+        public ValueTask DisposeAsync()
+        {
+            disposed();
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class ImmediateStatusClient(bool authenticated, Action disposed) : IOwnedCopilotClientV1
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<CopilotRuntimeStatusObservationV1?>(new("1.0.75", 3, null, authenticated));
+        public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<CopilotModelCatalogEntryV1>?> ListModelsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CopilotModelCatalogEntryV1>?>([]);
+        public ValueTask DisposeAsync()
+        {
+            disposed();
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class CatalogClient : IOwnedCopilotClientV1

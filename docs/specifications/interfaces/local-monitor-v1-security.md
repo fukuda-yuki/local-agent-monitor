@@ -294,9 +294,12 @@ AI execution crosses the local-only boundary.
   that exact identifier is in `models`). `loading` and `stale` are UI-only and
   are not wire states. Responses never include credentials, provider exception
   text, billing, policy objects, raw catalogue payloads, or
-  configuration-synthesized stand-ins. In-memory reuse is process-local and
-  replaced by the next explicit refresh or an unauthenticated/unavailable
-  result; there is no persistent catalogue store or background poll;
+  configuration-synthesized stand-ins. In-memory reuse is process-local. Each
+  explicit refresh takes ownership before SDK work; only the latest admitted
+  refresh may replace the authoritative snapshot, including a newer
+  unauthenticated, unavailable, empty, or failed state. An older completion
+  does not resurrect a prior ready set. There is no persistent catalogue store
+  or background poll;
 - Session/node start `model` is a required string. Missing, non-string, `auto`,
   or illegal-charset values are HTTP `400` `{"error":"invalid_request"}`. A
   syntactically valid identifier that is not in the current usable discovered

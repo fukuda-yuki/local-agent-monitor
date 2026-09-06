@@ -440,8 +440,15 @@ against the current discovered set, stored on that run, hashed into that run's
 configuration identity, and passed to the provider session. Later page
 selections and concurrent runs must not change another run's model. A later
 start or restore poll must not render, clear cancel, or write status for an
-older run after a newer run owns the surface. Stale asynchronous discovery
-responses must not overwrite the current selector.
+older run after a newer run owns the surface. Session and node start/restore
+operations take ownership before the start POST or exact-report read and keep
+it through response/body, polling, report/history reads, and URL, active-run,
+cancellation, status, and result writes. Closing or replacing the surface
+invalidates pending continuations and does not mark a created server run
+canceled. Stale asynchronous discovery responses must not overwrite the current
+selector. An older model-list refresh must not replace a newer authoritative
+server snapshot, including a newer unauthenticated, unavailable, empty, or
+failed state.
 
 `GET /api/local-monitor/v1/ai/sessions/{sessionId}/reports` computes each
 required boolean `snapshot_changed` only by comparing the immutable saved

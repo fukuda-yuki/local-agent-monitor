@@ -50,6 +50,7 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
     string? legacyConfiguredModel) : ILocalAiModelDiscoveryV1
 {
     private readonly object gate = new();
+    private int admitted;
     private LocalAiModelDiscoverySnapshotV1 snapshot = new("not_checked", [],
         LocalAiModelIdentityV1.IsSupportedId(legacyConfiguredModel) ? legacyConfiguredModel : null, false, 0);
 
@@ -67,18 +68,20 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
 
     public async ValueTask<LocalAiModelDiscoverySnapshotV1> RefreshAsync(CancellationToken token)
     {
+        int ticket;
+        lock (gate) ticket = ++admitted;
         IOwnedCopilotClientV1? client = null;
         try
         {
             client = clientFactory();
-            if (client is null) return Publish("unavailable", []);
+            if (client is null) return Publish(ticket, "unavailable", []);
             await client.StartAsync(token).ConfigureAwait(false);
             var status = await client.GetStatusAsync(token).ConfigureAwait(false);
             if (status is null || !CopilotRuntimeIdentityCertifierV1.TryCertify(status, out _))
-                return Publish("unavailable", []);
-            if (!status.IsAuthenticated) return Publish("unauthenticated", []);
+                return Publish(ticket, "unavailable", []);
+            if (!status.IsAuthenticated) return Publish(ticket, "unauthenticated", []);
             var listed = await client.ListModelsAsync(token).ConfigureAwait(false);
-            if (listed is null) return Publish("unavailable", []);
+            if (listed is null) return Publish(ticket, "unavailable", []);
             var models = new List<LocalAiDiscoveredModelV1>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var entry in listed)
@@ -86,7 +89,7 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
                 if (!LocalAiModelIdentityV1.IsSupportedId(entry.Id) || !seen.Add(entry.Id)) continue;
                 models.Add(new(entry.Id, LocalAiModelIdentityV1.SanitizeDisplayName(entry.DisplayName, entry.Id)));
             }
-            return Publish(models.Count == 0 ? "empty" : "ready", models);
+            return Publish(ticket, models.Count == 0 ? "empty" : "ready", models);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -94,7 +97,7 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
         }
         catch
         {
-            return Publish("failed", []);
+            return Publish(ticket, "failed", []);
         }
         finally
         {
@@ -106,10 +109,11 @@ internal sealed class LocalAiModelDiscoveryServiceV1(
         }
     }
 
-    private LocalAiModelDiscoverySnapshotV1 Publish(string state, IReadOnlyList<LocalAiDiscoveredModelV1> models)
+    private LocalAiModelDiscoverySnapshotV1 Publish(int ticket, string state, IReadOnlyList<LocalAiDiscoveredModelV1> models)
     {
         lock (gate)
         {
+            if (ticket != admitted) return snapshot;
             var legacy = snapshot.LegacyConfiguredModel;
             var eligible = state == "ready"
                 && legacy is not null

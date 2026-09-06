@@ -221,6 +221,314 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Fact]
+    [Trait("ValidationLane", "Affected")]
+    public async Task EarlierSessionStartPostDoesNotReplaceLaterRun()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var firstPost = new TaskCompletionSource(); var releaseFirst = new TaskCompletionSource(); var fulfilledFirst = new TaskCompletionSource(); var starts = 0; var cancels = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json"))));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiLatestRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("current B")}},"snapshot_changed":false}],"next_cursor":null}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json("""{"discovery_state":"ready","models":[{"id":"model-a","display_name":"A"},{"id":"model-b","display_name":"B"}],"legacy_configured_model":null,"legacy_eligible":false}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/runs/*/cancel", r => { Interlocked.Increment(ref cancels); return r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"canceled"}""")); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs", async route =>
+        {
+            if (route.Request.Method != "POST" || route.Request.Url.TrimEnd('/').EndsWith("session-runs", StringComparison.Ordinal))
+            {
+                var current = Interlocked.Increment(ref starts);
+                if (current == 1)
+                {
+                    firstPost.TrySetResult();
+                    await releaseFirst.Task;
+                    await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" });
+                    fulfilledFirst.TrySetResult();
+                    return;
+                }
+                await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiLatestRunId}}"}""" });
+                return;
+            }
+            await route.ContinueAsync();
+        });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("late A")}}}""")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiLatestRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiLatestRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("current B")}}}""")));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }).ClickAsync();
+        var select = page.Locator("[data-session-ai-model-select]");
+        await Expect(select.Locator("option[value='model-a']")).ToHaveCountAsync(1);
+        await select.SelectOptionAsync("model-a");
+        await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
+        await firstPost.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await select.SelectOptionAsync("model-b");
+        await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
+        var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" });
+        try { await Expect(dialog).ToContainTextAsync("current B"); }
+        finally { releaseFirst.TrySetResult(); }
+        await fulfilledFirst.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.EvaluateAsync("() => new Promise(resolve => setTimeout(resolve, 50))");
+        await Expect(dialog).ToContainTextAsync("current B");
+        await Expect(dialog.GetByText("late A")).ToHaveCountAsync(0);
+        Assert.Contains($"analysis={AiLatestRunId}", page.Url);
+        Assert.DoesNotContain($"analysis={AiRunId}", page.Url);
+        Assert.Equal(0, Volatile.Read(ref cancels));
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Affected")]
+    public async Task ClosingSessionSurfaceDuringPendingStartDoesNotClaimRunOrCancel()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var firstPost = new TaskCompletionSource(); var releaseFirst = new TaskCompletionSource(); var fulfilledFirst = new TaskCompletionSource(); var cancels = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json"))));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json("""{"discovery_state":"ready","models":[{"id":"model-a","display_name":"A"}],"legacy_configured_model":null,"legacy_eligible":false}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/runs/*/cancel", r => { Interlocked.Increment(ref cancels); return r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"canceled"}""")); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs", async route =>
+        {
+            if (route.Request.Method != "POST" || route.Request.Url.TrimEnd('/').EndsWith("session-runs", StringComparison.Ordinal))
+            {
+                firstPost.TrySetResult();
+                await releaseFirst.Task;
+                await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" });
+                fulfilledFirst.TrySetResult();
+                return;
+            }
+            await route.ContinueAsync();
+        });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("abandoned A")}}}""")));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }).ClickAsync();
+        var select = page.Locator("[data-session-ai-model-select]");
+        await Expect(select.Locator("option[value='model-a']")).ToHaveCountAsync(1);
+        await select.SelectOptionAsync("model-a");
+        var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" });
+        await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
+        await firstPost.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "閉じる" }).ClickAsync();
+        await Expect(dialog).ToBeHiddenAsync();
+        releaseFirst.TrySetResult();
+        await fulfilledFirst.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.EvaluateAsync("() => new Promise(resolve => setTimeout(resolve, 50))");
+        await Expect(dialog).ToBeHiddenAsync();
+        Assert.DoesNotContain($"analysis={AiRunId}", page.Url);
+        await Expect(page.GetByText("abandoned A")).ToHaveCountAsync(0);
+        Assert.Equal(0, Volatile.Read(ref cancels));
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Affected")]
+    public async Task LateSessionReportDoesNotReplaceNewerRunReadback()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var starts = 0; var releaseFirstReports = new TaskCompletionSource(); var firstReports = new TaskCompletionSource(); var fulfilledFirstReports = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json"))));
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", r => r.FulfillAsync(Json(Readiness())));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/models", r => r.FulfillAsync(Json("""{"discovery_state":"ready","models":[{"id":"model-a","display_name":"A"},{"id":"model-b","display_name":"B"}],"legacy_configured_model":null,"legacy_eligible":false}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", async route =>
+        {
+            if (Volatile.Read(ref starts) == 1)
+            {
+                firstReports.TrySetResult();
+                await releaseFirstReports.Task;
+                await route.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("late A report")}},"snapshot_changed":false}],"next_cursor":null}"""));
+                fulfilledFirstReports.TrySetResult();
+                return;
+            }
+            if (Volatile.Read(ref starts) >= 2)
+            {
+                await route.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiLatestRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("current B")}},"snapshot_changed":false}],"next_cursor":null}"""));
+                return;
+            }
+            await route.FulfillAsync(Json("""{"reports":[],"next_cursor":null}"""));
+        });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs", async route =>
+        {
+            if (route.Request.Method != "POST" || route.Request.Url.TrimEnd('/').EndsWith("session-runs", StringComparison.Ordinal))
+            {
+                var current = Interlocked.Increment(ref starts);
+                var runId = current == 1 ? AiRunId : AiLatestRunId;
+                await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{runId}}"}""" });
+                return;
+            }
+            await route.ContinueAsync();
+        });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("late A poll")}}}""")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiLatestRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiLatestRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("current B")}}}""")));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await page.GetByRole(AriaRole.Button, new() { Name = "AIで分析" }).ClickAsync();
+        var select = page.Locator("[data-session-ai-model-select]");
+        await Expect(select.Locator("option[value='model-a']")).ToHaveCountAsync(1);
+        await select.SelectOptionAsync("model-a");
+        await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
+        await firstReports.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await select.SelectOptionAsync("model-b");
+        await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
+        var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" });
+        try { await Expect(dialog).ToContainTextAsync("current B"); }
+        finally { releaseFirstReports.TrySetResult(); }
+        await fulfilledFirstReports.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.EvaluateAsync("() => new Promise(resolve => setTimeout(resolve, 50))");
+        await Expect(dialog).ToContainTextAsync("current B");
+        await Expect(dialog.GetByText("late A report")).ToHaveCountAsync(0);
+        await Expect(dialog.GetByText("late A poll")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Affected")]
+    public async Task LateRestoredSessionReportDoesNotReplaceNewerRun()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var reportCalls = 0; var releaseRestore = new TaskCompletionSource(); var restoreStarted = new TaskCompletionSource(); var restoreFulfilled = new TaskCompletionSource();
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(Summary("summary-full.json"))));
+        await ReadyAi(page);
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("restored A")}}}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", async route =>
+        {
+            var current = Interlocked.Increment(ref reportCalls);
+            if (current == 1)
+            {
+                restoreStarted.TrySetResult();
+                await releaseRestore.Task;
+                await route.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("restored A")}},"snapshot_changed":false}],"next_cursor":null}"""));
+                restoreFulfilled.TrySetResult();
+                return;
+            }
+            await route.FulfillAsync(Json($$"""{"reports":[{"run_id":"{{AiLatestRunId}}","state":"succeeded","content_state":"retained","result":{{AiResult("current B")}},"snapshot_changed":false}],"next_cursor":null}"""));
+        });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/session-runs", async route =>
+        {
+            if (route.Request.Method != "POST" || route.Request.Url.TrimEnd('/').EndsWith("session-runs", StringComparison.Ordinal))
+            {
+                await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiLatestRunId}}"}""" });
+                return;
+            }
+            await route.ContinueAsync();
+        });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/session-runs/{AiLatestRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiLatestRunId}}","state":"succeeded","scope_kind":"session","session_id":"{{SessionId}}","node_id":null,"error":null,"result":{{AiResult("current B")}}}""")));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}?analysis={AiRunId}");
+        var dialog = page.GetByRole(AriaRole.Dialog, new() { Name = "セッションのAI分析" });
+        await Expect(dialog).ToBeVisibleAsync();
+        await restoreStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await Expect(page.Locator("[data-session-ai-model-select]")).ToHaveValueAsync("synthetic");
+        await page.GetByRole(AriaRole.Button, new() { Name = "再分析" }).ClickAsync();
+        try { await Expect(dialog).ToContainTextAsync("current B"); }
+        finally { releaseRestore.TrySetResult(); }
+        await restoreFulfilled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.EvaluateAsync("() => new Promise(resolve => setTimeout(resolve, 50))");
+        await Expect(dialog).ToContainTextAsync("current B");
+        await Expect(dialog.GetByText("restored A")).ToHaveCountAsync(0);
+        Assert.Contains($"analysis={AiLatestRunId}", page.Url);
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Affected")]
+    public async Task EarlierNodeStartPostDoesNotReplaceLaterRun()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("event");
+        var firstPost = new TaskCompletionSource(); var releaseFirst = new TaskCompletionSource(); var fulfilledFirst = new TaskCompletionSource(); var starts = 0; var cancels = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary)));
+        await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
+        await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await ReadyAi(page);
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/runs/*/cancel", r => { Interlocked.Increment(ref cancels); return r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"canceled"}""")); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs", async route =>
+        {
+            if (route.Request.Method != "POST" || route.Request.Url.TrimEnd('/').EndsWith("node-runs", StringComparison.Ordinal))
+            {
+                var current = Interlocked.Increment(ref starts);
+                if (current == 1)
+                {
+                    firstPost.TrySetResult();
+                    await releaseFirst.Task;
+                    await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" });
+                    fulfilledFirst.TrySetResult();
+                    return;
+                }
+                await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiLatestRunId}}"}""" });
+                return;
+            }
+            await route.ContinueAsync();
+        });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/node-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{AiResult("late A")}}}""")));
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/node-runs/{AiLatestRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiLatestRunId}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{AiResult("current B")}}}""")));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await page.Locator("[data-timeline-node]").ClickAsync();
+        await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        var surface = page.Locator("[data-node-ai-surface]");
+        await Expect(surface.Locator("[data-ai-model-select] >> option[value='synthetic']")).ToHaveCountAsync(1);
+        await surface.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        await firstPost.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await surface.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        try { await Expect(surface).ToContainTextAsync("current B"); }
+        finally { releaseFirst.TrySetResult(); }
+        await fulfilledFirst.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.EvaluateAsync("() => new Promise(resolve => setTimeout(resolve, 50))");
+        await Expect(surface).ToContainTextAsync("current B");
+        await Expect(surface.GetByText("late A")).ToHaveCountAsync(0);
+        Assert.Contains($"analysis={AiLatestRunId}", page.Url);
+        Assert.DoesNotContain($"analysis={AiRunId}", page.Url);
+        Assert.Equal(0, Volatile.Read(ref cancels));
+    }
+
+    [Fact]
+    [Trait("ValidationLane", "Affected")]
+    public async Task ClosingNodeSurfaceDuringPendingStartDoesNotClaimRunOrCancel()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
+        var (summary, timeline, node, _) = InspectorDocuments("event");
+        var firstPost = new TaskCompletionSource(); var releaseFirst = new TaskCompletionSource(); var fulfilledFirst = new TaskCompletionSource(); var cancels = 0;
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary)));
+        await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
+        await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await ReadyAi(page);
+        await page.RouteAsync("**/api/local-monitor/v1/ai/sessions/*/reports*", r => r.FulfillAsync(Json("""{"reports":[],"next_cursor":null}""")));
+        await page.RouteAsync("**/api/local-monitor/v1/ai/runs/*/cancel", r => { Interlocked.Increment(ref cancels); return r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"canceled"}""")); });
+        await page.RouteAsync("**/api/local-monitor/v1/ai/node-runs", async route =>
+        {
+            if (route.Request.Method != "POST" || route.Request.Url.TrimEnd('/').EndsWith("node-runs", StringComparison.Ordinal))
+            {
+                firstPost.TrySetResult();
+                await releaseFirst.Task;
+                await route.FulfillAsync(new() { Status = 201, ContentType = "application/json", Body = $$"""{"run_id":"{{AiRunId}}"}""" });
+                fulfilledFirst.TrySetResult();
+                return;
+            }
+            await route.ContinueAsync();
+        });
+        await page.RouteAsync($"**/api/local-monitor/v1/ai/node-runs/{AiRunId}", r => r.FulfillAsync(Json($$"""{"run_id":"{{AiRunId}}","state":"succeeded","scope_kind":"node","session_id":"{{SessionId}}","node_id":"node-a8a773d6614d5030f505ff195b452dd6","error":null,"result":{{AiResult("abandoned A")}}}""")));
+
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        await page.Locator("[data-timeline-node]").ClickAsync();
+        await page.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        var surface = page.Locator("[data-node-ai-surface]");
+        await Expect(surface.Locator("[data-ai-model-select] >> option[value='synthetic']")).ToHaveCountAsync(1);
+        await surface.GetByRole(AriaRole.Button, new() { Name = "この項目をAIで分析" }).ClickAsync();
+        await firstPost.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await surface.GetByRole(AriaRole.Button, new() { Name = "AI分析を閉じる" }).ClickAsync();
+        await Expect(surface).ToHaveCountAsync(0);
+        releaseFirst.TrySetResult();
+        await fulfilledFirst.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await page.EvaluateAsync("() => new Promise(resolve => setTimeout(resolve, 50))");
+        await Expect(page.Locator("[data-node-ai-surface]")).ToHaveCountAsync(0);
+        Assert.DoesNotContain($"analysis={AiRunId}", page.Url);
+        await Expect(page.GetByText("abandoned A")).ToHaveCountAsync(0);
+        Assert.Equal(0, Volatile.Read(ref cancels));
+    }
+
+    [Fact]
     public async Task ExactRunningSessionAnalysisResumesPollingAndReachesItsTerminalReport()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var context = await browser.NewContextAsync(); await context.AddInitScriptAsync("window.setTimeout = fn => { queueMicrotask(fn); return 1; };"); var page = await context.NewPageAsync();
