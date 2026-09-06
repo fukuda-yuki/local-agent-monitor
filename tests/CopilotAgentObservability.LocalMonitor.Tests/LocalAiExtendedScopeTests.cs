@@ -63,7 +63,7 @@ public sealed class LocalAiExtendedScopeTests
             ProviderBehavior.FactoryUnavailable => null,
             ProviderBehavior.FactoryException => throw new InvalidOperationException("synthetic_private_factory_message"),
             _ => client,
-        }, "synthetic-model", diagnostics);
+        }, diagnostics);
 
         LocalAiProviderOutcomeV1? outcome = null;
         var failure = await Record.ExceptionAsync(async () =>
@@ -86,7 +86,7 @@ public sealed class LocalAiExtendedScopeTests
         var events = new List<string>();
         var client = new ProviderClient(events, ProviderBehavior.Exception,
             failDelete: true, failClientDispose: true, failSessionDispose: true);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model", diagnostics);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, diagnostics);
 
         var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
@@ -110,7 +110,7 @@ public sealed class LocalAiExtendedScopeTests
         using var diagnostics = new FailingDiagnosticWriter();
         var events = new List<string>();
         var client = new ProviderClient(events, behavior);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model", diagnostics);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, diagnostics);
 
         if (behavior == ProviderBehavior.MissingModel)
             Assert.Equal(LocalAiProviderOutcomeKindV1.Failed,
@@ -130,7 +130,7 @@ public sealed class LocalAiExtendedScopeTests
         using var diagnostics = new StringWriter();
         var request = ProviderRequest("repository_selection");
         request = request with { Run = request.Run with { RunId = "synthetic-private-path\nforged-record" } };
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => null, "synthetic-model", diagnostics);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => null, diagnostics);
 
         Assert.Equal(LocalAiProviderOutcomeKindV1.Failed,
             (await adapter.ExecuteAsync(request, CancellationToken.None)).Kind);
@@ -153,7 +153,7 @@ public sealed class LocalAiExtendedScopeTests
     {
         var events = new List<string>();
         var client = new ProviderClient(events, behavior);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client);
         using var cancellation = new CancellationTokenSource();
         if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
 
@@ -175,7 +175,7 @@ public sealed class LocalAiExtendedScopeTests
     {
         var events = new List<string>();
         var client = new ProviderClient(events, ProviderBehavior.Complete, failDelete: true);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
@@ -197,7 +197,7 @@ public sealed class LocalAiExtendedScopeTests
     {
         var events = new List<string>();
         var client = new ProviderClient(events, behavior, failDelete: true);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client);
         using var cancellation = new CancellationTokenSource();
         if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
 
@@ -222,7 +222,7 @@ public sealed class LocalAiExtendedScopeTests
     {
         var events = new List<string>();
         var client = new ProviderClient(events, behavior, failClientDispose: true);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client);
         using var cancellation = new CancellationTokenSource();
         if (behavior == ProviderBehavior.Cancellation) cancellation.Cancel();
 
@@ -242,7 +242,7 @@ public sealed class LocalAiExtendedScopeTests
     {
         var events = new List<string>();
         var client = new ProviderClient(events, ProviderBehavior.Complete, failClientDispose: true);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None));
@@ -260,7 +260,7 @@ public sealed class LocalAiExtendedScopeTests
         using var diagnostics = new StringWriter();
         var events = new List<string>();
         var client = new ProviderClient(events, ProviderBehavior.Complete);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model", diagnostics);
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, diagnostics);
 
         var outcome = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None);
 
@@ -278,7 +278,7 @@ public sealed class LocalAiExtendedScopeTests
     {
         var events = new List<string>();
         var client = new ProviderClient(events, behavior);
-        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client, "synthetic-model");
+        var adapter = new GitHubCopilotLocalAiProviderAdapterV1(() => client);
 
         var outcome = await adapter.ExecuteAsync(ProviderRequest("repository_selection"), CancellationToken.None);
 
@@ -369,7 +369,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
         var snapshot=new CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1(SnapshotId,scope,null,null,
             scope=="comparison"?ComparisonId:RepositoryId,"revision","{}"u8.ToArray(),Encoding.UTF8.GetBytes($$"""{"evidence_refs":["{{CanonicalEvidenceLocation}}"]}"""),new string('a',64),new HashSet<string>{CanonicalEvidenceLocation},
             RepositoryId:RepositoryId,ComparisonId:scope=="comparison"?ComparisonId:null);
-        var run=new LocalAiRunStatusV1(RunId,"running",scope,null,null,null,RepositoryId:RepositoryId,ComparisonId:snapshot.ComparisonId);
+        var run=new LocalAiRunStatusV1(RunId,"running",scope,null,null,null,Model:"synthetic-model",RepositoryId:RepositoryId,ComparisonId:snapshot.ComparisonId);
         return new(snapshot,run,new LocalAiRawReadCapabilityV1([],static (_,_)=>ValueTask.FromResult(Array.Empty<byte>())),null,[]);
     }
 
@@ -539,7 +539,7 @@ Never include credentials, local filesystem paths, prompts, tool payloads, scope
     private sealed class BusyRepository:ILocalAiRepositorySnapshotAdapterV1
     {public ValueTask<LocalAiRepositoryPreviewResultV1> PreviewAsync(LocalAiRepositoryPreviewRequestV1 request,CancellationToken token)=>throw new NotSupportedException();public ValueTask<bool> IsCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>throw new NotSupportedException();public ValueTask<LocalAiSnapshotProjectionV1?> RehydrateCurrentAsync(LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromException<LocalAiSnapshotProjectionV1?>(new CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotException(CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryScopeSnapshotError.PersistenceBusy,"persistence_busy",new Exception()));}
     private sealed class AcceptedRuns(LocalAiSnapshotProjectionV1 snapshot):ILocalAiRunRepositoryV1,ILocalAiAcceptedSnapshotRepositoryV1
-    {public int CreateCount{get;private set;}public void StoreAccepted(LocalAiSnapshotProjectionV1 value){}public LocalAiSnapshotProjectionV1? ReadAccepted(string id)=>snapshot;public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 value,int timeout){CreateCount++;throw new InvalidOperationException();}public void Start(string id){}public LocalAiRunStatusV1 Complete(string id,LocalAiProviderOutcomeV1 o,DateTimeOffset at)=>throw new NotSupportedException();public LocalAiRunStatusV1 Fail(string id,string code)=>throw new NotSupportedException();public LocalAiRunStatusV1 Read(string id)=>throw new NotSupportedException();public bool Cancel(string id)=>false;public LocalAiReportPageResponseV1 Reports(string id,int? limit,string? cursor,string hash)=>throw new NotSupportedException();}
+    {public int CreateCount{get;private set;}public void StoreAccepted(LocalAiSnapshotProjectionV1 value){}public LocalAiSnapshotProjectionV1? ReadAccepted(string id)=>snapshot;public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 value,int timeout,string? model=null){CreateCount++;throw new InvalidOperationException();}public void Start(string id){}public LocalAiRunStatusV1 Complete(string id,LocalAiProviderOutcomeV1 o,DateTimeOffset at)=>throw new NotSupportedException();public LocalAiRunStatusV1 Fail(string id,string code)=>throw new NotSupportedException();public LocalAiRunStatusV1 Read(string id)=>throw new NotSupportedException();public bool Cancel(string id)=>false;public LocalAiReportPageResponseV1 Reports(string id,int? limit,string? cursor,string hash)=>throw new NotSupportedException();}
     private sealed class NoSnapshots:CopilotAgentObservability.Persistence.Sqlite.ILocalAiSnapshotProjectionServiceV1
     {public ValueTask<CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1> ReadSessionAsync(string id,CancellationToken token)=>throw new NotSupportedException();public ValueTask<CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1> ReadNodeAsync(string id,string node,CancellationToken token)=>throw new NotSupportedException();public ValueTask<bool> IsCurrentAsync(CopilotAgentObservability.Persistence.Sqlite.LocalAiSnapshotProjectionV1 value,CancellationToken token)=>ValueTask.FromResult(true);}
     private sealed class NoProvider:ILocalAiProviderAdapterV1{public ValueTask<LocalAiProviderOutcomeV1> ExecuteAsync(LocalAiProviderRequestV1 request,CancellationToken token)=>throw new NotSupportedException();}

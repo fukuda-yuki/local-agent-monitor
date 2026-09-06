@@ -555,7 +555,7 @@ internal sealed class LocalAiAnalysisStoreV1
             || request.ConfigurationSha256.Length!=64 || request.ConfigurationSha256.Any(character=>character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
             throw new ArgumentException("local_ai_run_metadata_invalid");
     }
-    private static bool Token(string value)=>!string.IsNullOrWhiteSpace(value)&&value.Length<=200&&value.All(character=>char.IsLetterOrDigit(character)||character is '_' or '-' or '.');
+    private static bool Token(string value)=>!string.IsNullOrWhiteSpace(value)&&value.Length<=200&&value.All(character=>char.IsLetterOrDigit(character)||character is '_' or '-' or '.' or '/')&&!string.Equals(value,"auto",StringComparison.Ordinal);
     private static void ValidateUuid7(string value){if(!LocalAiResultValidatorV1.CanonicalUuid7(value)) throw new ArgumentException("local_ai_uuid7_required");}
     private static bool Allowed(LocalAiRunStateV1 current,LocalAiRunStateV1 next)=>current==LocalAiRunStateV1.Queued&&next==LocalAiRunStateV1.Running || current==LocalAiRunStateV1.Running&&next is LocalAiRunStateV1.ProviderFailed or LocalAiRunStateV1.ProviderPartial or LocalAiRunStateV1.InvalidResult or LocalAiRunStateV1.InvalidEvidence or LocalAiRunStateV1.StaleSnapshot or LocalAiRunStateV1.ScopeTooLarge or LocalAiRunStateV1.TimedOut or LocalAiRunStateV1.Canceled;
     private static LocalAiRunStateV1 ReadState(SqliteConnection c,string id){using var q=c.CreateCommand();q.CommandText="SELECT state FROM local_ai_runs WHERE run_id=$id;";q.Parameters.AddWithValue("$id",id);return Parse(q.ExecuteScalar() as string??throw new InvalidOperationException("local_ai_run_missing"));}

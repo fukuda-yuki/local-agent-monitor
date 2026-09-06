@@ -622,12 +622,13 @@ internal static class MonitorHost
                 services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
             if (settingsAiReadiness is not null && localAiClientFactory is not null && localAiOptions is not null)
             {
-                var aiConfigurationHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-                    $"local-ai-v1\0{localAiOptions.DefaultModel}\0{localAiOptions.DefaultProfile}")));
+                var modelDiscovery = testOptions?.LocalAiModelDiscovery
+                    ?? new LocalAiModelDiscoveryServiceV1(localAiClientFactory, localAiOptions.DefaultModel);
+                builder.Services.AddSingleton<ILocalAiModelDiscoveryV1>(modelDiscovery);
                 var runRepository = SqliteLocalAiRunRepositoryV1.Create(
-                    options.DatabasePath, localAiOptions.DefaultModel, aiConfigurationHash, timeProvider, retentionCatalog);
+                    options.DatabasePath, localAiOptions.DefaultModel, localAiOptions.DefaultProfile, timeProvider, retentionCatalog);
                 var providerAdapter = new GitHubCopilotLocalAiProviderAdapterV1(
-                    localAiClientFactory, localAiOptions.DefaultModel, Console.Error);
+                    localAiClientFactory, Console.Error);
                 var localAiRawReader = new LocalAiRetentionRawReaderV1(
                     new LocalWorkspaceNodeContentReader(retentionContext, timeProvider));
                 builder.Services.AddSingleton<ILocalAiAnalysisApplicationV1>(services =>
@@ -644,7 +645,8 @@ internal static class MonitorHost
                         new LocalAiComparisonSnapshotAdapterV1(services.GetRequiredService<SqliteLocalComparisonStore>()),
                         new LocalAiRepositorySnapshotAdapterV1(services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(),services.GetRequiredService<ILocalAiSnapshotProjectionServiceV1>(),services.GetRequiredService<IHistoricalEvidenceSnapshotSourceV1>(),timeProvider),
                         options.RepositoryAiEnabled,
-                        options.CompareAiEnabled));
+                        options.CompareAiEnabled,
+                        modelDiscovery));
                 if (testOptions?.LocalAiAnalysisApplication is null)
                     builder.Services.AddHostedService(services =>
                         (LocalAiAnalysisApplicationV1)services.GetRequiredService<ILocalAiAnalysisApplicationV1>());
@@ -1207,7 +1209,8 @@ internal static class MonitorHost
                 contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);
             LocalMonitorV1ComparisonRoutes.Map(app, app.Services.GetRequiredService<ILocalMonitorV1ComparisonApplication>());
             LocalAiRoutesV1.Map(app, app.Services.GetRequiredService<ILocalAiAnalysisApplicationV1>(),
-                options.RepositoryAiEnabled, options.CompareAiEnabled);
+                options.RepositoryAiEnabled, options.CompareAiEnabled,
+                app.Services.GetService<ILocalAiModelDiscoveryV1>());
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
@@ -3162,6 +3165,8 @@ internal sealed class MonitorHostTestOptions
 
     public ILocalAiAnalysisApplicationV1? LocalAiAnalysisApplication { get; init; }
 
+    public ILocalAiModelDiscoveryV1? LocalAiModelDiscovery { get; init; }
+
     public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
 
     public Action<OwnedSessionExecutionEvidenceV1>? OwnedSessionExecutionEvidenceObserver { get; init; }
@@ -3202,7 +3207,7 @@ internal sealed class MonitorHostTestOptions
 
     public IReadOnlyDictionary<string, string?>? ConfigurationValues { get; init; }
 
-    public bool UseUserSecrets { get; init; } = true;
+    public bool UseUserSecrets { get; init; }
 
     public Func<string, TimeProvider, LocalRepositoryCatalogApplication>? LocalRepositoryApplicationFactory { get; init; }
 

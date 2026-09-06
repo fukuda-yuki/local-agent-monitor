@@ -161,7 +161,8 @@ public sealed class SettingsAiReadinessRouteTests
         Assert.Equal(HttpStatusCode.OK, readinessResponse.StatusCode);
 
         var application = host.Services.GetRequiredService<ILocalAiAnalysisApplicationV1>();
-        var started = await application.StartSessionAsync(new(sessionId), CancellationToken.None);
+        await host.Services.GetRequiredService<ILocalAiModelDiscoveryV1>().RefreshAsync(CancellationToken.None);
+        var started = await application.StartSessionAsync(new(sessionId, "gpt-5"), CancellationToken.None);
         Assert.NotNull(started.RunId);
         LocalAiRunStatusV1? run = null;
         for (var attempt = 0; attempt < 100; attempt++)
@@ -237,6 +238,8 @@ public sealed class SettingsAiReadinessRouteTests
         public Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken) =>
             Task.FromResult(session ?? throw new NotSupportedException());
         public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<CopilotModelCatalogEntryV1>?> ListModelsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CopilotModelCatalogEntryV1>?>([new("gpt-5", "gpt-5")]);
         public ValueTask DisposeAsync()
         {
             DisposeCalls++;

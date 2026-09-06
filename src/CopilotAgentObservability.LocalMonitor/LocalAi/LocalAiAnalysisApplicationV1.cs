@@ -5,9 +5,9 @@ using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalAi;
 
-internal sealed record LocalAiSessionStartRequestV1(string SessionId, int TimeoutSeconds = 60);
+internal sealed record LocalAiSessionStartRequestV1(string SessionId, string Model, int TimeoutSeconds = 60);
 internal sealed record LocalAiPriorTurnV1(string Question, string Answer);
-internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, int TimeoutSeconds = 60,
+internal sealed record LocalAiNodeStartRequestV1(string SessionId, string NodeId, string Model, int TimeoutSeconds = 60,
     string? Question = null, IReadOnlyList<LocalAiPriorTurnV1>? PriorTurns = null);
 internal sealed record LocalAiStartResponseV1(string? RunId, string? ErrorCode);
 internal sealed record LocalAiRunStatusV1(string RunId, string State, string ScopeKind, string? SessionId,
@@ -36,7 +36,7 @@ internal interface ILocalAiProviderAdapterV1
 
 internal interface ILocalAiRunRepositoryV1
 {
-    LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout);
+    LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout, string? model = null);
     void Start(string runId);
     LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt);
     LocalAiRunStatusV1 Fail(string runId, string errorCode);
@@ -74,19 +74,20 @@ internal sealed class LocalAiAnalysisApplicationV1(
     ILocalAiComparisonSnapshotAdapterV1? comparisons = null,
     ILocalAiRepositorySnapshotAdapterV1? repositories = null,
     bool repositoryAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
-    bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled) : ILocalAiAnalysisApplicationV1, IHostedService
+    bool compareAiEnabled = MonitorOptions.DefaultExtendedAiEnabled,
+    ILocalAiModelDiscoveryV1? models = null) : ILocalAiAnalysisApplicationV1, IHostedService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object lifecycleGate = new();
     private readonly Dictionary<string, Admission> active = new(StringComparer.Ordinal);
     private bool accepting = true;
     public ValueTask<LocalAiStartResponseV1> StartSessionAsync(LocalAiSessionStartRequestV1 request, CancellationToken token) =>
-        StartAsync(request.SessionId, null, request.TimeoutSeconds, null, [], token);
+        StartAsync(request.SessionId, null, request.Model, request.TimeoutSeconds, null, [], token);
 
     public ValueTask<LocalAiStartResponseV1> StartNodeAsync(LocalAiNodeStartRequestV1 request, CancellationToken token)
     {
         ValidateTranscript(request);
-        return StartAsync(request.SessionId, request.NodeId, request.TimeoutSeconds, request.Question, request.PriorTurns ?? [], token);
+        return StartAsync(request.SessionId, request.NodeId, request.Model, request.TimeoutSeconds, request.Question, request.PriorTurns ?? [], token);
     }
 
     public async ValueTask<LocalAiStartResponseV1> StartComparisonAsync(LocalAiComparisonRunRequestV1 request, CancellationToken token)
@@ -129,10 +130,11 @@ internal sealed class LocalAiAnalysisApplicationV1(
         return new(run.RunId,null);
     }
 
-    private async ValueTask<LocalAiStartResponseV1> StartAsync(string sessionId, string? nodeId, int timeout,
+    private async ValueTask<LocalAiStartResponseV1> StartAsync(string sessionId, string? nodeId, string model, int timeout,
         string? question, IReadOnlyList<LocalAiPriorTurnV1> priorTurns, CancellationToken token)
     {
-        if (timeout is < 1 or > 600) return new(null, "invalid_request");
+        if (timeout is < 1 or > 600 || !LocalAiModelIdentityV1.IsSupportedId(model)) return new(null, "invalid_request");
+        if (models is not null && !models.IsSelectable(model)) return new(null, "model_unavailable");
         var admissionId = Guid.CreateVersion7().ToString();
         var admission = new Admission(CancellationTokenSource.CreateLinkedTokenSource(token));
         lock (lifecycleGate)
@@ -173,7 +175,7 @@ internal sealed class LocalAiAnalysisApplicationV1(
             {
                 if (!accepting || admission.Cancellation.IsCancellationRequested)
                 { CompleteAdmission(admissionId, admission); return new(null, "provider_unavailable"); }
-                run = runs.Create(snapshot, timeout);
+                run = runs.Create(snapshot, timeout, model);
                 runs.Start(run.RunId);
                 admission.RunId = run.RunId;
             }

@@ -256,7 +256,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var application = new LocalAiAnalysisApplicationV1(
             _ => ValueTask.FromResult(false), snapshots, runs, new Provider(LocalAiProviderOutcomeV1.Complete(ValidResult())));
 
-        var result = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        var result = await application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None);
 
         Assert.Equal("provider_unavailable", result.ErrorCode);
         Assert.Equal(0, snapshots.Reads);
@@ -270,7 +270,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),
             new OversizedByteSnapshots(),runs,new Provider(LocalAiProviderOutcomeV1.Failed()));
 
-        var response=await application.StartSessionAsync(new(SessionId),CancellationToken.None);
+        var response=await application.StartSessionAsync(new(SessionId, "model-test"),CancellationToken.None);
 
         Assert.Equal("scope_too_large",response.ErrorCode);
         Assert.Null(response.RunId);
@@ -288,7 +288,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
             new Provider(LocalAiProviderOutcomeV1.Failed()));
 
         var error=await Assert.ThrowsAsync<InvalidOperationException>(()=>
-            application.StartSessionAsync(new(SessionId),CancellationToken.None).AsTask());
+            application.StartSessionAsync(new(SessionId, "model-test"),CancellationToken.None).AsTask());
 
         Assert.Equal("local_ai_snapshot_not_canonical",error.Message);
     }
@@ -306,7 +306,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
             "failed" => LocalAiProviderOutcomeV1.Failed(), _ => LocalAiProviderOutcomeV1.Complete(ValidResult()) };
         var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), snapshot, runs, new Provider(outcome));
 
-        var response = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        var response = await application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None);
 
         Assert.NotNull(response.RunId);
         Assert.Equal(expected, runs.State);
@@ -319,7 +319,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true),
             new ScopeGrowthSnapshots(), runs, provider);
 
-        var response = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        var response = await application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None);
         await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         provider.Release.TrySetResult();
         for (var index=0; index<100 && runs.State=="running"; index++) await Task.Delay(10);
@@ -368,7 +368,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
             new FailingNodeSnapshots(failure), runs, new Provider(LocalAiProviderOutcomeV1.Complete(ValidResult())));
 
         var response = await application.StartNodeAsync(
-            new(SessionId, "node-0123456789abcdef0123456789abcdef"), CancellationToken.None);
+            new(SessionId, "node-0123456789abcdef0123456789abcdef", "model-test"), CancellationToken.None);
 
         Assert.Equal(expected, response.ErrorCode);
         Assert.Equal(0, runs.Creates);
@@ -379,7 +379,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     {
         var runs = new LifecycleRuns(); var provider = new CapturingProvider();
         var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), new FixedSnapshots(true), runs, provider);
-        var request = new LocalAiNodeStartRequestV1(SessionId, "node-anchor", 60, "question", [new("prior", "answer")]);
+        var request = new LocalAiNodeStartRequestV1(SessionId, "node-anchor", "model-test", 60, "question", [new("prior", "answer")]);
 
         _ = await application.StartNodeAsync(request, CancellationToken.None);
 
@@ -396,7 +396,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), snapshots,
             new LifecycleRuns(), provider, (_, evidence, _) => ValueTask.FromResult(Encoding.UTF8.GetBytes(evidence.EvidenceId)));
 
-        _ = await application.StartSessionAsync(new(SessionId), CancellationToken.None);
+        _ = await application.StartSessionAsync(new(SessionId, "model-test"), CancellationToken.None);
         await provider.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal("raw:node-0:event_content", provider.RawText);
@@ -408,14 +408,14 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     {
         var runs = new LifecycleRuns(); var provider = new BlockingProvider();
         var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), new FixedSnapshots(true), runs, provider);
-        var started = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        var started = await application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None);
         Assert.NotNull(started.RunId);
         await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await application.StopAsync(CancellationToken.None);
 
         Assert.Equal("canceled", runs.State);
-        var rejected = await application.StartSessionAsync(new(SessionId, 60), CancellationToken.None);
+        var rejected = await application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None);
         Assert.Equal("provider_unavailable", rejected.ErrorCode);
     }
 
@@ -424,7 +424,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     {
         var runs=new LifecycleRuns();var provider=new CompletionRaceProvider();
         var application=new LocalAiAnalysisApplicationV1(_=>ValueTask.FromResult(true),new FixedSnapshots(true),runs,provider);
-        var started=await application.StartSessionAsync(new(SessionId,60),CancellationToken.None);
+        var started=await application.StartSessionAsync(new(SessionId, "model-test", 60),CancellationToken.None);
         await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(await application.CancelAsync(started.RunId!,CancellationToken.None));
@@ -443,7 +443,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var application = new LocalAiAnalysisApplicationV1(async token =>
         { entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return true; }, snapshots, runs,
             new Provider(LocalAiProviderOutcomeV1.Failed()));
-        var start = application.StartSessionAsync(new(SessionId, 60), CancellationToken.None).AsTask();
+        var start = application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None).AsTask();
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await application.StopAsync(CancellationToken.None);
@@ -460,7 +460,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         var snapshots = new BlockingSnapshots(); var runs = new RecordingRuns();
         var application = new LocalAiAnalysisApplicationV1(_ => ValueTask.FromResult(true), snapshots, runs,
             new Provider(LocalAiProviderOutcomeV1.Failed()));
-        var start = application.StartSessionAsync(new(SessionId, 60), CancellationToken.None).AsTask();
+        var start = application.StartSessionAsync(new(SessionId, "model-test", 60), CancellationToken.None).AsTask();
         await snapshots.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await application.StopAsync(CancellationToken.None);
@@ -502,7 +502,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         await using var host = await Host(application);
 
         using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/node-runs",
-            $$"""{"session_id":"{{SessionId}}","node_id":"{{nodeId}}"}"""));
+            $$"""{"session_id":"{{SessionId}}","node_id":"{{nodeId}}","model":"model-test"}"""));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal("{\"error\":\"invalid_request\"}", await response.Content.ReadAsStringAsync());
@@ -518,7 +518,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         await using var host = await Host(application);
 
         using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/node-runs",
-            $$"""{"session_id":"{{SessionId}}","node_id":"node-0123456789abcdef0123456789abcdef"}"""));
+            $$"""{"session_id":"{{SessionId}}","node_id":"node-0123456789abcdef0123456789abcdef","model":"model-test"}"""));
 
         Assert.Equal(expected, response.StatusCode);
         Assert.Equal($$"""{"error":"{{code}}"}""", await response.Content.ReadAsStringAsync());
@@ -575,7 +575,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         await using var host = await Host(new ThrowingNodeApplication(message));
 
         using var response = await host.SendAsync(Request(HttpMethod.Post, "/api/local-monitor/v1/ai/node-runs",
-            $$"""{"session_id":"{{SessionId}}","node_id":"node-0123456789abcdef0123456789abcdef"}"""));
+            $$"""{"session_id":"{{SessionId}}","node_id":"node-0123456789abcdef0123456789abcdef","model":"model-test"}"""));
 
         Assert.Equal(expected, response.StatusCode);
         if(expected==HttpStatusCode.BadRequest)
@@ -709,7 +709,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     private sealed class RecordingRuns : ILocalAiRunRepositoryV1
     {
         public int Creates { get; private set; }
-        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout) { Creates++; throw new Xunit.Sdk.XunitException("must not create"); }
+        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot, int timeout, string? model = null) { Creates++; throw new Xunit.Sdk.XunitException("must not create"); }
         public void Start(string runId) => throw new NotSupportedException();
         public LocalAiRunStatusV1 Complete(string runId, LocalAiProviderOutcomeV1 outcome, DateTimeOffset completedAt) => throw new NotSupportedException();
         public LocalAiRunStatusV1 Fail(string runId, string errorCode) => throw new NotSupportedException();
@@ -805,7 +805,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
     {
         internal string State { get; private set; }="queued";
         internal string PersistedText { get; private set; }=string.Empty;
-        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout) { PersistedText=Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson); return Status(); }
+        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout, string? model = null) { PersistedText=Encoding.UTF8.GetString(snapshot.PayloadCanonicalJson); return Status(); }
         public void Start(string runId)=>State="running";
         public LocalAiRunStatusV1 Complete(string runId,LocalAiProviderOutcomeV1 outcome,DateTimeOffset completedAt) { if(State=="canceled")return Status();State=outcome.Kind==LocalAiProviderOutcomeKindV1.Partial?"provider_partial":outcome.Kind==LocalAiProviderOutcomeKindV1.Failed?"provider_failed":"succeeded"; return Status(); }
         public LocalAiRunStatusV1 Fail(string runId,string errorCode){if(State=="canceled")return Status();State=errorCode;return Status();}
@@ -820,7 +820,7 @@ public sealed class LocalAiSnapshotApplicationRouteTests
         internal int ObservedPayloadBytes { get; private set; }
         internal int SnapshotRows { get; private set; }
         internal int RunRows { get; private set; }
-        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout)
+        public LocalAiRunStatusV1 Create(LocalAiSnapshotProjectionV1 snapshot,int timeout, string? model = null)
         {
             AdmissionAttempts++;ObservedPayloadBytes=snapshot.PayloadCanonicalJson.Length;
             if(snapshot.EvidenceIdentifiers.Count>4096||ObservedPayloadBytes<=1_048_576)

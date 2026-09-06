@@ -89,7 +89,17 @@ An optional AI action may interpret the deterministic comparison receipt, but it
 
 The v1 provider is GitHub Copilot SDK.
 
-AI is visible only when the provider is ready and starts only from an explicit user action.
+AI is visible only when the provider is authenticated and starts only from an
+explicit user action. Settings connection-check is authentication-only; it is
+not selected-model availability or analysis success.
+
+Session reports and exact-node analysis share one model-discovery/selection
+capability on that same authenticated GitHub Copilot path. The user chooses a
+model in the existing analysis UI from an explicit SDK model list for the
+current identity. The selected identifier is captured immutably on that run.
+Changing the page-local selection does not edit `CopilotAnalysis:*` or restart
+the process. Repository/Compare AI and BYOK credential ownership are outside
+this shared-capability tranche.
 
 Supported scopes:
 

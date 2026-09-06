@@ -4,6 +4,8 @@ using CopilotAgentObservability.LocalMonitor.Analysis;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
+internal sealed record CopilotModelCatalogEntryV1(string Id, string? DisplayName);
+
 internal interface IOwnedCopilotClientV1 : IAsyncDisposable
 {
     ICopilotSkillRuntimeClient RuntimeClient => this as ICopilotSkillRuntimeClient
@@ -12,6 +14,8 @@ internal interface IOwnedCopilotClientV1 : IAsyncDisposable
     Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken);
     Task<IOwnedCopilotSessionV1> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken);
     Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<CopilotModelCatalogEntryV1>?> ListModelsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<CopilotModelCatalogEntryV1>?>([]);
 }
 
 internal interface IOwnedCopilotSessionV1 : IAsyncDisposable
@@ -127,6 +131,19 @@ internal sealed class OwnedCopilotSdkClientV1 : IOwnedCopilotClientV1, ICopilotS
 
     public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken) =>
         client.DeleteSessionAsync(sessionId, cancellationToken);
+
+    public async Task<IReadOnlyList<CopilotModelCatalogEntryV1>?> ListModelsAsync(CancellationToken cancellationToken)
+    {
+        var models = await client.ListModelsAsync(cancellationToken).ConfigureAwait(false);
+        if (models is null) return null;
+        var entries = new List<CopilotModelCatalogEntryV1>(models.Count);
+        foreach (var model in models)
+        {
+            if (string.IsNullOrWhiteSpace(model?.Id)) continue;
+            entries.Add(new(model.Id, model.Name));
+        }
+        return entries;
+    }
 
     async Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ICopilotSkillRuntimeClient.DiscoverSkillsAsync(
         IReadOnlyList<string> projectPaths,

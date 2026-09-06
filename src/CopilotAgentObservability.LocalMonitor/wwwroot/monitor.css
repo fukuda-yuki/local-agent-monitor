@@ -57,6 +57,8 @@
 .local-monitor-ai-dialog-frame { display: grid; gap: 12px; max-height: inherit; overflow: auto; padding: 16px; }
 .local-monitor-ai-dialog-frame header, .local-monitor-ai-dialog-frame footer { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
 .local-monitor-ai-dialog-frame h2, .local-monitor-node-ai h3 { margin: 0; }
+.local-monitor-ai-model { display: grid; gap: 8px; }
+.local-monitor-ai-model select { max-width: 100%; }
 .local-monitor-node-ai { border-top: 1px solid var(--border, #ddd); display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; }
 .local-monitor-node-ai textarea { box-sizing: border-box; min-height: 72px; max-width: 100%; width: 100%; }
 .local-monitor-ai-finding { border-left: 3px solid var(--accent, #526de8); margin: 8px 0; padding-left: 10px; }

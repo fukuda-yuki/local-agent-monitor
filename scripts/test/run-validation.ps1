@@ -82,7 +82,8 @@ $localShardSelectors = [ordered]@{
     's04' = @(
         '.Tests.Skill', '.Tests.Session', '.Tests.CurrentSkill', '.Tests.Source', '.Tests.Copilot',
         '.Tests.DotNet', '.Tests.Windows', '.Tests.Linux', '.Tests.Claude', '.Tests.Subagent',
-        '.Tests.Monitor', 'CopilotAgentObservability.LocalMonitor.SkillRuntime.')
+        '.Tests.Monitor', 'CopilotAgentObservability.LocalMonitor.SkillRuntime.',
+        '.Tests.SemanticAttributeCaptureTests')
     's05' = @(
         '.Tests.Agent', '.Tests.Apply', '.Tests.Canvas', '.Tests.Cost', '.Tests.Discovery',
         '.Tests.Doctor', '.Tests.Effect', '.Tests.Fact', '.Tests.Historical', '.Tests.Hook',
