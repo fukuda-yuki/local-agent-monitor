@@ -9,14 +9,14 @@
     </nav>
 
     <h2 class="monitor-page-title">保持管理</h2>
-    <p class="monitor-subtle">正確な対象と影響を確認してから、保持状態を変更します。</p>
+    <p class="monitor-subtle">保存・削除の条件を変更します。</p>
     <button class="monitor-btn monitor-btn-primary" id="retention-manage-trigger" type="button">保持を管理</button>
 
     <dialog class="retention-dialog" id="retention-dialog" aria-labelledby="retention-dialog-title" aria-describedby="retention-dialog-description">
         <div class="retention-dialog-head">
             <div>
                 <h2 id="retention-dialog-title" tabindex="-1">保持を管理</h2>
-                <p id="retention-dialog-description">対象、操作、理由、影響を順に確認してください。操作は最終確認まで実行されません。</p>
+                <p id="retention-dialog-description">対象と影響を確認してから確定します。</p>
             </div>
             <button class="retention-close" id="retention-close" type="button" aria-label="保持管理を閉じる">×</button>
         </div>
@@ -24,7 +24,7 @@
         <dl class="retention-target">
             <dt>対象種別</dt>
             <dd id="retention-target-kind">@Model.TargetKind</dd>
-            <dt>正確な対象 ID</dt>
+            <dt>対象ID</dt>
             <dd id="retention-target-id">@Model.TargetId</dd>
         </dl>
 
@@ -71,7 +71,7 @@
             <h3 id="retention-preview-title" tabindex="-1">変更前の最終確認</h3>
             <div id="retention-preview-content"></div>
             <div class="retention-final-actions">
-                <p class="retention-warning"><span aria-hidden="true">⚠</span> 表示された正確な対象と影響に同意した場合だけ確定してください。</p>
+                <p class="retention-warning"><span aria-hidden="true">⚠</span> 対象と影響を確認してください。</p>
                 <button class="monitor-btn monitor-btn-primary" id="retention-confirm" type="button" disabled>この内容で確定</button>
             </div>
         </section>

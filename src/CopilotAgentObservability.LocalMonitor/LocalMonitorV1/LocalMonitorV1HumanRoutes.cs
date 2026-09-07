@@ -413,8 +413,9 @@ internal static class LocalMonitorV1HumanRoutes
     {
         LocalMonitorV1PrimaryRouteKind.RepositorySessions =>
             ("repository", snapshot!.Repositories.Single(item => item.RepositoryId == path.RepositoryId).DisplayName),
+        LocalMonitorV1PrimaryRouteKind.RepositorySelection => ("all", "セッション"),
         LocalMonitorV1PrimaryRouteKind.AllSessions => ("all", "すべてのセッション"),
-        LocalMonitorV1PrimaryRouteKind.UnassignedSessions => ("unassigned", "リポジトリ未設定のセッション"),
+        LocalMonitorV1PrimaryRouteKind.UnassignedSessions => ("unassigned", "未設定のセッション"),
         LocalMonitorV1PrimaryRouteKind.ComparisonDetail =>
             ("comparison", snapshot!.Repositories.Single(item => item.RepositoryId == path.RepositoryId).DisplayName),
         _ => (null, null),
@@ -424,8 +425,7 @@ internal static class LocalMonitorV1HumanRoutes
     {
         var viewPath = routeKind switch
         {
-            LocalMonitorV1PrimaryRouteKind.RepositorySelection =>
-                "/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml",
+            LocalMonitorV1PrimaryRouteKind.RepositorySelection or
             LocalMonitorV1PrimaryRouteKind.RepositorySessions or
             LocalMonitorV1PrimaryRouteKind.AllSessions or
             LocalMonitorV1PrimaryRouteKind.UnassignedSessions =>

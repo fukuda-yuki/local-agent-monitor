@@ -55,8 +55,8 @@ public sealed class HistoricalImportUiPlaywrightTests
         await Expect(sourceCards).ToHaveCountAsync(2);
         await Expect(sourceCards).ToContainTextAsync(["GitHub Copilot CLI", "Claude Code"]);
         await Expect(sourceCards.First).ToContainTextAsync("Unsupported");
-        await Expect(sourceCards.First).ToContainTextAsync("metadata_only");
-        await Expect(sourceCards.First).ToContainTextAsync("not_read");
+        await Expect(sourceCards.First).ToContainTextAsync("本文を除いた情報だけを読み取ります");
+        await Expect(sourceCards.First).ToContainTextAsync("現在の取得元設定では取り込めません");
         Assert.DoesNotContain(requests, request => request.Method == "POST");
 
         await page.GetByLabel("履歴ソース").SelectOptionAsync("claude-code");
@@ -69,7 +69,7 @@ public sealed class HistoricalImportUiPlaywrightTests
         var consentCheckbox = page.GetByLabel("メタデータだけを読み取ることに同意します");
         await Expect(consentCheckbox).ToBeDisabledAsync();
         await page.GetByLabel("参照方法").SelectOptionAsync("selected_root");
-        await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
+        await page.GetByLabel("ローカルパスまたは参照").FillAsync(privateReference);
         await page.GetByLabel("Session ID").FillAsync("session-1");
         await Expect(consentCheckbox).ToBeDisabledAsync();
         await page.GetByLabel("ソースアプリケーション版").FillAsync("1.0.71");
@@ -86,7 +86,7 @@ public sealed class HistoricalImportUiPlaywrightTests
         await Expect(page.Locator("#historical-import-preview-details")).ToContainTextAsync("not_read");
         await Expect(page.Locator("#historical-import-preview-details")).ToContainTextAsync("not_applicable");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "確認してインポート" })).ToBeDisabledAsync();
-        await Expect(page.GetByLabel("正確なローカル参照")).ToHaveValueAsync(string.Empty);
+        await Expect(page.GetByLabel("ローカルパスまたは参照")).ToHaveValueAsync(string.Empty);
         Assert.DoesNotContain(privateReference, await page.ContentAsync(), StringComparison.Ordinal);
         Assert.DoesNotContain(requests, request => request.Url.Contains(privateReference, StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(requests, request => request.Url.Contains("confirmations", StringComparison.Ordinal)
@@ -171,7 +171,7 @@ public sealed class HistoricalImportUiPlaywrightTests
             const string privateReference = "C:\\Users\\person\\SECRET_HISTORY_PATH.jsonl";
             await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
             await page.GetByLabel("参照方法").SelectOptionAsync("selected_root");
-            await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
+            await page.GetByLabel("ローカルパスまたは参照").FillAsync(privateReference);
             await page.GetByLabel("Session ID").FillAsync("session-1");
             await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
             await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
@@ -190,7 +190,7 @@ public sealed class HistoricalImportUiPlaywrightTests
             try
             {
                 await Expect(page.GetByLabel("履歴ソース")).ToBeDisabledAsync();
-                await Expect(page.GetByLabel("正確なローカル参照")).ToBeDisabledAsync();
+                await Expect(page.GetByLabel("ローカルパスまたは参照")).ToBeDisabledAsync();
                 await Expect(page.GetByLabel("ソースアプリケーション版")).ToBeDisabledAsync();
                 await Expect(page.Locator(".historical-import-source-card").First).ToBeDisabledAsync();
                 await Expect(page.Locator("#historical-import-progress")).ToBeVisibleAsync();
@@ -199,7 +199,7 @@ public sealed class HistoricalImportUiPlaywrightTests
             {
                 releaseConfirmation.TrySetResult();
             }
-            await Expect(page.Locator("#historical-import-progress")).ToContainTextAsync("トランザクションを実行しています");
+            await Expect(page.Locator("#historical-import-progress")).ToContainTextAsync("取り込み中");
             releaseImport.SetResult();
 
             await Expect(page.Locator("#historical-import-result")).ToBeVisibleAsync();
@@ -219,12 +219,12 @@ public sealed class HistoricalImportUiPlaywrightTests
             await Expect(page.Locator("#historical-import-observation-detail img")).ToHaveCountAsync(0);
             Assert.False(await page.EvaluateAsync<bool>("Boolean(window.__historicalInjected)"));
             await Expect(page.GetByRole(AriaRole.Button, new() { Name = "トレースを開く" })).ToBeDisabledAsync();
-            await Expect(page.Locator("#historical-import-trace-unavailable")).ToContainTextAsync("ナビゲーション専用");
+            await Expect(page.Locator("#historical-import-trace-unavailable")).ToContainTextAsync("対応するセッションからトレースを確認できます");
 
             await page.GetByRole(AriaRole.Tab, new() { Name = "Live" }).ClickAsync();
             await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Live OTel");
             await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Hook / SDK");
-            await Expect(page.GetByRole(AriaRole.Link, new() { Name = "Session 詳細を開く" })).ToHaveAttributeAsync(
+            await Expect(page.GetByRole(AriaRole.Link, new() { Name = "セッションを開く" })).ToHaveAttributeAsync(
                 "href",
                 "/diagnostics?session_id=0198a5ac-7180-7c85-b0d8-000000000001#doctor-session");
             Assert.DoesNotContain(requests, request => request.Url.Contains("analysis", StringComparison.OrdinalIgnoreCase));
@@ -304,7 +304,7 @@ public sealed class HistoricalImportUiPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-        await page.GetByLabel("正確なローカル参照").FillAsync("C:\\synthetic-history");
+        await page.GetByLabel("ローカルパスまたは参照").FillAsync("C:\\synthetic-history");
         await page.GetByLabel("Session ID").FillAsync("session-1");
         await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
         await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
@@ -398,7 +398,7 @@ public sealed class HistoricalImportUiPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-        await page.GetByLabel("正確なローカル参照").FillAsync("C:\\synthetic-history");
+        await page.GetByLabel("ローカルパスまたは参照").FillAsync("C:\\synthetic-history");
         await page.GetByLabel("Session ID").FillAsync("session-1");
         await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
         await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
@@ -504,7 +504,7 @@ public sealed class HistoricalImportUiPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-        await page.GetByLabel("正確なローカル参照").FillAsync("C:\\synthetic-history");
+        await page.GetByLabel("ローカルパスまたは参照").FillAsync("C:\\synthetic-history");
         await page.GetByLabel("Session ID").FillAsync("session-1");
         await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
         await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
@@ -514,13 +514,13 @@ public sealed class HistoricalImportUiPlaywrightTests
         await Expect(page.Locator("#historical-import-error")).ToContainTextAsync(expectedError);
         await Expect(page.Locator("#historical-import-progress")).ToBeHiddenAsync();
         await Expect(page.GetByLabel("履歴ソース")).ToBeEnabledAsync();
-        await Expect(page.GetByLabel("正確なローカル参照")).ToBeEnabledAsync();
+        await Expect(page.GetByLabel("ローカルパスまたは参照")).ToBeEnabledAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "プレビューを作成" })).ToBeEnabledAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "確認してインポート" })).ToBeDisabledAsync();
         Assert.Equal(2, importPosts);
         Assert.Equal(expectedResultReads, resultReads);
 
-        await page.GetByLabel("正確なローカル参照").FillAsync("C:\\synthetic-history-2");
+        await page.GetByLabel("ローカルパスまたは参照").FillAsync("C:\\synthetic-history-2");
         await page.GetByLabel("Session ID").FillAsync("session-2");
         await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
         await page.GetByRole(AriaRole.Button, new() { Name = "プレビューを作成" }).ClickAsync();
@@ -575,7 +575,7 @@ public sealed class HistoricalImportUiPlaywrightTests
             await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
             const string privateReference = "C:\\Users\\person\\SECRET_IN_FLIGHT_HISTORY.jsonl";
             await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-            await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
+            await page.GetByLabel("ローカルパスまたは参照").FillAsync(privateReference);
             await page.GetByLabel("Session ID").FillAsync("session-1");
             await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
             await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
@@ -747,7 +747,7 @@ public sealed class HistoricalImportUiPlaywrightTests
             await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
             await initialHistoryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-            await page.GetByLabel("正確なローカル参照").FillAsync("C:\\synthetic-history");
+            await page.GetByLabel("ローカルパスまたは参照").FillAsync("C:\\synthetic-history");
             await page.GetByLabel("Session ID").FillAsync("session-1");
             await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
             await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
@@ -835,7 +835,7 @@ public sealed class HistoricalImportUiPlaywrightTests
         await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         const string privateReference = "C:\\Users\\person\\SECRET_STALE_HISTORY.jsonl";
         await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-        await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
+        await page.GetByLabel("ローカルパスまたは参照").FillAsync(privateReference);
         await page.GetByLabel("Session ID").FillAsync("session-1");
         await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
         await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();

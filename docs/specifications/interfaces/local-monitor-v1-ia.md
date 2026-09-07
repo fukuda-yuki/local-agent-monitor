@@ -7,6 +7,7 @@ Date: 2026-07-30
 Route/transport amendment: PO136-A2b, 2026-08-09
 Archive amendment: D082, 2026-08-09
 Skill snapshot amendment: D083, 2026-08-11
+Session-first and concise-copy amendment: Issue #283, 2026-09-07
 
 ## 1. Product boundary
 
@@ -28,13 +29,12 @@ Manual proposal authoring, manual evidence-selection workflows, Candidate/Recomm
 ## 2. Information architecture
 
 ```text
-Repository selection
-  -> Session Explorer
-      -> Session detail
-      -> Compare selection -> Repository Session Compare
+Session Explorer + Repository scope navigation
+  -> Session detail
+  -> Compare selection -> Repository Session Compare
 ```
 
-There is no permanent sidebar or permanent top-level product navigation.
+Primary pages share Repository scope navigation beside the content. It contains all Sessions, unassigned Sessions when nonempty, named Repositories and their counts, and Repository management entry points. At narrow widths it becomes a collapsed disclosure above the content. There is no aggregate dashboard or unrelated permanent product navigation.
 
 The shared header contains only:
 
@@ -53,7 +53,7 @@ Human pages exist only in raw-default posture.
 
 | Route | Responsibility | Single question answered |
 |---|---|---|
-| `/` | Repository selection | Which Repository or Session scope should I inspect? |
+| `/` | All-Session home | Which Session should I inspect? |
 | `/repositories/{repositoryId}/sessions` | Repository-scoped Session Explorer | Which Session in this Repository should I open or compare? |
 | `/sessions` | All active Sessions virtual scope | Which Session should I open when Repository assignment is not useful? |
 | `/sessions/unassigned` | Unassigned Session virtual scope | Which Session needs inspection or Repository assignment? |
@@ -125,7 +125,7 @@ Checkbox selection before a comparison snapshot is created is transient and is n
 
 ## 4. Existing route disposition
 
-- `/` changes from the old Overview to Repository selection.
+- `/` opens Session Explorer directly; `/sessions` remains its explicit all-Session route.
 - The old `/traces` list is retired atomically when the functional #138
   Session Explorer backed by #134 ships. The narrow existing list classifier
   then returns empty no-store 404 for every method and advertises no `Allow`.
@@ -139,22 +139,16 @@ Checkbox selection before a comparison snapshot is created is transient and is n
 - Existing unrelated standalone surfaces are not promoted into the v1 primary IA and are not implicitly deleted by this specification.
 - No indefinite redirect, dual UI path or compatibility shim is added unless a frozen producer contract explicitly requires it.
 
-## 5. Repository selection
+## 5. Repository scope navigation
 
-Repository is presented as a card because the expected local set is small.
+The home page starts with the Session list. Repository navigation remains available on primary pages, without a separate selection landing page.
 
-Each active card shows:
-
-- display name;
-- active assigned Session count;
-- last observed safe instant.
-
-Supplementary entries:
-
-- `すべてのセッション`;
-- `リポジトリ未設定のセッション`, only when non-empty;
-- `リポジトリを追加`;
-- archived Repository management through Settings.
+- each Repository entry combines its display name, Session count and direct scope link;
+- the current scope has a visible edge and `aria-current`, not color alone;
+- all Sessions and nonempty unassigned Sessions are direct entries;
+- create and archive management enter the existing Settings flow;
+- rename and Repository management remain in Settings;
+- counts describe the existing collection response, without inferred totals or aggregation.
 
 Identity, locator, assignment, correction and conflict behavior are owned by
 [the Local Repository catalog contract](local-repository-catalog.md), its
@@ -174,12 +168,13 @@ The screen is a dense direct-open list, not a dashboard and not master-detail.
 
 - Repository or virtual scope label;
 - active result count;
-- Repository management, where applicable;
 - `比較を作成`.
 
 No aggregate/KPI card row is displayed.
 
 ### Filters
+
+Search is always visible. Model, date, source, state, presence, page size and archive controls share one labelled disclosure. Their existing transport and history ownership remain unchanged.
 
 - instruction label / Skill / Tool search;
 - date range;
@@ -193,11 +188,12 @@ No aggregate/KPI card row is displayed.
 
 | UI label | Contents |
 |---|---|
-| セッション | first instruction label or safe date-based fallback; source/model/capture note below |
-| 状態 | terminal-safe Session state |
-| 要約 | positive Skill / Tool / Sub-agent / Error / Retry values and honest missing state |
-| トークン合計 | recorded total and cache-read ratio only when available |
-| 開始 | safe start instant and duration |
+| セッション | first instruction label or safe date fallback; source/model/status below; assignment and capture details on demand |
+| 活動 | positive Skill / Tool / Sub-agent / Error / Retry values; other recorded states in a disclosure |
+| 入力・出力トークン | separate input/output values and available cache observations |
+| 日時 | safe start or explicitly labelled last-observed instant and duration |
+
+Instruction previews may span two lines; the exact label remains in the link title and Session information. Dates and metric labels wrap rather than being silently clipped.
 
 Selecting a row opens Session detail directly. There is no preview pane.
 
@@ -300,7 +296,7 @@ The screen has three vertical regions:
 
 ### Session context
 
-- first instruction or safe date-based label;
+- a concise first-instruction preview (up to 64 characters) or safe date-based label; the full recorded label remains in Session information;
 - status;
 - source;
 - start/end/duration;
@@ -313,7 +309,7 @@ Opaque technical IDs are not the title.
 ### Session-wide summary
 
 The summary always represents the complete Session snapshot and does not change when a node is selected.
-Primary token values and the five activity facts remain visible. Each missing-state
+Input, output and observed cache-read ratio remain primary; the five activity facts form a compact inline strip. Total tokens, cache components, coverage and denominator details remain in `内訳・記録状態`. Each missing-state
 label may disclose its explanation in place, without reclassifying that state.
 Capture coverage and observed component details share an explicitly labelled
 expandable section; the summary grows with its content rather than clipping it.
@@ -341,7 +337,7 @@ Other fixed items:
 
 ### Initial inspector
 
-Normal entry never shows an empty panel. It shows Session overview:
+Normal entry leaves the inspector closed and uses the width for activity. `情報・指示` opens Session information with:
 
 - initial instruction;
 - additional instruction count;
@@ -363,6 +359,7 @@ Each row combines semantic hierarchy on the left and timing/duration/parallelism
 
 - no separate tree/waterfall tabs;
 - latest execution is expanded by default;
+- when its complete root page contains exactly one Agent with children, expand that exact structural level with one bounded child-page request; retain normal pagination and request-generation ownership;
 - previous execution headers retain summary/error/retry facts while collapsed;
 - Agent identity is shown only with exact authority;
 - `Main Agent` is never invented;
@@ -374,10 +371,10 @@ Each row combines semantic hierarchy on the left and timing/duration/parallelism
 
 Common structure:
 
-- return to Session overview;
-- kind/name/status/duration/parent path;
-- object-specific facts;
-- related activity/evidence;
+- close control, kind/name/status/duration;
+- available content actions;
+- expandable object-specific timing, attributes and parent/related activity;
+- Session information action;
 - expandable `技術情報`.
 
 ### Tool
@@ -411,8 +408,8 @@ Common structure:
 
 Available content actions precede an expandable list of other content states.
 Exact technical evidence remains available, and optional node AI actions follow
-the observed facts. The context breadcrumb says `セッション詳細`; the heading
-and overview retain the full server-provided instruction label.
+the observed facts. The context breadcrumb says `セッション`; the heading
+and information panel retain access to the full server-provided instruction label. The heading uses the bounded preview. Both wide and narrow inspectors can be closed; the narrow inspector retains modal focus and background inertness.
 
 There are no page-level `整形 / raw` tabs.
 
@@ -631,17 +628,30 @@ Binding key labels:
 | Repository | リポジトリ |
 | Session | セッション |
 | Source | 取得元 |
-| 観測された動き | 要約 |
+| 観測された動き | 活動 |
 | 記録Token | トークン合計 |
 | cache read | キャッシュから読み込み |
 | new input | 新規入力 |
 | cache creation | キャッシュ書き込み |
-| Repository未割り当て | リポジトリ未設定のセッション |
+| Repository未割り当て | 未設定のセッション |
 | technical information | 技術情報 |
 
-Sentence-level microcopy remains #169 work after the first integrated implementation and does not block initial implementation.
+Microcopy uses concise labels, with explanations only where they help interpret an exceptional state or make an operation decision. Repeated count/loading sentences and internal workflow commentary do not belong in the main reading path.
 
-Missing-state labels are provided by #137 and must not expose internal enum names.
+The shared C# and browser fact renderer use concise primary labels:
+
+| Fact | Primary label |
+|---|---|
+| positive / proven zero | count + `件` / `0件` |
+| not observed / raw not captured | `なし` |
+| unsupported | `未対応` |
+| capture gap | `一部欠落` |
+| projection invalid | `読取不可` |
+| certification pending | count when present, with `未確認`; otherwise `未確認` |
+| raw expired / deleted / read denied | `期限切れ` / `削除済み` / `表示不可` |
+| inconsistent | `不整合` |
+
+`なし` describes the available record, not a numeric zero or a claim that a tool was unused. It adds no repeated generic caveat. Existing source-specific explanations and exceptional-state reasons remain available; the semantic state, zero-proof checks and eligibility for derived visualization do not change. Internal enum names are not primary labels.
 
 ## 15. State matrices
 
@@ -701,31 +711,33 @@ budgets for Japanese text.
 - compact gap: 8px;
 - no page-level horizontal scroll.
 
-### Repository selection
+### Repository navigation
 
-- card min width 300px, max width 380px;
-- 16px grid gap;
-- up to 3 columns at 1366px.
+- 192px desktop scope column;
+- narrow screens use an in-flow disclosure;
+- one list of scope links at every width.
 
 ### Session Explorer
 
 - title/actions and filters wrap to their content height;
 - the list has bounded internal scrolling (up to 65dvh); the page may scroll vertically;
-- instruction links show up to three lines and open the exact full detail;
+- instruction links show up to two lines and open the exact full detail;
 - row height follows content, with comfortable control spacing;
 - narrow filter disclosures expand in flow instead of outside the viewport.
+- row fact disclosures expand within the table, without clipped floating panels;
+- at the last page, focus moves to the visible result count; the live region does not add a duplicate count line or shift the table when focus changes.
 
 ### Session detail
 
 - context and summary grow to fit text and expanded facts;
 - the page scrolls vertically without nested fixed-height summary scrolling;
-- inspector width: min 360px, max 420px; it remains alongside the timeline
+- inspector width: min 320px, max 380px; it remains alongside the timeline
   on desktop and scrolls within the available viewport below the shared header;
 - each execution timeline has bounded internal scrolling (up to 60dvh / 640px),
   preserving its scroll position across collapse and rerender;
 - long node names wrap; nested rows retain indentation and level semantics.
 
-At widths below 1180px, the inspector becomes a right overlay/drawer instead of forcing page horizontal scrolling. At the hard 1366px viewport it is a simultaneous second pane.
+At widths below 1180px, the inspector becomes a right overlay/drawer instead of forcing page horizontal scrolling. At the 1366px viewport it is a simultaneous second pane only after selection or opening information.
 
 ### Compare
 
@@ -802,7 +814,7 @@ Design references (consulted 2026-09-07):
 | Human route/URL/Session collection request transport | [route transport](local-monitor-v1-route-transport.md) + #136 | #136 pure parsers; #134 maps the accepted success wire |
 | Shell/header/Settings host | this spec | #135/#136 |
 | Missing states | #129 + this spec | #137 |
-| Repository selection | this spec | #167 |
+| Repository scope navigation | this spec | #167 |
 | Session Explorer | this spec | #138 |
 | Session summary | this spec | #139 |
 | Timeline/inspector | this spec | #140 |

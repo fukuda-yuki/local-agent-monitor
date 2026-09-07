@@ -150,7 +150,7 @@
     const request = nextGeneration();
     root.setAttribute("aria-busy", "true");
     root.dataset.readState = "loading";
-    status.textContent = "Cost analytics を読み込んでいます。";
+    status.textContent = "費用を読み込み中…";
     error.hidden = true;
     incomplete.hidden = true;
     try {
@@ -178,26 +178,26 @@
       renderCatalog();
       renderAnalytics();
       renderSession();
-      status.textContent = "Cost analytics を更新しました。";
+      status.textContent = "費用を更新しました。";
       root.setAttribute("aria-busy", "false");
       root.dataset.readState = "fresh";
       if (estimateId && !state.contextFocused) {
         state.contextFocused = true;
         byId("cost-context-heading").focus();
-        announce("exact estimate を読み込みました。");
+        announce("指定した推定費用を読み込みました。");
       } else {
         announce(state.analytics.state === "incomplete"
-          ? "incomplete snapshot を読み込みました。完全な totals は保留しています。"
-          : "Cost analytics を読み込みました。");
+          ? "取得できた範囲を表示しています。全体の合計は未確定です。"
+          : "費用を読み込みました。");
       }
     } catch (failure) {
       if (failure?.name === "AbortError") return;
       root.setAttribute("aria-busy", "false");
       root.dataset.readState = "stale";
       error.hidden = false;
-      status.textContent = "前回表示した facts は stale の可能性があります。";
-      error.textContent = `Cost analytics を読み込めませんでした · ${failure.message}`;
-      announce("Cost analytics の読み込みに失敗しました。");
+      status.textContent = "前回の表示は古い可能性があります。";
+      error.textContent = `費用を読み込めませんでした · ${failure.message}`;
+      announce("費用を読み込めませんでした。");
     }
   }
 
@@ -262,7 +262,7 @@
     const sources = state.catalog?.sources ?? [];
     const entries = state.catalog?.entries ?? [];
     if (!sources.length && !entries.length) {
-      container.append(node("p", "empty-state", "安全な catalog projection はありません。"));
+      container.append(node("p", "empty-state", "料金カタログなし"));
     }
     for (const item of sources) {
       const card = node("article", "cost-catalog-item");
@@ -373,7 +373,7 @@
       if (reasons) card.append(node("span", "monitor-subtle", reasons));
       totals.append(card);
     }
-    if (!totals.children.length) totals.append(node("p", "empty-state", "この範囲に monetary total はありません。"));
+    if (!totals.children.length) totals.append(node("p", "empty-state", "この範囲の費用合計はありません。"));
 
     const daily = byId("cost-daily-list");
     daily.replaceChildren();
@@ -387,7 +387,7 @@
       );
       daily.append(row);
     }
-    if (!daily.children.length) daily.append(node("p", "empty-state", "daily monetary trend はありません。"));
+    if (!daily.children.length) daily.append(node("p", "empty-state", "日別の費用記録なし"));
     renderGroups(value.groups ?? []);
     const next = byId("cost-groups-next");
     next.hidden = !value.next_cursor;
@@ -412,7 +412,7 @@
     }
     if (!groups.length) {
       const row = node("tr");
-      const cell = node("td", "empty-state", "この条件の component group はありません。");
+      const cell = node("td", "empty-state", "条件に一致する費用内訳なし");
       cell.colSpan = 6;
       row.append(cell);
       rows.append(row);
@@ -492,7 +492,7 @@
       );
       container.append(card);
     }
-    if (!items.length) container.append(node("p", "empty-state", "immutable estimate history はありません。"));
+    if (!items.length) container.append(node("p", "empty-state", "推定履歴なし"));
     const next = byId("cost-estimates-next");
     next.hidden = !state.estimateHistory?.next_after;
     next.dataset.cursor = state.estimateHistory?.next_after ?? "";
@@ -517,7 +517,7 @@
     }
     const latest = state.estimateHistory?.latest_attempt;
     if (latest) container.append(node("p", "monitor-subtle", `latest attempt · ${latest.kind} · ${latest.freshness} · ${latest.code ?? latest.estimate_status ?? "pending"}`));
-    if (!values.length && !latest) container.append(node("p", "empty-state", "recalculation attempt はありません。"));
+    if (!values.length && !latest) container.append(node("p", "empty-state", "再計算履歴なし"));
     const next = byId("cost-attempts-next");
     next.hidden = !state.attemptHistory?.next_after;
     next.dataset.cursor = state.attemptHistory?.next_after ?? "";
@@ -731,12 +731,12 @@
             ["Created", dateText(state.preview.configuration?.created_at_utc)],
           ]));
         byId("cost-commit").disabled = false;
-        announce("configuration preview を作成しました。commit 前です。");
+        announce("変更内容を確認してください。まだ保存されていません。");
       } catch (failure) {
         state.preview = null;
         if (requestedGeneration === state.generation) {
           byId("cost-preview-result").textContent = `preview failed · ${failure.message}`;
-          announce("configuration preview に失敗しました。");
+          announce("変更内容を確認できませんでした。");
         }
       } finally {
         setMutationDisabled(false);
@@ -907,8 +907,8 @@
     const button = byId("cost-recalculate");
     button.disabled = mutationDisabled || !usable;
     button.title = usable
-      ? "現在の immutable configuration で再計算します。"
-      : "Session context と matching configuration が必要です。";
+      ? "現在の設定で再計算します。"
+      : "対象セッションと対応する料金設定が必要です。";
   }
 
   function selectCatalogEntry() {

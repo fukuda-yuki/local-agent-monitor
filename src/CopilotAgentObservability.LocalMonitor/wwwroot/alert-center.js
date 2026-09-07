@@ -392,7 +392,7 @@
       }
       evidenceList.append(item);
     }
-    if (alert.evidence.length === 0) evidenceList.append(node("li", "empty-state", "Evidence reference はありません。"));
+    if (alert.evidence.length === 0) evidenceList.append(node("li", "empty-state", "根拠なし"));
     evidenceSection.append(evidenceList);
 
     const relationships = node("section", "alert-detail-section");
@@ -415,7 +415,7 @@
         null,
         `revision ${transition.revision} · ${transition.action} · ${transition.previous_state} → ${transition.state} · ${formatTime(transition.occurred_at)} · ${transition.actor} / ${transition.reason_code} · ${transition.result_code}${relationship}`));
     }
-    if (!alert.lifecycle.history?.length) historyList.append(node("li", "empty-state", "lifecycle transition はありません。"));
+    if (!alert.lifecycle.history?.length) historyList.append(node("li", "empty-state", "変更履歴なし"));
     history.append(historyList);
 
     detailBody.append(badges, summary, formula, measurements, provenance, evidenceSection, relationships, history);
@@ -426,7 +426,7 @@
     const section = node("section", "alert-detail-section alert-actions");
     section.append(node("h4", null, "Lifecycle actions"));
     if (alert.lifecycle.allowed_actions.length === 0) {
-      section.append(node("p", "monitor-subtle", "この状態で許可された操作はありません。"));
+      section.append(node("p", "monitor-subtle", "操作なし"));
       detailBody.append(section);
       return;
     }
@@ -439,7 +439,7 @@
       reason.append(option);
     }
     reasonLabel.append(reason);
-    const commentLabel = node("label", null, "コメント（任意・sanitized）");
+    const commentLabel = node("label", null, "コメント（任意・機密情報を除く）");
     const comment = node("input");
     comment.id = "alert-action-comment";
     comment.type = "text";
@@ -482,8 +482,8 @@
     recurring.replaceChildren();
     if (groups.length === 0) {
       recurring.append(node("p", "empty-state", snapshotState === "incomplete"
-        ? "incomplete_snapshot · 取得範囲に recurring group はありません。スナップショットが不完全なため、全体として 0 件とは断定できません。"
-        : "この期間の recurring group はありません。"));
+        ? "取得範囲に繰り返し発生したアラートはありません。一部未取得です。"
+        : "この期間に繰り返し発生したアラートはありません。"));
       return;
     }
     const list = node("div", "alert-recurring-list");
@@ -513,18 +513,18 @@
 
   function renderCoverage(facts, coverageState) {
     coverage.replaceChildren();
-    coverage.append(node("p", "monitor-subtle retention-diagnostics-help", "以下の suppression fact はアラートではありません。"));
+    coverage.append(node("p", "monitor-subtle retention-diagnostics-help", "通知を抑制した記録"));
     if (coverageState === "incomplete") {
-      coverage.append(node("p", "monitor-subtle", "coverage の取得上限に達しました。省略件数は不明です。"));
+      coverage.append(node("p", "monitor-subtle", "取得上限に達しました。残りの件数は不明です。"));
     }
     if (coverageState === "unavailable") {
-      coverage.append(node("p", "empty-state", "coverage は現在利用できません。suppression fact の有無は未確認です。"));
+      coverage.append(node("p", "empty-state", "取得範囲と抑制記録を確認できません。"));
       return;
     }
     if (facts.length === 0) {
       coverage.append(node("p", "empty-state", coverageState === "incomplete"
-        ? "取得範囲で suppression fact は確認できません。0 件とは断定できません。"
-        : "suppression fact はありません。"));
+        ? "抑制記録なし（一部未取得）"
+        : "抑制記録なし"));
       return;
     }
     const list = node("ul", "alert-coverage-list");
@@ -659,7 +659,7 @@
         empty.textContent = snapshot.total_count > 0
           ? "このページにアラートはありません。前のページに戻ってください。"
           : snapshot.snapshot_state === "incomplete"
-          ? "取得できた範囲に条件一致のアラートはありません。スナップショットが不完全なため、全体として 0 件とは断定できません。"
+          ? "条件に一致するアラートなし（一部未取得）"
           : "この条件のアラートはありません。";
         status.hidden = true;
         return true;
@@ -687,7 +687,7 @@
       nextPage.disabled = true;
       pageInfo.textContent = "ページ情報を取得できませんでした。";
       recurring.replaceChildren(node("p", "empty-state", "集計を読み込めませんでした。"));
-      coverage.replaceChildren(node("p", "empty-state", "coverage を読み込めませんでした。"));
+      coverage.replaceChildren(node("p", "empty-state", "取得範囲を読み込めませんでした。"));
       return false;
     } finally {
       if (generation === loadGeneration) loadController = null;

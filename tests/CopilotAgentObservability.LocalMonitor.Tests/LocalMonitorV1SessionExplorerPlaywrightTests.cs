@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Encodings.Web;
@@ -33,9 +34,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         item["timing"]!["last_seen_at"] = "2026-01-02T00:00:02.0000000+00:00";
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route => route.FulfillAsync(Json(Canonical(payload))));
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions");
-        await Expect(page.Locator("[data-session-started]").First).ToContainTextAsync("最終観測");
-        await Expect(page.Locator("[data-session-status]").First).ToHaveTextAsync("状態未観測");
-        await Expect(page.Locator("[data-session-started]").Nth(1)).Not.ToContainTextAsync("最終観測");
+        await Expect(page.Locator("[data-session-started]").First).ToContainTextAsync("最終記録");
+        await Expect(page.Locator("[data-session-status]").First).ToHaveTextAsync("状態不明");
+        await Expect(page.Locator("[data-session-started]").Nth(1)).Not.ToContainTextAsync("最終記録");
     }
 
     [Fact]
@@ -56,7 +57,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(page.Locator("#session-explorer-rows tr")).ToHaveCountAsync(2);
         await page.Locator("#session-search").FillAsync("still usable");
         await page.RunAndWaitForRequestAsync(
-            () => page.Locator("#session-explorer-filters button[type='submit']").ClickAsync(),
+            () => page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync(),
             request => request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal)
                 && request.PostData?.Contains("still usable", StringComparison.Ordinal) == true);
         await Expect(page.Locator("#session-ai-open, #session-ai-dialog")).ToHaveCountAsync(0);
@@ -126,7 +127,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#session-ai-open")).ToBeHiddenAsync();
         await page.Locator("#session-search").FillAsync("still usable");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("#session-explorer-rows tr")).ToHaveCountAsync(2);
         Assert.True(searchCalls >= 2);
 
@@ -160,8 +161,8 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
     [Theory]
     [InlineData("unbound", "ネイティブセッションとの関連を確認できません", false)]
-    [InlineData("partial", "ライフサイクルまたは入力の記録が一部欠けています", false)]
-    [InlineData("rich", "内容または終了状態の記録が一部欠けています", false)]
+    [InlineData("partial", "ライフサイクルまたは入力の一部欠落", false)]
+    [InlineData("rich", "内容または終了状態の一部欠落", false)]
     [InlineData("full", "必要な記録がそろっています", false)]
     [InlineData("complete", null, true)]
     [Trait("ValidationLane", "Nightly")]
@@ -224,18 +225,18 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         {
             await Expect(content.Locator($"[data-fact-state='{state}'] .fact-state-primary")).ToHaveCountAsync(count);
         }
-        await Expect(content.Locator("[data-fact-state='not-observed'] p")).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(content.Locator("[data-fact-state='not-observed']")).ToContainTextAsync("なし");
         await Expect(content.Locator("[data-fact-state='unsupported'] p")).ToHaveTextAsync(new[]
         {
-            "取得元: 取得元を確認できません。この項目は取得元で記録されません。",
-            "取得元: vscode。この項目は取得元で記録されません。",
+            "取得元: 取得元を確認できません。取得元がこの項目に未対応です。",
+            "取得元: vscode。取得元がこの項目に未対応です。",
         });
-        await Expect(content.Locator("[data-fact-state='capture-gap'] p")).ToContainTextAsync("記録が一部欠けています");
-        await Expect(content.Locator("[data-fact-state='raw-not-captured'] p").First).ToContainTextAsync("記録されていません");
+        await Expect(content.Locator("[data-fact-state='capture-gap'] p")).ToContainTextAsync("記録に欠落があります");
+        await Expect(content.Locator("[data-fact-state='raw-not-captured'] p").First).ToContainTextAsync("取得時に保存されていません");
         await Expect(content.Locator("[data-fact-state='raw-expired'] p").First).ToContainTextAsync("保存期間");
         await Expect(content.Locator(".fact-state-primary", new() { HasText = "0件" })).ToHaveCountAsync(0);
         await Expect(content.Locator("span p")).ToHaveCountAsync(0);
-        await Expect(content.GetByText("取得元: vscode。この項目は取得元で記録されません。", new() { Exact = true })).ToBeVisibleAsync();
+        await Expect(content.GetByText("取得元: vscode。取得元がこの項目に未対応です。", new() { Exact = true })).ToBeVisibleAsync();
         foreach (var rawToken in new[] { "not_observed", "source_unsupported", "capture_gap", "certification_pending", "not_captured", "expired_pending_deletion", "redacted" })
         {
             await Expect(content).Not.ToContainTextAsync(rawToken);
@@ -283,16 +284,16 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(previewContent.GetByRole(AriaRole.Heading, new() { Name = "除外項目の技術情報 1件", Exact = true })).ToBeVisibleAsync();
         await Expect(previewContent).ToContainTextAsync($"セッションID: {SessionId}");
         await Expect(previewContent).ToContainTextAsync($"ワークスペースのSHA-256: {hash}");
-        await Expect(previewContent).ToContainTextAsync("内容は記録されていません");
-        await Expect(previewContent).ToContainTextAsync("記録された形式を安全に確認できません");
-        await Expect(previewContent).ToContainTextAsync("記録が表示可能な範囲を超えています");
-        await Expect(previewContent).ToContainTextAsync("記録された値に整合しない項目があります");
+        await Expect(previewContent).ToContainTextAsync("なし");
+        await Expect(previewContent).ToContainTextAsync("記録形式を読み取れません");
+        await Expect(previewContent).ToContainTextAsync("表示上限を超えています");
+        await Expect(previewContent).ToContainTextAsync("値が一致しません");
         await Expect(previewContent).ToContainTextAsync("必要な記録がそろっています");
-        await Expect(previewContent).ToContainTextAsync("ライフサイクルまたは入力の記録が一部欠けています");
+        await Expect(previewContent).ToContainTextAsync("ライフサイクルまたは入力の一部欠落");
         await Expect(page.Locator("#session-ai-preview-content")).ToContainTextAsync("セッションがアーカイブ済みのため除外されました");
         await page.Locator("#session-ai-start").ClickAsync();
         var renderedResult = page.Locator("#session-ai-result");
-        await Expect(renderedResult).ToContainTextAsync("AIによる解釈（セッション一覧の記録ではありません）");
+        await Expect(renderedResult).ToContainTextAsync("AIによる解釈");
         await Expect(renderedResult).ToContainTextAsync("分析対象の技術情報");
         await Expect(renderedResult).ToContainTextAsync("記録時点の技術情報");
         await Expect(renderedResult).ToContainTextAsync("分析の技術情報");
@@ -329,7 +330,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.EvaluateAsync($"window.LocalMonitorV1History.push({{ analysis: '{runId}' }})");
 
-        await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AIによる解釈（セッション一覧の記録ではありません）");
+        await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("AIによる解釈");
         await Expect(page.Locator("#session-ai-result")).ToContainTextAsync("\\\"result\\\":");
     }
 
@@ -418,6 +419,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         });
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions?mode=compare", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-include-archived").CheckAsync();
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
@@ -538,6 +540,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(page.Locator("#session-compare-preview")).ToHaveAttributeAsync("aria-disabled", "true");
         await page.Locator("#session-compare-preview").PressAsync("Enter");
         Assert.Equal(0, previewCalls);
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-include-archived").CheckAsync();
         await Expect(page.Locator("#session-compare-preview")).ToHaveAttributeAsync("aria-disabled", "false");
         await page.Locator("#session-compare-preview").ClickAsync();
@@ -611,6 +614,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{ThirdSessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-include-archived").CheckAsync();
         await page.Locator("#session-compare-preview").ClickAsync();
         await Expect(page.Locator("#session-comparison-preview-status")).ToContainTextAsync("比較内容を読み込めませんでした");
@@ -781,6 +785,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await identityDisclosure.PressAsync("Enter");
 
         await page.SetViewportSizeAsync(1000, 768);
+        await OpenAdvancedFiltersAsync(page);
         await Expect(page.Locator("#session-model")).ToBeVisibleAsync();
         var narrowLayout = await page.EvaluateAsync<double[]>("""
             () => {
@@ -792,14 +797,15 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         Assert.True(narrowLayout[2] >= narrowLayout[3]);
 
         await page.SetViewportSizeAsync(800, 768);
+        await OpenAdvancedFiltersAsync(page);
         await Expect(page.Locator("#session-model")).ToBeVisibleAsync();
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
 
-        await page.Locator("#session-search").FocusAsync();
+        await page.Locator(".local-monitor-advanced-filters > summary").FocusAsync();
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#session-model")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Tab");
-        await Expect(page.Locator("details:has(#session-from) summary")).ToBeFocusedAsync();
+        await Expect(page.Locator(".local-monitor-session-filter-menu:has(#session-from) > summary")).ToBeFocusedAsync();
 
         await row.Locator("[data-session-status]").ClickAsync();
         await page.WaitForURLAsync(host.Url + $"/sessions/{SessionId}");
@@ -836,7 +842,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/sessions",
             new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("1件を表示しています");
+        await Expect(page.Locator("#session-explorer-status")).ToHaveTextAsync("1件");
         var row = page.Locator($"[data-session-row][data-session-id='{SessionId}']");
         await Expect(row).ToHaveCountAsync(1);
         await Expect(row.Locator("[data-session-open]")).ToHaveAttributeAsync("href", $"/sessions/{SessionId}");
@@ -977,6 +983,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         }
 
         await page.Locator("#session-search").FillAsync("transient-sensitive-query");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync("transient-sensitive-model");
         await page.Locator("#session-search").PressAsync("Enter");
         await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
@@ -986,8 +993,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         navigationUrls.Clear();
         requestUrls.Clear();
         await page.Locator("#session-search").FillAsync("transient-sensitive-query");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync("transient-sensitive-model");
-        await page.Locator("#session-explorer-filters button[type='submit']").PressAsync("Enter");
+        await page.Locator("#session-explorer-filters > button[type='submit']").PressAsync("Enter");
         await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
         var submitButtonEnterNavigationUrls = navigationUrls.ToArray();
         var submitButtonEnterRequestUrls = requestUrls.ToArray();
@@ -1039,14 +1047,17 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await TabToAsync("#session-search");
         Assert.NotEqual("none", await page.Locator("#session-search")
             .EvaluateAsync<string>("node => getComputedStyle(node).outlineStyle"));
+        await TabToAsync("#session-explorer-filters > button[type='submit']");
+        await TabToAsync(".local-monitor-advanced-filters > summary");
+        await page.Keyboard.PressAsync("Enter");
         await TabToAsync("#session-model");
-        await TabToAsync("details:has(#session-from) > summary");
-        await TabToAsync("details:has(#session-source) > summary");
-        await TabToAsync("details:has(#session-status) > summary");
-        await TabToAsync("details:has(#session-has-skill) > summary");
+        await TabToAsync(".local-monitor-session-filter-menu:has(#session-from) > summary");
+        await TabToAsync(".local-monitor-session-filter-menu:has(#session-source) > summary");
+        await TabToAsync(".local-monitor-session-filter-menu:has(#session-status) > summary");
+        await TabToAsync(".local-monitor-session-filter-menu:has(#session-has-skill) > summary");
         await TabToAsync("#session-limit");
         await TabToAsync("#session-include-archived");
-        await TabToAsync("#session-explorer-filters button[type='submit']");
+        await TabToAsync(".local-monitor-advanced-filters button[type='submit']");
         await TabToAsync(".local-monitor-session-table-region");
         await TabToAsync("[data-session-row]:first-child [data-session-open]");
         await TabToAsync("[data-session-row]:first-child .local-monitor-session-identity .local-monitor-session-fact-disclosure > summary");
@@ -1119,28 +1130,31 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         }
 
         await page.Locator("#session-search").FillAsync("  機密にならない検索語  ");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync("model,with,comma\n model-b ");
-        await page.Locator("details:has(#session-from) summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-from) > summary").ClickAsync();
         await page.Locator("#session-from").FillAsync("2026-01-01T00:00:00.0000000+00:00");
         await page.Locator("#session-to").FillAsync("2026-02-01T00:00:00.0000000+00:00");
-        await page.Locator("details:has(#session-from) summary").ClickAsync();
-        await page.Locator("details:has(#session-source) summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-from) > summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-source) > summary").ClickAsync();
         await page.Locator("#session-source").SelectOptionAsync(["claude-code", "vscode"]);
-        await page.Locator("details:has(#session-source) summary").ClickAsync();
-        await page.Locator("details:has(#session-status) summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-source) > summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-status) > summary").ClickAsync();
         await page.Locator("#session-status").SelectOptionAsync("completed");
-        await page.Locator("details:has(#session-status) summary").ClickAsync();
-        await page.Locator("details:has(#session-has-skill) summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-status) > summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-has-skill) > summary").ClickAsync();
         await page.Locator("#session-has-skill").SelectOptionAsync("true");
         await page.Locator("#session-has-subagent").SelectOptionAsync("false");
         await page.Locator("#session-has-error").SelectOptionAsync("true");
         await page.Locator("#session-has-retry").SelectOptionAsync("false");
-        await page.Locator("details:has(#session-has-skill) summary").ClickAsync();
+        await page.Locator(".local-monitor-session-filter-menu:has(#session-has-skill) > summary").ClickAsync();
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-limit").SelectOptionAsync("100");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-include-archived").CheckAsync();
         var filterRequest = page.WaitForRequestAsync(request =>
             request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await filterRequest;
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(100);
 
@@ -1223,7 +1237,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("#session-search").FillAsync("memory-only");
         var memoryFilterRequest = page.WaitForRequestAsync(request =>
             request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await memoryFilterRequest;
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(50);
         var memoryPageRequest = page.WaitForRequestAsync(request =>
@@ -1371,7 +1385,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await memoryPage.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await memoryPage.Locator("#session-search").FillAsync("document-only");
-        await memoryPage.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await memoryPage.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(memoryPage.Locator("[data-session-row]")).ToHaveCountAsync(50);
         await memoryPage.Locator("#session-load-more").ClickAsync();
         await Expect(memoryPage.Locator("#session-explorer-status")).ToContainTextAsync("読み込めませんでした");
@@ -1420,7 +1434,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#session-load-more")).ToBeVisibleAsync();
         await page.Locator("#session-search").FillAsync("delayed");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await delayedStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         try
         {
@@ -1550,7 +1564,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("[data-session-row] .local-monitor-session-row-actions > summary").PressAsync("Enter");
         await page.Locator("[data-session-assignment]").ClickAsync();
 
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("操作を完了できませんでした");
+        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("操作に失敗しました");
         Assert.Equal(1, collectionCalls);
         Assert.Equal(
             $"{{\"schema_version\":\"local-session-repository-action.v1\",\"session_id\":\"{SessionId}\",\"expected_revision\":2,\"action\":\"explicitly_unassign\",\"repository_id\":null}}",
@@ -1598,7 +1612,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("[data-session-row] .local-monitor-session-row-actions > summary").ClickAsync();
         await page.Locator("[data-session-assignment]").ClickAsync();
 
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("操作を完了できませんでした");
+        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("操作に失敗しました");
         Assert.Equal(1, collectionCalls);
         Assert.Contains("\"action\":\"resume_automatic\"", ownerBody, StringComparison.Ordinal);
     }
@@ -1683,7 +1697,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var archivedFacts = archived.Locator(".local-monitor-session-identity .local-monitor-session-fact-disclosure > summary");
         await archivedFacts.PressAsync("Enter");
         await Expect(archived.Locator("[data-capture-note='token_inconsistent']"))
-            .ToContainTextAsync("内訳を表示できません");
+            .ToContainTextAsync("不整合");
 
         await page.Locator("#session-compare-mode").ClickAsync();
         await archived.Locator("[data-cohort='a']").CheckAsync();
@@ -1693,6 +1707,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("セッションのアーカイブ除外 1件");
         await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("リポジトリのアーカイブ除外 1件");
         Assert.Equal(host.Url + "/sessions?mode=compare", page.Url);
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-include-archived").CheckAsync();
         await Expect(page.Locator("#session-compare-validation")).Not.ToContainTextAsync("セッションのアーカイブ除外");
         await Expect(page.Locator("#session-compare-validation")).Not.ToContainTextAsync("リポジトリのアーカイブ除外");
@@ -1753,7 +1768,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("[data-session-archive]").PressAsync("Enter");
         await archiveRefresh;
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(1);
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("表示しています");
+        await Expect(page.Locator("#session-explorer-status")).ToHaveTextAsync(new Regex("^[0-9,]+件$"));
         await Expect(page.Locator("[data-session-archive]")).ToBeFocusedAsync();
         Assert.Equal(2, collectionCalls);
         Assert.Equal(
@@ -1765,7 +1780,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("[data-session-assignment]").PressAsync("Enter");
         await assignmentRefresh;
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(1);
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("表示しています");
+        await Expect(page.Locator("#session-explorer-status")).ToHaveTextAsync(new Regex("^[0-9,]+件$"));
         await Expect(page.Locator("[data-session-assignment]")).ToBeFocusedAsync();
         Assert.Equal(3, collectionCalls);
         Assert.Equal(
@@ -1894,7 +1909,8 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         Assert.NotNull(ownerHeaders);
         Assert.Equal("local-monitor", ownerHeaders["x-monitor-csrf"]);
         Assert.Matches("^lrc1_[A-Za-z0-9_-]{43}$", ownerHeaders["idempotency-key"]);
-        Assert.All(repositoryRequests, request => Assert.Equal(
+        Assert.Contains(host.Url + "/api/local-monitor/v1/repositories?archive_scope=active_only&limit=50", repositoryRequests);
+        Assert.All(repositoryRequests.Where(request => request.Contains("archive_scope=include_archived", StringComparison.Ordinal)), request => Assert.Equal(
             host.Url + "/api/local-monitor/v1/repositories?archive_scope=include_archived&limit=200",
             request));
         Assert.DoesNotContain("同じ名前", string.Join(' ', repositoryRequests), StringComparison.Ordinal);
@@ -1977,7 +1993,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             route.FulfillAsync(Json(Canonical(sessionDocument))));
         await page.RouteAsync("**/api/local-monitor/v1/repositories?*", route =>
         {
-            repositoryRequests++;
+            if (route.Request.Url.Contains("archive_scope=include_archived", StringComparison.Ordinal)) repositoryRequests++;
             var secondPage = route.Request.Url.Contains("after=", StringComparison.Ordinal);
             var repositories = new JsonArray();
             if (secondPage)
@@ -2120,8 +2136,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         var routeRead = page.WaitForRequestAsync(request =>
             request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-include-archived").CheckAsync();
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await routeRead;
         await page.WaitForURLAsync(host.Url + "/sessions?archive_scope=include_archived");
         await Expect(page.Locator("[data-session-archive]")).ToBeDisabledAsync();
@@ -2200,8 +2217,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         });
 
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-limit").SelectOptionAsync("100");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await page.Locator("#session-load-more").ClickAsync();
         var pageTwo = page.Locator($"[data-session-id='{pageTwoSessionId}']");
         await Expect(pageTwo).ToHaveCountAsync(1);
@@ -2210,7 +2228,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await ownerStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await page.Locator("#session-search").FillAsync("new-filter");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await newFilterReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         releaseOwner.TrySetResult(true);
         await confirmedRefreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -2302,12 +2320,12 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("安定して取得できるか未確認です");
-        await Expect(page.Locator("[data-session-tokens]")).ToContainTextAsync("安定して取得できるか未確認です");
+        await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("未確認");
+        await Expect(page.Locator("[data-session-tokens]")).ToContainTextAsync("未確認");
         await Expect(page.Locator("[data-session-tokens]")).ToContainTextAsync("出力 25");
         await Expect(page.Locator("[data-fact-state='certification-pending']")).ToHaveCountAsync(2);
         await Expect(page.Locator("[data-fact-state='certification-pending'] .fact-state-primary"))
-            .ToHaveTextAsync(["安定して取得できるか未確認です", "安定して取得できるか未確認です"]);
+            .ToHaveTextAsync(["未確認", "未確認"]);
     }
 
     [Fact]
@@ -2347,7 +2365,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         var row = page.Locator("[data-session-row]");
         await Expect(row.Locator("[data-session-summary]")).ToContainTextAsync("再試行: 123,456,789件");
-        await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("安定して取得できるか未確認です");
+        await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("未確認");
         var rowBox = Assert.IsType<LocatorBoundingBoxResult>(await row.BoundingBoxAsync());
         Assert.True(rowBox.Height >= 64);
         Assert.True(await page.Locator("[data-session-row]").EvaluateAsync<bool>(
@@ -2358,14 +2376,14 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var summaryPanel = summaryDisclosure.Locator(".local-monitor-session-fact-panel");
         await Expect(summaryPanel).ToBeVisibleAsync();
         var summaryPanelBox = Assert.IsType<LocatorBoundingBoxResult>(await summaryPanel.BoundingBoxAsync());
-        Assert.True(summaryPanelBox.Height > rowBox.Height);
+        Assert.True(summaryPanelBox.Height > 0 && summaryPanelBox.Height <= 768);
         Assert.True(await summaryPanel.EvaluateAsync<bool>(
             "panel => { const box = panel.getBoundingClientRect(); const point = document.elementFromPoint(box.left + 8, box.top + Math.min(40, box.height - 1)); return point === panel || panel.contains(point); }"));
         await summaryDisclosure.Locator("summary").PressAsync("Enter");
         var tokenDisclosure = row.Locator("[data-session-tokens] .local-monitor-session-fact-disclosure");
         await tokenDisclosure.Locator("summary").PressAsync("Enter");
         await Expect(tokenDisclosure.Locator(".local-monitor-session-fact-panel"))
-            .ToContainTextAsync("安定して取得できるか未確認です");
+            .ToContainTextAsync("未確認");
     }
 
     [Fact]
@@ -2414,41 +2432,41 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var summary = page.Locator("[data-session-summary]");
         await Expect(summary.Locator("[data-summary-family]")).ToHaveCountAsync(4);
         await Expect(summary.Locator(".local-monitor-session-fact-disclosure > summary"))
-            .ToHaveTextAsync("記録状態を確認");
+            .ToHaveTextAsync("記録状態");
         await summary.Locator(".local-monitor-session-fact-disclosure > summary").PressAsync("Enter");
         await Expect(summary.Locator(".local-monitor-session-fact-panel")).ToBeVisibleAsync();
-        await Expect(summary).ToContainTextAsync("ツール: 今回の記録にはありません");
-        await Expect(summary).ToContainTextAsync("サブエージェント: この取得元では記録できません");
-        await Expect(summary).ToContainTextAsync("エラー: 記録が一部欠けています");
-        await Expect(summary).ToContainTextAsync("再試行: 記録が一部欠けています");
+        await Expect(summary).ToContainTextAsync("ツール: なし");
+        await Expect(summary).ToContainTextAsync("サブエージェント: 未対応");
+        await Expect(summary).ToContainTextAsync("エラー: 読取不可");
+        await Expect(summary).ToContainTextAsync("再試行: 読取不可");
         await Expect(summary.Locator("[data-fact-state='not-observed']"))
-            .ToContainTextAsync("今回の記録にはありません");
+            .ToContainTextAsync("なし");
         await Expect(summary.Locator("[data-fact-state='unsupported']"))
-            .ToContainTextAsync("この取得元では記録できません");
+            .ToContainTextAsync("未対応");
         await Expect(summary.Locator(".local-monitor-session-fact-disclosure > summary")).ToBeFocusedAsync();
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
         await page.ScreenshotAsync(new() { Path = ExplorerArtifactPath("session-explorer-unsupported-1366x768.png") });
         await Expect(summary.Locator("[data-summary-family='error'] [data-fact-state='projection-invalid']"))
-            .ToContainTextAsync("記録された形式を安全に確認できません");
+            .ToContainTextAsync("記録形式を読み取れません");
         await Expect(summary.Locator("[data-summary-family='retry'] [data-fact-state='projection-invalid']"))
-            .ToContainTextAsync("表示可能な範囲を超えています");
+            .ToContainTextAsync("表示上限を超えています");
         var identity = page.Locator(".local-monitor-session-identity small");
         await identity.Locator(".local-monitor-session-fact-disclosure > summary").PressAsync("Enter");
         await Expect(identity.Locator(".local-monitor-session-fact-panel")).ToBeVisibleAsync();
-        await Expect(identity).ToContainTextAsync("取得元: VS Code · 記録が一部欠けています");
-        await Expect(identity).ToContainTextAsync("モデル: model-partial · 安定して取得できるか未確認です");
+        await Expect(identity).ToContainTextAsync("取得元: VS Code · 一部欠落");
+        await Expect(identity).ToContainTextAsync("モデル: model-partial · 未確認");
         var tokenDisclosure = page.Locator("[data-session-tokens] .local-monitor-session-fact-disclosure");
         await tokenDisclosure.Locator("summary").PressAsync("Enter");
         await Expect(tokenDisclosure.Locator(".local-monitor-session-fact-panel")).ToBeVisibleAsync();
         await Expect(tokenDisclosure.Locator(".local-monitor-session-fact-panel"))
-            .ToContainTextAsync("記録が一部欠けています");
+            .ToContainTextAsync("一部欠落");
         var timingDisclosure = page.Locator("[data-session-started] .local-monitor-session-fact-disclosure");
         await timingDisclosure.Locator("summary").PressAsync("Enter");
         await Expect(timingDisclosure.Locator(".local-monitor-session-fact-panel")).ToBeVisibleAsync();
         await Expect(timingDisclosure.Locator(".local-monitor-session-fact-panel"))
-            .ToContainTextAsync("記録が一部欠けています");
+            .ToContainTextAsync("読取不可");
         await Expect(timingDisclosure.Locator(".local-monitor-session-fact-panel"))
-            .ToContainTextAsync("検証できません");
+            .ToContainTextAsync("整合性を確認できません");
         var rowBox = Assert.IsType<LocatorBoundingBoxResult>(
             await page.Locator("[data-session-row]").BoundingBoxAsync());
         Assert.True(rowBox.Height >= 64);
@@ -2476,9 +2494,11 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.Locator("#session-search").FillAsync(" exact q ");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync("model,one\n model two ");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-limit").SelectOptionAsync("100");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(2);
         await page.Locator("#session-compare-mode").ClickAsync();
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
@@ -2540,48 +2560,54 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var boundaryQuery = string.Concat(Enumerable.Repeat("😀", 200));
         var boundaryModel = string.Concat(Enumerable.Repeat("😀", 64));
         await page.Locator("#session-search").FillAsync(boundaryQuery);
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync(boundaryModel);
         var boundaryRequest = page.WaitForRequestAsync(request =>
             request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         var accepted = await boundaryRequest;
         using (var acceptedBody = JsonDocument.Parse(accepted.PostData!))
         {
             Assert.Equal(boundaryQuery, acceptedBody.RootElement.GetProperty("q").GetString());
             Assert.Equal(boundaryModel, acceptedBody.RootElement.GetProperty("model")[0].GetString());
         }
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("表示しています");
+        await Expect(page.Locator("#session-explorer-status")).ToHaveTextAsync(new Regex("^[0-9,]+件$"));
 
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync(string.Concat(Enumerable.Repeat("😀", 65)));
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("各128文字");
 
         await page.Locator("#session-search").FillAsync("valid");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync(new string('m', 128));
         var scalarBoundaryRequest = page.WaitForRequestAsync(request =>
             request.Url.EndsWith("/api/local-monitor/v1/sessions", StringComparison.Ordinal));
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await scalarBoundaryRequest;
-        await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("表示しています");
+        await Expect(page.Locator("#session-explorer-status")).ToHaveTextAsync(new Regex("^[0-9,]+件$"));
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync(new string('m', 129));
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("各128文字");
 
         var q = "sensitive-" + new string('x', 191);
         await page.Locator("#session-search").FillAsync(q);
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("検索条件を使用できません");
         await Expect(page.Locator("#session-explorer-status")).Not.ToContainTextAsync("sensitive");
 
         await page.Locator("#session-search").FillAsync("valid");
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync("invalid\u2028model");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("各128文字");
 
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-model").FillAsync("");
         await page.Locator(".local-monitor-session-filter-menu:has(#session-from) > summary").ClickAsync();
         await page.Locator("#session-from").FillAsync(" 2026-01-01T00:00:00.0000000+00:00");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("#session-explorer-status")).ToContainTextAsync("正しいUTC日時");
         Assert.Equal(3, collectionCalls);
         Assert.DoesNotContain("sensitive", page.Url, StringComparison.Ordinal);
@@ -2621,7 +2647,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(1);
         await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("セッションのアーカイブ除外 1件");
         await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("除外後に基準が空になります");
-        await Expect(page.Locator("#session-explorer-status")).ToBeFocusedAsync();
+        await Expect(page.Locator("#session-result-count")).ToBeFocusedAsync();
         Assert.Equal(2, collectionCalls);
     }
 
@@ -2650,7 +2676,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator($"[data-session-id='{SessionId}'] [data-cohort='a']").CheckAsync();
         await page.Locator($"[data-session-id='{SecondSessionId}'] [data-cohort='b']").CheckAsync();
         await page.Locator("#session-search").FillAsync("second");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
 
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(1);
         await Expect(page.Locator("#session-compare-validation")).ToContainTextAsync("条件変更のため比較対象の選択をクリアしました");
@@ -2838,8 +2864,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         });
 
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-limit").SelectOptionAsync("100");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(100);
         await page.Locator("#session-load-more").PressAsync("Enter");
 
@@ -2875,8 +2902,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         });
 
         await page.GotoAsync(host.Url + "/sessions?mode=compare", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await OpenAdvancedFiltersAsync(page);
         await page.Locator("#session-limit").SelectOptionAsync("100");
-        await page.Locator("#session-explorer-filters button[type='submit']").ClickAsync();
+        await page.Locator("#session-explorer-filters > button[type='submit']").ClickAsync();
         await Expect(page.Locator("[data-session-row]")).ToHaveCountAsync(100);
         var firstPageLayout = await page.EvaluateAsync<double[]>("""
             () => {
@@ -2899,7 +2927,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.Locator("#session-load-more").PressAsync("Enter");
         await Expect(page.Locator("[data-session-row][data-session-id='018f0000-0000-7000-8000-000000001001']"))
             .ToHaveCountAsync(1);
-        await Expect(page.Locator("#session-explorer-status")).ToBeFocusedAsync();
+        await Expect(page.Locator("#session-result-count")).ToBeFocusedAsync();
         await page.Locator("[data-cohort='b']").CheckAsync();
 
         await Expect(page.Locator("[data-cohort-count='a']")).ToHaveTextAsync("基準 100件");
@@ -3152,4 +3180,10 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             return ValueTask.FromResult(new LocalRepositoryScopeSnapshot(request, repositories, []));
         }
     }
+    private static async Task OpenAdvancedFiltersAsync(IPage page)
+    {
+        var closed = page.Locator(".local-monitor-advanced-filters:not([open]) > summary");
+        if (await closed.CountAsync() > 0) await closed.ClickAsync();
+    }
+
 }

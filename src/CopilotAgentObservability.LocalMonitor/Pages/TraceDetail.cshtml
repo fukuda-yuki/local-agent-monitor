@@ -21,12 +21,12 @@
          data-trace-status="@(Model.Trace.TraceStatus ?? "")"
          data-error-trace="@(isErrorTrace ? "true" : "false")">
     <nav class="breadcrumb detail-breadcrumb" aria-label="パンくず">
-        <a href="/">リポジトリ</a><span class="breadcrumb-sep">›</span>
+        <a href="/">セッション</a><span class="breadcrumb-sep">›</span>
         <span>トレース</span><span class="breadcrumb-sep">›</span>
         <span class="breadcrumb-current">@title</span>
         <span class="breadcrumb-actions">
             <a class="nav-adjacent" id="trace-cost-link" href="/costs">Estimated cost</a>
-            <a class="nav-adjacent" asp-page="/Alerts" asp-route-trace_id="@Model.TraceId">関連 Alert</a>
+            <a class="nav-adjacent" asp-page="/Alerts" asp-route-trace_id="@Model.TraceId">関連アラート</a>
             @if (Model.RawAvailable)
             {
                 <button type="button" class="copilot-open-btn" id="copilot-open" aria-haspopup="dialog">
@@ -60,8 +60,8 @@
                 <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
             </div>
             <div class="agent-summary" id="agent-summary" aria-live="polite">
-                <strong id="agent-summary-state">Sub-agent利用を確認中…</strong>
-                <span id="agent-summary-meta">Agent実行グラフを読み込み中…</span>
+                <strong id="agent-summary-state">サブエージェントを確認中…</strong>
+                <span id="agent-summary-meta">実行の流れを読み込み中…</span>
             </div>
             <div class="agent-summary" id="trace-source-evidence" aria-live="polite" hidden></div>
             <p class="detail-meta">

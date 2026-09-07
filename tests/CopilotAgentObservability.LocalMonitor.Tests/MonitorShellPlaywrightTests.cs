@@ -212,12 +212,12 @@ public class MonitorShellPlaywrightTests
               document.body.append(target);
               const result = window.LocalMonitorV1FactState.render(target, {
                 state: "projection_invalid",
-                reasonText: "投影結果を安全に表示できません。"
+                reasonText: "表示用データ更新結果を安全に表示できません。"
               });
               return [result.primaryText, target.textContent];
             }
             """);
-        Assert.Equal("記録が一部欠けています", rendered[0]);
+        Assert.Equal("読取不可", rendered[0]);
         Assert.DoesNotContain("projection_invalid", rendered[1], StringComparison.OrdinalIgnoreCase);
 
         var zeroStates = await page.EvaluateAsync<string[]>(
@@ -241,8 +241,8 @@ public class MonitorShellPlaywrightTests
               return [unprovedResult.primaryText, unproved.textContent, String(missingRejected)];
             }
             """);
-        Assert.Equal("今回の記録にはありません", zeroStates[0]);
-        Assert.Contains("実際に使われなかったとは断定できません", zeroStates[1], StringComparison.Ordinal);
+        Assert.Equal("なし", zeroStates[0]);
+        Assert.Equal("なし", zeroStates[1]);
         Assert.Equal("true", zeroStates[2]);
 
         var factParity = await page.EvaluateAsync<string[]>(
@@ -287,9 +287,9 @@ public class MonitorShellPlaywrightTests
             """);
         Assert.Equal(
             [
-                "accepted:この取得元では記録できません",
+                "accepted:未対応",
                 "rejected",
-                "accepted:1件を記録",
+                "accepted:1件",
                 "rejected",
                 "rejected",
                 "rejected",
@@ -592,8 +592,7 @@ public class MonitorShellPlaywrightTests
 
         var receiver = page.Locator("[data-settings-receiver-source]");
         await Expect(receiver.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
-        await Expect(receiver).ToContainTextAsync("今回の記録にはありません");
-        await Expect(receiver).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(receiver).ToContainTextAsync("なし");
         await Expect(receiver).Not.ToContainTextAsync("not_observed");
         await Expect(receiver).Not.ToContainTextAsync("0件");
         Assert.False(await receiver.EvaluateAsync<bool>("node => Boolean(node.querySelector('p p, button button, a a, button a, a button'))"));
@@ -618,7 +617,7 @@ public class MonitorShellPlaywrightTests
             await Expect(receiver).ToContainTextAsync(label);
         }
         await Expect(receiver.Locator("[data-fact-state]")).ToHaveCountAsync(0);
-        await Expect(receiver).Not.ToContainTextAsync("今回の記録にはありません");
+        await Expect(receiver).Not.ToContainTextAsync("なし");
 
         sourceResponse = "empty";
         await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
@@ -634,7 +633,7 @@ public class MonitorShellPlaywrightTests
         await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
         await Expect(diagnostics).ToContainTextAsync("取得元の状態を読み込めませんでした。");
         await Expect(diagnostics.Locator("[data-fact-state]")).ToHaveCountAsync(0);
-        await Expect(diagnostics).Not.ToContainTextAsync("今回の記録にはありません");
+        await Expect(diagnostics).Not.ToContainTextAsync("なし");
     }
 
     [Fact]
@@ -731,8 +730,8 @@ public class MonitorShellPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/sessions?settings=receiver", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("[data-settings-receiver-health]")).ToContainTextAsync("受信状態に注意が必要です");
-        await Expect(page.Locator("[data-settings-receiver-health]")).ToContainTextAsync("投影に遅れがあります");
-        await Expect(page.Locator("[data-settings-section='receiver']")).ToContainTextAsync("投影待ち 7件");
+        await Expect(page.Locator("[data-settings-receiver-health]")).ToContainTextAsync("表示用データ更新に遅れがあります");
+        await Expect(page.Locator("[data-settings-section='receiver']")).ToContainTextAsync("表示用データ更新待ち 7件");
         await Expect(page.Locator("[data-settings-receiver-source]")).ToContainTextAsync("互換性を確認済み");
         await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("開始 2026-08-30 01:02:03 UTC");
         await Expect(page.Locator("[data-settings-receiver-runtime]")).ToContainTextAsync("受信先 HTTP · ループバック · ポート 4320");
@@ -743,7 +742,7 @@ public class MonitorShellPlaywrightTests
         Assert.Contains(requestedUrls, url => url.EndsWith("/api/monitor/source-diagnostics?limit=1", StringComparison.Ordinal));
         await page.Locator("[data-settings-navigation='state']").ClickAsync();
         await Expect(page.Locator("[data-settings-state-receiver]")).Not.ToContainTextAsync("確認しています");
-        await Expect(page.Locator("[data-settings-state-projection]")).ToContainTextAsync("投影待ち 7件");
+        await Expect(page.Locator("[data-settings-state-projection]")).ToContainTextAsync("表示用データ更新待ち 7件");
         await Expect(page.Locator("[data-settings-state-ai]")).ToContainTextAsync("未確認");
         await Expect(page.Locator("[data-settings-state-ai]")).Not.ToContainTextAsync("gpt-5");
         await Expect(page.Locator("[data-settings-state-data]")).ToContainTextAsync("保留 2件");
@@ -770,7 +769,7 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("データベース 4096バイト");
         await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("直近の履歴取り込みは実行中です");
         await Expect(page.Locator("[data-settings-section='storage']")).Not.ToContainTextAsync("running");
-        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: この画面では確認できません。");
+        await Expect(page.Locator("[data-settings-section='storage']")).ToContainTextAsync("自動バックアップ: 状態不明");
         Assert.Contains(requestedUrls, url => url.EndsWith("/api/local-monitor/v1/settings/storage", StringComparison.Ordinal));
         await Expect(page.Locator("[data-settings-section='storage'] a[href='/diagnostics#retention-diagnostics']")).ToHaveCountAsync(1);
         await page.Locator("[data-settings-backup-now]").ClickAsync();
@@ -779,9 +778,9 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-backup-download]")).ToBeVisibleAsync();
         await page.Locator("[data-settings-navigation='diagnostics']").ClickAsync();
         await Expect(page.Locator("[data-settings-diagnostics-health]")).ToContainTextAsync("受信状態に注意が必要です");
-        await Expect(page.Locator("[data-settings-diagnostics-projection]")).ToContainTextAsync("投影待ち 7件");
+        await Expect(page.Locator("[data-settings-diagnostics-projection]")).ToContainTextAsync("表示用データ更新待ち 7件");
         await Expect(page.Locator("[data-settings-diagnostics-source]")).ToContainTextAsync("互換性を確認済み");
-        await Expect(page.Locator("[data-settings-diagnostics-repositories]")).ToContainTextAsync("先頭ページ 0件 · アーカイブ 1件 · リポジトリ未設定のセッション 2件");
+        await Expect(page.Locator("[data-settings-diagnostics-repositories]")).ToContainTextAsync("先頭ページ 0件 · アーカイブ 1件 · 未設定のセッション 2件");
         await Expect(page.Locator("[data-settings-section='diagnostics'] a[href='/diagnostics']")).ToHaveCountAsync(1);
         await page.Locator("[data-settings-navigation='storage']").ClickAsync();
         await page.Locator("[data-settings-backup-now]").ClickAsync();
@@ -972,7 +971,7 @@ public class MonitorShellPlaywrightTests
         var archive = page.Locator("[data-settings-archived-sessions]");
         var search = page.GetByRole(AriaRole.Searchbox, new() { Name = "アーカイブ済みセッションID" });
         var result = page.Locator("[data-settings-archived-session-search-result]");
-        var more = archive.GetByRole(AriaRole.Button, new() { Name = "さらに読み込む" });
+        var more = archive.GetByRole(AriaRole.Button, new() { Name = "さらに表示" });
         await Expect(archive.GetByRole(AriaRole.Link, new() { Name = listedSession, Exact = true })).ToBeVisibleAsync();
         await Expect(more).ToBeEnabledAsync();
 
@@ -1050,7 +1049,7 @@ public class MonitorShellPlaywrightTests
         });
 
         await page.GotoAsync($"{host.Url}/sessions?settings=archive", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
-        var more = page.Locator("[data-settings-archived-sessions]").GetByRole(AriaRole.Button, new() { Name = "さらに読み込む" });
+        var more = page.Locator("[data-settings-archived-sessions]").GetByRole(AriaRole.Button, new() { Name = "さらに表示" });
         await Expect(more).ToBeEnabledAsync();
         await more.EvaluateAsync("button => { button.click(); button.click(); }");
         await Expect(more).ToBeDisabledAsync();

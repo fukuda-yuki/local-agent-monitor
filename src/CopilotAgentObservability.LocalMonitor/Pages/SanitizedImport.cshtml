@@ -9,7 +9,7 @@
     </nav>
 
     <h2 class="monitor-page-title">サニタイズ済み証拠を取り込む</h2>
-    <p class="monitor-subtle">凍結済み v1 バンドルを検証し、変更内容を確認してからトランザクションで取り込みます。raw テレメトリは復元しません。</p>
+    <p class="monitor-subtle">バンドルを検証し、変更内容を確認して取り込みます。本文を含むテレメトリは復元しません。</p>
 
     <section class="panel sanitized-import-select" aria-labelledby="sanitized-import-select-title">
         <h3 id="sanitized-import-select-title">1. バンドルを選択</h3>
@@ -26,7 +26,7 @@
             <span class="monitor-badge" id="sanitized-import-provenance-badge">内部整合性検証済み（出所未証明）</span>
         </div>
         <div id="sanitized-import-preview-content"></div>
-        <p class="sanitized-import-caution">競合がなく、表示された preview digest が選択中のファイルと現在の取り込み状態に一致する場合だけ確定できます。</p>
+        <p class="sanitized-import-caution">競合やファイルの変更がある場合は、再度確認が必要です。</p>
         <button class="monitor-btn monitor-btn-primary" id="sanitized-import-commit-button" type="button" disabled>この内容を取り込む</button>
     </section>
 

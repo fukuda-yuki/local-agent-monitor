@@ -97,9 +97,7 @@ internal sealed record FactStatePresentationRequest(
 
 internal sealed class FactStatePresentation
 {
-    private const string NotObservedPrimary = "今回の記録にはありません";
-    private const string NotObservedDetail =
-        "この記録では呼び出しを確認できませんでした。実際に使われなかったとは断定できません。";
+    private const string NotObservedPrimary = "なし";
 
     private FactStatePresentation(
         string primaryText,
@@ -138,20 +136,20 @@ internal sealed class FactStatePresentation
         {
             FactState.ObservedPositive => (PositiveCountText(count!.Value), null, true),
             FactState.ObservedZero when !request.HasCompleteCoverageProof =>
-                (NotObservedPrimary, NotObservedDetail, false),
+                (NotObservedPrimary, null, false),
             FactState.ObservedZero => ("0件", null, true),
-            FactState.NotObserved => (NotObservedPrimary, NotObservedDetail, false),
-            FactState.Unsupported => ("この取得元では記録できません", null, false),
-            FactState.CaptureGap => ("記録が一部欠けています", null, false),
+            FactState.NotObserved => (NotObservedPrimary, null, false),
+            FactState.Unsupported => ("未対応", null, false),
+            FactState.CaptureGap => ("一部欠落", null, false),
             FactState.CertificationPending =>
-                (PositiveCountText(count!.Value), "安定して取得できるか未確認です。", true),
-            FactState.RawNotCaptured => ("内容は記録されていません", null, false),
-            FactState.RawExpired => ("保存期間を過ぎたため表示できません", null, false),
-            FactState.RawDeleted or FactState.RawReadDenied =>
-                ("保存期間を過ぎたため表示できません", null, false),
-            FactState.ProjectionInvalid => ("記録が一部欠けています", null, false),
+                (PositiveCountText(count!.Value), "未確認", true),
+            FactState.RawNotCaptured => ("なし", null, false),
+            FactState.RawExpired => ("期限切れ", null, false),
+            FactState.RawDeleted => ("削除済み", null, false),
+            FactState.RawReadDenied => ("表示不可", null, false),
+            FactState.ProjectionInvalid => ("読取不可", null, false),
             FactState.Inconsistent =>
-                ("内訳を表示できません", "記録された値に整合しない項目があります。", false),
+                ("不整合", "値が一致しません。", false),
             _ => throw InvalidRequest(),
         };
 
@@ -223,7 +221,7 @@ internal sealed class FactStatePresentation
     }
 
     private static string PositiveCountText(ulong count) =>
-        string.Concat(count.ToString(CultureInfo.InvariantCulture), "件を記録");
+        string.Concat(count.ToString(CultureInfo.InvariantCulture), "件");
 
     private static string? Detail(
         string? fixedText = null,

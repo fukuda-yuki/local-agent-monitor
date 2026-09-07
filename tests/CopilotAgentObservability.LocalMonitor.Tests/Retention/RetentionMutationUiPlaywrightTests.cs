@@ -139,9 +139,9 @@ public sealed class RetentionMutationUiPlaywrightTests
         var previewContent = page.Locator("#retention-preview-content");
         foreach (var requiredPreviewText in new[]
         {
-            fixture.ItemId, "delete_now", "single_item", "正確な項目数", "現在のライフサイクル・ピン・削除状態",
-            "保存先種別の内訳", "ピン解除を含む正確な削除対象", "取得・有効期限・ポリシーの原状態",
-            "保持されるメタデータ・証拠への影響", "除外と進行中 cleanup の競合", "retention_backup_not_purged",
+            fixture.ItemId, "delete_now", "single_item", "対象件数", "現在のライフサイクル・ピン・削除状態",
+            "保存先種別の内訳", "削除対象（ピン解除を含む）", "取得・有効期限・ポリシーの原状態",
+            "保持されるメタデータ・証拠への影響", "除外・削除処理との競合", "retention_backup_not_purged",
             "期待状態バージョン", "対象集合 digest", "preview digest", "確認期限（5 分）",
         })
             await Expect(previewContent).ToContainTextAsync(requiredPreviewText);
@@ -161,7 +161,7 @@ public sealed class RetentionMutationUiPlaywrightTests
         await Expect(page.Locator("#retention-result-content")).ToContainTextAsync("読み取り拒否はい");
         await Expect(page.Locator("#retention-result-content")).ToContainTextAsync("deletion_queued");
         await Expect(page.Locator("#retention-result-content")).ToContainTextAsync("削除日時—");
-        await Expect(page.Locator("#retention-live")).ToContainTextAsync("物理削除の完了は #89 worker 状態で確認してください");
+        await Expect(page.Locator("#retention-live")).ToContainTextAsync("削除の完了は「削除処理の状態」で確認できます");
 
         var mutationBodies = requests
             .Where(request => request.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal))
@@ -316,7 +316,7 @@ public sealed class RetentionMutationUiPlaywrightTests
 
         await Expect(page.Locator("#retention-preview-content")).ToContainTextAsync("empty_not_applicable");
         await Expect(page.Locator("#retention-preview-content")).ToContainTextAsync("no_exact_owned_items");
-        await Expect(page.Locator("#retention-preview-content")).ToContainTextAsync("正確な項目数0");
+        await Expect(page.Locator("#retention-preview-content")).ToContainTextAsync("対象件数0");
         await Expect(page.Locator("#retention-confirm")).ToBeDisabledAsync();
         Assert.Equal(0, confirmationCalls);
     }

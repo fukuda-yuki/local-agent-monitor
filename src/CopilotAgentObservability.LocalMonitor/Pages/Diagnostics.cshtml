@@ -99,7 +99,7 @@
     <div class="panel">
         <div class="panel-head">
             <span class="panel-title">コンポーネント確認</span>
-            <span class="panel-meta">問題があった時だけ読む場所 — 正常時は全行 OK</span>
+            <span class="panel-meta"></span>
         </div>
         <div class="monitor-table-wrapper">
             <table class="monitor-table component-table">
@@ -149,7 +149,7 @@
     <div class="panel">
         <div class="panel-head">
             <span class="panel-title">しきい値（設定値）</span>
-            <span class="panel-meta">readiness contract の実効値</span>
+            <span class="panel-meta">現在の設定</span>
         </div>
         <div class="threshold-list">
             <div class="inspector-meta-row"><span>受信 stall</span><span class="monitor-mono">&lt; @Model.IngestionStallThresholdSeconds s</span></div>
@@ -160,10 +160,10 @@
     <section class="panel historical-import-entry" aria-labelledby="historical-import-entry-heading">
         <div class="panel-head">
             <span class="panel-title" id="historical-import-entry-heading">履歴ソースの統合</span>
-            <span class="panel-meta">明示的な metadata-only preview</span>
+            <span class="panel-meta">メタデータのみ</span>
         </div>
         <div class="historical-import-entry-body">
-            <p class="monitor-subtle">選択した GitHub Copilot CLI または Claude Code の履歴ソースを、確認付きで取り込みます。自動検出や background scan は行いません。</p>
+            <p class="monitor-subtle">GitHub Copilot CLI・Claude Code の履歴を選んで取り込みます。</p>
             <a class="monitor-btn monitor-btn-primary" href="/historical-import">履歴インポートを開く</a>
         </div>
     </section>
@@ -171,7 +171,7 @@
     <section class="panel doctor-panel" id="doctor" aria-labelledby="doctor-heading">
         <div class="panel-head">
             <span class="panel-title" id="doctor-heading">First-Trace Doctor</span>
-            <span class="panel-meta">共通 Doctor 契約による初回トレース確認</span>
+            <span class="panel-meta">初回トレースの接続確認</span>
         </div>
         <div class="doctor-source-control">
             <label for="doctor-source">確認するソース</label>
@@ -202,8 +202,8 @@
             <div class="doctor-evidence" id="doctor-session-target" hidden>
                 <h4 tabindex="-1" id="doctor-session-target-heading">Exact Session</h4>
                 <dl class="doctor-result-grid" id="doctor-session-target-summary"></dl>
-                <a class="panel-link" id="doctor-session-alert-link" href="/alerts">この Session の Alert →</a>
-                <a class="panel-link" id="doctor-session-cost-link" href="/costs">この Session の Cost →</a>
+                <a class="panel-link" id="doctor-session-alert-link" href="/alerts">セッションのアラート →</a>
+                <a class="panel-link" id="doctor-session-cost-link" href="/costs">セッションの費用 →</a>
             </div>
             <div class="doctor-evidence" id="doctor-source-target" hidden>
                 <h4 tabindex="-1" id="doctor-source-target-heading">Exact source diagnostic</h4>
@@ -219,7 +219,7 @@
 
     <details class="raw-section" id="ingestion-history">
         <summary><h3 class="raw-section-title">取り込み履歴</h3></summary>
-        <p class="monitor-subtle">受信した raw record と紐づく trace（sanitized metadata のみ）。</p>
+        <p class="monitor-subtle">受信レコードと関連するトレース</p>
         <div class="monitor-table-wrapper">
             <table class="monitor-table" id="ingestion-history-table">
                 <thead>
@@ -296,7 +296,7 @@
     <section class="panel" id="source-diagnostics">
         <div class="panel-head">
             <span class="panel-title">ソース互換性</span>
-            <span class="panel-meta">受信元の schema と adapter の診断（sanitized metadata のみ）</span>
+            <span class="panel-meta">取得元の記録形式と変換処理</span>
         </div>
         <div class="monitor-table-wrapper">
             <table class="monitor-table">
@@ -357,14 +357,14 @@
     <section class="panel" id="retention-diagnostics">
         <div class="panel-head">
             <span class="panel-title">保持と削除の状態</span>
-            <span class="panel-meta" id="retention-diagnostics-summary">sanitized metadata の固定一覧</span>
+            <span class="panel-meta" id="retention-diagnostics-summary">本文を含まない状態情報</span>
         </div>
-        <p class="monitor-subtle retention-diagnostics-help">対象 ID を選ぶと、その項目だけの保持管理を開きます。近似検索や自由入力は行いません。</p>
+        <p class="monitor-subtle retention-diagnostics-help">項目IDから保持・削除を管理できます。</p>
         <div class="monitor-table-wrapper">
             <table class="monitor-table">
                 <thead>
                     <tr>
-                        <th>正確な項目 ID</th>
+                        <th>項目ID</th>
                         <th>保存先種別</th>
                         <th>状態</th>
                         <th>期限</th>

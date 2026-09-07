@@ -69,7 +69,7 @@
 
   function allowedKeys() {
     if (routeKind === "RepositorySessions") return EXPLORER_KEYS;
-    if (["AllSessions", "UnassignedSessions"].includes(routeKind)) return new Set([...EXPLORER_KEYS].filter(key => key !== "analysis"));
+    if (["RepositorySelection", "AllSessions", "UnassignedSessions"].includes(routeKind)) return new Set([...EXPLORER_KEYS].filter(key => key !== "analysis"));
     if (routeKind === "SessionDetail") return SESSION_KEYS;
     if (routeKind === "ComparisonDetail") return COMPARISON_KEYS;
     return SELECTION_KEYS;
@@ -188,7 +188,7 @@
     const parts = [];
     const order = routeKind === "SessionDetail"
       ? ["execution", "node", "analysis", "settings"]
-      : ["RepositorySessions", "AllSessions", "UnassignedSessions"].includes(routeKind)
+      : ["RepositorySelection", "RepositorySessions", "AllSessions", "UnassignedSessions"].includes(routeKind)
         ? ["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope", "cursor", "mode", "analysis", "settings"]
         : routeKind === "ComparisonDetail" ? ["analysis", "settings"] : ["settings"];
     for (const key of order) append(parts, key, state[key]);
@@ -224,22 +224,22 @@
 
   const formatCount = value => value.toLocaleString("ja-JP");
   const factText = Object.freeze({
-    observed_positive: value => [`${formatCount(value)}件を記録`, null, true],
+    observed_positive: value => [`${formatCount(value)}件`, null, true],
     observed_zero: () => ["0件", null, true],
-    not_observed: () => ["今回の記録にはありません", "この記録では呼び出しを確認できませんでした。実際に使われなかったとは断定できません。", false],
-    unsupported: () => ["この取得元では記録できません", null, false],
-    capture_gap: () => ["記録が一部欠けています", null, false],
-    projection_invalid: () => ["記録が一部欠けています", null, false],
+    not_observed: () => ["なし", null, false],
+    unsupported: () => ["未対応", null, false],
+    capture_gap: () => ["一部欠落", null, false],
+    projection_invalid: () => ["読取不可", null, false],
     certification_pending: value => [
-      value === null || value === undefined ? "安定して取得できるか未確認です" : `${formatCount(value)}件を記録`,
-      value === null || value === undefined ? null : "安定して取得できるか未確認です。",
+      value === null || value === undefined ? "未確認" : `${formatCount(value)}件`,
+      value === null || value === undefined ? null : "未確認",
       value !== null && value !== undefined,
     ],
-    raw_not_captured: () => ["内容は記録されていません", null, false],
-    raw_expired: () => ["保存期間を過ぎたため表示できません", null, false],
-    raw_deleted: () => ["保存期間を過ぎたため表示できません", null, false],
-    raw_read_denied: () => ["保存期間を過ぎたため表示できません", null, false],
-    inconsistent: () => ["内訳を表示できません", "記録された値に整合しない項目があります。", false],
+    raw_not_captured: () => ["なし", null, false],
+    raw_expired: () => ["期限切れ", null, false],
+    raw_deleted: () => ["削除済み", null, false],
+    raw_read_denied: () => ["表示不可", null, false],
+    inconsistent: () => ["不整合", "値が一致しません。", false],
   });
 
   function isAsciiIdentifierCharacter(value) {
@@ -352,25 +352,25 @@
             };
       case "not_observed": return { ...base, state: "not_observed" };
       case "source_unsupported":
-        return { ...base, state: "unsupported", sourceText: "セッション取得元", reasonText: "この項目は取得元で記録されません" };
-      case "capture_gap": return { ...base, state: "capture_gap", reasonText: "この項目の記録が一部欠けています" };
+        return { ...base, state: "unsupported", sourceText: "セッション取得元", reasonText: "取得元がこの項目に未対応です" };
+      case "capture_gap": return { ...base, state: "capture_gap", reasonText: "記録に欠落があります" };
       case "certification_pending": return { ...base, state: "certification_pending" };
-      case "not_captured": return { ...base, state: "raw_not_captured", reasonText: "この項目は記録されていません" };
-      case "expired": return { ...base, state: "raw_expired", reasonText: "この項目は保存期間を過ぎています" };
-      case "redacted": return { ...base, state: "raw_not_captured", reasonText: "この項目は表示用に記録されていません" };
-      case "malformed": return { ...base, state: "projection_invalid", reasonText: "記録された形式を安全に確認できません" };
-      case "oversized": return { ...base, state: "projection_invalid", reasonText: "記録が表示可能な範囲を超えています" };
-      case "projection_invalid": return { ...base, state: "projection_invalid", reasonText: "この項目の記録を検証できません" };
-      case "inconsistent": return { ...base, state: "inconsistent", reasonText: "この項目の値を確定できません" };
+      case "not_captured": return { ...base, state: "raw_not_captured", reasonText: "取得時に保存されていません" };
+      case "expired": return { ...base, state: "raw_expired", reasonText: "保存期間が終了しています" };
+      case "redacted": return { ...base, state: "raw_not_captured", reasonText: "表示用に伏せられています" };
+      case "malformed": return { ...base, state: "projection_invalid", reasonText: "記録形式を読み取れません" };
+      case "oversized": return { ...base, state: "projection_invalid", reasonText: "表示上限を超えています" };
+      case "projection_invalid": return { ...base, state: "projection_invalid", reasonText: "記録の整合性を確認できません" };
+      case "inconsistent": return { ...base, state: "inconsistent", reasonText: "値を確定できません" };
       default: throw new TypeError("invalid session fact");
     }
   }
 
   const captureNotePresentations = Object.freeze({
-    raw_content_not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "内容は記録されていません" },
+    raw_content_not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "内容は保存されていません" },
     raw_content_expired: { state: "raw_expired", recordedCount: null, reasonText: "内容の保存期間は終了しています" },
     source_unsupported: { state: "unsupported", recordedCount: null, sourceText: "セッション取得元", reasonText: "この記録は取得元で提供されません" },
-    capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "この記録が一部欠けています" },
+    capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "記録に欠落があります" },
     certification_pending: { state: "certification_pending", recordedCount: null },
     projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "この記録を検証できません" },
     token_inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "トークン値に整合しない項目があります" },

@@ -185,7 +185,7 @@ public sealed class AlertCenterPlaywrightTests
         await Expect(page.Locator("#alert-detail")).ToContainTextAsync("unknown");
         await Expect(page.Locator("#alert-detail")).ToContainTextAsync("missing");
         await Expect(page.Locator("#alert-rows .alert-row").First).ToContainTextAsync("failure-ratio.critical 0.7 ratio");
-        await Expect(page.Locator("#alert-recurring")).ToContainTextAsync("incomplete_snapshot");
+        await Expect(page.Locator("#alert-recurring")).ToContainTextAsync("一部未取得");
         await Expect(page.Locator("#alert-recurring")).Not.ToContainTextAsync("2 Sessions");
         await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("missing_required_capability");
         await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("context unknown");
@@ -222,7 +222,7 @@ public sealed class AlertCenterPlaywrightTests
 
         await page.Locator($"[data-alert-select='{AlertC}']").ClickAsync();
         await Expect(page.Locator("#alert-detail")).ToContainTextAsync("superseded");
-        await Expect(page.Locator("#alert-detail")).ToContainTextAsync("許可された操作はありません");
+        await Expect(page.Locator("#alert-detail")).ToContainTextAsync("操作なし");
         await page.Locator($"[data-alert-select='{AlertD}']").ClickAsync();
         await Expect(page.Locator("#alert-detail")).ToContainTextAsync("resolved");
         await Expect(page.Locator("[data-alert-action='reopen']")).ToBeVisibleAsync();
@@ -339,7 +339,7 @@ public sealed class AlertCenterPlaywrightTests
         await page.GotoAsync($"{host.Url}/alerts", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#alert-empty")).ToBeVisibleAsync();
         await Expect(page.Locator("#alert-empty")).ToContainTextAsync("アラートはありません");
-        await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("アラートではありません");
+        await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("通知を抑制した記録");
 
         readModel.Snapshot = Snapshot(
             [],
@@ -351,10 +351,10 @@ public sealed class AlertCenterPlaywrightTests
             omittedCoverageFactCount: null);
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#alert-empty")).ToBeVisibleAsync();
-        await Expect(page.Locator("#alert-empty")).ToContainTextAsync("0 件とは断定できません");
-        await Expect(page.Locator("#alert-recurring")).ToContainTextAsync("0 件とは断定できません");
-        await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("省略件数は不明");
-        await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("0 件とは断定できません");
+        await Expect(page.Locator("#alert-empty")).ToContainTextAsync("一部未取得");
+        await Expect(page.Locator("#alert-recurring")).ToContainTextAsync("一部未取得");
+        await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("残りの件数は不明");
+        await Expect(page.Locator("#alert-coverage")).ToContainTextAsync("一部未取得");
 
         readModel.Status = AlertCenterReadStatus.Unavailable;
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });

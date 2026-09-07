@@ -229,18 +229,18 @@
     if (!agentSummary || !agentSummaryState || !agentSummaryMeta) return;
     if (!graph?.summary) {
       agentSummary.classList.add("agent-summary-unavailable");
-      agentSummaryState.textContent = "Sub-agent利用を判定できません";
-      agentSummaryMeta.textContent = "Agent実行グラフを取得できませんでした";
+      agentSummaryState.textContent = "サブエージェント利用は不明";
+      agentSummaryMeta.textContent = "実行の流れを取得できませんでした";
       return;
     }
 
     const summary = graph.summary;
     agentSummary.classList.remove("agent-summary-unavailable");
     agentSummaryState.textContent = summary.agent_presence === "undeterminable"
-      ? "Sub-agent利用を判定できません"
+      ? "サブエージェント利用は不明"
       : summary.subagent_invocation_count > 0
         ? `Sub-agent ${summary.subagent_invocation_count}回検出`
-        : "Sub-agentは検出されませんでした";
+        : "サブエージェント なし";
     const main = summary.main_agent_name ? `main ${summary.main_agent_name}` : "main —";
     const rootAgents = (graph.agents ?? []).filter((agent) => agent.agent_role === "root");
     const rootNames = [...new Set(rootAgents.map((agent) => agent.agent_name).filter(Boolean))];

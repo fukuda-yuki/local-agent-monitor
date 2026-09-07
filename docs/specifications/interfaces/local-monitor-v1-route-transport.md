@@ -179,9 +179,9 @@ The `settings` key is valid on every primary page and has the closed values:
 state | receiver | ai | repositories | archive | storage | diagnostics
 ```
 
-### Repository selection and Compare
+### Compare
 
-`/` accepts only `settings`. `/repositories/{repositoryId}/comparisons/{comparisonId}` accepts, in generated-link order:
+`/repositories/{repositoryId}/comparisons/{comparisonId}` accepts, in generated-link order:
 
 ```text
 analysis, settings
@@ -230,9 +230,10 @@ or the Session overview implicitly. Recovery is an explicit user action.
 
 ### Session Explorer
 
-The three Explorer pages are:
+The four Explorer pages are (Issue #283 adds the all-Session home):
 
 ```text
+/
 /repositories/{repositoryId}/sessions
 /sessions
 /sessions/unassigned
@@ -261,7 +262,7 @@ sort repeated values in ordinal byte order.
 | `analysis` | Omitted or one opaque canonical UUIDv7, and only on Repository Explorer. The retained run must have `scope_kind=repository_selection` and the exact route Repository ID; wrong scope/owner/absence is closed `404 analysis_run_not_found`. |
 | `settings` | The closed Settings token above. |
 
-All/unassigned Explorer forbid `analysis`. `q`, `model`, `scope`, `repository_id`, `limit`, `after`, draft cohort IDs and
+Home/all/unassigned Explorer forbid `analysis`. `q`, `model`, `scope`, `repository_id`, `limit`, `after`, draft cohort IDs and
 any legacy `activity` key are not valid human-URL keys.
 
 Human `from`/`to` values have the exact raw spelling:
@@ -793,7 +794,7 @@ The list retires atomically with #138 Session Explorer integration, not when a
 parser helper or placeholder page lands. In the same integrated host
 composition:
 
-- the three Explorer pages are functional through #134's POST read under its
+- the Explorer pages are functional through #134's POST read under its
   later accepted canonical response contract;
 - the old `/traces` list page is unregistered;
 - there is no interval with both list UIs or with neither functional list.

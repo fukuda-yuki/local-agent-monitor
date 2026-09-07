@@ -274,15 +274,6 @@
     return `${value.toLocaleString("ja-JP")}件`;
   }
 
-  function localTimestamp(value) {
-    const parts = new Intl.DateTimeFormat("ja-JP", {
-      year: "numeric", month: "numeric", day: "numeric",
-      hour: "2-digit", minute: "2-digit", hour12: false,
-    }).formatToParts(new Date(value));
-    const part = type => parts.find(item => item.type === type)?.value ?? "";
-    return `${part("year")}年${part("month")}月${part("day")}日 ${part("hour")}:${part("minute")}`;
-  }
-
   function element(name, className, text) {
     const node = document.createElement(name);
     if (className) node.className = className;
@@ -290,43 +281,27 @@
     return node;
   }
 
-  function renderLastObserved(target, value) {
-    target.replaceChildren();
-    if (value === null) {
-      window.LocalMonitorV1FactState.render(target, { state: "not_observed", recordedCount: null });
-      return;
-    }
-    const time = element("time", null, localTimestamp(value));
-    time.dateTime = value;
-    target.append(time);
+  const scopeNavigation = document.querySelector(".local-monitor-scope-navigation");
+  const compactScope = matchMedia("(max-width: 900px)");
+  if (scopeNavigation) {
+    scopeNavigation.open = !compactScope.matches;
+    compactScope.addEventListener("change", event => { scopeNavigation.open = !event.matches; });
   }
 
   function renderRepository(item) {
     const card = element("article", "local-monitor-repository-card");
     card.dataset.repositoryCard = "";
     card.dataset.repositoryId = item.repository_id;
-    const heading = element("h2", "local-monitor-repository-name", item.display_name);
-    heading.dataset.repositoryName = "";
-    heading.title = item.display_name;
-    const count = element("p", "local-monitor-repository-count", countText(item.active_session_count));
-    count.dataset.repositorySessionCount = "";
-    count.setAttribute("aria-label", `アクティブなセッション ${countText(item.active_session_count)}`);
-    const observed = element("div", "local-monitor-repository-last-observed");
-    observed.dataset.repositoryLastObserved = "";
-    const observedLabel = element("span", "local-monitor-repository-fact-label", "最終記録");
-    const observedValue = element("div", "local-monitor-repository-fact-value");
-    renderLastObserved(observedValue, item.last_observed_at);
-    observed.append(observedLabel, observedValue);
-    const actions = element("div", "local-monitor-repository-card-actions");
-    const open = element("a", "local-monitor-repository-open", "セッションを開く");
-    open.dataset.repositoryOpen = "";
+    const open = element("a", "local-monitor-repository-open", item.display_name);
+    open.dataset.repositoryOpen = ""; open.dataset.repositoryName = "";
+    open.title = item.display_name;
     open.href = window.LocalMonitorV1Paths.repositorySessions(item.repository_id);
-    const manage = element("button", "local-monitor-repository-manage", "管理");
-    manage.type = "button";
-    manage.dataset.repositoryManage = "";
-    manage.addEventListener("click", () => openRepositoryManagement(item, manage));
-    actions.append(open, manage);
-    card.append(heading, count, observed);
+    if (window.location.pathname === open.pathname) open.setAttribute("aria-current", "page");
+    else if (window.location.pathname.startsWith(`/repositories/${item.repository_id}/comparisons/`)) open.setAttribute("aria-current", "location");
+    const count = element("span", "local-monitor-repository-count", countText(item.active_session_count));
+    count.dataset.repositorySessionCount = "";
+    count.setAttribute("aria-label", `セッション ${countText(item.active_session_count)}`);
+    card.append(open, count);
     if (item.assignment_conflict_count > 0) {
       const conflict = element("a", "local-monitor-repository-conflict",
         `割り当ての確認が必要 ${countText(item.assignment_conflict_count)}`);
@@ -334,7 +309,6 @@
       conflict.href = window.LocalMonitorV1Paths.unassignedSessions();
       card.append(conflict);
     }
-    card.append(actions);
     return card;
   }
 
@@ -343,7 +317,7 @@
     if (!status) return;
     status.replaceChildren(document.createTextNode(text));
     if (retry) {
-      const button = element("button", "local-monitor-repository-inline-action", "もう一度読み込む");
+      const button = element("button", "local-monitor-repository-inline-action", "再読み込み");
       button.type = "button";
       button.addEventListener("click", retry, { once: true });
       status.append(document.createTextNode(" "), button);
@@ -352,6 +326,8 @@
 
   function renderRoot() {
     if (!root || !rootState.totals) return;
+    const activeScope = root.querySelector(window.location.pathname === "/sessions/unassigned" ? "#unassigned-sessions-entry" : ["/", "/sessions"].includes(window.location.pathname) ? "#all-sessions-entry" : "[aria-current=page]");
+    activeScope?.setAttribute("aria-current", "page");
     root.querySelector("[data-all-session-count]").textContent = countText(rootState.totals.allSessionCount);
     const unassigned = root.querySelector("#unassigned-sessions-entry");
     unassigned.hidden = rootState.totals.unassignedActiveSessionCount === 0;
@@ -362,8 +338,8 @@
     loadMore.hidden = rootState.nextCursor === null;
     loadMore.disabled = false;
     setRootStatus(rootState.repositories.length === 0
-      ? "登録されたアクティブなリポジトリはありません。"
-      : `${countText(rootState.repositories.length)}のリポジトリを表示しています。`);
+      ? "リポジトリなし"
+      : "");
   }
 
   function sameTotals(state, page) {
@@ -459,7 +435,7 @@
     createForm.id = "repository-create-form";
     const createHeading = element("h4", null, "リポジトリを追加");
     const createDisplay = labeledInput("表示名", "repository-create-display-name", "text", 200);
-    const createLocator = labeledInput("GitHub locator（任意）", "repository-create-github-locator", "text", 2048);
+    const createLocator = labeledInput("GitHub URL（任意）", "repository-create-github-locator", "text", 2048);
     const createSubmit = element("button", null, "追加");
     createSubmit.type = "submit";
     createForm.append(createHeading, createDisplay.label, createLocator.label, createSubmit);
@@ -468,7 +444,7 @@
     const unassignedEntry = element("a", "local-monitor-repository-inline-action");
     unassignedEntry.href = window.LocalMonitorV1Paths.unassignedSessions();
     const repositoriesList = element("div", "local-monitor-repository-settings-list");
-    const repositoriesLoadMore = element("button", null, "さらに読み込む");
+    const repositoriesLoadMore = element("button", null, "さらに表示");
     repositoriesLoadMore.type = "button";
     repositoriesLoadMore.hidden = true;
     const manager = element("section", "local-monitor-repository-manager");
@@ -489,7 +465,7 @@
     renameSubmit.disabled = true;
     renameForm.append(renameDisplay.label, renameSubmit);
     const archiveNote = element("p", "local-monitor-repository-archive-note",
-      "アーカイブは元に戻せる管理情報です。セッションのアーカイブ状態や割り当ては変更しません。");
+      "一覧から非表示にします。復元できます。所属セッションは変更しません。");
     archiveNote.id = "repository-archive-confirmation-description";
     const archiveConfirmation = document.createElement("label");
     archiveConfirmation.className = "local-monitor-repository-archive-confirmation";
@@ -515,7 +491,7 @@
     const archiveStatus = element("p", "local-monitor-repository-settings-status", "リポジトリを読み込んでいます。");
     archiveStatus.setAttribute("aria-live", "polite");
     const archiveList = element("div", "local-monitor-repository-settings-list");
-    const archiveLoadMore = element("button", null, "さらに読み込む");
+    const archiveLoadMore = element("button", null, "さらに表示");
     archiveLoadMore.type = "button";
     archiveLoadMore.hidden = true;
     archiveSection.append(archiveHeading, archiveStatus, archiveList, archiveLoadMore);
@@ -550,7 +526,7 @@
   function setSettingsStatus(target, text, retry) {
     target.replaceChildren(document.createTextNode(text));
     if (retry) {
-      const button = element("button", "local-monitor-repository-inline-action", "もう一度読み込む");
+      const button = element("button", "local-monitor-repository-inline-action", "再読み込み");
       button.type = "button";
       button.addEventListener("click", retry, { once: true });
       target.append(document.createTextNode(" "), button);
@@ -630,7 +606,7 @@
     if (document.activeElement !== settingsDom.renameDisplay) settingsDom.renameDisplay.value = selected.display_name;
     settingsDom.renameSubmit.disabled = settingsState.numericRevision === null;
     setSettingsStatus(settingsDom.renameStatus, settingsState.numericRevision === null
-      ? "変更に必要な情報を確認しています。" : "表示名を変更できます。");
+      ? "更新情報を確認中…" : "");
   }
 
   function renderSettings() {
@@ -640,10 +616,10 @@
     settingsDom.repositoriesList.replaceChildren(...active.map(renderRepositorySettingsItem));
     settingsDom.archiveList.replaceChildren(...archived.map(renderArchivedSettingsItem));
     setSettingsStatus(settingsDom.repositoriesStatus,
-      active.length === 0 ? "登録されたアクティブなリポジトリはありません。" : `${countText(active.length)}を表示しています。`);
-    settingsDom.unassignedEntry.textContent = `リポジトリ未設定のセッション ${countText(settingsState.totals.unassignedActiveSessionCount)}`;
+      active.length === 0 ? "リポジトリなし" : `${countText(active.length)}を表示しています。`);
+    settingsDom.unassignedEntry.textContent = `未設定のセッション ${countText(settingsState.totals.unassignedActiveSessionCount)}`;
     setSettingsStatus(settingsDom.archiveStatus,
-      archived.length === 0 ? "アーカイブ済みリポジトリはありません。" : `${countText(archived.length)}を表示しています。`);
+      archived.length === 0 ? "アーカイブなし" : `${countText(archived.length)}を表示しています。`);
     settingsDom.repositoriesLoadMore.hidden = settingsState.nextCursor === null;
     settingsDom.archiveLoadMore.hidden = settingsState.nextCursor === null;
     settingsDom.repositoriesLoadMore.disabled = false;
@@ -855,7 +831,7 @@
       });
     } catch (error) {
       if (!isCurrent() || error instanceof DOMException && error.name === "AbortError") return;
-      showResult("リポジトリを追加できませんでした。入力内容を確認して、もう一度お試しください。", true);
+      showResult("追加に失敗しました。入力内容を確認してください。", true);
     }
   }
 
@@ -903,10 +879,10 @@
           if (!isCurrent()) return;
           settingsDom.renameDisplay.value = draft;
         }
-        showResult("情報が更新されています。最新の状態を確認して、もう一度実行してください。", true);
+        showResult("情報が更新されました。再読み込みしてやり直してください。", true);
         return;
       }
-      showResult("表示名を変更できませんでした。入力内容を確認して、もう一度お試しください。", true);
+      showResult("変更に失敗しました。入力内容を確認してください。", true);
     }
   }
 
@@ -939,7 +915,7 @@
       if (error instanceof ApiFailure && error.code === "revision_conflict") {
         await refreshSettings("repositories");
         if (!isCurrent()) return;
-        showResult("情報が更新されています。最新の状態を確認して、もう一度実行してください。", true);
+        showResult("情報が更新されました。再読み込みしてやり直してください。", true);
         return;
       }
       showResult("リポジトリをアーカイブできませんでした。もう一度お試しください。", true);
@@ -971,7 +947,7 @@
       if (error instanceof ApiFailure && error.code === "revision_conflict") {
         await refreshSettings("archive");
         if (!isCurrent()) return;
-        showResult("情報が更新されています。最新の状態を確認して、もう一度実行してください。", true);
+        showResult("情報が更新されました。再読み込みしてやり直してください。", true);
         return;
       }
       showResult("リポジトリを復元できませんでした。もう一度お試しください。", true);

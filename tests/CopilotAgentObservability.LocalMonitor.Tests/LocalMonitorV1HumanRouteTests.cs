@@ -73,7 +73,6 @@ public sealed class LocalMonitorV1HumanRouteTests
     private const string RepositoryId = "018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071";
     private const string SessionId = "018f2b4e-7c1a-7f1a-9a2b-6c3d4e5f6072";
     private const string ComparisonId = "018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073";
-    private const string RepositorySelectionRenderer = "/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml";
     private const string SessionExplorerRenderer = "/Pages/Shared/LocalMonitorV1/_SessionExplorer.cshtml";
     private const string SessionWorkspaceRenderer = "/Pages/Shared/LocalMonitorV1/_SessionWorkspace.cshtml";
     private const string RepositoryCompareRenderer = "/Pages/Shared/LocalMonitorV1/_RepositoryCompare.cshtml";
@@ -172,8 +171,7 @@ public sealed class LocalMonitorV1HumanRouteTests
 
     public static TheoryData<string, string[]> RendererOwnership => new()
     {
-        { RepositorySelectionRenderer, ["/"] },
-        { SessionExplorerRenderer, [$"/repositories/{RepositoryId}/sessions", "/sessions", "/sessions/unassigned"] },
+        { SessionExplorerRenderer, ["/", $"/repositories/{RepositoryId}/sessions", "/sessions", "/sessions/unassigned"] },
         { SessionWorkspaceRenderer, [$"/sessions/{SessionId}"] },
     };
 
@@ -226,7 +224,7 @@ public sealed class LocalMonitorV1HumanRouteTests
     public async Task MissingFailedOrAmbiguousRendererRemainsClosedUnavailable(RendererLookupOutcome outcome)
     {
         using var temp = new MonitorTempDirectory();
-        var viewEngine = new ControlledRazorViewEngine(RepositorySelectionRenderer, outcome);
+        var viewEngine = new ControlledRazorViewEngine(SessionExplorerRenderer, outcome);
         await using var host = await MonitorTestHost.StartAsync(
             temp,
             testOptions: RendererOptions(viewEngine));
@@ -247,7 +245,7 @@ public sealed class LocalMonitorV1HumanRouteTests
         const string exceptionMessage = "controlled_nonfatal_renderer_lookup_failure";
         var exception = (Exception)Activator.CreateInstance(exceptionType, exceptionMessage)!;
         var viewEngine = new ControlledRazorViewEngine(
-            RepositorySelectionRenderer,
+            SessionExplorerRenderer,
             RendererLookupOutcome.Available,
             exception);
         await using var host = await MonitorTestHost.StartAsync(
@@ -357,7 +355,7 @@ public sealed class LocalMonitorV1HumanRouteTests
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(
             temp,
-            testOptions: RendererOptions(RepositorySelectionRenderer));
+            testOptions: RendererOptions(SessionExplorerRenderer));
         using var get = await host.Client.GetAsync("/");
         using var head = await host.Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/"));
 

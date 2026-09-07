@@ -26,7 +26,7 @@ public sealed class FactStatePresentationTests
     {
         {
             "positive",
-            "1件を記録",
+            "1件",
             null,
             true
         },
@@ -38,79 +38,79 @@ public sealed class FactStatePresentationTests
         },
         {
             "not-observed",
-            "今回の記録にはありません",
-            "この記録では呼び出しを確認できませんでした。実際に使われなかったとは断定できません。",
+            "なし",
+            null,
             false
         },
         {
             "unsupported",
-            "この取得元では記録できません",
+            "未対応",
             "取得元: GitHub Copilot Chat。この取得元はスキルを識別する情報を提供しません。",
             false
         },
         {
             "capture-gap",
-            "記録が一部欠けています",
-            "取得元: GitHub Copilot Chat。投影段階でトークン値を保持できませんでした。",
+            "一部欠落",
+            "取得元: GitHub Copilot Chat。表示用データ更新段階でトークン値を保持できませんでした。",
             false
         },
         {
             "malformed",
-            "記録が一部欠けています",
+            "読取不可",
             "形式を確認できない記録が含まれています。",
             false
         },
         {
             "oversized",
-            "記録が一部欠けています",
+            "読取不可",
             "表示上限を超えた記録が含まれています。",
             false
         },
         {
             "projection-invalid",
-            "記録が一部欠けています",
-            "投影段階で整合性を確認できませんでした。",
+            "読取不可",
+            "表示用データ更新段階で整合性を確認できませんでした。",
             false
         },
         {
             "certification-pending",
-            "3件を記録",
-            "安定して取得できるか未確認です。取得元: GitHub Copilot CLI。取得条件を限定した確認がまだ完了していません。",
+            "3件",
+            "未確認。取得元: GitHub Copilot CLI。取得条件を限定した確認がまだ完了していません。",
             true
         },
         {
             "expired",
-            "保存期間を過ぎたため表示できません",
+            "期限切れ",
             "この内容の保存期間は終了しています。",
             false
         },
         {
             "redacted",
-            "内容は記録されていません",
+            "なし",
             "機密情報を除外したため内容を保存していません。",
             false
         },
         {
             "not-captured",
-            "内容は記録されていません",
+            "なし",
             "取得時に内容の保存が有効ではありませんでした。",
             false
         },
         {
             "inconsistent-cache",
-            "内訳を表示できません",
-            "記録された値に整合しない項目があります。キャッシュ値が入力トークン合計を上回っています。",
+            "不整合",
+            "値が一致しません。キャッシュ値が入力トークン合計を上回っています。",
             false
         },
         {
             "mixed-source-version",
-            "今回の記録にはありません",
-            "この記録では呼び出しを確認できませんでした。実際に使われなかったとは断定できません。取得元: 複数の取得元・バージョン。完全な対象範囲を証明できません。",
+            "なし",
+            "取得元: 複数の取得元・バージョン。完全な対象範囲を証明できません。",
             false
         },
         {
             "archived-context",
-            "2件を記録",
+            "2件",
             "アーカイブされたセッションの記録です。",
             true
         },
@@ -194,7 +194,7 @@ public sealed class FactStatePresentationTests
         var presentation = FactStatePresentation.Resolve(
             new(FactState.ObservedZero, new RecordedFactCount(0)));
 
-        Assert.Equal("今回の記録にはありません", presentation.PrimaryText);
+        Assert.Equal("なし", presentation.PrimaryText);
         Assert.DoesNotContain("0件", presentation.PrimaryText);
         Assert.False(presentation.AllowsDerivedVisualization);
     }
@@ -277,9 +277,9 @@ public sealed class FactStatePresentationTests
     }
 
     [Theory]
-    [InlineData(1UL, "1件を記録")]
-    [InlineData(12UL, "12件を記録")]
-    [InlineData(1234UL, "1234件を記録")]
+    [InlineData(1UL, "1件")]
+    [InlineData(12UL, "12件")]
+    [InlineData(1234UL, "1234件")]
     public void Resolve_PositiveCountUsesDeterministicDisplayLabel(
         ulong count,
         string expected)
@@ -309,8 +309,8 @@ public sealed class FactStatePresentationTests
                 FactState.CertificationPending,
                 new RecordedFactCount(12)));
 
-        Assert.Equal("12件を記録", presentation.PrimaryText);
-        Assert.Contains("安定して取得できるか未確認です", presentation.DetailText);
+        Assert.Equal("12件", presentation.PrimaryText);
+        Assert.Contains("未確認", presentation.DetailText);
     }
 
     [Fact]
@@ -319,33 +319,33 @@ public sealed class FactStatePresentationTests
         var presentation = FactStatePresentation.Resolve(
             new(FactState.Inconsistent));
 
-        Assert.Equal("内訳を表示できません", presentation.PrimaryText);
+        Assert.Equal("不整合", presentation.PrimaryText);
         Assert.False(presentation.AllowsDerivedVisualization);
     }
 
     [Theory]
     [InlineData((int)FactState.RawDeleted)]
     [InlineData((int)FactState.RawReadDenied)]
-    public void Resolve_DeletedAndReadDeniedUseTheAcceptedGroupedUnavailablePresentation(int stateValue)
+    public void Resolve_DeletedAndReadDeniedKeepDistinctConciseLabels(int stateValue)
     {
         var presentation = FactStatePresentation.Resolve(
             new(
                 (FactState)stateValue,
                 Explanation: new(ReasonText: "保存済み内容へアクセスできません。")));
 
-        Assert.Equal("保存期間を過ぎたため表示できません", presentation.PrimaryText);
+        Assert.Equal(stateValue == (int)FactState.RawDeleted ? "削除済み" : "表示不可", presentation.PrimaryText);
         Assert.False(presentation.AllowsDerivedVisualization);
     }
 
     [Fact]
-    public void Resolve_ProjectionInvalidUsesTheSharedCaptureGapPresentation()
+    public void Resolve_ProjectionInvalidKeepsItsDistinctConciseLabel()
     {
         var presentation = FactStatePresentation.Resolve(
             new(
                 FactState.ProjectionInvalid,
-                Explanation: new(ReasonText: "投影結果を安全に表示できません。")));
+                Explanation: new(ReasonText: "表示用データ更新結果を安全に表示できません。")));
 
-        Assert.Equal("記録が一部欠けています", presentation.PrimaryText);
+        Assert.Equal("読取不可", presentation.PrimaryText);
         Assert.False(presentation.AllowsDerivedVisualization);
     }
 
@@ -409,7 +409,7 @@ public sealed class FactStatePresentationTests
             FactStatePresentation.Resolve(
                 new(
                     FactState.CaptureGap,
-                    Explanation: new(ReasonText: "投影段階で記録を保持できませんでした。"))),
+                    Explanation: new(ReasonText: "表示用データ更新段階で記録を保持できませんでした。"))),
             FactStatePresentation.Resolve(
                 new(
                     FactState.CertificationPending,
@@ -622,7 +622,7 @@ public sealed class FactStatePresentationTests
         var decoded = WebUtility.HtmlDecode(html);
 
         Assert.Contains("&lt;img src=x onerror=alert(1)&gt;", html);
-        Assert.Contains("1件を記録", decoded);
+        Assert.Contains("1件", decoded);
         Assert.Contains("取得元: <取得元>。", decoded);
         Assert.Contains("<img src=x onerror=alert(1)>", decoded);
         Assert.DoesNotContain("<img", html, StringComparison.OrdinalIgnoreCase);
@@ -642,11 +642,12 @@ public sealed class FactStatePresentationTests
         var decoded = WebUtility.HtmlDecode(html);
 
         Assert.Contains(
-            "<span class=\"fact-state-primary\">今回の記録にはありません</span>",
+            "<span class=\"fact-state-primary\">なし</span>",
             decoded);
         Assert.Contains("<details class=\"fact-state-explanation\">", decoded);
         Assert.Contains("<summary>表示の理由</summary>", decoded);
-        Assert.Contains("実際に使われなかったとは断定できません", decoded);
+        Assert.Contains("このセッションの記録だけを確認しました。", decoded);
+        Assert.DoesNotContain("実際に使われなかった", decoded);
         Assert.DoesNotContain("title=", html, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -661,8 +662,8 @@ public sealed class FactStatePresentationTests
         var html = await RenderPartialAsync(presentation);
         var decoded = WebUtility.HtmlDecode(html);
 
-        Assert.Contains("内訳を表示できません", decoded);
-        Assert.Contains("記録された値に整合しない項目があります", decoded);
+        Assert.Contains("不整合", decoded);
+        Assert.Contains("値が一致しません", decoded);
         Assert.DoesNotContain("125%", decoded);
         Assert.DoesNotContain("<meter", decoded, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("<progress", decoded, StringComparison.OrdinalIgnoreCase);
@@ -744,16 +745,16 @@ public sealed class FactStatePresentationTests
                 FactState.CaptureGap,
                 Explanation: new(
                     "GitHub Copilot Chat",
-                    "投影段階でトークン値を保持できませんでした。")),
+                    "表示用データ更新段階でトークン値を保持できませんでした。")),
             "malformed" => new(
-                FactState.CaptureGap,
+                FactState.ProjectionInvalid,
                 Explanation: new(ReasonText: "形式を確認できない記録が含まれています。")),
             "oversized" => new(
-                FactState.CaptureGap,
+                FactState.ProjectionInvalid,
                 Explanation: new(ReasonText: "表示上限を超えた記録が含まれています。")),
             "projection-invalid" => new(
-                FactState.CaptureGap,
-                Explanation: new(ReasonText: "投影段階で整合性を確認できませんでした。")),
+                FactState.ProjectionInvalid,
+                Explanation: new(ReasonText: "表示用データ更新段階で整合性を確認できませんでした。")),
             "certification-pending" => new(
                 FactState.CertificationPending,
                 new RecordedFactCount(3),

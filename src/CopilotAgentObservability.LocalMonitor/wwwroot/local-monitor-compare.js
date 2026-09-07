@@ -252,21 +252,21 @@
   }
 
   function renderFactState(target, token) {
-    if (token === "not_observed") { target.textContent = "この比較値は未記録です"; return; }
+    if (token === "not_observed") { target.textContent = "なし"; return; }
     const presentations = {
       recorded: { state: "observed_positive", recordedCount: 1n },
       explicit_zero: { state: "observed_zero", recordedCount: 0n, hasCompleteCoverageProof: true, sourceText: "保存済み比較", reasonText: "保存時点で明示的に 0 です" },
       not_observed: { state: "not_observed", recordedCount: null },
-      source_unsupported: { state: "unsupported", recordedCount: null, sourceText: "セッション取得元", reasonText: "この項目は取得元で記録されません" },
-      capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "この項目の記録が一部欠けています" },
+      source_unsupported: { state: "unsupported", recordedCount: null, sourceText: "セッション取得元", reasonText: "取得元がこの項目に未対応です" },
+      capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "記録に欠落があります" },
       certification_pending: { state: "certification_pending", recordedCount: null },
-      not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は記録されていません" },
-      expired: { state: "raw_expired", recordedCount: null, reasonText: "この項目は保存期間を過ぎています" },
+      not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "取得時に保存されていません" },
+      expired: { state: "raw_expired", recordedCount: null, reasonText: "保存期間が終了しています" },
       deleted: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は削除されています" },
       read_denied: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は読み取れません" },
-      inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "この項目の値を確定できません" },
-      projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "この項目の記録を検証できません" },
-      too_large: { state: "projection_invalid", recordedCount: null, reasonText: "記録が表示可能な範囲を超えています" },
+      inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "値を確定できません" },
+      projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "記録の整合性を確認できません" },
+      too_large: { state: "projection_invalid", recordedCount: null, reasonText: "表示上限を超えています" },
       projection_unavailable: { state: "not_observed", recordedCount: null, reasonText: "保存済みの値を利用できません" },
     };
     window.LocalMonitorV1FactState.render(target, presentations[token] ?? presentations.projection_invalid);
@@ -338,10 +338,10 @@
             && result.values.some(value => value.key === `a_${relativeBase ? `${relativeBase}_` : ""}median` && value.value === "0");
           const reason = zeroBaseline ? "基準が0のため、相対差は計算できません。"
             : isDifference ? "比較可能な値が揃っていません。"
-            : result.row_key === "session_duration" ? "確定したSessionの開始・終了が未記録です。観測活動範囲とは別の値です。"
-            : result.row_key.endsWith("versions") ? "取得元の版が未記録です。互換性の判定とは別です。"
-            : /tokens|cache|input/.test(result.row_key) ? "この成分の比較値が未記録です。記録された他の成分は利用できます。"
-            : "この呼出し・活動の比較値が未記録です。未使用やゼロとは断定できません。";
+            : result.row_key === "session_duration" ? "開始・終了の記録がありません。"
+            : result.row_key.endsWith("versions") ? "バージョンの記録がありません。"
+            : /tokens|cache|input/.test(result.row_key) ? "この成分の比較値がありません。"
+            : "比較値の記録がありません。";
           owner.append(element("p", null, reason));
           continue;
         }
@@ -570,7 +570,7 @@
     for (const reference of Array.isArray(references) ? references : []) {
       const href = aiEvidenceLink(reference);
       if (!href) continue;
-      const link = element("a", null, "正確な根拠を開く"); link.href = href; target.append(link);
+      const link = element("a", null, "根拠を開く"); link.href = href; target.append(link);
     }
   }
 
@@ -601,11 +601,11 @@
     if (result.improvement_suggestions.length) aiResult.append(element("h4", null, "改善案（AIによる提案）"));
     for (const suggestion of result.improvement_suggestions) {
       const article = element("article");
-      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "期待される効果（AIによる提案）"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
+      for (const [key, label] of [["target_label", "対象"], ["rationale", "理由"], ["concrete_change", "変更案"], ["expected_effect", "期待される効果"], ["risks_or_limitations", "リスク・制約"]]) appendAiField(article, label, suggestion[key]);
       appendAiEvidence(article, suggestion.evidence_refs); aiResult.append(article);
     }
     if (result.limitations.length) { aiResult.append(element("h4", null, "制約")); for (const limitation of result.limitations) aiResult.append(element("p", null, String(limitation))); }
-    const evidence = element("section"); evidence.append(element("h4", null, "正確な根拠"));
+    const evidence = element("section"); evidence.append(element("h4", null, "根拠"));
     const evidenceList = element("ul"); for (const href of acceptedEvidence) { const item = element("li"); const link = element("a", null, href); link.href = href; item.append(link); evidenceList.append(item); }
     evidence.append(evidenceList); aiResult.append(evidence);
     if (result.provenance && typeof result.provenance === "object") {

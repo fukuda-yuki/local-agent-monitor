@@ -22,11 +22,11 @@ public sealed class RuntimeBackupPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/backup-restore", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "runtime backup と restore", Exact = true })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "バックアップ・復元", Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByText("raw_content_included", new() { Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByText("not_repository_safe", new() { Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByText("retention_backup_not_purged", new() { Exact = true })).ToBeVisibleAsync();
-        await Expect(page.GetByLabel("検査する backup archive")).ToBeVisibleAsync();
+        await Expect(page.GetByLabel("バックアップZIP")).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Status)).ToHaveAttributeAsync("aria-labelledby", "result-heading");
         await Expect(page.GetByText("config-cli runtime-backup restore --bundle <bundle.zip> --database <monitor.db>", new() { Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { NameRegex = new("restore", System.Text.RegularExpressions.RegexOptions.IgnoreCase) })).ToHaveCountAsync(0);
