@@ -17,6 +17,41 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     private const string AiLatestRunId = "018f0000-0000-7000-8000-000000000073";
 
     [Fact]
+    public async Task InvestigationShowsFullConversationAndCallScopeWithoutReplacingSessionFacts()
+    {
+        using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true }); var page = await browser.NewPageAsync();
+        var (summaryText, timeline, node, revision) = InspectorDocuments("event");
+        var summary = JsonNode.Parse(summaryText)!.AsObject();
+        var nodeId = node["node"]!["node_id"]!.GetValue<string>(); var executionId = node["execution"]!["execution_id"]!.GetValue<string>();
+        summary["session"]!["model"]!["values"] = new JsonArray("model-a", "model-b"); summary["session"]!["version"]!["values"] = new JsonArray("1.0", "2.0");
+        summary["llm_calls"] = JsonNode.Parse($$"""[{"node_id":"{{nodeId}}","execution_id":"{{executionId}}","requested_model":"requested-a","response_model":"observed-b"}]""");
+        var messages = summary["conversation"]!.AsArray();
+        messages[0]!["call_node_id"] = nodeId;
+        var extra = messages[0]!.DeepClone(); extra["node_id"] = "node-11111111111111111111111111111111"; extra["content_state"] = "expired"; messages.Add(extra);
+        var response = messages[0]!.DeepClone(); response["node_id"] = "node-22222222222222222222222222222222"; response["role"] = "assistant"; response["part"] = "event_content"; messages.Add(response);
+        node["node"]!["kind"] = "llm_call"; timeline["items"]![0]!["kind"] = "llm_call";
+        node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"llm_call","requested_model":{"state":"recorded","value":"requested-a"},"response_model":{"state":"recorded","value":"observed-b"},"observation_scope":"exact_call"}""");
+        node["node"]!["tokens"]!["input"] = JsonNode.Parse("""{"state":"recorded","value":41}""");
+        var full = new string('x', 300) + "<script>window.__injected=true</script>終端";
+        await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString())));
+        await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
+        await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
+        await page.RouteAsync("**/nodes/*/content?*", r => { var isResponse = r.Request.Url.Contains("22222222222222222222222222222222"); var content = ContentDocument(revision, isResponse ? "event_content" : "instruction", isResponse ? "exact response" : full); content["node_id"] = isResponse ? "node-22222222222222222222222222222222" : nodeId; return r.FulfillAsync(Json(content.ToJsonString())); });
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
+        var journey = page.Locator("[data-session-conversation]"); await Expect(journey.Locator("li")).ToHaveCountAsync(3); await Expect(journey).ToContainTextAsync("期限切れ");
+        await journey.GetByRole(AriaRole.Button, new() { Name = "全文を表示" }).First.ClickAsync(); await Expect(page.Locator("[data-raw-content-text]")).ToHaveTextAsync(full); Assert.False(await page.EvaluateAsync<bool>("() => Boolean(window.__injected)"));
+        await page.Locator("[data-raw-content-close]").ClickAsync();
+        await journey.GetByRole(AriaRole.Button, new() { Name = "同じ呼び出しの応答", Exact = true }).First.ClickAsync(); await Expect(page.Locator("[data-raw-content-text]")).ToHaveTextAsync("exact response"); await page.Locator("[data-raw-content-close]").ClickAsync();
+        await journey.GetByRole(AriaRole.Button, new() { Name = "この記録のLLM呼び出し" }).First.ClickAsync();
+        await Expect(page.Locator("[data-inspector-kind=llm_call]")).ToContainTextAsync("このLLM呼び出しのみ"); await Expect(page.Locator("[data-inspector-kind=llm_call]")).ToContainTextAsync("41");
+        await Expect(page.Locator("[data-inspector-close]")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Escape"); await Expect(journey.GetByRole(AriaRole.Button, new() { Name = "この記録のLLM呼び出し" }).First).ToBeFocusedAsync();
+        await page.Locator("[data-session-overview-open]").ClickAsync();
+        await Expect(page.Locator("[data-session-overview-model]")).ToContainTextAsync("model-a / model-b"); await Expect(page.Locator("[data-session-overview-version]")).ToContainTextAsync("1.0 / 2.0");
+    }
+
+    [Fact]
     public async Task ServerSummaryWithTiedStartsUsesSourceOrdinalBeforeExecutionId()
     {
         using var temp = new MonitorTempDirectory();
@@ -986,7 +1021,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         if (kind == "retry") await Expect(inspector).ToContainTextAsync("復旧: はい");
         if (kind == "error") await Expect(inspector).ToContainTextAsync("状態: 失敗");
         Assert.Equal(0, requestCount);
-        if (kind == "subagent") { await Expect(inspector).ToContainTextAsync("選択: 記録あり"); await Expect(inspector).ToContainTextAsync("開始: 記録あり"); await Expect(inspector).ToContainTextAsync("完了: 記録あり"); await Expect(inspector).ToContainTextAsync("失敗: なし"); await Expect(inspector).ToContainTextAsync("選択解除: なし"); await Expect(inspector).ToContainTextAsync("スキル活動: 1"); await Expect(inspector).ToContainTextAsync("ツール活動: 2"); await Expect(inspector).ToContainTextAsync("入力トークン: 5"); await Expect(inspector).ToContainTextAsync("出力トークン: 3"); await Expect(inspector).ToContainTextAsync("トークン合計: 8"); await Expect(inspector).ToContainTextAsync("推論トークン: なし"); await Expect(inspector).Not.ToContainTextAsync("agent_id"); }
+        if (kind == "subagent") { await Expect(inspector).ToContainTextAsync("選択: 記録あり"); await Expect(inspector).ToContainTextAsync("開始: 記録あり"); await Expect(inspector).ToContainTextAsync("完了: 記録あり"); await Expect(inspector).ToContainTextAsync("失敗: 未観測"); await Expect(inspector).ToContainTextAsync("選択解除: 未観測"); await Expect(inspector).ToContainTextAsync("スキル活動: 1"); await Expect(inspector).ToContainTextAsync("ツール活動: 2"); await Expect(inspector).ToContainTextAsync("入力トークン: 5"); await Expect(inspector).ToContainTextAsync("出力トークン: 3"); await Expect(inspector).ToContainTextAsync("トークン合計: 8"); await Expect(inspector).ToContainTextAsync("推論トークン: 未観測"); await Expect(inspector).Not.ToContainTextAsync("agent_id"); }
         var trigger = page.GetByRole(AriaRole.Button, new() { Name = $"{contentLabel}を表示" }); await trigger.ClickAsync(); await Expect(page.GetByRole(AriaRole.Dialog).Locator("pre")).ToHaveTextAsync(raw); Assert.Equal(1, requestCount); Assert.Empty(console);
         await page.Keyboard.PressAsync("Tab"); await page.Keyboard.PressAsync("Tab"); Assert.True(await page.EvaluateAsync<bool>("() => document.querySelector('[data-raw-content-dialog]').contains(document.activeElement)")); await page.Keyboard.PressAsync("Escape"); await Expect(trigger).ToBeFocusedAsync();
         Assert.DoesNotContain(raw, page.Url); Assert.False(await page.EvaluateAsync<bool>("raw => [...document.querySelectorAll('*')].some(e => [...e.attributes].some(a => a.name.startsWith('data-') && a.value.includes(raw)))", raw));
@@ -1009,12 +1044,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Theory]
-    [InlineData("not_captured", "なし")]
+    [InlineData("not_captured", "未取得")]
     [InlineData("expired", "期限切れ")]
     [InlineData("deleted", "削除済み")]
     [InlineData("read_denied", "表示不可")]
     [InlineData("oversized", "表示上限超過")]
-    [InlineData("invalid", "一部欠落")]
+    [InlineData("invalid", "記録が不正です")]
     public async Task EveryUnavailableContentStateIsDistinctAndNeverFetches(string contentState, string expected)
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
@@ -1044,7 +1079,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var (summary, timeline, node, _) = InspectorDocuments("skill"); node["node"]!["metadata"]!["historical_snapshot_reference"] = JsonNode.Parse("""{"state":"not_observed","value":null}"""); var rawRequests = 0;
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.RouteAsync("**/content?*", r => { rawRequests++; return r.AbortAsync(); }); await page.RouteAsync("**/skill-invocations/**", r => { rawRequests++; return r.AbortAsync(); });
-        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var skill = page.Locator("[data-inspector-kind=skill]"); var historical = skill.Locator("[data-historical-snapshot-fact]"); await Expect(historical.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1); await Expect(historical).ToContainTextAsync("なし"); await Expect(skill).Not.ToContainTextAsync("not_observed"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" })).ToHaveCountAsync(0); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "現在のファイルを読み取る" })).ToHaveCountAsync(0); Assert.Equal(0, rawRequests);
+        await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync(); var skill = page.Locator("[data-inspector-kind=skill]"); var historical = skill.Locator("[data-historical-snapshot-fact]"); await Expect(historical.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1); await Expect(historical).ToContainTextAsync("未観測"); await Expect(skill).Not.ToContainTextAsync("not_observed"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "履歴スナップショットを表示" })).ToHaveCountAsync(0); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "現在のファイルを読み取る" })).ToHaveCountAsync(0); Assert.Equal(0, rawRequests);
     }
 
     [Theory]
@@ -1676,7 +1711,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync("**/summary", r => ++summaries == 1 ? r.FulfillAsync(Json(Summary("summary-full.json"))) : r.FulfillAsync(new RouteFulfillOptions { Status = 503, ContentType = "application/json", Body = "{\"error\":\"persistence_busy\"}" }));
         await page.RouteAsync("**/timeline?*", r => { timelines++; return r.FulfillAsync(new RouteFulfillOptions { Status = 409, ContentType = "application/json", Body = "{\"error\":\"workspace_snapshot_stale\"}" }); });
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要"); await page.WaitForTimeoutAsync(200);
-        Assert.Equal(2, summaries); Assert.Equal(1, timelines); Assert.Equal("8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a", await page.EvaluateAsync<string>("() => window.LocalMonitorSessionWorkspace.revision"));
+        Assert.Equal(2, summaries); Assert.Equal(1, timelines); Assert.Equal("ff8ad0ad636ed1e9deb7d89b4910c087c292deeb633a33cf68e95b533b437fd7", await page.EvaluateAsync<string>("() => window.LocalMonitorSessionWorkspace.revision"));
     }
 
     [Fact]
@@ -1703,14 +1738,14 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         var timelineUrls = new List<string>();
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route => route.FulfillAsync(Json(Summary("summary-full.json"))));
         var timeline = JsonNode.Parse(Summary("timeline-page.json"))!.AsObject();
-        timeline["workspace_revision"] = "8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a";
+        timeline["workspace_revision"] = "ff8ad0ad636ed1e9deb7d89b4910c087c292deeb633a33cf68e95b533b437fd7";
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/timeline?*", route =>
         {
             timelineUrls.Add(route.Request.Url);
             return route.FulfillAsync(Json(timeline.ToJsonString()));
         });
         var node = JsonNode.Parse(Summary("node-nested.json"))!.AsObject();
-        node["workspace_revision"] = "8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a";
+        node["workspace_revision"] = "ff8ad0ad636ed1e9deb7d89b4910c087c292deeb633a33cf68e95b533b437fd7";
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/nodes/*?*", route =>
             route.FulfillAsync(Json(node.ToJsonString())));
 
@@ -1725,7 +1760,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-timeline-time-bar]")).ToHaveCountAsync(0);
         await Expect(page.Locator("[data-timeline-instant]")).ToHaveCountAsync(1);
         Assert.Single(timelineUrls);
-        Assert.EndsWith("/timeline?workspace_revision=8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a&execution_id=9a5590c8-46e3-7069-af48-3844d2bf17a4&limit=100", timelineUrls[0]);
+        Assert.EndsWith("/timeline?workspace_revision=ff8ad0ad636ed1e9deb7d89b4910c087c292deeb633a33cf68e95b533b437fd7&execution_id=9a5590c8-46e3-7069-af48-3844d2bf17a4&limit=100", timelineUrls[0]);
 
         await page.Locator("[data-timeline-node]").ClickAsync();
         await Expect(page).ToHaveURLAsync(host.Url + $"/sessions/{SessionId}?execution=9a5590c8-46e3-7069-af48-3844d2bf17a4&node=node-a8a773d6614d5030f505ff195b452dd6");
@@ -1759,7 +1794,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
             });
         });
         var emptyTimeline = JsonNode.Parse(Summary("timeline-empty.json"))!.AsObject();
-        emptyTimeline["workspace_revision"] = "8afe8c6c3beb9278813e087c347d50efe5175c61145bc0984f0b47dc7fbb416a";
+        emptyTimeline["workspace_revision"] = "ff8ad0ad636ed1e9deb7d89b4910c087c292deeb633a33cf68e95b533b437fd7";
         emptyTimeline["execution_id"] = "9a5590c8-46e3-7069-af48-3844d2bf17a4";
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/timeline?*", route =>
             route.FulfillAsync(Json(emptyTimeline.ToJsonString())));
@@ -1767,7 +1802,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
         await Expect(page.Locator("[data-session-workspace]")).ToHaveCountAsync(1);
-        await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("トークン合計");
+        await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("取得元が報告した合計");
         await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("15");
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要");
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("Review the retained instruction");
@@ -1827,15 +1862,15 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要");
-        await Expect(page.Locator("[data-session-overview-source]")).ToContainTextAsync("なし");
-        await Expect(page.Locator("[data-session-overview-time]")).ToContainTextAsync("なし");
-        await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("なし");
-        await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("なし");
+        await Expect(page.Locator("[data-session-overview-source]")).ToContainTextAsync("未観測");
+        await Expect(page.Locator("[data-session-overview-time]")).ToContainTextAsync("未観測");
+        await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("未観測");
+        await Expect(page.Locator("[data-session-time]")).ToContainTextAsync("未観測");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
-            await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("なし");
+            await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("未観測");
         var additionalInstruction = page.Locator("[data-session-additional-instruction-fact]");
         await Expect(additionalInstruction).ToHaveAttributeAsync("data-fact-state", "not-observed");
-        await Expect(additionalInstruction).ToContainTextAsync("なし");
+        await Expect(additionalInstruction).ToContainTextAsync("未観測");
         await Expect(additionalInstruction).Not.ToContainTextAsync("0件");
         await Expect(additionalInstruction).Not.ToContainTextAsync("not_observed");
         var overviewCoverage = page.Locator("[data-session-overview] .local-monitor-session-coverage");
@@ -1844,7 +1879,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         {
             Assert.False(await coverage.EvaluateAsync<bool>("node => Boolean(node.querySelector('span p'))"));
             var instruction = coverage.Locator("li", new() { HasText = "指示:" });
-            await Expect(instruction).ToContainTextAsync("なし");
+            await Expect(instruction).ToContainTextAsync("未観測");
             await Expect(instruction.Locator("p")).ToHaveCountAsync(0);
             await Expect(instruction).Not.ToContainTextAsync("0件");
             await Expect(instruction).Not.ToContainTextAsync("not_observed");
@@ -1869,7 +1904,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(page.Locator("[data-session-overview]")).Not.ToContainTextAsync("実行中");
         await Expect(page.Locator("[data-session-overview-time]")).ToHaveTextAsync("最終記録 2026-08-26T01:02:03.0000000+00:00");
         foreach (var name in new[] { "input", "output", "cache-read", "new-input" })
-            await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("なし");
+            await Expect(page.Locator($"[data-session-fixed-{name}]")).ToContainTextAsync("未観測");
         await Expect(page.Locator("[data-session-fixed-coverage]")).ToContainTextAsync("一部欠落");
 
         fixture = "summary-empty.json";
@@ -1887,15 +1922,15 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Theory]
-    [InlineData("not_observed", "なし")]
+    [InlineData("not_observed", "未観測")]
     [InlineData("source_unsupported", "未対応")]
     [InlineData("capture_gap", "一部欠落")]
     [InlineData("malformed", "読取不可")]
     [InlineData("oversized", "読取不可")]
     [InlineData("projection_invalid", "読取不可")]
     [InlineData("certification_pending", "未確認")]
-    [InlineData("not_captured", "なし")]
-    [InlineData("redacted", "なし")]
+    [InlineData("not_captured", "未取得")]
+    [InlineData("redacted", "未取得")]
     [InlineData("expired", "期限切れ")]
     [InlineData("inconsistent", "不整合")]
     public async Task ExecutionSummaryMapsEveryAcceptedFactStateWithoutRawTokens(string factState, string expected)
@@ -1941,7 +1976,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await Expect(execution.Locator("[data-execution-fact='input']")).ToContainTextAsync("12,323");
         await Expect(execution.Locator("[data-execution-fact='output']")).ToContainTextAsync("6");
         await Expect(total).ToContainTextAsync("トークン合計:");
-        await Expect(total).ToContainTextAsync("なし");
+        await Expect(total).ToContainTextAsync("未観測");
         await Expect(toggle).Not.ToContainTextAsync("12,329");
         await Expect(page.Locator("[data-session-fixed-input]")).ToContainTextAsync("10");
         await Expect(page.Locator("[data-session-fixed-output]")).ToContainTextAsync("5");
@@ -1961,7 +1996,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await toggle.ClickAsync();
         await execution.Locator(".local-monitor-session-execution-facts > summary").ClickAsync();
         await Expect(execution.Locator("[data-execution-fact='input']")).ToContainTextAsync("未対応");
-        await Expect(total).ToContainTextAsync("なし");
+        await Expect(total).ToContainTextAsync("未観測");
     }
 
     [Fact]
@@ -1970,7 +2005,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options()); PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var summary = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); summary["session"]!["instruction"]!["state"] = "not_observed"; summary["session"]!["instruction"]!["label"] = null; summary["session"]!["instruction"]!["content_available"] = false;
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
-        var overview = page.Locator("[data-session-overview]"); var instruction = overview.Locator("h3:has-text('最初の指示') + div"); await Expect(instruction).ToHaveAttributeAsync("data-session-instruction-fact", ""); await Expect(instruction).ToHaveAttributeAsync("data-fact-state", "not-observed"); await Expect(instruction).ToContainTextAsync("なし"); await Expect(instruction).Not.ToContainTextAsync("not_observed"); await Expect(instruction).Not.ToContainTextAsync("0件");
+        var overview = page.Locator("[data-session-overview]"); var instruction = overview.Locator("h3:has-text('最初の指示') + div"); await Expect(instruction).ToHaveAttributeAsync("data-session-instruction-fact", ""); await Expect(instruction).ToHaveAttributeAsync("data-fact-state", "not-observed"); await Expect(instruction).ToContainTextAsync("未観測"); await Expect(instruction).Not.ToContainTextAsync("not_observed"); await Expect(instruction).Not.ToContainTextAsync("0件");
     }
 
     [Fact]
@@ -2044,6 +2079,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         tokens["cache_read"]!["state"] = "recorded"; tokens["cache_read"]!["value"] = 4;
         tokens["new_input"]!["state"] = "recorded"; tokens["new_input"]!["value"] = 6;
         tokens["cache_read_ratio_basis_points"]!["state"] = "recorded"; tokens["cache_read_ratio_basis_points"]!["value"] = 4000;
+        tokens["observed_components"]!["cache_read"] = JsonNode.Parse("""{"subtotal":{"state":"recorded","value":4},"observed_call_count":1,"applicable_call_count":1,"paired_input":null}""");
+        tokens["observed_components"]!["cache_read_ratio_basis_points"] = JsonNode.Parse("""{"subtotal":{"state":"recorded","value":4000},"observed_call_count":1,"applicable_call_count":1,"paired_input":10}""");
         await page.RouteAsync("**/api/local-monitor/v1/sessions/*/summary", route => route.FulfillAsync(new RouteFulfillOptions
         {
             Status = 200, ContentType = "application/json; charset=utf-8", Body = summary.ToJsonString(),
@@ -2063,6 +2100,8 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true }); var page = await browser.NewPageAsync();
         var summary = JsonNode.Parse(Summary("summary-full.json"))!.AsObject(); var tokens = summary["session"]!["tokens"]!;
         tokens["cache_read"] = JsonNode.Parse("""{"state":"recorded","value":0}"""); tokens["new_input"] = JsonNode.Parse("""{"state":"recorded","value":10}"""); tokens["cache_read_ratio_basis_points"] = JsonNode.Parse("""{"state":"recorded","value":0}""");
+        tokens["observed_components"]!["cache_read"] = JsonNode.Parse("""{"subtotal":{"state":"recorded","value":0},"observed_call_count":1,"applicable_call_count":1,"paired_input":null}""");
+        tokens["observed_components"]!["cache_read_ratio_basis_points"] = JsonNode.Parse("""{"subtotal":{"state":"recorded","value":0},"observed_call_count":1,"applicable_call_count":1,"paired_input":10}""");
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("0%");
     }
@@ -2076,7 +2115,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         node["node"]!["kind"] = "tool"; node["node"]!["lifecycle"] = "started"; node["node"]!["status"] = "active"; node["node"]!["timing"]!["ended_at"] = null; node["node"]!["timing"]!["duration_ms"] = null;
         node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"tool","caller":{"state":"recorded","node_id":"node-2db4028cf76015c954848d7dcbb5deca"},"lifecycle":{"state":"recorded","value":"started"},"status":{"state":"recorded","value":"active"},"exit":{"state":"not_observed"},"mcp_server_identity":{"state":"not_observed","value":null},"mcp_server_name":{"state":"not_observed","value":null},"mcp_tool_name":{"state":"recorded","value":"open-tool"},"input":{"state":"not_captured","available":false},"result":{"state":"not_captured","available":false},"error":{"state":"not_captured","available":false},"retry":{"state":"recorded","node_ids":[]},"recovery":{"state":"recorded","node_ids":[]},"child_activity":{"skill":{"state":"not_observed","count":null},"tool":{"state":"recorded","count":0},"subagent":{"state":"not_observed","count":null},"error":{"state":"not_observed","count":null},"retry":{"state":"not_observed","count":null}},"source_references":{"state":"recorded","references":[{"source_kind":"session_event","source_identity":"synthetic-tool","trace_id":null,"span_id":null,"event_id":"synthetic-event"}]}}""");
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary))); await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString()))); await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString()))); await page.GotoAsync(host.Url + $"/sessions/{SessionId}"); await page.Locator("[data-timeline-node]").ClickAsync();
-        var inspector = page.Locator("[data-inspector-kind=tool]"); await Expect(inspector).ToContainTextAsync("終了: なし"); await Expect(inspector).ToContainTextAsync("所要時間: なし"); await Expect(inspector).Not.ToContainTextAsync("終了: null"); await Expect(inspector).Not.ToContainTextAsync("所要時間: null");
+        var inspector = page.Locator("[data-inspector-kind=tool]"); await Expect(inspector).ToContainTextAsync("終了: 未観測"); await Expect(inspector).ToContainTextAsync("所要時間: 未観測"); await Expect(inspector).Not.ToContainTextAsync("終了: null"); await Expect(inspector).Not.ToContainTextAsync("所要時間: null");
     }
 
     private static async Task AssertValidNodeShape(Action<JsonObject> mutate)

@@ -38,7 +38,7 @@ public sealed class FactStatePresentationTests
         },
         {
             "not-observed",
-            "なし",
+            "未観測",
             null,
             false
         },
@@ -86,13 +86,13 @@ public sealed class FactStatePresentationTests
         },
         {
             "redacted",
-            "なし",
+            "未取得",
             "機密情報を除外したため内容を保存していません。",
             false
         },
         {
             "not-captured",
-            "なし",
+            "未取得",
             "取得時に内容の保存が有効ではありませんでした。",
             false
         },
@@ -104,7 +104,7 @@ public sealed class FactStatePresentationTests
         },
         {
             "mixed-source-version",
-            "なし",
+            "未観測",
             "取得元: 複数の取得元・バージョン。完全な対象範囲を証明できません。",
             false
         },
@@ -194,7 +194,7 @@ public sealed class FactStatePresentationTests
         var presentation = FactStatePresentation.Resolve(
             new(FactState.ObservedZero, new RecordedFactCount(0)));
 
-        Assert.Equal("なし", presentation.PrimaryText);
+        Assert.Equal("未観測", presentation.PrimaryText);
         Assert.DoesNotContain("0件", presentation.PrimaryText);
         Assert.False(presentation.AllowsDerivedVisualization);
     }
@@ -642,7 +642,7 @@ public sealed class FactStatePresentationTests
         var decoded = WebUtility.HtmlDecode(html);
 
         Assert.Contains(
-            "<span class=\"fact-state-primary\">なし</span>",
+            "<span class=\"fact-state-primary\">未観測</span>",
             decoded);
         Assert.Contains("<details class=\"fact-state-explanation\">", decoded);
         Assert.Contains("<summary>表示の理由</summary>", decoded);

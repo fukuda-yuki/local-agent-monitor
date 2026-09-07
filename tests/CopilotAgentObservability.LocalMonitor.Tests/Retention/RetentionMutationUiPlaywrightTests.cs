@@ -14,6 +14,37 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionMutationUiPlaywrightTests
 {
     [Fact(Timeout = 60_000)]
+    public async Task ExpiredSession_FromDetailShowsDeniedStateAndRejectsExplicitPin()
+    {
+        await using var fixture = await RetentionUiFixture.CreateAsync();
+        ((MutableTimeProvider)fixture.Temp.TimeProvider).Advance(TimeSpan.FromDays(91));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
+        var page = await browser.NewPageAsync();
+        page.SetDefaultTimeout(5_000);
+        var posts = new List<string>();
+        page.Request += (_, request) => { if (request.Method == "POST" && request.Url.Contains("/api/retention/v1/", StringComparison.Ordinal)) posts.Add(request.Url); };
+        await page.GotoAsync($"{fixture.Host.Url}/sessions/{fixture.SessionId}");
+        await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り拒否 1件");
+        await page.GetByRole(AriaRole.Link, new() { Name = "保持・削除を管理", Exact = true }).ClickAsync();
+        await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り可能 0件");
+        Assert.Empty(posts);
+        await page.GetByLabel("ピン留め", new() { Exact = true }).CheckAsync();
+        await page.GetByLabel("理由").SelectOptionAsync("research_needed");
+        await page.GetByRole(AriaRole.Button, new() { Name = "影響を確認" }).ClickAsync();
+        await Expect(page.Locator("#retention-preview-content")).ToContainTextAsync("読み取り拒否1");
+        Assert.Single(posts);
+        Assert.EndsWith("/previews", posts[0], StringComparison.Ordinal);
+        var mutationTask = page.WaitForResponseAsync(response => response.Url.EndsWith("/api/retention/v1/mutations", StringComparison.Ordinal));
+        await page.GetByRole(AriaRole.Button, new() { Name = "この内容で確定" }).ClickAsync();
+        var mutation = await mutationTask;
+        Assert.Equal(409, mutation.Status);
+        Assert.Contains("retention_pin_expired", await mutation.TextAsync(), StringComparison.Ordinal);
+        await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り可能 0件");
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task SessionPin_ReissuedConfirmationUsesOnlyFreshTokenAndShowsAuthoritativeResult()
     {
         await using var fixture = await RetentionUiFixture.CreateAsync();
@@ -31,10 +62,14 @@ public sealed class RetentionMutationUiPlaywrightTests
                 retentionPosts.Add(request);
         };
 
-        await page.GotoAsync($"{fixture.Host.Url}/retention/session/{fixture.SessionId}", new PageGotoOptions
+        await page.GotoAsync($"{fixture.Host.Url}/sessions/{fixture.SessionId}", new PageGotoOptions
         {
             WaitUntil = WaitUntilState.DOMContentLoaded,
         });
+        await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り可能 1件");
+        await page.GetByRole(AriaRole.Link, new() { Name = "保持・削除を管理", Exact = true }).ClickAsync();
+        await page.WaitForURLAsync($"{fixture.Host.Url}/retention/session/{fixture.SessionId}");
+        await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("最も早い期限");
         await Expect(page.Locator("#retention-dialog")).ToBeVisibleAsync();
         await Expect(page.Locator("#retention-dialog-title")).ToBeFocusedAsync();
         Assert.False(
@@ -71,6 +106,7 @@ public sealed class RetentionMutationUiPlaywrightTests
         await Expect(page.Locator("#retention-result")).ToBeVisibleAsync();
         await Expect(page.Locator("#retention-operation-status")).ToHaveTextAsync("committed");
         await Expect(page.Locator("#retention-result-content")).ToContainTextAsync("retention_pin_applied");
+        await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("ピン状態 1件");
         await Expect(page.Locator("#retention-result-content")).ToContainTextAsync("retention_backup_not_purged");
 
         var mutationBodies = requests

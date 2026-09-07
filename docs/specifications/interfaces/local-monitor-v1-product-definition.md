@@ -39,6 +39,21 @@ The core must expose, when captured and authorized:
 
 Missing information is never converted to zero or inferred from proximity, names or free text.
 
+Investigation exposes recorded model identifiers and producer versions, full
+initial and additional user instructions and their exactly related responses,
+and the model, usage and content of individual LLM calls. Requested/configured
+and response-observed model identities remain distinct; an unknown role stays
+unknown. System/developer instructions and historical Skill evidence are
+separate from the user conversation. Raw content remains on-demand and subject
+to the existing local authorization, size and retention gates.
+
+Observed token components include their contributing/applicable call counts.
+The cache-read ratio means the proportion of paired input tokens read from
+cache, not a call hit rate. Producer totals are not reconstructed from components.
+The investigation retains bounded transient navigation context and supports
+explicit preservation of immutable deterministic comparisons. The narrow
+transport, collection, detail and comparison owners define these behaviors.
+
 ## Session discovery and Repository organization
 
 The user-facing hierarchy is:

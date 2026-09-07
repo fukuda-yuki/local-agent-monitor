@@ -67,12 +67,18 @@
     route: null,
     dynamic: { q: null, model: [], limit: null },
     pendingDynamic: null,
+    investigationUnit: "work_session",
     nextCursor: null,
     memoryCursor: null,
     workspaceRevision: null,
     items: [],
     compareMode: false,
     cohorts: { a: new Set(), b: new Set() },
+    frozenCohorts: { a: false, b: false },
+    candidateGeneration: 0,
+    routeGeneration: 0,
+    restoringInvestigation: false,
+    skillDigests: [],
     excludedSelections: new Set(),
     exclusionReasons: new Map(),
     selectionNotice: null,
@@ -759,6 +765,7 @@
       q: state.dynamic.q,
       cursor,
       limit: state.dynamic.limit,
+      investigation_unit: state.investigationUnit,
     };
   }
 
@@ -921,6 +928,22 @@
       aiDialog.showModal(); aiStatus.textContent = value.result ? "保存された分析を表示しています。" : AI_STATE_LABELS[value.state] ?? "分析状態を確認できませんでした。";
       aiResult.replaceChildren(); if (value.result) renderRepositoryAiResult(value.result); else if (["queued", "running"].includes(value.state)) { aiCancel.hidden = false; pollAiRun(runId, generation); }
     } catch (error) { if (generation !== aiState.generation || aiState.runId !== runId || error?.name === "AbortError") return; aiState.runId = null; aiState.restoredRunId = null; aiStatus.textContent = "保存された分析を復元できませんでした。"; }
+  }
+
+  async function loadFacets(signal) {
+    try {
+      const { value } = await comparisonPost("/api/local-monitor/v1/sessions/facets", requestBody(null), signal);
+      if (!exactKeys(value, ["work_session_count", "observation_fragment_count", "models"])
+          || typeof value.work_session_count !== "bigint" || value.work_session_count < 0n
+          || typeof value.observation_fragment_count !== "bigint" || value.observation_fragment_count < 0n
+          || !Array.isArray(value.models) || value.models.length > 256 || !value.models.every(validModelText)) throw new TypeError("invalid facets");
+      root.querySelector("#session-unit-counts").textContent = `この範囲: 作業セッション ${value.work_session_count}件・未結合の観測断片 ${value.observation_fragment_count}件（絞り込み前）`;
+      const options = [element("option", null, "モデルを選択"), ...value.models.map(value => { const option = element("option", null, value); option.value = value; return option; })];
+      options[0].value = "";
+      root.querySelector("#session-observed-model").replaceChildren(...options);
+    } catch (error) {
+      if (!signal?.aborted) root.querySelector("#session-unit-counts").textContent = "範囲の件数・観測済みモデルを取得できませんでした。";
+    }
   }
 
   async function readCollection(cursor, signal) {
@@ -1140,7 +1163,9 @@
       target.append(element("span", null,
         positive.join(" · ")));
     }
-    else if (unresolved.length) target.append(element("span", null, "なし"));
+    else if (unresolved.length) target.append(element("span", null,
+      unresolved.every(name => item.summary[name].state === "not_observed") ? "未観測" : "件数不明"));
+    else target.append(element("span", null, "0件を確認"));
     if (needsDisclosure) {
       const disclosure = element("details", "local-monitor-session-fact-disclosure");
       const disclosureSummary = element("summary", null,
@@ -1225,6 +1250,7 @@
         }
       }
       updateCompareBar();
+      void saveInvestigation();
     });
     wrapper.append(input, document.createTextNode(label));
     return wrapper;
@@ -1423,6 +1449,7 @@
     const secondary = element("small");
     const metadataLine = element("span", "local-monitor-session-metadata-line", [...item.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel), ...item.model.values].join(" · "));
     secondary.append(metadataLine);
+    secondary.append(element("span", "local-monitor-session-metadata-line", `${item.completeness === "unbound" ? "未結合の観測断片" : "作業セッション"} · 用途不明`));
     const disclosure = element("details", "local-monitor-session-fact-disclosure");
     const disclosureSummary = element("summary", null, "詳細");
     disclosureSummary.setAttribute("aria-label", `${link.textContent}: 詳細`);
@@ -1501,10 +1528,10 @@
     const actions = element("td", "local-monitor-session-actions");
     actions.append(rowActions(item));
     row.append(compare, identity, summaryCell, tokens, started, actions);
-    row.addEventListener("click", event => {
+    row.addEventListener("click", async event => {
       if (event.target instanceof Element
           && event.target.closest("a,button,input,select,textarea,summary,details,label")) return;
-      window.location.assign(link.href);
+      await openSession(link.href);
     });
     return row;
   }
@@ -1618,6 +1645,9 @@
       state.items = [...page.items];
       state.nextCursor = page.nextCursor;
       render();
+      document.dispatchEvent(new CustomEvent("local-monitor-snapshot-loaded", { detail: { observedAt: new Date().toISOString(), revision: state.workspaceRevision } }));
+      await loadFacets(controller.signal);
+      if (!state.restoringInvestigation) await saveInvestigation(generation);
       return true;
     } catch (error) {
       if (controller.signal.aborted || generation !== state.generation) return;
@@ -1667,12 +1697,13 @@
   }
 
   function applyControls(route) {
+    root.querySelector("#session-investigation-unit").value = state.investigationUnit;
     const routeSources = new Set(Array.isArray(route.source) ? route.source : []);
     const routeStatuses = new Set(Array.isArray(route.status) ? route.status : []);
     for (const option of sourceFilter.options) option.selected = routeSources.has(option.value);
     for (const option of statusFilter.options) option.selected = routeStatuses.has(option.value);
-    from.value = route.from ?? "";
-    to.value = route.to ?? "";
+    from.value = localDateTime(route.from);
+    to.value = localDateTime(route.to);
     hasSkill.value = route.has_skill ?? "";
     hasSubagent.value = route.has_subagent ?? "";
     hasError.value = route.has_error ?? "";
@@ -1694,7 +1725,69 @@
     });
   }
 
-  function applyRoute(route) {
+  let investigationSaveSequence = 0;
+  async function saveInvestigation(generation = state.generation) {
+    const sequence = ++investigationSaveSequence;
+    if (!state.workspaceRevision || generation !== state.generation) return false;
+    try {
+      const result = await comparisonPost("/api/local-monitor/v1/investigations", {
+        schema_version: "local-monitor-investigation.request.v1", search: requestBody(state.memoryCursor),
+        workspace_revision: state.workspaceRevision, cohorts: { a: [...state.cohorts.a], b: [...state.cohorts.b] },
+        scroll_y: Math.max(0, Math.min(10000000, Math.round(window.scrollY))),
+      });
+      if (sequence !== investigationSaveSequence || generation !== state.generation || !exactKeys(result.value, ["handle"]) || !REVISION.test(result.value.handle)) return false;
+      history.replaceState({ ...history.state, localMonitorInvestigation: result.value.handle }, "");
+      return true;
+    } catch {
+      if (sequence === investigationSaveSequence && generation === state.generation) status.textContent = "調査条件を一時保存できませんでした。もう一度操作してください。";
+      return false;
+    }
+  }
+
+  async function openSession(url) {
+    if (!await saveInvestigation()) return;
+    history.pushState({ localMonitorInvestigation: history.state.localMonitorInvestigation }, "", url);
+    window.location.reload();
+  }
+
+  async function restoreInvestigation(routeGeneration) {
+    const handle = history.state?.localMonitorInvestigation;
+    if (typeof handle !== "string" || !REVISION.test(handle)) return false;
+    try {
+      const { value } = await comparisonPost("/api/local-monitor/v1/investigations/restore", { handle });
+      if (routeGeneration !== state.routeGeneration) return true;
+      if (!exactKeys(value, ["saved", "stale", "page_reset", "valid_selection"]) || typeof value.stale !== "boolean" || typeof value.page_reset !== "boolean") throw new TypeError("invalid investigation");
+      const saved = value.saved;
+      if (saved.search.scope !== root.dataset.explorerScope || saved.search.repository_id !== (root.dataset.repositoryId ?? null)) throw new TypeError("investigation scope changed");
+      state.dynamic = { q: saved.search.q, model: saved.search.model, limit: saved.search.limit === null ? null : Number(saved.search.limit) };
+      state.investigationUnit = saved.search.investigation_unit ?? "all";
+      state.cohorts = { a: new Set(value.valid_selection.a), b: new Set(value.valid_selection.b) };
+      state.frozenCohorts = { a: true, b: true };
+      state.route = { ...state.route, from: saved.search.from, to: saved.search.to, source: saved.search.source, status: saved.search.status,
+        has_skill: saved.search.has_skill?.toString(), has_subagent: saved.search.has_subagent?.toString(), has_error: saved.search.has_error?.toString(), has_retry: saved.search.has_retry?.toString(), archive_scope: saved.search.archive_scope === "active_only" ? undefined : saved.search.archive_scope };
+      applyControls(state.route);
+      if (value.stale) state.selectionNotice = value.page_reset
+        ? "ページ位置を使用できないため先頭に戻りました。検索条件と有効な選択は保持しています。"
+        : "記録が更新されています。現在の結果を再取得し、有効な選択だけを復元しました。";
+      state.restoringInvestigation = true;
+      const loaded = await loadPage(value.page_reset ? null : saved.search.cursor);
+      state.restoringInvestigation = false;
+      if (loaded) {
+        window.scrollTo(0, Number(saved.scroll_y));
+        if (value.stale) status.textContent = state.selectionNotice;
+      }
+      return true;
+    } catch {
+      if (routeGeneration !== state.routeGeneration) return true;
+      state.restoringInvestigation = false;
+      state.restoreNotice = "調査条件の保存期限切れ、または記録変更のため条件をリセットしました。";
+      history.replaceState({ localMonitorV1: history.state?.localMonitorV1 }, "");
+      return false;
+    }
+  }
+
+  async function applyRoute(route) {
+    const routeGeneration = ++state.routeGeneration;
     const browserTraversal = state.browserTraversal;
     state.browserTraversal = false;
     const analysisChanged = (state.route?.analysis ?? null) !== (route.analysis ?? null);
@@ -1711,16 +1804,21 @@
       : state.pendingDynamic ?? { q: null, model: [], limit: null };
     state.pendingDynamic = null;
     state.memoryCursor = route.cursor ?? null;
-    state.compareMode = route.mode === "compare";
+    state.compareMode = Boolean(root.dataset.repositoryId) && route.mode === "compare";
+    if (!state.workspaceRevision && route.cursor && !history.state?.localMonitorInvestigation) state.investigationUnit = "all";
+    if ((browserTraversal || !state.workspaceRevision) && await restoreInvestigation(routeGeneration)) return;
+    if (routeGeneration !== state.routeGeneration) return;
     if (!preserveCohorts) {
       state.cohorts.a.clear();
       state.cohorts.b.clear();
+      state.frozenCohorts = { a: false, b: false };
       state.excludedSelections.clear();
       state.exclusionReasons.clear();
       state.selectionNotice = null;
     }
     applyControls(route);
-    loadPage(route.cursor ?? null);
+    await loadPage(route.cursor ?? null);
+    if (state.restoreNotice) { status.textContent = state.restoreNotice; state.restoreNotice = null; }
   }
 
   function updateCompareBar() {
@@ -1738,7 +1836,6 @@
     const availableB = [...b].filter(id => !locallyExcluded(id));
     const total = a.size + b.size;
     const messages = [];
-    if (state.selectionNotice !== null) messages.push(state.selectionNotice);
     if (a.size === 0 || b.size === 0) messages.push("基準と比較対象を1件以上選択してください。");
     if (overlap.length) messages.push("同じセッションを両方の対象には選択できません。");
     if (total > 200) messages.push("選択できるセッションは合計200件までです。");
@@ -1750,6 +1847,7 @@
     if (b.size > 0 && availableB.length === 0) messages.push("アーカイブ除外後に比較対象が空になります。");
     const valid = messages.length === 0 && UUID_V7.test(root.dataset.repositoryId ?? "");
     if (messages.length === 0 && !valid) messages.push("リポジトリ別の一覧から比較を作成してください。");
+    if (state.selectionNotice !== null) messages.push(state.selectionNotice);
     const validMessage = "比較できます。";
     compareValidationPrimary.textContent = messages.length === 0
       ? validMessage
@@ -1768,6 +1866,51 @@
       cohorts: { a: [...state.cohorts.a], b: [...state.cohorts.b] },
       include_archived: includeArchived.checked,
     };
+  }
+
+  async function resolveCandidates(method, cohort = null) {
+    if (!root.dataset.repositoryId) return;
+    const generation = ++state.candidateGeneration;
+    const routeGeneration = state.generation;
+    const candidateStatus = root.querySelector("#session-candidate-status");
+    const choice = state.skillDigests[Number(root.querySelector("#session-skill-digest").value)];
+    if (method === "skill_digest" && !choice) { candidateStatus.textContent = "取得済みの履歴を選択してください。"; return; }
+    candidateStatus.textContent = "現在の記録から候補を確認しています。";
+    try {
+      const { value } = await comparisonPost("/api/local-monitor/v1/sessions/candidates", {
+        method, search: requestBody(null), skill_name: method === "skill_digest" ? choice.name : null,
+        skill_digest: method === "skill_digest" ? choice.digest : null,
+      });
+      if (generation !== state.candidateGeneration || routeGeneration !== state.generation) return;
+      if (!exactKeys(value, ["method", "session_ids", "workspace_revision", "skill_digests", "unavailable_count"])
+          || value.method !== method || !REVISION.test(value.workspace_revision)
+          || !Array.isArray(value.session_ids) || value.session_ids.length > 200 || !value.session_ids.every(id => UUID_V7.test(id))
+          || new Set(value.session_ids).size !== value.session_ids.length
+          || !Array.isArray(value.skill_digests) || value.skill_digests.length > 256
+          || !value.skill_digests.every(item => exactKeys(item, ["name", "digest"]) && typeof item.name === "string" && REVISION.test(item.digest))
+          || typeof value.unavailable_count !== "bigint" || value.unavailable_count < 0n) throw new TypeError("invalid candidates");
+      if (method === "skill_options") {
+        state.skillDigests = value.skill_digests;
+        root.querySelector("#session-skill-digest").replaceChildren(...value.skill_digests.map((item, index) => {
+          const option = element("option", null, `${item.name} · ${item.digest}`); option.value = String(index); return option;
+        }));
+        candidateStatus.textContent = value.skill_digests.length === 0
+          ? `利用できる履歴ダイジェストがありません（履歴ダイジェストを提示できないセッション ${value.unavailable_count}件）。変更境界は推定しません。`
+          : `${value.skill_digests.length}件の履歴を取得しました。履歴ダイジェストを提示できないセッション ${value.unavailable_count}件。`;
+        return;
+      }
+      state.cohorts[cohort] = new Set(value.session_ids);
+      state.frozenCohorts[cohort] = true;
+      state.selectionNotice = "条件から選んだ候補を固定しました。条件を変えても保持し、確定前に採用・除外を確認します。";
+      render();
+      candidateStatus.textContent = `${cohort === "a" ? "基準" : "比較対象"}の候補を${value.session_ids.length}件に置き換えました。${method === "skill_digest" ? `履歴ダイジェストを提示できないセッション ${value.unavailable_count}件。` : "採用・除外を確認してください。"}`;
+      await saveInvestigation();
+    } catch (error) {
+      if (generation !== state.candidateGeneration || routeGeneration !== state.generation) return;
+      candidateStatus.textContent = error instanceof ApiFailure && error.code === "workspace_too_large"
+        ? "候補が上限を超えています。条件を絞ってください。一部だけを選択することはしません。"
+        : "候補を確認できませんでした。現在の選択は保持しています。";
+    }
   }
 
   function clearComparisonDialog(restoreFocus = true) {
@@ -1920,7 +2063,7 @@
           || result.response.headers.get("Location") !== result.value.location) throw new TypeError("invalid comparison create");
       const location = result.value.location;
       clearComparisonDialog(false);
-      window.location.assign(location);
+      await openSession(location);
     } catch (error) {
       if (controller.signal.aborted || generation !== state.comparison.generation) return;
       if (error instanceof ApiFailure && error.code === "comparison_preview_stale") {
@@ -1935,24 +2078,45 @@
 
   function resetSelectionForFilterChange() {
     if (state.cohorts.a.size === 0 && state.cohorts.b.size === 0) return;
-    state.cohorts.a.clear();
-    state.cohorts.b.clear();
+    if (!state.frozenCohorts.a) state.cohorts.a.clear();
+    if (!state.frozenCohorts.b) state.cohorts.b.clear();
     state.excludedSelections.clear();
     state.exclusionReasons.clear();
-    state.selectionNotice = "条件変更のため比較対象の選択をクリアしました。";
+    state.selectionNotice = state.frozenCohorts.a || state.frozenCohorts.b
+      ? "固定した候補を保持しています。確定前に現在の採用・除外を確認してください。"
+      : "条件変更のため比較対象の選択をクリアしました。";
     updateCompareBar();
+  }
+
+  function localDateTime(value) {
+    if (!value) return "";
+    const instant = new Date(value);
+    return new Date(instant.getTime() - instant.getTimezoneOffset() * 60000).toISOString().slice(0, 23);
+  }
+
+  function canonicalDateTime(value) {
+    if (value === "") return "";
+    const instant = new Date(value);
+    if (!Number.isFinite(instant.getTime()) || localDateTime(instant.toISOString()) !== value.padEnd(23, value.length === 16 ? ":00.000" : "0")) {
+      // Round-trip validation rejects local times skipped by daylight-saving transitions.
+      if (!Number.isFinite(instant.getTime()) || localDateTime(instant.toISOString()).slice(0, value.length) !== value) return null;
+    }
+    return instant.toISOString().replace("Z", "0000+00:00");
   }
 
   function applyFilters(event) {
     event.preventDefault();
+    const nextUnit = root.querySelector("#session-investigation-unit").value;
+    if (state.investigationUnit !== nextUnit) resetSelectionForFilterChange();
+    state.investigationUnit = nextUnit;
     const q = search.value;
     const models = model.value.split("\n").filter(value => value !== "");
-    const fromValue = from.value;
-    const toValue = to.value;
-    if (!timestamp(fromValue === "" ? null : fromValue)
+    const fromValue = canonicalDateTime(from.value);
+    const toValue = canonicalDateTime(to.value);
+    if (fromValue === null || toValue === null || !timestamp(fromValue === "" ? null : fromValue)
         || !timestamp(toValue === "" ? null : toValue)
         || fromValue !== "" && toValue !== "" && fromValue >= toValue) {
-      showError("期間は正しいUTC日時で、開始を終了より前にしてください。", from);
+      showError("期間は有効な現地日時で、開始を終了より前にしてください。", from);
       return;
     }
     if (q !== "" && !validQueryText(q)) {
@@ -2008,6 +2172,20 @@
   }
 
   filters.addEventListener("submit", applyFilters);
+  root.querySelectorAll("[data-candidate-filter]").forEach(button => button.addEventListener("click", () => resolveCandidates("filters", button.dataset.candidateFilter)));
+  root.querySelectorAll("[data-candidate-skill]").forEach(button => button.addEventListener("click", () => resolveCandidates("skill_digest", button.dataset.candidateSkill)));
+  root.querySelector("#session-skill-digests-load").addEventListener("click", () => resolveCandidates("skill_options"));
+  root.querySelector("#session-observed-model").addEventListener("change", event => {
+    const value = event.target.value;
+    if (value && !model.value.split("\n").includes(value)) model.value = [...model.value.split("\n").filter(Boolean), value].join("\n");
+    event.target.value = "";
+  });
+  root.addEventListener("click", async event => {
+    const link = event.target.closest("a[data-session-open]");
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    await openSession(link.href);
+  }, true);
   includeArchived.addEventListener("change", () => {
     if (comparisonDialog.open) clearComparisonDialog(false);
     updateCompareBar();
@@ -2017,7 +2195,7 @@
     if (state.nextCursor === null) return;
     state.initiatingControl = loadMore;
     state.focusAfterRender = { kind: "pagination" };
-    const eligible = state.dynamic.q === null && state.dynamic.model.length === 0 && state.dynamic.limit === null;
+    const eligible = state.dynamic.q === null && state.dynamic.model.length === 0 && state.dynamic.limit === null && state.investigationUnit === "all";
     if (eligible) {
       state.pendingDynamic = state.dynamic;
       state.preserveCohortsOnNextRoute = state.compareMode;
@@ -2030,6 +2208,7 @@
   });
 
   compareButton.addEventListener("click", () => {
+    if (!root.dataset.repositoryId) return;
     state.pendingDynamic = state.dynamic;
     state.focusAfterRender = { kind: "compare-first" };
     window.LocalMonitorV1History.push({ mode: "compare", cursor: null });
@@ -2118,6 +2297,9 @@
     if (comparisonDialog.open) clearComparisonDialog(false);
     state.browserTraversal = true;
     if (assignmentDialog.open) closeAssignmentPicker(false);
+  });
+  document.addEventListener("local-monitor-refresh-requested", async () => {
+    if (await saveInvestigation()) window.location.reload();
   });
   document.addEventListener("cao-route-state", event => { applyRoute(event.detail); restoreRepositoryAnalysis(event.detail); });
   enableRepositoryAi();

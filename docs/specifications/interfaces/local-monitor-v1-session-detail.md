@@ -112,7 +112,7 @@ Schema token: `local-monitor-session-summary.response.v2`. It is sole-current;
 there is no v1 selector, negotiation path, or fallback.
 
 Top-level property order is `schema_version, workspace_revision, session,
-executions, technical_references`.
+executions, conversation, llm_calls, technical_references`.
 
 `session` property order is `session_id, status, completeness, assignment,
 archive, instruction, source, model, version, timing, tokens, activity,
@@ -203,6 +203,64 @@ execution scope. `child_count` is an exact nonnegative integer.
 ordinal-sorted distinct arrays of sanitized identifiers. No local path, raw
 content, prompt, response, Tool payload, Skill body, or locator appears.
 
+## Investigation presentation and conversation references
+
+Session information displays every recorded model and producer version from its
+Session-wide facts; node selection never replaces those values. Identity roles
+are unknown unless an exact call provides requested/configured or response-observed
+evidence. Version observations do not certify compatibility.
+
+`conversation` is a chronological array of at most 4,096 sanitized references,
+ordered by time authority, recorded start, source ordinal, and node ID. It contains
+source-authored `user.message`, `UserPromptSubmit`, `userPromptSubmitted`, and
+`assistant.message` events only. Each row is exactly
+`{node_id,execution_id,role,time_authority,recorded_at,part,content_state,call_node_id,correspondence}`.
+Role is `user|assistant`; time authority is `recorded|missing|invalid`, with a
+nullable canonical recorded timestamp. Part is the existing exact `instruction`
+or `event_content` selector. Content state uses the existing seven-state content
+availability vocabulary. An exact parent LLM call supplies `call_node_id`;
+otherwise it is null. `correspondence` is currently `unknown`: a shared call does
+not prove a one-to-one instruction/response match. Instructions link directly to
+responses with the same exact call binding, labeled as responses from that call
+while individual correspondence remains unknown. Envelope observations remain
+visible as recorded observations, not inferred new turns. Full retained content
+is read on demand through the existing revision-bound content route, rendered
+inertly, and never replaced by the bounded Session heading preview.
+
+`llm_calls` contains at most 4,096 exact call references in chronological order:
+`{node_id,execution_id,requested_model,response_model}`. Model strings are nullable;
+these references expose all role-bearing identities and link aggregates to calls.
+They do not alter the Session collection model fact.
+
+For an exact LLM call, `event_content` checks retained input context from its
+unique raw Trace/Span owner. It returns captured `gen_ai.system_instructions`
+and `gen_ai.input.messages` values as inert text only after raw-record Retention
+access approval. Availability means the raw span can be checked, not that these
+attributes or any particular role were captured. Missing attributes are
+`404 raw_content_not_captured`. The runtime locator uses `raw_record` and
+`otel_input_context`, a null JSON pointer and unknown selected length until the
+bounded authorized read. The raw retention tuple and effective expiry state
+participate in workspace revision. All existing leases, owner binding, size
+limits and terminal states remain enforced. No new part token is added.
+
+Captured call input history and system/developer context are separate from this
+user conversation. Historical Skill content retains its own snapshot entry point;
+a current Skill file is never substituted for history.
+
+An exact OTel `chat` operation is `kind:llm_call`, including failed calls. Its
+closed metadata is `{kind,requested_model,response_model,observation_scope}`.
+The two models are existing `{state,value}` string facts from the exact normalized
+request/response fields, with unavailable values explicit; `observation_scope`
+is `exact_call`. Tokens and timing on the node are call-specific. Parent rollups
+and Session totals never substitute for a selected call's missing components.
+
+Primary input/output/cache figures use available observed component subtotals
+and contributing/applicable call counts. Producer-reported total stays separate;
+no input-plus-output total is manufactured. Cache percentage is the proportion
+of paired input tokens read from cache, with paired input denominator and call
+coverage visible, never a call hit rate. Existing zero-input, invalid-value, and
+exact parent/child deduplication semantics remain binding.
+
 ## Exact Timeline response
 
 Schema token: `local-monitor-session-timeline.response.v2`. It is sole-current.
@@ -223,7 +281,7 @@ tokens, child_count, has_more_children, collapsed_children, content_parts,
 source_references`.
 
 `relationship_authority` is `exact|explicit|unknown`. `kind` is one of
-`execution|agent|skill|tool|subagent|event|error|retry|permission|unknown_relation_group`.
+`execution|agent|llm_call|skill|tool|subagent|event|error|retry|permission|unknown_relation_group`.
 `name` is `{state,text}` with state `recorded|not_observed|invalid`.
 `lifecycle`, `status`, `timing`, `activity`, and `tokens` use the Summary closed
 shapes. `content_parts` is an ordinal-sorted subset of the six accepted part

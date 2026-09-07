@@ -8,7 +8,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalComparisonSchemaTests
 {
     [Fact]
-    public void Ensure_InstallsTheExactEmptyFiveCategoryAuthority()
+    public void Ensure_InstallsTheExactEmptySavedComparisonAuthority()
     {
         using var database = new ComparisonDatabase();
         using var connection = database.OpenCurrentDependencies();
@@ -25,7 +25,7 @@ public sealed class LocalComparisonSchemaTests
         Assert.NotNull(ensure);
         ensure.Invoke(null, [connection]);
 
-        Assert.Equal(1L, Scalar(connection,
+        Assert.Equal(2L, Scalar(connection,
             "SELECT version FROM schema_version WHERE component='local_comparison';"));
         Assert.Equal(
             [
@@ -33,6 +33,7 @@ public sealed class LocalComparisonSchemaTests
                 "local_comparison_evidence",
                 "local_comparison_expiry_tombstones",
                 "local_comparison_results",
+                "local_comparison_saved_lifetimes",
                 "local_comparison_snapshots",
             ],
             Strings(connection,
@@ -133,7 +134,7 @@ public sealed class LocalComparisonSchemaTests
     }
 
     [Fact]
-    public void Registry_AssignsEveryOwnedObjectToOneOfTheFiveCategories()
+    public void Registry_AssignsEveryOwnedObjectIncludingSavedLifetime()
     {
         using var database = new ComparisonDatabase();
         using var connection = database.OpenCurrentDependencies();
@@ -146,16 +147,18 @@ public sealed class LocalComparisonSchemaTests
             "comparison_result",
             "comparison_evidence",
             "comparison_expiry_tombstone",
+            "comparison_saved_lifetime",
         ], LocalComparisonComponentRegistryV1.CategoryTokens);
         Assert.Equal(
         [
+            "local_comparison_saved_lifetimes",
             "local_comparison_expiry_tombstones",
             "local_comparison_evidence",
             "local_comparison_results",
             "local_comparison_cohort_memberships",
             "local_comparison_snapshots",
         ], LocalComparisonComponentRegistryV1.ReverseDependencyTableNames);
-        Assert.Equal(23, LocalComparisonComponentRegistryV1.Objects.Count);
+        Assert.Equal(24, LocalComparisonComponentRegistryV1.Objects.Count);
         Assert.All(LocalComparisonComponentRegistryV1.Objects,
             item => Assert.True(Enum.IsDefined(item.Category)));
     }

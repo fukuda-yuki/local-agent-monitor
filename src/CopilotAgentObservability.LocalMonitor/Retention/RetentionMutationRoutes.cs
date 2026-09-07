@@ -29,10 +29,26 @@ internal static class RetentionMutationRoutes
         app.MapPost("/api/retention/v1/mutations", context => ExecuteMutationAsync(context, application));
         app.MapGet("/api/retention/v1/mutations/{operationId}", (string operationId, HttpContext context) => ReadMutationStatusAsync(context, application, operationId));
         app.MapGet("/api/retention/v1/items/{itemId}", (string itemId, HttpContext context) => ReadItemStateAsync(context, application, itemId));
+        app.Map("/api/retention/v1/sessions/{sessionId}/management", context => ReadSessionManagementAsync(context, application));
         RetentionHistoryRoutes.Map(app, application);
     }
 
     internal static bool IsRetentionPath(PathString path) => path.StartsWithSegments("/api/retention/v1");
+
+    private static async Task ReadSessionManagementAsync(HttpContext context, RetentionMutationApplicationService application)
+    {
+        PrepareRetentionResponse(context.Response);
+        if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
+        { context.Response.Headers.Allow = "GET, HEAD"; await WriteErrorAsync(context, 405, "method_not_allowed"); return; }
+        if (context.Request.QueryString.HasValue || context.Request.ContentLength is > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
+        { await WriteErrorAsync(context, 400, RetentionMutationErrorCodes.RequestInvalid); return; }
+        var result = Invoke(() => application.ReadSessionManagement(context.Request.RouteValues["sessionId"]?.ToString() ?? ""));
+        if (result is null) { await WriteErrorAsync(context, 503, RetentionMutationErrorCodes.CatalogUnavailable); return; }
+        if (result.ErrorCode is not null) { await WriteApplicationErrorAsync(context, result.ErrorCode, false, false); return; }
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(result.Status!, Json);
+        context.Response.ContentLength = bytes.Length;
+        if (!HttpMethods.IsHead(context.Request.Method)) await context.Response.Body.WriteAsync(bytes, context.RequestAborted);
+    }
 
     internal static Task WriteErrorAsync(HttpContext context, int statusCode, string error)
     {

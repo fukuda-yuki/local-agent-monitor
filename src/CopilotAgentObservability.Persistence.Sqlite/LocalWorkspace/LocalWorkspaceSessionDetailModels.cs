@@ -37,7 +37,8 @@ internal sealed record LocalWorkspaceNodeDetail(
     LocalWorkspaceToolMetadataDetail? ToolMetadata = null,
     LocalWorkspaceSkillMetadataDetail? SkillMetadata = null,
     LocalWorkspaceSubagentLifecycleDetail? SubagentLifecycle = null,
-    LocalWorkspacePermissionMetadataDetail? PermissionMetadata = null);
+    LocalWorkspacePermissionMetadataDetail? PermissionMetadata = null,
+    string? RequestedModel = null, string? ResponseModel = null);
 
 internal sealed record LocalWorkspaceNodeSourceReferenceDetail(
     string SourceKind, string? SourceIdentity, string? TraceId, string? SpanId, string? EventId,

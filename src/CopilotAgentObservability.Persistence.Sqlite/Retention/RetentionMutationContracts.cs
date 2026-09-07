@@ -145,6 +145,10 @@ public static class RetentionMutationLifecycleStates
 
 public static class RetentionMutationStateProjection
 {
+    public static bool IsReadable(RetentionItemLifecycle state, DateTimeOffset? expiresAt, DateTimeOffset? readDeniedAt, DateTimeOffset now) =>
+        readDeniedAt is null && (state == RetentionItemLifecycle.RetainedByPolicy
+            || state == RetentionItemLifecycle.Expiring && expiresAt is { } expiry && expiry > now);
+
     public static RetentionPinState PinState(RetentionItemLifecycle state) =>
         state == RetentionItemLifecycle.RetainedByPolicy ? RetentionPinState.Pinned : RetentionPinState.Unpinned;
 

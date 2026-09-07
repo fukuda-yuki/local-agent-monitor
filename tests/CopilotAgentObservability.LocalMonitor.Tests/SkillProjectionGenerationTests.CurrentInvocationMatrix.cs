@@ -1240,10 +1240,19 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         bool registryAccepted = true,
         string state = "available",
         string reason = "none",
-        bool expired = false)
+        bool expired = false,
+        string? bodyText = null)
     {
         var sourceVersion = registryAccepted ? "1.0.65" : "0.9.0";
         var write = NewWrite(sessionKey, skillName, sourceVersion, state, reason, expired);
+        if (bodyText is not null) write = write with
+        {
+            PayloadTokenUtf8 = JsonSerializer.SerializeToUtf8Bytes(new { name = skillName, path = "skills/SKILL.md", content = bodyText }),
+            BodySha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(bodyText))),
+            BodyUtf8Bytes = Encoding.UTF8.GetByteCount(bodyText),
+            DefinitionPathSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData("skills/SKILL.md"u8)),
+            DefinitionPathUtf8Bytes = "skills/SKILL.md"u8.Length,
+        };
         Commit(write);
         sessions[sessionKey] = ResolveSession(sessionKey);
         latestWrites[sessionKey] = write;

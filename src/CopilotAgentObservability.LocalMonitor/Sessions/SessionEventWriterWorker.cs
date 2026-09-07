@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using CopilotAgentObservability.LocalMonitor.Events;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions;
 
@@ -6,12 +7,14 @@ internal sealed class SessionEventWriterWorker : BackgroundService
 {
     private readonly SessionEventQueue queue;
     private readonly SessionEventNormalizer normalizer;
+    private readonly MonitorEventBroker? eventBroker;
     private readonly TaskCompletionSource readerStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public SessionEventWriterWorker(SessionEventQueue queue, SessionEventNormalizer normalizer)
+    public SessionEventWriterWorker(SessionEventQueue queue, SessionEventNormalizer normalizer, MonitorEventBroker? eventBroker = null)
     {
         this.queue = queue;
         this.normalizer = normalizer;
+        this.eventBroker = eventBroker;
     }
 
     public override async Task StartAsync(CancellationToken cancellationToken)
@@ -29,7 +32,8 @@ internal sealed class SessionEventWriterWorker : BackgroundService
             if (!request.TryClaim()) continue;
             try
             {
-                normalizer.NormalizeAndWrite(request.Envelope);
+                if (normalizer.NormalizeAndWrite(request.Envelope))
+                    eventBroker?.PublishProjectionChanged();
                 request.Complete(SessionEventCommitStatus.Committed);
             }
             catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)

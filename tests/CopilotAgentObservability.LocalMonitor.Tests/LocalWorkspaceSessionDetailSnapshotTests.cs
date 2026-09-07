@@ -3,7 +3,10 @@ using System.Text.Json;
 using System.Runtime.InteropServices;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -849,7 +852,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         {
             LocalWorkspaceProjectionSchemaTests.Execute(connection, """
                 UPDATE monitor_spans
-                SET operation='chat',category='llm_call',input_tokens=100,output_tokens=20
+                SET operation='chat',category='llm_call',input_tokens=100,output_tokens=20,request_model='requested-model',response_model='response-model'
                 WHERE raw_record_id=1 AND span_ordinal=0;
                 """);
             using var transaction = connection.BeginTransaction();
@@ -863,6 +866,11 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
 
         var execution = Assert.Single(summary.Detail.Executions,
             value => value.SourceIdentity == runId);
+        var call = Assert.Single(summary.Detail.Nodes, node => node.Kind == "llm_call");
+        Assert.Equal("requested-model", call.RequestedModel); Assert.Equal("response-model", call.ResponseModel);
+        Assert.Equal(100, call.Tokens.Input.Value); Assert.Null(call.Tokens.Total.Value);
+        using var wire = System.Text.Json.JsonDocument.Parse(CopilotAgentObservability.LocalMonitor.LocalMonitorV1.LocalMonitorV1SessionDetailApplication.SerializeNode(summary, call.NodeId));
+        Assert.Equal("exact_call", wire.RootElement.GetProperty("node").GetProperty("metadata").GetProperty("observation_scope").GetString());
         Assert.Equal("llm_span", execution.Tokens.Authority);
         Assert.Equal("recorded", execution.Tokens.Input.State);
         Assert.Equal(100, execution.Tokens.Input.Value);
@@ -882,6 +890,76 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal(20, session.Tokens.Output.Value);
         Assert.Equal("not_observed", session.Tokens.Total.State);
         Assert.Null(session.Tokens.Total.Value);
+    }
+
+    [Fact]
+    public async Task ExactCallInputContextReadsRetainedRawOwnerAndRejectsChangedRevision()
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.TimeProvider = new MutableTimeProvider(DateTimeOffset.Parse("2026-08-26T00:10:00Z"));
+        const string sessionId = "018f0000-0000-7000-8000-000000000001";
+        var context = temp.RetentionContext;
+        InitializeRoundFiveSemanticFixture(temp.DatabasePath, sessionId, "018f0000-0000-7000-8000-000000000010", "018f0000-0000-7000-8000-000000000020");
+        var token = new byte[32];
+        const string captured = "2026-08-26T00:00:00.0000000+00:00";
+        var receipt = CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateRawRecord(new(context.StoreInstanceId, 1, captured, DateTimeOffset.Parse(captured).UtcTicks, 1, token));
+        var history = JsonSerializer.Serialize(new[] { new { role = "developer", content = "captured developer" }, new { role = "user", content = new string('x', 300) + "full initial instruction" }, new { role = "user", content = "additional instruction" } });
+        var payload = JsonSerializer.Serialize(new { resourceSpans = new[] { new { scopeSpans = new[] { new { spans = new[] { new { traceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", spanId = "bbbbbbbbbbbbbbbb", attributes = new[] { new { key = "gen_ai.system_instructions", value = new { stringValue = "captured system" } }, new { key = "gen_ai.input.messages", value = new { stringValue = history } } } } } } } } } });
+        using (var connection = OpenFile(temp.DatabasePath))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                UPDATE monitor_spans SET operation='chat',category='llm_call' WHERE raw_record_id=1;
+                INSERT INTO raw_records(id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token)
+                VALUES(1,'raw-otlp','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',$captured,'{}',$payload,1,$token);
+                INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version)
+                VALUES('raw-call-context',$store,'raw_record','1',1,$receipt,$captured,'2026-09-01T00:00:00.0000000+00:00','raw-default-90d',1,'expiring',1,1);
+                """;
+            command.Parameters.AddWithValue("$captured", captured); command.Parameters.AddWithValue("$payload", payload); command.Parameters.AddWithValue("$token", token); command.Parameters.AddWithValue("$store", context.StoreInstanceId); command.Parameters.AddWithValue("$receipt", receipt); command.ExecuteNonQuery();
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load()); transaction.Commit();
+        }
+        var builder = WebApplication.CreateBuilder(); builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, CreateRoundFiveService(temp.DatabasePath), new byte[32], new LocalWorkspaceNodeContentReader(context, temp.TimeProvider));
+        await app.StartAsync(); using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+        using var summaryResponse = await client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary");
+        Assert.Equal(System.Net.HttpStatusCode.OK, summaryResponse.StatusCode);
+        using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsStringAsync());
+        var call = summary.RootElement.GetProperty("llm_calls")[0].GetProperty("node_id").GetString(); var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
+        var path = $"/api/local-monitor/v1/sessions/{sessionId}/nodes/{call}/content?workspace_revision={revision}&part=event_content";
+        using var response = await client.GetAsync(path); Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("raw_record", body.RootElement.GetProperty("source_reference").GetProperty("store_kind").GetString());
+        Assert.Contains(history, body.RootElement.GetProperty("text").GetString()); Assert.Contains("captured system", body.RootElement.GetProperty("text").GetString());
+        LocalWorkspaceContentAvailability locator;
+        using (var connection = OpenFile(temp.DatabasePath))
+        using (var transaction = connection.BeginTransaction())
+            locator = LocalWorkspaceOtelInputContext.ReadAvailability(connection, transaction, sessionId, call!, temp.TimeProvider.GetUtcNow())!;
+        var publicationLoss = new RawInputContextPublicationLoss(temp.DatabasePath);
+        var lost = await LocalWorkspaceOtelInputContext.ReadAsync(context, temp.TimeProvider, sessionId, call!, locator, CancellationToken.None, publicationLoss);
+        Assert.True(publicationLoss.InvalidatedCommittedGrant);
+        Assert.Equal(LocalWorkspaceNodeContentReadDisposition.Stale, lost.Disposition);
+        Assert.Null(lost.Lease);
+        using (var connection = OpenFile(temp.DatabasePath)) LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE retention_items SET read_denied_at='2026-08-26T00:10:01.0000000+00:00',revision=revision+1 WHERE item_id='raw-call-context';");
+        using var stale = await client.GetAsync(path); Assert.Equal(System.Net.HttpStatusCode.Conflict, stale.StatusCode);
+        using var updated = await client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary"); using var updatedSummary = JsonDocument.Parse(await updated.Content.ReadAsStringAsync());
+        var newRevision = updatedSummary.RootElement.GetProperty("workspace_revision").GetString(); Assert.NotEqual(revision, newRevision);
+        using var denied = await client.GetAsync(path.Replace(revision!, newRevision!)); Assert.Equal(System.Net.HttpStatusCode.Forbidden, denied.StatusCode);
+    }
+
+    private sealed class RawInputContextPublicationLoss(string databasePath) : IRetentionReadBoundaryCheckpoint
+    {
+        internal bool InvalidatedCommittedGrant { get; private set; }
+
+        public void Reached(RetentionReadBoundaryCheckpoint checkpoint)
+        {
+            if (checkpoint != RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction) return;
+            using var connection = OpenFile(databasePath);
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM retention_leases WHERE item_id='raw-call-context' AND lease_kind='access';";
+            InvalidatedCommittedGrant = command.ExecuteNonQuery() == 1;
+        }
     }
 
     [Fact]

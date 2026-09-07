@@ -395,10 +395,10 @@ They must not contain:
   `has_skill`/`has_subagent`/`has_error`/`has_retry`, archive/mode/Settings
   tokens and an eligible opaque process-keyed cursor;
 - dynamic `q` and `model` values exist only in current-page form/JavaScript
-  memory and the bounded Session POST body; non-default limit is also transient;
-  reload/back clears all three;
+  memory, bounded process-memory investigation receipts and POST bodies;
+  non-default limit is also transient; live receipts support revalidated reload/back;
 - URL cursor eligibility requires exact q=null/model=[]/limit=null/default 50;
-  other cursors remain page-memory/POST state;
+  investigation unit must also be `all`; other cursors remain page-memory/receipt/POST state;
 - cursor HMACs bind the complete semantic filter without exposing raw or
   normalized q/model values or an unkeyed low-entropy digest;
 - comparison and AI URLs carry opaque snapshot/run IDs only;
@@ -425,3 +425,9 @@ The v1 redesign does not modify:
 - exact identity/provenance rules;
 - no heuristic Session/Repository/parent binding;
 - no missing-to-zero or composite score.
+
+## Transient investigation navigation
+
+The investigation receipt routes in `local-monitor-v1-route-transport.md` may retain only a bounded validated current search request, collection revision, exact selected IDs and page/scroll position in process memory. Retention is at most 30 minutes from creation, with at most 32 process-wide receipts. Raw filter/model text must never enter URLs, browser storage/history, logs, analytics, persistent settings or the database. Browser history may contain the random opaque receipt handle only. Reload and traversal revalidate against current authorized source/archive state. Handle expiry, eviction and process restart explicitly reset the investigation; copying a URL does not transfer its raw filters.
+
+Saved comparison list/status reads and explicit save/remove mutations use the same local comparison trust boundary. POST and DELETE require exact empty-object JSON and the Monitor CSRF header; GET/HEAD do not mutate retention. The saved receipt stores only the accepted sanitized comparison, never raw filters or content. Its 30-day local lifetime, capacity, integrity and backup exclusion remain owned by `local-monitor-v1-comparison.md`.

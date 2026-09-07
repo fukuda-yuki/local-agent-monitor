@@ -25,6 +25,22 @@ public sealed class LocalMonitorV1ComparisonRouteTests
         Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
     }
 
+    [Theory]
+    [InlineData("POST")]
+    [InlineData("DELETE")]
+    public async Task SavedMutation_RequiresCsrfBeforeCallingApplication(string method)
+    {
+        var application = new StubApplication("{}"u8.ToArray());
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(application));
+        using var request = new HttpRequestMessage(new HttpMethod(method), $"/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}/saved")
+        { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
+        using var response = await host.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal("{\"error\":\"csrf_rejected\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal(0, application.CallCount);
+    }
+
     [Fact]
     public async Task ReadHeadHasGetStatusHeadersAndLengthWithNoBody()
     {

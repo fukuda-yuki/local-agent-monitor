@@ -7,9 +7,27 @@ Session workspace v1 surface and does not create a second lifecycle, catalog,
 worker, queue entity, or physical-delete path.
 
 Local Monitor v1 presents retention as a focused flow opened from Unified
-Settings. Repository/Session archive is separate reversible metadata: it does
+Settings and the exact Session detail's retention-management link. Opening
+either surface performs reads only; preview and confirmation require explicit
+user actions. Repository/Session archive is separate reversible metadata: it does
 not pin, delete, extend expiry, create a retention item or change this
 lifecycle.
+
+### Session management summary
+
+`GET`/`HEAD /api/retention/v1/sessions/{session_id}/management` is an additive
+human-surface summary; the frozen session retention response is unchanged.
+It accepts no query or body and uses the existing same-origin/no-store retention
+boundary. Its `retention-session-management.v1` response contains `session_id`,
+`target_scope: session_event_content`, exact `target_item_count`,
+`excluded_item_count`, the existing `current_state` aggregate, `expiring_item_count`,
+and nullable `earliest_expires_at`/`latest_expires_at` for expiring items.
+Resolution uses the mutation resolver's exact Session ownership checks; linked
+`raw_record` rows remain item-only. Reads create no preview, confirmation or
+mutation records. Invalid targets and unavailable catalogs retain existing errors.
+The UI shows authoritative lifecycle-derived pin/readability counts and expiry
+instants, without inferring manual pin history or physical deletion completion.
+The detail and management page explain the separate archive and raw-record scopes.
 
 ## Contract foundation and fixed values
 

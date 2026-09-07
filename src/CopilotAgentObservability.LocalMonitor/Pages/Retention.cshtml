@@ -29,6 +29,11 @@
         </dl>
 
         <div id="retention-current-status" class="retention-current-status" aria-label="現在の保持状態"></div>
+        @if (Model.TargetKind == "session")
+        {
+            <div data-session-retention-status data-session-id="@Model.TargetId" aria-label="セッション本文の保持・期限" role="status" aria-live="polite"></div>
+            <a href="/sessions/@Model.TargetId">セッションに戻る</a>
+        }
 
         <fieldset class="retention-operation" id="retention-operation">
             <legend>操作を選択</legend>
@@ -87,3 +92,7 @@
     </dialog>
 </section>
 <script src="/monitor-retention.js" defer></script>
+@if (Model.TargetKind == "session")
+{
+    <script src="/local-monitor-session-retention.js" defer></script>
+}

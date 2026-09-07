@@ -11,6 +11,7 @@ internal enum LocalComparisonComponentCategory
     ComparisonResult,
     ComparisonEvidence,
     ComparisonExpiryTombstone,
+    ComparisonSavedLifetime,
 }
 
 internal sealed record LocalComparisonRegisteredObject(
@@ -26,10 +27,12 @@ internal static class LocalComparisonComponentRegistryV1
         "comparison_result",
         "comparison_evidence",
         "comparison_expiry_tombstone",
+        "comparison_saved_lifetime",
     ];
 
     internal static IReadOnlyList<string> ReverseDependencyTableNames { get; } =
     [
+        "local_comparison_saved_lifetimes",
         "local_comparison_expiry_tombstones",
         "local_comparison_evidence",
         "local_comparison_results",
@@ -44,7 +47,7 @@ internal static class LocalComparisonComponentRegistryV1
 internal static class LocalComparisonSchemaV1
 {
     internal const string ComponentName = "local_comparison";
-    internal const int Version = 1;
+    internal const int Version = 2;
     internal static string CanonicalSql { get; } = ReadCanonicalSql();
 
     internal static readonly string[] TableNames =
@@ -54,6 +57,7 @@ internal static class LocalComparisonSchemaV1
         "local_comparison_results",
         "local_comparison_evidence",
         "local_comparison_expiry_tombstones",
+        "local_comparison_saved_lifetimes",
     ];
 
     internal static readonly string[] IndexNames =
@@ -86,11 +90,29 @@ internal static class LocalComparisonSchemaV1
         BuildDefinitions();
     private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>
         ExpectedObjects = SqliteOwnedSchemaAuthority.Compile(Definitions);
+    private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>
+        LegacyObjects = SqliteOwnedSchemaAuthority.Compile(Definitions.Where(item => item.Name != "local_comparison_saved_lifetimes").ToArray());
 
     internal static IReadOnlyList<LocalComparisonRegisteredObject> RegisteredObjects { get; } =
         BuildRegisteredObjects();
 
     internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects => ExpectedObjects.Values;
+
+    internal static IEnumerable<string> TablesForVersion(int version) => version switch
+    {
+        1 => TableNames.Take(TableNames.Length - 1),
+        Version => TableNames,
+        _ => throw new InvalidOperationException("local_comparison_version_unsupported"),
+    };
+
+    internal static void ValidateSupportedBackup(SqliteConnection connection, SqliteTransaction? transaction, bool allowLegacyRepositoryCatalog)
+    {
+        if (ReadDeclaredVersion(connection, transaction) != 1)
+        { Validate(connection, transaction, allowLegacyRepositoryCatalog); return; }
+        ValidateDependencies(connection, transaction, allowLegacyRepositoryCatalog);
+        if (!SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), LegacyObjects)) Reject();
+        ValidateRows(connection, transaction, includeSaved: false);
+    }
 
     internal static void Ensure(SqliteConnection connection)
     {
@@ -107,6 +129,16 @@ internal static class LocalComparisonSchemaV1
 
         var declared = ReadDeclaredVersion(connection, transaction);
         var objects = ReadOwnedObjects(connection, transaction);
+        if (declared == 1)
+        {
+            ValidateDependencies(connection, transaction);
+            if (!SqliteOwnedSchemaAuthority.Equal(objects, LegacyObjects)) Reject();
+            ValidateRows(connection, transaction, includeSaved: false);
+            Execute(connection, transaction, LocalComparisonSavedLifetimeSchema.Sql);
+            Execute(connection, transaction, "UPDATE schema_version SET version=2 WHERE component='local_comparison';");
+            Validate(connection, transaction);
+            return;
+        }
         if (declared is not null || objects.Count != 0)
         {
             Validate(connection, transaction);
@@ -115,13 +147,14 @@ internal static class LocalComparisonSchemaV1
 
         ValidateDependencies(connection, transaction);
         Execute(connection, transaction, CanonicalSql);
+        Execute(connection, transaction, LocalComparisonSavedLifetimeSchema.Sql);
         if (!HasExactOwnedSchema(connection, transaction)
             || TableNames.Any(table => Count(connection, transaction, table) != 0))
         {
             Reject();
         }
         Execute(connection, transaction,
-            "INSERT INTO schema_version(component,version) VALUES('local_comparison',1);");
+            "INSERT INTO schema_version(component,version) VALUES('local_comparison',2);");
     }
 
     internal static void Validate(SqliteConnection connection, SqliteTransaction? transaction)
@@ -230,8 +263,10 @@ internal static class LocalComparisonSchemaV1
 
     internal static void ValidateRows(
         SqliteConnection connection,
-        SqliteTransaction? transaction)
+        SqliteTransaction? transaction,
+        bool includeSaved = true)
     {
+        if (includeSaved) LocalComparisonSavedLifetimeSchema.ValidateRows(connection, transaction);
         ValidateTombstones(connection, transaction);
         ValidateNoOrphanOperationalRows(connection, transaction);
         string? after = null;
@@ -390,11 +425,12 @@ internal static class LocalComparisonSchemaV1
     private static IReadOnlyList<SqliteOwnedSchemaDefinition> BuildDefinitions()
     {
         var statements = CanonicalSql.Split("\n\n", StringSplitOptions.RemoveEmptyEntries);
-        var expected = TableNames.Length + IndexNames.Length + TriggerNames.Length;
+        var legacyTableCount = TableNames.Length - 1;
+        var expected = legacyTableCount + IndexNames.Length + TriggerNames.Length;
         if (statements.Length != expected)
             throw new InvalidOperationException("local_comparison_schema_artifact_invalid");
         var definitions = new List<SqliteOwnedSchemaDefinition>(expected);
-        for (var index = 0; index < TableNames.Length; index++)
+        for (var index = 0; index < legacyTableCount; index++)
             definitions.Add(new("table", TableNames[index], TableNames[index], statements[index]));
 
         var indexTables = new[]
@@ -405,15 +441,16 @@ internal static class LocalComparisonSchemaV1
         };
         for (var index = 0; index < IndexNames.Length; index++)
             definitions.Add(new("index", IndexNames[index], indexTables[index],
-                statements[TableNames.Length + index]));
+                statements[legacyTableCount + index]));
 
-        var triggerOffset = TableNames.Length + IndexNames.Length;
+        var triggerOffset = legacyTableCount + IndexNames.Length;
         for (var index = 0; index < TriggerNames.Length; index++)
         {
             var tableIndex = index / 3;
             definitions.Add(new("trigger", TriggerNames[index], TableNames[tableIndex],
                 statements[triggerOffset + index]));
         }
+        definitions.Add(new("table", "local_comparison_saved_lifetimes", "local_comparison_saved_lifetimes", LocalComparisonSavedLifetimeSchema.Sql));
         return definitions.AsReadOnly();
     }
 
@@ -426,6 +463,7 @@ internal static class LocalComparisonSchemaV1
             [TableNames[2]] = LocalComparisonComponentCategory.ComparisonResult,
             [TableNames[3]] = LocalComparisonComponentCategory.ComparisonEvidence,
             [TableNames[4]] = LocalComparisonComponentCategory.ComparisonExpiryTombstone,
+            [TableNames[5]] = LocalComparisonComponentCategory.ComparisonSavedLifetime,
         };
         return ExpectedObjects.Values
             .OrderBy(item => item.Type, StringComparer.Ordinal)
@@ -484,5 +522,5 @@ internal static class LocalComparisonSchemaV1
 
     private static void Reject() =>
         throw new InvalidOperationException(
-            "Unsupported incomplete local_comparison schema version 1.");
+            "Unsupported incomplete local_comparison schema.");
 }

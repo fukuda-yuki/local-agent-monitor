@@ -31,6 +31,7 @@ internal sealed record LocalMonitorV1SessionSearchRequest(
     int? Limit)
 {
     internal int EffectiveLimit => Limit ?? 50;
+    internal string InvestigationUnit { get; init; } = "all";
 }
 
 internal static class LocalMonitorV1UrlState
@@ -41,7 +42,7 @@ internal static class LocalMonitorV1UrlState
         return request.QueryOriginal is null
             && request.QueryNormalized is null
             && request.Models is { Count: 0 }
-            && request.Limit is null;
+            && request.Limit is null && request.InvestigationUnit == "all";
     }
 }
 
@@ -90,6 +91,12 @@ internal static class LocalMonitorV1SessionSearchRequestParser
         {
             using var document = JsonDocument.Parse(bytes, DocumentOptions);
             var root = document.RootElement;
+            var unit = "all";
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("investigation_unit", out var unitValue))
+            {
+                if (unitValue.ValueKind != JsonValueKind.String || unitValue.GetString() is not ("all" or "work_session" or "observation_fragment")) return LocalMonitorV1SessionSearchParseStatus.InvalidRequest;
+                unit = unitValue.GetString()!;
+            }
             if (!TryProperties(root, out var properties)
                 || !TryRequiredString(properties["schema_version"], out var schemaVersion)
                 || !string.Equals(schemaVersion, SchemaVersion, StringComparison.Ordinal)
@@ -137,7 +144,7 @@ internal static class LocalMonitorV1SessionSearchRequestParser
                 queryOriginal,
                 queryNormalized,
                 cursor,
-                limit);
+                limit) { InvestigationUnit = unit };
             return LocalMonitorV1SessionSearchParseStatus.Success;
         }
         catch (Exception exception) when (
@@ -156,6 +163,11 @@ internal static class LocalMonitorV1SessionSearchRequestParser
         if (root.ValueKind != JsonValueKind.Object) return false;
         foreach (var property in root.EnumerateObject())
         {
+            if (property.Name == "investigation_unit")
+            {
+                if (!properties.TryAdd(property.Name, property.Value)) return false;
+                continue;
+            }
             if (!ExpectedProperties.Contains(property.Name)
                 || !properties.TryAdd(property.Name, property.Value))
             {
@@ -163,7 +175,7 @@ internal static class LocalMonitorV1SessionSearchRequestParser
             }
         }
 
-        return properties.Count == ExpectedProperties.Count;
+        return properties.Count == ExpectedProperties.Count + (properties.ContainsKey("investigation_unit") ? 1 : 0);
     }
 
     private static bool TryRequiredString(JsonElement element, out string? value)

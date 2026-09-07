@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Archive;
 using CopilotAgentObservability.Persistence.Sqlite;
 
@@ -9,13 +10,59 @@ internal static class LocalMonitorV1CollectionRoutes
 {
     internal const string RepositoriesPath = "/api/local-monitor/v1/repositories";
     internal const string SessionsPath = "/api/local-monitor/v1/sessions";
+    internal const string InvestigationsPath = "/api/local-monitor/v1/investigations";
+    private static readonly LocalMonitorV1InvestigationStore Investigations = new();
 
-    internal static bool IsPath(PathString path) => path == RepositoriesPath || path == SessionsPath;
+    internal static bool IsPath(PathString path) => path == RepositoriesPath || path == SessionsPath || path == SessionsPath + "/facets" || path == SessionsPath + "/candidates" || path == InvestigationsPath || path == InvestigationsPath + "/restore";
 
-    internal static void Map(WebApplication app, ILocalRepositoryScopeSnapshotService service, LocalMonitorV1CollectionTestOverrides? testOverrides = null)
+    internal static void Map(WebApplication app, ILocalRepositoryScopeSnapshotService service, LocalMonitorV1CollectionTestOverrides? testOverrides = null,
+        ILocalRepositoryComparisonInputSnapshotService? comparisonService = null, Func<Guid, Guid, CancellationToken, Task<string?>>? historicalDigest = null)
     {
         var cursorKey = testOverrides?.CursorKey.ToArray() ?? RandomNumberGenerator.GetBytes(32);
         var repositoryCursorKey = testOverrides?.RepositoryCursorKey?.ToArray() ?? RandomNumberGenerator.GetBytes(32);
+        foreach (var path in new[] { InvestigationsPath, InvestigationsPath + "/restore", SessionsPath + "/candidates" }) app.Map(path, async context =>
+        {
+            if (!HttpMethods.IsPost(context.Request.Method)) { context.Response.Headers.Allow = "POST"; await Error(context, 405, "method_not_allowed"); return; }
+            if (MonitorHost.IsCrossSiteRequest(context) || !MonitorHost.HasMonitorCsrfHeader(context)) { await Error(context, 403, "csrf_rejected"); return; }
+            if (!LocalArchiveWire.HasNoSemanticQuery(context.Request.QueryString.Value)) { await Error(context, 400, "invalid_request"); return; }
+            if (!LocalArchiveWire.HasSupportedPostMedia(context.Request.Headers.ContentType, context.Request.Headers.ContentEncoding)) { await Error(context, 415, "unsupported_media_type"); return; }
+            var bytes = await ReadBody(context); if (bytes is null) return;
+            try
+            {
+                using var document = JsonDocument.Parse(bytes.Value, new() { MaxDepth = 5 });
+                var body = document.RootElement;
+                if (path == SessionsPath + "/candidates")
+                {
+                    await Success(context, await LocalMonitorV1CandidateApplication.ResolveAsync(body, service, comparisonService, historicalDigest, cursorKey, context.RequestAborted)); return;
+                }
+                if (path == InvestigationsPath)
+                {
+                    var handle = Investigations.Save(body);
+                    if (handle is null) { await Error(context, 400, "invalid_request"); return; }
+                    await Success(context, JsonSerializer.SerializeToUtf8Bytes(new { handle })); return;
+                }
+                if (!LocalMonitorV1InvestigationStore.Keys(body, "handle") || !LocalMonitorV1InvestigationStore.Hex(body.GetProperty("handle"))) { await Error(context, 400, "invalid_request"); return; }
+                if (!Investigations.TryGet(body.GetProperty("handle").GetString()!, out var saved, out var request)) { await Error(context, 410, "investigation_expired"); return; }
+                var scope = request!.Scope switch { "repository" => LocalRepositoryScopeKind.Repository, "unassigned" => LocalRepositoryScopeKind.Unassigned, _ => LocalRepositoryScopeKind.All };
+                var snapshot = await service.ReadAsync(new(scope, request.RepositoryId), context.RequestAborted);
+                var pageReset = false;
+                byte[] currentBytes;
+                try { currentBytes = LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request, cursorKey, testOverrides?.SessionCollectionRevision, testOverrides?.SessionItemRevision); }
+                catch (LocalMonitorV1CollectionException exception) when (exception.Error == "invalid_cursor")
+                {
+                    pageReset = true;
+                    currentBytes = LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request with { Cursor = null }, cursorKey, testOverrides?.SessionCollectionRevision, testOverrides?.SessionItemRevision);
+                }
+                using var current = JsonDocument.Parse(currentBytes);
+                var eligible = snapshot.Sessions.Where(row => LocalMonitorV1CollectionApplication.SelectionScopeMatches(row, request)).Select(row => ((LocalWorkspaceProjectionRow)row.Session).SessionId).ToHashSet(StringComparer.Ordinal);
+                string[] Valid(string cohort) => saved.GetProperty("cohorts").GetProperty(cohort).EnumerateArray().Select(id => id.GetString()!).Where(eligible.Contains).ToArray();
+                await Success(context, JsonSerializer.SerializeToUtf8Bytes(new { saved, stale = pageReset || saved.GetProperty("workspace_revision").GetString() != current.RootElement.GetProperty("workspace_revision").GetString(), page_reset = pageReset, valid_selection = new { a = Valid("a"), b = Valid("b") } }));
+            }
+            catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { await Error(context, 400, "invalid_request"); }
+            catch (LocalWorkspaceSessionDetailException e) when (e.Error == "local_monitor_ui_unavailable") { await Error(context, 503, e.Error); }
+            catch (LocalRepositoryScopeSnapshotException) { await Error(context, 503, "persistence_busy"); }
+            catch (LocalMonitorV1CollectionException e) { await Error(context, e.Error == "workspace_too_large" ? 409 : 400, e.Error); }
+        });
         app.MapMethods(RepositoriesPath, [HttpMethods.Get, HttpMethods.Head], async context =>
         {
             if (MonitorHost.IsCrossSiteRequest(context)) { await Error(context, 403, "csrf_rejected"); return; }
@@ -30,7 +77,7 @@ internal static class LocalMonitorV1CollectionRoutes
             catch (LocalRepositoryScopeSnapshotException) { await Error(context, 503, "persistence_busy"); }
             catch (LocalMonitorV1CollectionException e) { await Error(context, e.Error == "workspace_too_large" ? 409 : 400, e.Error); }
         });
-        app.Map(SessionsPath, async context =>
+        foreach (var collectionPath in new[] { SessionsPath, SessionsPath + "/facets" }) app.Map(collectionPath, async context =>
         {
             if (!HttpMethods.IsPost(context.Request.Method)) { context.Response.Headers.Allow = "POST"; await Error(context, 405, "method_not_allowed"); return; }
             if (MonitorHost.IsCrossSiteRequest(context) || !MonitorHost.HasMonitorCsrfHeader(context)) { await Error(context, 403, "csrf_rejected"); return; }
@@ -47,7 +94,9 @@ internal static class LocalMonitorV1CollectionRoutes
             try
             {
                 var snapshot = await service.ReadAsync(new(scope, request.RepositoryId), context.RequestAborted);
-                await Success(context, LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request, cursorKey, testOverrides?.SessionCollectionRevision, testOverrides?.SessionItemRevision));
+                await Success(context, collectionPath.EndsWith("/facets", StringComparison.Ordinal)
+                    ? LocalMonitorV1CollectionApplication.SerializeFacets(snapshot, request)
+                    : LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request, cursorKey, testOverrides?.SessionCollectionRevision, testOverrides?.SessionItemRevision));
             }
             catch (InvalidOperationException e) when (e.Message == "local_repository_scope_repository_not_found") { await Error(context, 404, "repository_not_found"); }
             catch (LocalWorkspaceSessionDetailException e) when (e.Error == "local_monitor_ui_unavailable") { await Error(context, 503, e.Error); }

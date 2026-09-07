@@ -4,12 +4,14 @@
   "title": "local-monitor-session-summary.response.v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "workspace_revision", "session", "executions", "technical_references"],
+  "required": ["schema_version", "workspace_revision", "session", "executions", "conversation", "llm_calls", "technical_references"],
   "properties": {
     "schema_version": {"const": "local-monitor-session-summary.response.v2"},
     "workspace_revision": {"$ref": "#/$defs/revision"},
     "session": {"$ref": "#/$defs/session"},
     "executions": {"type": "array", "minItems": 0, "maxItems": 256, "items": {"$ref": "#/$defs/execution"}, "contains": {"properties": {"latest": {"const": true}}, "required": ["latest"]}, "minContains": 0, "maxContains": 1},
+    "conversation": {"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["node_id","execution_id","role","time_authority","recorded_at","part","content_state","call_node_id","correspondence"],"properties":{"node_id":{"$ref":"#/$defs/nodeId"},"execution_id":{"$ref":"#/$defs/uuidv7"},"role":{"enum":["user","assistant"]},"time_authority":{"enum":["recorded","missing","invalid"]},"recorded_at":{"oneOf":[{"$ref":"#/$defs/instant"},{"type":"null"}]},"part":{"enum":["instruction","event_content"]},"content_state":{"enum":["available","not_captured","expired","deleted","read_denied","oversized","invalid"]},"call_node_id":{"oneOf":[{"$ref":"#/$defs/nodeId"},{"type":"null"}]},"correspondence":{"const":"unknown"}}}},
+    "llm_calls":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["node_id","execution_id","requested_model","response_model"],"properties":{"node_id":{"$ref":"#/$defs/nodeId"},"execution_id":{"$ref":"#/$defs/uuidv7"},"requested_model":{"type":["string","null"],"minLength":1},"response_model":{"type":["string","null"],"minLength":1}}}},
     "technical_references": {"$ref": "#/$defs/sessionReferences"}
   },
   "allOf": [{"if": {"properties": {"executions": {"minItems": 1}}, "required": ["executions"]}, "then": {"properties": {"executions": {"contains": {"properties": {"latest": {"const": true}}, "required": ["latest"]}, "minContains": 1, "maxContains": 1}}}}],

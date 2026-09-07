@@ -275,7 +275,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             && !syntheticSkillTarget && otelExecutions is null)
             await ValidateNodeAncestry(connection, transaction, request, token);
         var projectedNodes = NormalizeCurrentSkillNodes(
-            await ReadNodes(connection, transaction, request, skillProjection, token, otelExecutions is not null), skillProjection);
+            await ReadNodes(connection, transaction, request, skillProjection, token, otelExecutions is not null || request.Kind == LocalRepositorySessionDetailRequestKind.Summary), skillProjection);
         var persistedNodeIds = await ReadPersistedCurrentSkillNodeIds(connection, transaction, sessionId, skillProjection, token);
         projectedNodes = await AddMissingCurrentSkillNodes(
             connection, transaction, request, projectedNodes, skillProjection, materializableSkillNodeIds, persistedNodeIds, token);
@@ -305,9 +305,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var metadata = request.Kind is LocalRepositorySessionDetailRequestKind.Summary or LocalRepositorySessionDetailRequestKind.Compare
             ? await ReadMetadata(connection, transaction, sessionId, token)
             : new Metadata([], [], null, null);
-        var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
-            ? await ReadSummaryContent(connection, transaction, sessionId, acceptedAt, token)
-            : request.Kind == LocalRepositorySessionDetailRequestKind.Compare ? []
+        var content = request.Kind == LocalRepositorySessionDetailRequestKind.Compare ? []
             : await ReadContent(connection, transaction, nodeIds, acceptedAt, token);
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Content)
         {
@@ -336,7 +334,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         }
         var contribution = new LocalWorkspaceSessionDetailContribution(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
-        return otelExecutions?.Apply(contribution, request) ?? contribution;
+        return LocalWorkspaceOtelInputContext.Apply(connection, transaction, sessionId, otelExecutions?.Apply(contribution, request) ?? contribution, acceptedAt);
     }
 
     private static async Task<string?> ReadProjectedContentState(
@@ -2814,29 +2812,6 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         while(await reader.ReadAsync(token))rows.Add(Content(reader));return rows.ToArray();
     }
 
-    private async Task<LocalWorkspaceContentAvailability[]> ReadSummaryContent(SqliteConnection c, SqliteTransaction t, string sessionId, DateTimeOffset acceptedAt, CancellationToken token)
-    {
-        statementObserver?.Invoke("detail-summary-content");
-        using var command = Command(c, t, $$"""
-            SELECT c.node_id,c.part,{{LocalWorkspaceContentAuthority.EffectiveAvailabilitySql}},c.source_item_id,c.revision_input,c.store_kind,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,c.retention_item_id,c.retention_store_instance_id,c.source_captured_at,c.source_expires_at,c.retention_revision,c.retention_ownership_receipt,c.retention_owner_token
-            FROM local_workspace_node_content_refs c
-            JOIN local_workspace_nodes n ON n.node_id=c.node_id
-            JOIN local_workspace_sessions session ON session.session_id=n.session_id
-            JOIN session_events e ON e.event_id=c.source_item_id AND e.session_id=n.session_id
-            LEFT JOIN session_event_content s ON s.event_id=e.event_id
-            LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
-            LEFT JOIN retention_tombstones tmb ON tmb.item_id=i.item_id
-            WHERE n.session_id=$session_id AND c.part='instruction' AND c.source_item_id=session.label_source_identity
-            ORDER BY c.node_id LIMIT 2;
-            """, sessionId);
-        command.Parameters.AddWithValue("$now", Canonical(acceptedAt));
-        var rows = new List<LocalWorkspaceContentAvailability>();
-        using var reader = await command.ExecuteReaderAsync(token);
-        while (await reader.ReadAsync(token)) rows.Add(Content(reader));
-        if (rows.Count > 1) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-        return rows.ToArray();
-    }
-
     private static LocalWorkspaceContentAvailability Content(SqliteDataReader reader) => new(
         reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
         reader.GetString(5), reader.GetString(6), S(reader, 7), L(reader, 8), S(reader, 9), S(reader, 10),
@@ -3058,6 +3033,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 AppendRevisionValue(hash, reader.GetString(2));
             }
         }
+        LocalWorkspaceOtelInputContext.AppendRevision(hash, c, t, sessionId, acceptedAt);
         return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 

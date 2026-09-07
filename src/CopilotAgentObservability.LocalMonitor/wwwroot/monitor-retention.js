@@ -252,6 +252,7 @@
     }
 
     async function readTargetStatus() {
+        if (targetKind === "session") document.dispatchEvent(new Event("cao-retention-state-changed"));
         const status = await requestJson(targetStatusPath(), { signal: activeController.signal });
         currentStatus.textContent = "";
         appendHeading(currentStatus, "現在の状態");

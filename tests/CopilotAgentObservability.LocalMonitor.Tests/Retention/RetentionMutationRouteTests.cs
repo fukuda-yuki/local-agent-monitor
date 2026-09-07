@@ -17,6 +17,42 @@ public sealed class RetentionMutationRouteCollection
 public sealed class RetentionMutationRouteTests
 {
     [Fact]
+    public async Task SessionManagement_IsReadOnlyNoStoreAndPreservesFrozenSessionContract()
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero)) };
+        var sessionId = SeedSession(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: TestOptions());
+        var frozenPath = $"/api/retention/v1/sessions/{sessionId}";
+        var before = await host.Client.GetStringAsync(frozenPath);
+        var path = frozenPath + "/management";
+        using var response = await host.Client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        AssertNoStore(response);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        AssertPropertyNames(json.RootElement, "schema_version", "session_id", "target_scope", "target_item_count",
+            "excluded_item_count", "current_state", "expiring_item_count", "earliest_expires_at", "latest_expires_at");
+        Assert.Equal("retention-session-management.v1", json.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal(1, json.RootElement.GetProperty("current_state").GetProperty("readable_item_count").GetInt32());
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+        using var query = await host.Client.GetAsync(path + "?preview=true");
+        Assert.Equal(HttpStatusCode.BadRequest, query.StatusCode);
+        using var bodyRequest = new HttpRequestMessage(HttpMethod.Get, path) { Content = new StringContent("{}") };
+        using var body = await host.Client.SendAsync(bodyRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, body.StatusCode);
+        using var postRequest = new HttpRequestMessage(HttpMethod.Post, path);
+        postRequest.Headers.Add("x-monitor-csrf", "local-monitor");
+        using var post = await host.Client.SendAsync(postRequest);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
+        using var foreignRequest = new HttpRequestMessage(HttpMethod.Get, path);
+        foreignRequest.Headers.Add("Origin", "https://foreign.invalid");
+        using var foreign = await host.Client.SendAsync(foreignRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, foreign.StatusCode);
+        Assert.Equal(before, await host.Client.GetStringAsync(frozenPath));
+    }
+
+    [Fact]
     public async Task PreviewRoute_ReturnsThePinnedPreviewContract()
     {
         using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero)) };
