@@ -14,7 +14,7 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
     private const string ArchivedRepositoryId = "018f0000-0000-7000-8000-000000000103";
 
     [Fact]
-    public async Task Root_RendersExactCardsVirtualScopesSafeFactsAndOpaqueNavigation()
+    public async Task Root_ShowsSessionsWithExactRepositoryScopeNavigation()
     {
         const string hostileName = "同じ名前 <img src=x onerror=window.__repositoryNameExecuted=true>";
         var repositories = new[]
@@ -48,22 +48,15 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
 
         await page.GotoAsync(host.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.Locator("#local-monitor-repository-selection"))
-            .ToContainTextAsync("GitHub URL、または Copilot CLI が記録したワークスペースの Git 情報");
+        await Expect(page.Locator("[data-session-explorer]")).ToBeVisibleAsync();
+        await Expect(page.Locator("#all-sessions-entry")).ToHaveAttributeAsync("aria-current", "page");
         var cards = page.Locator("[data-repository-card]");
         await Expect(cards).ToHaveCountAsync(2);
         await Expect(cards.Nth(0).Locator("[data-repository-name]")).ToHaveTextAsync(hostileName);
         await Expect(cards.Nth(1).Locator("[data-repository-name]")).ToHaveTextAsync(hostileName);
         await Expect(cards.Nth(0).Locator("[data-repository-session-count]")).ToHaveTextAsync("2件");
         await Expect(cards.Nth(1).Locator("[data-repository-session-count]")).ToHaveTextAsync("1件");
-        await Expect(cards.Nth(0).Locator("[data-repository-last-observed] time"))
-            .ToHaveAttributeAsync("datetime", "2026-08-28T02:03:04.0000000+00:00");
-        await Expect(cards.Nth(0).Locator("[data-repository-last-observed]"))
-            .ToContainTextAsync("2026年8月28日");
-        await Expect(cards.Nth(0).Locator(".local-monitor-repository-fact-label"))
-            .ToHaveTextAsync("最終記録");
-        await Expect(cards.Nth(1).Locator("[data-repository-last-observed] time"))
-            .ToHaveAttributeAsync("datetime", "0001-01-01T00:00:00.0000000+00:00");
+        await Expect(cards.Locator("[data-repository-last-observed]")).ToHaveCountAsync(0);
         await Expect(cards.Nth(0).Locator("[data-repository-open]"))
             .ToHaveAttributeAsync("href", $"/repositories/{FirstRepositoryId}/sessions");
         await Expect(cards.Nth(1).Locator("[data-repository-open]"))
@@ -99,7 +92,7 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
 
         await page.GotoAsync(host.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("#repository-selection-status"))
-            .ToContainTextAsync("登録されたアクティブなリポジトリはありません");
+            .ToContainTextAsync("リポジトリなし");
         Assert.DoesNotContain(requests, request => request.Url.Contains("/locators", StringComparison.Ordinal));
 
         await page.Locator("#add-repository-action").ClickAsync();
@@ -121,7 +114,8 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
         Assert.DoesNotContain("github.com/synthetic/task5", page.Url, StringComparison.Ordinal);
 
         await page.Locator("#settings-modal-close").ClickAsync();
-        await page.Locator("[data-repository-manage]").ClickAsync();
+        await page.Locator("#add-repository-action").ClickAsync();
+        await page.Locator("[data-repository-settings-manage]").ClickAsync();
         await Expect(page.Locator("#repository-rename-display-name")).ToBeFocusedAsync();
         await Expect(page.Locator("#repository-rename-display-name")).ToHaveValueAsync("同じ名前");
         Assert.Contains(requests, request => request.Method == "GET"
@@ -136,7 +130,7 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
 
         await Expect(page.Locator("[data-repository-archive]")).ToBeDisabledAsync();
         await Expect(page.Locator("#repository-archive-confirmation-description"))
-            .ToContainTextAsync("セッションのアーカイブ状態や割り当ては変更しません");
+            .ToContainTextAsync("所属セッションは変更しません");
         await page.Locator("#repository-archive-confirmation").CheckAsync();
         await page.Locator("[data-repository-archive]").ClickAsync();
         await Expect(page.Locator("#repository-management-result")).ToBeFocusedAsync();
@@ -241,7 +235,8 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
             }));
 
         await page.GotoAsync(host.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await page.Locator("[data-repository-manage]").ClickAsync();
+        await page.Locator("#add-repository-action").ClickAsync();
+        await page.Locator("[data-repository-settings-manage]").ClickAsync();
 
         var identity = page.Locator("[data-repository-identity-kind='local_git_repository']");
         await Expect(identity).ToContainTextAsync("ローカル Git / PrivateWorkspace");
@@ -315,9 +310,9 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
         Assert.Equal(48, wide[0]);
         Assert.Equal(24, wide[1]);
         Assert.True(wide[2] <= wide[3]);
-        Assert.InRange(wide[4], 300, 380);
+        Assert.InRange(wide[4], 170, 192);
         Assert.True(wide[5] > 0);
-        Assert.Equal(16, wide[6]);
+        Assert.Equal(4, wide[6]);
 
         await page.Locator("#repository-load-more").ClickAsync();
 
@@ -328,6 +323,8 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
         Assert.DoesNotContain("after=", page.Url, StringComparison.Ordinal);
 
         await page.SetViewportSizeAsync(360, 768);
+        await Expect(page.Locator(".local-monitor-scope-navigation")).Not.ToHaveAttributeAsync("open", "");
+        await page.Locator(".local-monitor-scope-navigation > summary").ClickAsync();
         var narrow = await page.EvaluateAsync<double[]>("""
             () => {
               const cards = [...document.querySelectorAll('[data-repository-card]')];
@@ -418,11 +415,11 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
         await page.GotoAsync(host.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
         await Expect(page.Locator("#repository-selection-status")).ToContainTextAsync("リポジトリを読み込めませんでした");
-        await Expect(page.Locator("#repository-selection-status button")).ToHaveTextAsync("もう一度読み込む");
+        await Expect(page.Locator("#repository-selection-status button")).ToHaveTextAsync("再読み込み");
         Assert.DoesNotContain("persistence_busy", await page.Locator("body").InnerTextAsync(), StringComparison.Ordinal);
         await page.Locator("#repository-selection-status button").ClickAsync();
         await Expect(page.Locator("#repository-selection-status"))
-            .ToContainTextAsync("登録されたアクティブなリポジトリはありません");
+            .ToContainTextAsync("リポジトリなし");
         Assert.Equal(2, collectionCalls);
     }
 
@@ -459,7 +456,7 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
         await page.Locator("#repository-create-form button[type='submit']").ClickAsync();
 
         await Expect(page.Locator("#repository-management-result"))
-            .ToContainTextAsync("リポジトリを追加できませんでした");
+            .ToContainTextAsync("追加に失敗しました");
         await Expect(page.Locator("#repository-create-display-name")).ToHaveValueAsync("再試行する名前");
         Assert.DoesNotContain("persistence_busy", await page.Locator("body").InnerTextAsync(), StringComparison.Ordinal);
         await page.Locator("#repository-create-form button[type='submit']").ClickAsync();
@@ -586,7 +583,7 @@ public sealed class LocalMonitorV1RepositorySelectionPlaywrightTests
 
         await Expect(page.Locator("#repository-selection-status")).ToContainTextAsync("続きを読み込めませんでした");
         await Expect(page.Locator("[data-repository-card]")).ToHaveCountAsync(50);
-        await Expect(page.Locator("#repository-selection-status button")).ToHaveTextAsync("もう一度読み込む");
+        await Expect(page.Locator("#repository-selection-status button")).ToHaveTextAsync("再読み込み");
         await page.Locator("#repository-selection-status button").ClickAsync();
         await Expect(page.Locator("#repository-selection-status")).ToContainTextAsync("続きを読み込めませんでした");
         await Expect(page.Locator("[data-repository-card]")).ToHaveCountAsync(50);

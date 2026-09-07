@@ -252,7 +252,7 @@ public class MonitorAgentExecutionPlaywrightTests
         await page.GotoAsync($"{host.Url}/traces/{MonitorRichTrace.TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.Locator("#errors-only").UncheckAsync();
 
-        await Expect(page.Locator("#agent-summary-state")).ToHaveTextAsync("Sub-agent利用を判定できません");
+        await Expect(page.Locator("#agent-summary-state")).ToHaveTextAsync("サブエージェント利用は不明");
         await Expect(page.Locator("#flow-view .turn-card")).ToHaveCountAsync(3);
         await Expect(page.Locator("#flow-view .agent-container")).ToHaveCountAsync(0);
         await Expect(page.Locator("#flow-status")).ToBeHiddenAsync();

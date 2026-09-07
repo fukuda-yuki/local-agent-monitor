@@ -66,7 +66,7 @@
         const messages = {
             historical_import_preview_stale: "プレビューが古くなりました。ソースを選び直して新しいプレビューを作成してください。",
             historical_import_source_changed: "ソースがプレビュー後に変わりました。新しいプレビューが必要です。",
-            historical_import_no_eligible_candidates: "現在のソース契約では取り込める候補がありません。",
+            historical_import_no_eligible_candidates: "この取得元から取り込める記録がありません。",
             historical_import_confirmation_expired: "確認の有効期限が切れました。新しいプレビューが必要です。",
             historical_import_preview_expired: "プレビューの有効期限が切れました。新しいプレビューが必要です。",
             historical_import_store_busy: "履歴インポートの保存先が使用中です。状態を変えずに終了しました。",
@@ -326,7 +326,7 @@
             renderPreview(response);
             setLive(response.commit_allowed
                 ? "プレビューを表示しました。内容を確認してから確定してください。"
-                : "プレビューを表示しました。現在のソース契約では確定できません。");
+                : "取り込み対象がないため確定できません。");
         } catch (failure) {
             if (controller.signal.aborted
                 || requestGeneration !== previewGeneration
@@ -561,7 +561,7 @@
                 || generation !== observationGeneration
                 || activeSourceKind !== "historical") return;
             if (!response.items || response.items.length === 0) {
-                renderEmptyList("Historical observation はまだありません。");
+                renderEmptyList("取り込んだ履歴なし");
                 return;
             }
             for (const item of response.items) {
@@ -630,10 +630,10 @@
             ]);
             traceButton.disabled = !value.trace_controls_enabled;
             traceUnavailable.textContent = value.trace_controls_enabled
-                ? "正確な既存 Session のナビゲーションを利用できます。"
+                ? "対応するセッションを開けます。"
                 : (value.missing_capabilities || []).includes("trace_identity")
-                    ? "trace_identity がありません。Historical summary から trace を合成しません。"
-                    : "Historical binding はナビゲーション専用です。この画面では trace 操作を有効にしません。";
+                    ? "対応するトレースの記録がありません。"
+                    : "対応するセッションからトレースを確認できます。";
             observationDetail.hidden = false;
         } catch (failure) {
             if (controller.signal.aborted
@@ -655,7 +655,7 @@
                 || generation !== observationGeneration
                 || activeSourceKind !== "live") return;
             if (!response.items || response.items.length === 0) {
-                renderEmptyList("Live Session はまだありません。");
+                renderEmptyList("ライブセッションなし");
                 return;
             }
             for (const item of response.items) {
@@ -683,7 +683,7 @@
                 ]);
                 const detailLink = document.createElement("a");
                 detailLink.className = "monitor-btn";
-                detailLink.textContent = "Session 詳細を開く";
+                detailLink.textContent = "セッションを開く";
                 detailLink.href = `/diagnostics?session_id=${encodeURIComponent(item.session_id)}#doctor-session`;
                 card.append(detailLink);
                 observationList.append(card);

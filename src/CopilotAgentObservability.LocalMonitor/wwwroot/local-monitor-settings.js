@@ -32,11 +32,11 @@
     ingestion_stalled: "受信処理が停止しています。",
     ingestion_backpressure: "受信処理が混み合っています。",
     writer_not_running: "記録処理が動作していません。",
-    projection_worker_missing: "投影処理が動作していません。",
-    projection_status_unknown: "投影状態を確認できません。",
-    projection_lag_exceeded: "投影の遅れが許容範囲を超えています。",
-    projection_lag: "投影に遅れがあります。",
-    span_projection_backlog: "詳細投影に待ちがあります。",
+    projection_worker_missing: "表示用データ更新処理が動作していません。",
+    projection_status_unknown: "表示用データ更新状態を確認できません。",
+    projection_lag_exceeded: "表示用データ更新の遅れが許容範囲を超えています。",
+    projection_lag: "表示用データ更新に遅れがあります。",
+    span_projection_backlog: "詳細表示用データ更新に待ちがあります。",
   });
   const BLOCKING_READINESS_REASONS = new Set(["loopback_unbound", "db_unavailable", "migration_failed", "fatal_error",
     "ingestion_stalled", "writer_not_running", "projection_worker_missing", "projection_status_unknown", "projection_lag_exceeded"]);
@@ -95,7 +95,7 @@
     if (token === "state") {
       const receiver = card("受信", "受信状態を確認しています。");
       receiver.dataset.settingsStateReceiver = "";
-      const projection = card("投影", "投影状態を確認しています。");
+      const projection = card("表示用データ更新", "表示用データ更新状態を確認しています。");
       projection.dataset.settingsStateProjection = "";
       const ai = card("AI", "AI設定を確認しています。");
       ai.dataset.settingsStateAi = "";
@@ -105,7 +105,7 @@
     } else if (token === "receiver") {
       const health = card("受信状態", "受信状態を確認しています。");
       health.dataset.settingsReceiverHealth = "";
-      const projection = card("投影", "投影状態を確認しています。");
+      const projection = card("表示用データ更新", "表示用データ更新状態を確認しています。");
       projection.dataset.settingsReceiverProjection = "";
       const source = factCard("記録範囲", "取得元の状態を確認しています。");
       source.dataset.settingsReceiverSource = "";
@@ -140,13 +140,13 @@
       operationResult.dataset.settingsStorageOperations = "";
       operationResult.setAttribute("aria-live", "polite");
       section.append(actions, backupResult, operationResult,
-        element("p", "local-monitor-settings-note", "自動バックアップ: この画面では確認できません。"),
+        element("p", "local-monitor-settings-note", "自動バックアップ: 状態不明"),
         element("p", "local-monitor-settings-note",
-          "アーカイブは元に戻せる管理情報です。削除・保持・固定とは異なります。復元や削除など影響のある操作は、移動先で確認してから実行します。"));
+          "アーカイブではデータを削除しません。復元・削除は各画面で行えます。"));
     } else if (token === "diagnostics") {
       const health = card("受信", "受信状態を確認しています。");
       health.dataset.settingsDiagnosticsHealth = "";
-      const projection = card("投影", "投影状態を確認しています。");
+      const projection = card("表示用データ更新", "表示用データ更新状態を確認しています。");
       projection.dataset.settingsDiagnosticsProjection = "";
       const source = factCard("取得元", "取得元の状態を確認しています。");
       source.dataset.settingsDiagnosticsSource = "";
@@ -189,7 +189,7 @@
   sessionSearchResult.dataset.settingsArchivedSessionSearchResult = "";
   sessionSearchResult.setAttribute("aria-live", "polite");
   const sessionList = element("div", "local-monitor-settings-list");
-  const sessionMore = element("button", null, "さらに読み込む");
+  const sessionMore = element("button", null, "さらに表示");
   sessionMore.type = "button";
   sessionMore.hidden = true;
   sessionArchive.append(sessionSearch, sessionSearchResult, sessionList, sessionMore);
@@ -270,7 +270,7 @@
       archivedSessions = archivedSessions.filter(candidate => candidate.target_id !== item.target_id);
       renderArchivedSessions();
     })));
-    if (archivedSessions.length === 0) sessionList.textContent = "アーカイブ済みセッションはありません。";
+    if (archivedSessions.length === 0) sessionList.textContent = "アーカイブなし";
     sessionMore.hidden = archivedCursor === null;
     sessionArchive.querySelector("p").textContent = `${archivedSessions.length}件を表示しています。`;
   }
@@ -414,8 +414,8 @@
           || !count(value.unsupported_event_version_count) || !count(value.projection_backlog)
           || value.projection_cursor !== null && !Number.isSafeInteger(value.projection_cursor)) throw new Error();
       if (generation === requestGeneration && target) target.textContent =
-        `${value.normalizer_status === "ready" ? "投影は正常です" : "投影に注意が必要です"} · 投影待ち ${value.projection_backlog}件`;
-    } catch { if (generation === requestGeneration && target) target.textContent = "投影状態を読み込めませんでした。"; }
+        `${value.normalizer_status === "ready" ? "表示用データ更新は正常です" : "表示用データ更新に注意が必要です"} · 表示用データ更新待ち ${value.projection_backlog}件`;
+    } catch { if (generation === requestGeneration && target) target.textContent = "表示用データ更新状態を読み込めませんでした。"; }
   }
 
   async function loadAi(generation) {
@@ -495,7 +495,7 @@
           adapter_failure: "取得元の変換処理に失敗しました。",
         };
         const actions = {
-          none: "追加の操作はありません。",
+          none: "",
           review_unknown_fields: "未対応の項目を診断画面で確認してください。",
           use_compatible_source_or_update_adapter: "対応する取得元の版を使うか、アダプターを更新してください。",
           capture_fixture_and_review_mapping: "記録例を保存し、項目の対応付けを確認してください。",
@@ -506,7 +506,7 @@
         if (!exact(item, keys) || !Object.hasOwn(states, item.compatibility_state) || !Object.hasOwn(actions, item.next_action)
             || !Array.isArray(item.reason_codes) || !count(item.unknown_span_count) || !count(item.unknown_event_count)
             || !count(item.unknown_attribute_count)) throw new Error();
-        text = `${states[item.compatibility_state]} ${actions[item.next_action]} 受信の稼働状態とは別の判定です。`;
+        text = `${states[item.compatibility_state]} ${actions[item.next_action]} `;
       }
       if (generation === requestGeneration && target) {
         if (text === null) window.LocalMonitorV1FactState.render(target, { state: "not_observed" });
@@ -763,7 +763,7 @@
     if (!target || owned.get("diagnostics").hidden) return;
     target.textContent = value && count(value.repositoryCount) && count(value.archivedRepositoryCount)
       && count(value.unassignedActiveSessionCount)
-      ? `先頭ページ ${value.repositoryCount}件 · アーカイブ ${value.archivedRepositoryCount}件 · リポジトリ未設定のセッション ${value.unassignedActiveSessionCount}件`
+      ? `先頭ページ ${value.repositoryCount}件 · アーカイブ ${value.archivedRepositoryCount}件 · 未設定のセッション ${value.unassignedActiveSessionCount}件`
       : "リポジトリ状態を読み込めませんでした。";
   });
   modal.addEventListener("close", () => {

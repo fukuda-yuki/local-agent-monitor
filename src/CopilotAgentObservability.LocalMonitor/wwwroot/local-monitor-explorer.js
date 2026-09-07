@@ -770,21 +770,21 @@
 
   function renderAiMetadata(preview) {
     aiPreviewContent.replaceChildren();
-    const completenessLabels = Object.freeze({ unbound: "ネイティブセッションとの関連を確認できません", partial: "ライフサイクルまたは入力の記録が一部欠けています", rich: "内容または終了状態の記録が一部欠けています", full: "必要な記録がそろっています" });
+    const completenessLabels = Object.freeze({ unbound: "ネイティブセッションとの関連を確認できません", partial: "ライフサイクルまたは入力の一部欠落", rich: "内容または終了状態の一部欠落", full: "必要な記録がそろっています" });
     const exclusions = Object.freeze({ session_not_found: "セッションを確認できないため除外されました", repository_mismatch: "リポジトリが一致しないため除外されました", session_archived: "セッションがアーカイブ済みのため除外されました", repository_archived: "リポジトリがアーカイブ済みのため除外されました", projection_unavailable: "比較用データを利用できないため除外されました" });
     const presentations = Object.freeze({
       not_observed: { state: "not_observed", recordedCount: null },
-      source_unsupported: { state: "unsupported", recordedCount: null, reasonText: "この項目は取得元で記録されません" },
-      capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "この項目の記録が一部欠けています" },
+      source_unsupported: { state: "unsupported", recordedCount: null, reasonText: "取得元がこの項目に未対応です" },
+      capture_gap: { state: "capture_gap", recordedCount: null, reasonText: "記録に欠落があります" },
       certification_pending: { state: "certification_pending", recordedCount: null, reasonText: "取得能力の検証が完了していません" },
-      not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は記録されていません" },
-      expired: { state: "raw_expired", recordedCount: null, reasonText: "この項目は保存期間を過ぎています" },
-      redacted: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は表示用に記録されていません" },
-      malformed: { state: "projection_invalid", recordedCount: null, reasonText: "記録された形式を安全に確認できません" },
-      oversized: { state: "projection_invalid", recordedCount: null, reasonText: "記録が表示可能な範囲を超えています" },
-      inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "この項目の値を確定できません" },
-      projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "この項目の記録を検証できません" },
-      expired_pending_deletion: { state: "raw_expired", recordedCount: null, reasonText: "この項目は保存期間を過ぎています" },
+      not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "取得時に保存されていません" },
+      expired: { state: "raw_expired", recordedCount: null, reasonText: "保存期間が終了しています" },
+      redacted: { state: "raw_not_captured", recordedCount: null, reasonText: "表示用に伏せられています" },
+      malformed: { state: "projection_invalid", recordedCount: null, reasonText: "記録形式を読み取れません" },
+      oversized: { state: "projection_invalid", recordedCount: null, reasonText: "表示上限を超えています" },
+      inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "値を確定できません" },
+      projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "記録の整合性を確認できません" },
+      expired_pending_deletion: { state: "raw_expired", recordedCount: null, reasonText: "保存期間が終了しています" },
     });
     const appendFact = (item, label, fact, sourceText) => {
       if (fact === null) return;
@@ -843,7 +843,7 @@
       const value = await aiJson("/api/local-monitor/v1/ai/repository-preview", { schema_version: "local-ai-repository-preview.request.v1", repository_id: root.dataset.repositoryId, selection }, aiState.controller.signal);
       if (generation !== aiState.generation || !validateRepositoryPreview(value)) throw new TypeError("invalid preview");
       aiState.preview = value; renderAiMetadata(value);
-      aiStatus.textContent = value.included.length === 0 ? "分析できる対象がありません。" : "この対象で分析を開始できます。";
+      aiStatus.textContent = value.included.length === 0 ? "分析できる対象がありません。" : "分析できます。";
       aiStart.disabled = value.included.length === 0;
     } catch (error) { if (generation !== aiState.generation || error?.name === "AbortError") return; aiStatus.textContent = aiErrorMessage(error, "分析対象を確認できませんでした。"); }
   }
@@ -866,14 +866,14 @@
   function appendEvidence(target, references) {
     const list = element("ul");
     for (const reference of references) { const item = element("li");
-      if (validEvidenceLocation(reference)) { const link = element("a", null, "正確な証拠を開く"); link.href = reference; item.append(link); }
+      if (validEvidenceLocation(reference)) { const link = element("a", null, "根拠を開く"); link.href = reference; item.append(link); }
       else item.textContent = "この証拠は利用できません"; list.append(item);
     }
     target.append(list);
   }
 
   function renderRepositoryAiResult(result) {
-    aiResult.append(element("h3", null, "AIによる解釈（セッション一覧の記録ではありません）"));
+    aiResult.append(element("h3", null, "AIによる解釈"));
     const scope = element("section"); scope.append(element("h4", null, "分析対象の技術情報"));
     appendAiValue(scope, "種類", result.scope.kind === "repository_selection" ? "リポジトリ選択" : result.scope.kind); appendAiValue(scope, "リポジトリID", result.scope.repository_id);
     aiResult.append(scope);
@@ -883,7 +883,7 @@
     const findings = element("section"); findings.append(element("h4", null, "指摘"));
     for (const finding of result.findings) { const article = element("article"); article.append(element("h5", null, finding.title), element("p", null, finding.explanation)); appendAiValue(article, "根拠の状態", ({ supported: "根拠あり", limited: "根拠に制約あり" })[finding.evidence_state] ?? finding.evidence_state); appendAiValue(article, "制約", finding.limitation); appendEvidence(article, finding.evidence_refs); findings.append(article); } aiResult.append(findings);
     const suggestions = element("section"); suggestions.append(element("h4", null, "改善案"));
-    for (const suggestion of result.improvement_suggestions) { const article = element("article"); appendAiValue(article, "対象", suggestion.target_label); appendAiValue(article, "変更案", suggestion.concrete_change); appendAiValue(article, "理由", suggestion.rationale); appendAiValue(article, "期待される効果（AIによる提案）", suggestion.expected_effect); appendAiValue(article, "リスク・制約", suggestion.risks_or_limitations); appendEvidence(article, suggestion.evidence_refs); suggestions.append(article); } aiResult.append(suggestions);
+    for (const suggestion of result.improvement_suggestions) { const article = element("article"); appendAiValue(article, "対象", suggestion.target_label); appendAiValue(article, "変更案", suggestion.concrete_change); appendAiValue(article, "理由", suggestion.rationale); appendAiValue(article, "期待される効果", suggestion.expected_effect); appendAiValue(article, "リスク・制約", suggestion.risks_or_limitations); appendEvidence(article, suggestion.evidence_refs); suggestions.append(article); } aiResult.append(suggestions);
     const limitations = element("section"); limitations.append(element("h4", null, "制約")); for (const value of result.limitations) limitations.append(element("p", null, value)); aiResult.append(limitations);
     const provenance = element("section"); provenance.append(element("h4", null, "分析の技術情報")); for (const [key, label] of [["provider", "プロバイダー"], ["model", "モデル"], ["prompt_template_version", "テンプレート"], ["requested_at", "依頼日時"], ["started_at", "開始日時"], ["completed_at", "完了日時"]]) appendAiValue(provenance, label, result.provenance[key]); aiResult.append(provenance);
   }
@@ -1061,7 +1061,7 @@
       assignmentLoadMore.hidden = true;
       assignmentSubmit.disabled = true;
       assignmentStatus.replaceChildren(document.createTextNode("リポジトリを読み込めませんでした。 "));
-      const retry = element("button", null, "もう一度読み込む");
+      const retry = element("button", null, "再読み込み");
       retry.type = "button";
       retry.addEventListener("click", () => loadAssignmentChoices(cursor), { once: true });
       assignmentStatus.append(retry);
@@ -1092,7 +1092,7 @@
 
   function fallbackLabel(item) {
     const observed = item.timing.started_at ?? item.timing.last_seen_at;
-    return observed === null ? "日時不明のセッション" : `${localTime(observed)}${item.timing.started_at === null ? " 最終観測" : ""} のセッション`;
+    return observed === null ? "日時不明のセッション" : `${localTime(observed)}${item.timing.started_at === null ? " 最終記録" : ""} のセッション`;
   }
 
   function statusText(value) {
@@ -1114,14 +1114,15 @@
 
   function renderFactDisclosure(target, item, label, renderFact) {
     const disclosure = element("details", "local-monitor-session-fact-disclosure");
-    const disclosureSummary = element("summary", null, "記録状態を確認");
+    const disclosureSummary = element("summary", null, "記録状態");
     const sessionLabel = item.label.state === "recorded" ? item.label.text : fallbackLabel(item);
-    disclosureSummary.setAttribute("aria-label", `${sessionLabel}: ${label}の記録状態を確認`);
+    disclosureSummary.setAttribute("aria-label", `${sessionLabel}: ${label}の記録状態`);
     const panel = element("div", "local-monitor-session-fact-panel");
     const wrapper = element("div", "local-monitor-session-named-fact");
     wrapper.append(element("span", "local-monitor-session-fact-name", `${label}: `));
     const factTarget = element("span", "local-monitor-session-fact");
     renderFact(factTarget);
+    disclosureSummary.textContent = `${label} ${factTarget.querySelector(".fact-state-primary")?.textContent ?? "記録状態"}`;
     wrapper.append(factTarget);
     panel.append(wrapper);
     disclosure.append(disclosureSummary, panel);
@@ -1137,12 +1138,13 @@
     const needsDisclosure = unresolved.length > 0 || positive.length > 1;
     if (positive.length) {
       target.append(element("span", null,
-        positive.length > 1 ? `記録あり ${positive.length}項目` : positive[0]));
+        positive.join(" · ")));
     }
+    else if (unresolved.length) target.append(element("span", null, "なし"));
     if (needsDisclosure) {
       const disclosure = element("details", "local-monitor-session-fact-disclosure");
       const disclosureSummary = element("summary", null,
-        unresolved.length > 0 ? "記録状態を確認" : "要約を確認");
+        unresolved.length > 0 ? "記録状態" : "活動の内訳");
       const sessionLabel = item.label.state === "recorded" ? item.label.text : fallbackLabel(item);
       disclosureSummary.setAttribute("aria-label", `${sessionLabel}: 要約を確認`);
       const panel = element("div", "local-monitor-session-fact-panel");
@@ -1188,8 +1190,15 @@
     }
     const cache = tokens.observed_components?.cache_read;
     const ratio = tokens.observed_components?.cache_read_ratio_basis_points;
-    if (cache?.subtotal.state === "recorded") target.append(element("small", null, `Cache ${formatInteger(cache.subtotal.value)} · ${formatInteger(cache.observed_call_count)}/${formatInteger(cache.applicable_call_count)} 呼出し`));
-    if (ratio?.subtotal.state === "recorded") target.append(element("small", null, `Cache比率 ${(Number(ratio.subtotal.value) / 100).toLocaleString("ja-JP")}% · 対応入力 ${formatInteger(ratio.paired_input)}`));
+    if (cache?.subtotal.state === "recorded" || ratio?.subtotal.state === "recorded") {
+      const disclosure = element("details", "local-monitor-session-fact-disclosure");
+      disclosure.append(element("summary", null, ratio?.subtotal.state === "recorded"
+        ? `キャッシュ ${(Number(ratio.subtotal.value) / 100).toLocaleString("ja-JP")}%（観測分）` : "キャッシュの内訳"));
+      const panel = element("div", "local-monitor-session-fact-panel");
+      if (cache?.subtotal.state === "recorded") panel.append(element("p", null, `読み込み ${formatInteger(cache.subtotal.value)} · 記録あり ${formatInteger(cache.observed_call_count)}/${formatInteger(cache.applicable_call_count)} 呼び出し`));
+      if (ratio?.subtotal.state === "recorded") panel.append(element("p", null, `対応する入力 ${formatInteger(ratio.paired_input)}`));
+      disclosure.append(panel); target.append(disclosure);
+    }
   }
   function cohortControl(item, cohort, label) {
     const wrapper = element("label", "local-monitor-session-cohort-option");
@@ -1350,7 +1359,7 @@
       await loadPage(state.memoryCursor ?? state.route?.cursor ?? null, true, { mutationConfirmed: true });
     } catch (error) {
       if (controller.signal.aborted || generation !== mutation.generation) return;
-      showError("操作を完了できませんでした。最新の状態を確認して、もう一度お試しください。", button);
+      showError("操作に失敗しました。再読み込みしてやり直してください。", button);
     } finally {
       if (generation === mutation.generation) {
         mutation.active = false;
@@ -1407,13 +1416,16 @@
     if (state.compareMode) compare.append(cohortControl(item, "a", "基準"), cohortControl(item, "b", "比較対象"));
     const identity = element("td", "local-monitor-session-identity");
     const link = element("a", "local-monitor-session-open", item.label.state === "recorded" ? item.label.text : fallbackLabel(item));
+    link.title = link.textContent;
     link.dataset.sessionOpen = "";
     link.dataset.sessionLabel = "";
     link.href = window.LocalMonitorV1Paths.session(item.session_id);
     const secondary = element("small");
+    const metadataLine = element("span", "local-monitor-session-metadata-line", [...item.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel), ...item.model.values].join(" · "));
+    secondary.append(metadataLine);
     const disclosure = element("details", "local-monitor-session-fact-disclosure");
-    const disclosureSummary = element("summary", null, "取得情報を確認");
-    disclosureSummary.setAttribute("aria-label", `${link.textContent}: 取得情報を確認`);
+    const disclosureSummary = element("summary", null, "詳細");
+    disclosureSummary.setAttribute("aria-label", `${link.textContent}: 詳細`);
     const panel = element("div", "local-monitor-session-fact-panel");
     for (const [name, fact, knownText] of [
       ["取得元", item.source, item.source.values.length > 0
@@ -1449,13 +1461,14 @@
     disclosure.append(disclosureSummary, panel);
     secondary.append(disclosure);
     identity.append(link, secondary);
-    const sessionStatus = element("td", "local-monitor-session-status", item.status === "active" && item.timing.state === "not_observed" ? "状態未観測" : statusText(item.status));
+    const sessionStatus = element("span", "local-monitor-session-status", item.status === "active" && item.timing.state === "not_observed" ? "状態不明" : statusText(item.status));
     sessionStatus.dataset.sessionStatus = "";
     if (item.archive.exclusion_reason === "session_archived") {
       sessionStatus.append(element("small", null, "セッションをアーカイブ済み"));
     } else if (item.archive.exclusion_reason === "repository_archived") {
       sessionStatus.append(element("small", null, "リポジトリをアーカイブ済み"));
     }
+    secondary.append(sessionStatus);
     const summaryCell = element("td", "local-monitor-session-summary");
     summaryCell.dataset.sessionSummary = "";
     renderSummary(summaryCell, item);
@@ -1475,7 +1488,8 @@
         });
       }
     } else if (item.timing.last_seen_at !== null) {
-      const time = element("time", null, `最終観測 ${localTime(item.timing.last_seen_at)}`);
+      const time = element("time", null, localTime(item.timing.last_seen_at));
+      started.append(element("small", null, "最終記録"));
       time.dateTime = item.timing.last_seen_at;
       started.append(time);
     } else {
@@ -1483,10 +1497,10 @@
         renderCollectionFact(factTarget, { state: item.timing.state, count: null });
       });
     }
-    if (item.observed_activity) started.append(element("small", null, `観測活動 ${localTime(item.observed_activity.started_at)} – ${localTime(item.observed_activity.ended_at)}（確定ライフサイクルとは別）`));
+    if (item.observed_activity) panel.append(element("span", null, `活動記録 ${localTime(item.observed_activity.started_at)} – ${localTime(item.observed_activity.ended_at)}`));
     const actions = element("td", "local-monitor-session-actions");
     actions.append(rowActions(item));
-    row.append(compare, identity, sessionStatus, summaryCell, tokens, started, actions);
+    row.append(compare, identity, summaryCell, tokens, started, actions);
     row.addEventListener("click", event => {
       if (event.target instanceof Element
           && event.target.closest("a,button,input,select,textarea,summary,details,label")) return;
@@ -1514,6 +1528,7 @@
     loadMore.disabled = false;
     compareBar.hidden = !state.compareMode;
     compareButton.hidden = state.compareMode;
+    status.classList.toggle("is-count", state.items.length > 0);
     if (state.items.length === 0) {
       const route = state.route ?? {};
       const filtered = state.dynamic.q !== null || state.dynamic.model.length > 0
@@ -1525,7 +1540,7 @@
         ? "条件に一致するセッションはありません。"
         : "この範囲にはセッションがありません。";
     }
-    else status.textContent = `${state.items.length.toLocaleString("ja-JP")}件を表示しています。`;
+    else status.textContent = `${formatInteger(state.items.length)}件`;
     updateCompareBar();
     setOwnerActionsDisabled(mutation.active);
     restoreFocusAfterRender();
@@ -1535,6 +1550,7 @@
     const request = state.focusAfterRender;
     state.focusAfterRender = null;
     if (request === null) return;
+    const resultStatus = state.items.length > 0 ? root.querySelector("#session-result-count") : status;
     let target = null;
     if (request.kind === "compare-first") {
       target = root.querySelector("[data-cohort='a']") ?? root.querySelector("#session-compare-cancel");
@@ -1548,24 +1564,25 @@
       target = row?.querySelector(selector) ?? row?.querySelector("[data-session-open]");
       if (target?.closest("details") instanceof HTMLDetailsElement) target.closest("details").open = true;
       if (target === null || target === undefined) {
-        status.tabIndex = -1;
-        target = status;
+        resultStatus.tabIndex = -1;
+        target = resultStatus;
       }
     } else if (request.kind === "pagination") {
       if (loadMore.hidden) {
-        status.tabIndex = -1;
-        target = status;
+        resultStatus.tabIndex = -1;
+        target = resultStatus;
       } else target = loadMore;
     }
     if (target instanceof HTMLElement && !target.hidden) target.focus({ preventScroll: true });
   }
 
   function showError(message, returnControl, recovery) {
+    status.classList.remove("is-count");
     status.replaceChildren(document.createTextNode(message));
     status.tabIndex = -1;
     status.focus({ preventScroll: true });
     if (returnControl?.isConnected) {
-      const retry = element("button", null, "もう一度読み込む");
+      const retry = element("button", null, "再読み込み");
       retry.type = "button";
       if (recovery?.label) retry.textContent = recovery.label;
       if (recovery?.attribute) retry.dataset[recovery.attribute] = "";
@@ -1592,6 +1609,7 @@
     loadMore.hidden = true;
     loadMore.disabled = true;
     updateCompareBar();
+    status.classList.remove("is-count");
     status.textContent = refresh ? "セッションを更新しています。" : "セッションを読み込んでいます。";
     try {
       const page = await readCollection(cursor, controller.signal);
@@ -1732,7 +1750,7 @@
     if (b.size > 0 && availableB.length === 0) messages.push("アーカイブ除外後に比較対象が空になります。");
     const valid = messages.length === 0 && UUID_V7.test(root.dataset.repositoryId ?? "");
     if (messages.length === 0 && !valid) messages.push("リポジトリ別の一覧から比較を作成してください。");
-    const validMessage = "選択は有効です。比較内容を確認できます。";
+    const validMessage = "比較できます。";
     compareValidationPrimary.textContent = messages.length === 0
       ? validMessage
       : messages.length === 1 ? messages[0] : `${messages[0]}（ほか${messages.length - 1}件）`;

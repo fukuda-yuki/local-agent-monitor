@@ -29,8 +29,8 @@
     unsupported_source_version: { reasons: ["unsupported_source_version"], action: "use_compatible_source_or_update_adapter", factState: "unsupported", reason: "このバージョンは取得元の互換性契約で対応していません" },
     schema_drift_detected: { reasons: ["schema_drift_detected"], action: "capture_fixture_and_review_mapping", factState: "capture_gap", reason: "取得元のスキーマ変更を検出したため、記録の完全性を確認できません" },
     recognized_record_drop_detected: { reasons: ["recognized_record_drop_detected"], action: "restore_mapping_or_update_versioned_golden", factState: "capture_gap", reason: "認識済みレコードの欠落を検出しました" },
-    adapter_failure_parse: { state: "adapter_failure", reasons: ["adapter_parse_failure"], action: "validate_payload_and_protocol", factState: "capture_gap", reason: "送信データを解析できなかったため、記録が一部欠けています" },
-    adapter_failure_exception: { state: "adapter_failure", reasons: ["adapter_exception"], action: "inspect_sanitized_adapter_failure", factState: "capture_gap", reason: "アダプター処理に失敗したため、記録が一部欠けています" },
+    adapter_failure_parse: { state: "adapter_failure", reasons: ["adapter_parse_failure"], action: "validate_payload_and_protocol", factState: "capture_gap", reason: "送信データを解析できなかったため、一部欠落" },
+    adapter_failure_exception: { state: "adapter_failure", reasons: ["adapter_exception"], action: "inspect_sanitized_adapter_failure", factState: "capture_gap", reason: "アダプター処理に失敗したため、一部欠落" },
   });
   const compatibilityReasonLabels = {
     unknown_fields_observed: "未知フィールドがあります",
@@ -66,7 +66,7 @@
     projection_failed: ["error", "after_action", "open_projection_diagnostics", "記録済みデータを画面へ反映できませんでした", "反映処理の診断を確認してください"],
     session_unbound: ["error", "after_action", "select_exact_session", "記録を Session に結び付けられません", "対象の Session を選択してください"],
     content_capture_disabled: ["warning", "after_action", "enable_content_capture_if_desired", "内容の記録が無効です", "必要な場合は内容の記録を有効にしてください"],
-    sanitized_only_raw_unavailable: ["warning", "after_action", "restart_without_sanitized_only_if_desired", "内容は記録されていません", "必要な場合は通常モードで Monitor を再起動してください"],
+    sanitized_only_raw_unavailable: ["warning", "after_action", "restart_without_sanitized_only_if_desired", "なし", "必要な場合は通常モードで Monitor を再起動してください"],
     schema_drift_detected: ["warning", "after_action", "review_source_diagnostics", "取得元のスキーマ変更を検出しました", "取得元の診断を確認してください"],
     ready_no_real_trace: ["info", "after_action", "run_bounded_source_interaction", "接続確認のための記録がまだありません", "取得元で確認用の操作を実行してください"],
     first_trace_ready: ["info", "none", "open_verified_trace_or_session", "最初の記録を確認できました", "確認済みの Trace または Session を開いてください"],

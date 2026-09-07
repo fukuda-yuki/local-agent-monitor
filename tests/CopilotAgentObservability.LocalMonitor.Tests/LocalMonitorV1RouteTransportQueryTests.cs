@@ -45,12 +45,14 @@ public sealed class LocalMonitorV1RouteTransportQueryTests
             LocalMonitorV1PrimaryPathParser.Classify("/sessions"), query));
     }
 
-    [Fact]
-    public void ExplorerQuery_ParsesOrderIndependentlyAndBuildsPinnedCanonicalOrder()
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/sessions")]
+    public void ExplorerQuery_ParsesOrderIndependentlyAndBuildsPinnedCanonicalOrder(string path)
     {
         var rawQuery = $"?settings=storage&status=failed&source=vscode&to=2026-08-09T12:00:00.0000000%2B00:00&source=claude-code&has_retry=false&archive_scope=include_archived&cursor={Cursor}&from=2026-08-01T00:00:00.0000000%2B00:00&mode=compare&has_skill=true&has_error=false&has_subagent=true";
 
-        Assert.True(LocalMonitorV1PageQueryParser.TryParse(LocalMonitorV1PrimaryRouteKind.AllSessions, rawQuery, out var query));
+        Assert.True(LocalMonitorV1PageQueryParser.TryParse(LocalMonitorV1PrimaryPathParser.Classify(path).RouteKind!.Value, rawQuery, out var query));
         Assert.NotNull(query);
         Assert.Equal(["claude-code", "vscode"], query.Sources);
         Assert.Equal(["failed"], query.Statuses);
@@ -66,9 +68,9 @@ public sealed class LocalMonitorV1RouteTransportQueryTests
         Assert.Equal("storage", query.Settings);
 
         Assert.Equal(
-            $"/sessions?from=2026-08-01T00:00:00.0000000%2B00:00&to=2026-08-09T12:00:00.0000000%2B00:00&source=claude-code&source=vscode&status=failed&has_skill=true&has_subagent=true&has_error=false&has_retry=false&archive_scope=include_archived&cursor={Cursor}&mode=compare&settings=storage",
+            $"{path}?from=2026-08-01T00:00:00.0000000%2B00:00&to=2026-08-09T12:00:00.0000000%2B00:00&source=claude-code&source=vscode&status=failed&has_skill=true&has_subagent=true&has_error=false&has_retry=false&archive_scope=include_archived&cursor={Cursor}&mode=compare&settings=storage",
             LocalMonitorV1CanonicalUrlBuilder.Build(
-                LocalMonitorV1PrimaryPathParser.Classify("/sessions"),
+                LocalMonitorV1PrimaryPathParser.Classify(path),
                 query,
                 new(
                     "all",
@@ -163,7 +165,7 @@ public sealed class LocalMonitorV1RouteTransportQueryTests
     [Theory]
     [InlineData("/", "?settings=repositories", "/?settings=repositories")]
     [InlineData("/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073", "?settings=diagnostics", "/repositories/018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6071/comparisons/018f2b4e-7c1a-7f1a-aa2b-6c3d4e5f6073?settings=diagnostics")]
-    public void SelectionAndComparison_AcceptOnlySettings(string path, string rawQuery, string expected)
+    public void HomeAndComparison_AcceptSettings(string path, string rawQuery, string expected)
     {
         var parsedPath = LocalMonitorV1PrimaryPathParser.Classify(path);
         Assert.True(LocalMonitorV1PageQueryParser.TryParse(parsedPath.RouteKind!.Value, rawQuery, out var query));
@@ -218,9 +220,10 @@ public sealed class LocalMonitorV1RouteTransportQueryTests
         Assert.False(LocalMonitorV1PageQueryParser.TryParse(LocalMonitorV1PrimaryRouteKind.SessionDetail, rawQuery, out _));
 
     [Theory]
-    [InlineData("?source=vscode")]
+    [InlineData("?q=private")]
+    [InlineData("?model=private")]
     [InlineData("?execution=018f2b4e-7c1a-7f1a-ba2b-6c3d4e5f6074")]
     [InlineData("?settings=ai&settings=ai")]
-    public void SelectionQuery_RejectsEveryKeyExceptOneSettings(string rawQuery) =>
+    public void HomeQuery_RejectsSensitiveDetailAndDuplicateSettingsKeys(string rawQuery) =>
         Assert.False(LocalMonitorV1PageQueryParser.TryParse(LocalMonitorV1PrimaryRouteKind.RepositorySelection, rawQuery, out _));
 }

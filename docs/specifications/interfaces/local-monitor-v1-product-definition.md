@@ -22,7 +22,7 @@ The product remains useful and complete when no LLM, provider authentication or 
 
 ## Primary user job
 
-The user can select a local Repository, find a Session, understand its execution, and descend to exact evidence without needing Trace/Span expertise.
+The user can find a Session, optionally narrow by Repository, understand its execution, and descend to exact evidence without needing Trace/Span expertise.
 
 The core must expose, when captured and authorized:
 
@@ -39,15 +39,14 @@ The core must expose, when captured and authorized:
 
 Missing information is never converted to zero or inferred from proximity, names or free text.
 
-## Repository-first organization
+## Session discovery and Repository organization
 
 The user-facing hierarchy is:
 
 ```text
-Repository selection
-  -> Session Explorer
-      -> Session detail
-      -> explicit cohort comparison
+Session Explorer + Repository scope navigation
+  -> Session detail
+  -> explicit cohort comparison
 ```
 
 Repository identity is a Local Monitor UUIDv7, not a display name, path or URL. Exact supported locators and manual user assignment are separate provenance. Sessions with no exact assignment remain reachable through an unassigned virtual scope.
@@ -58,10 +57,7 @@ Repository and Session archive are reversible visibility/selection states. Archi
 
 Session detail is an execution workspace with a contextual inspector.
 
-The top summary separates:
-
-- `トークン合計`: input and output;
-- `入力トークンの内訳`: cache read, new input and optional cache write/creation.
+The top summary shows input, output, observed cache-read ratio and compact activity facts. Total tokens, cache components and capture coverage remain available in an explicit disclosure. The initial workspace prioritizes activity; selecting a node or opening Session information reveals the inspector.
 
 The execution view combines semantic hierarchy and timing in one hierarchical timeline. It does not split the same evidence into separate tree and waterfall pages.
 

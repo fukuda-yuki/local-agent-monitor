@@ -10,13 +10,13 @@
              data-recovery-action="@Model.RecoveryAction">
         <div role="status" aria-live="polite">
             <h1>ページを表示できません</h1>
-            <p>状態を確認して、もう一度お試しください。</p>
+            <p>再読み込みしてください。</p>
         </div>
     </section>
 }
 else
 {
-    <section data-local-monitor-v1-host
+    <section class="local-monitor-app-layout" data-local-monitor-v1-host
              data-fact-state-renderer="shared"
              data-route-kind="@Model.RouteKind?.ToString()"
              data-page-state="@Model.PageState"
@@ -24,18 +24,19 @@ else
              data-execution-id="@Model.Query?.ExecutionId"
              data-node-id="@Model.Query?.NodeId"
              data-analysis-id="@Model.Query?.AnalysisId">
+        @if (Model.PageState is null)
+        {
+            @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml")
+        }
         @if (Model.PageState is not null)
         {
             <div role="status" aria-live="polite">
                 <h1>ページを表示できません</h1>
-                <p>状態を確認して、もう一度お試しください。</p>
+                <p>再読み込みしてください。</p>
             </div>
         }
-        else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.RepositorySelection)
-        {
-            @await Html.PartialAsync("/Pages/Shared/LocalMonitorV1/_RepositorySelection.cshtml")
-        }
-        else if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+        else if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySelection
+                 or LocalMonitorV1PrimaryRouteKind.RepositorySessions
                  or LocalMonitorV1PrimaryRouteKind.AllSessions
                  or LocalMonitorV1PrimaryRouteKind.UnassignedSessions)
         {
@@ -59,7 +60,8 @@ else
         <script src="/local-monitor-repositories.js" defer></script>
         <script src="/local-monitor-settings.js" defer></script>
     }
-    @if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+    @if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySelection
+             or LocalMonitorV1PrimaryRouteKind.RepositorySessions
              or LocalMonitorV1PrimaryRouteKind.AllSessions
              or LocalMonitorV1PrimaryRouteKind.UnassignedSessions)
     {

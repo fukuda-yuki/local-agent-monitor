@@ -277,12 +277,12 @@ internal static class RuntimeBackupRoutes
     private sealed record BackupApiResult(string? BackupId, string? ErrorCode, string? ArchiveSha256, IReadOnlyList<string>? Warnings, string? DownloadPath);
 
     private const string Ui = """
-        <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>runtime backup と restore</title></head>
-        <body><main><p><a href="/">← 概要へ戻る</a></p><h1>runtime backup と restore</h1><p><strong>raw content を含む backup です。</strong> repository-safe ではなく、Retention cleanup は operator-owned backup を削除しません。</p>
+        <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>バックアップ・復元</title></head>
+        <body><main><p><a href="/">← セッション一覧</a></p><h1>バックアップ・復元</h1><p><strong>本文を含むバックアップです。</strong>機密情報を含むため、公開リポジトリに保存しないでください。自動削除の対象外です。</p>
         <ul><li><code>raw_content_included</code></li><li><code>not_repository_safe</code></li><li><code>retention_backup_not_purged</code></li></ul>
-        <button id="create" type="button">online backup を作成</button><a id="download" hidden>backup をダウンロード</a>
-        <h2>offline restore 前の検査</h2><label for="bundle">検査する backup archive</label><input id="bundle" type="file" accept="application/zip" required aria-describedby="bundle-help"><span id="bundle-help">ZIP archive を1つ選択してください。</span><button id="preview" type="button">archive を検査</button>
-        <h2 id="result-heading">操作結果</h2><pre id="result" role="status" aria-live="polite" aria-labelledby="result-heading" tabindex="-1"></pre><p>この Web UI から restore は実行できません。preview を確認し、Local Monitor を停止してから <code>config-cli runtime-backup restore --bundle &lt;bundle.zip&gt; --database &lt;monitor.db&gt;</code> を使用してください。</p></main>
+        <button id="create" type="button">バックアップを作成</button><a id="download" hidden>バックアップを保存</a>
+        <h2>復元前の検査</h2><label for="bundle">バックアップZIP</label><input id="bundle" type="file" accept="application/zip" required aria-describedby="bundle-help"><span id="bundle-help">ZIP archive を1つ選択してください。</span><button id="preview" type="button">内容を検査</button>
+        <h2 id="result-heading">操作結果</h2><pre id="result" role="status" aria-live="polite" aria-labelledby="result-heading" tabindex="-1"></pre><p>検査結果を確認し、Local Monitor を停止してから、次のコマンドで復元してください。<code>config-cli runtime-backup restore --bundle &lt;bundle.zip&gt; --database &lt;monitor.db&gt;</code></p></main>
         <script>
         const out=document.querySelector('#result');
         const download=document.querySelector('#download');

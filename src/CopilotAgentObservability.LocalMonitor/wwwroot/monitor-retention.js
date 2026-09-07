@@ -254,7 +254,7 @@
     async function readTargetStatus() {
         const status = await requestJson(targetStatusPath(), { signal: activeController.signal });
         currentStatus.textContent = "";
-        appendHeading(currentStatus, "現在の権威ある状態");
+        appendHeading(currentStatus, "現在の状態");
         if (targetKind === "session") {
             appendDefinitionList(currentStatus, [
                 ["Session ID", status.session_id],
@@ -333,10 +333,10 @@
     function renderPreview(value) {
         previewContent.textContent = "";
         appendDefinitionList(previewContent, [
-            ["対象種別", value.target_kind], ["正確な対象 ID", value.target_id], ["操作", value.operation], ["スコープ", value.scope],
+            ["対象種別", value.target_kind], ["対象ID", value.target_id], ["操作", value.operation], ["スコープ", value.scope],
             ["結果", value.result], ["空の理由", value.empty_reason], ["変更可能", value.mutation_allowed],
             ["ソース状態", value.source_state], ["Session 完全性", value.session_completeness], ["コンテンツ状態", value.content_state],
-            ["正確な項目数", value.target_item_count], ["除外項目数", value.excluded_item_count],
+            ["対象件数", value.target_item_count], ["除外項目数", value.excluded_item_count],
         ]);
 
         appendHeading(previewContent, "現在のライフサイクル・ピン・削除状態");
@@ -351,7 +351,7 @@
         appendTable(previewContent, ["保存先種別", "項目数", "読み取り可能", "読み取り拒否"], value.store_kind_summary,
             ["store_kind", "item_count", "readable_count", "read_denied_count"]);
 
-        appendHeading(previewContent, value.operation === "delete_now" ? "ピン解除を含む正確な削除対象" : "正確な変更対象");
+        appendHeading(previewContent, value.operation === "delete_now" ? "削除対象（ピン解除を含む）" : "変更対象");
         appendTable(previewContent,
             ["項目 ID", "保存先種別", "状態", "ピン", "削除", "取得", "期限", "ポリシー", "版", "読み取り拒否", "キュー", "revision", "再試行終了", "エラー"],
             value.target_items,
@@ -371,13 +371,13 @@
             ["保持する証拠参照", impact.evidence_reference_retained_count],
         ]);
 
-        appendHeading(previewContent, "除外と進行中 cleanup の競合");
+        appendHeading(previewContent, "除外・削除処理との競合");
         appendTable(previewContent, ["除外理由", "項目数"], value.excluded_items_by_reason, ["reason_code", "item_count"]);
         appendTable(previewContent, ["競合コード", "項目数", "競合版"], value.active_cleanup_exclusion_conflicts, ["conflict_code", "item_count", "conflict_version"]);
 
         appendHeading(previewContent, "確定に固定される値");
         appendDefinitionList(previewContent, [
-            ["バックアップ非消去警告", value.backup_non_purge_warning_code], ["期待状態バージョン", value.expected_state_version],
+            ["バックアップへの影響", value.backup_non_purge_warning_code], ["期待状態バージョン", value.expected_state_version],
             ["対象集合 digest", value.target_item_set_digest], ["preview digest", value.preview_digest],
             ["確認期限（5 分）", value.confirmation_expires_at], ["拒否コード", value.rejection_code],
         ]);
@@ -481,10 +481,10 @@
         resultContent.textContent = "";
         const committedDetails = appendDefinitionList(resultContent, [
             ["状態", committedStatus(committed)], ["結果コード", committed.result_code], ["操作 ID", committed.operation_id],
-            ["操作", committed.operation], ["対象種別", committed.target_kind], ["正確な対象 ID", committed.target_id],
+            ["操作", committed.operation], ["対象種別", committed.target_kind], ["対象ID", committed.target_id],
             ["読み取り拒否", committed.read_denied], ["監査参照", committed.audit_event_id], ["再生結果", committed.idempotent_replay],
-            ["作成日時", committed.created_at], ["完了日時", committed.completed_at], ["バックアップ非消去警告", committed.backup_non_purge_warning_code],
-            ["正確な項目数", committed.target_item_count], ["ピン状態", committed.pin_state],
+            ["作成日時", committed.created_at], ["完了日時", committed.completed_at], ["バックアップへの影響", committed.backup_non_purge_warning_code],
+            ["対象件数", committed.target_item_count], ["ピン状態", committed.pin_state],
             ["期待バージョン", committed.expected_version], ["結果バージョン", committed.result_version],
             ...lifecycleRows(committed.lifecycle_counts),
         ]);
@@ -493,7 +493,7 @@
         operationStatus.textContent = committedStatus(committed);
         previewSurface.hidden = true;
         resultSurface.hidden = false;
-        setLive("トランザクションの確定結果を確認しました。補足の物理処理状態を取得しています。");
+        setLive("操作を確定しました。削除処理の状態を確認中…");
         document.getElementById("retention-result-title").focus({ preventScroll: true });
     }
 
@@ -528,25 +528,25 @@
         operationHost.className = "retention-supplement";
         targetHost.className = "retention-supplement";
         workerHost.className = "retention-supplement";
-        appendHeading(operationHost, "権威ある操作 status");
+        appendHeading(operationHost, "操作の確定状態");
         appendHeading(targetHost, "確定後の対象状態");
-        appendHeading(workerHost, "#89 物理 worker 状態");
+        appendHeading(workerHost, "削除処理の状態");
         resultContent.append(operationHost, targetHost, workerHost);
         const operationSupplement = (async () => {
             if (committed.status) {
-                appendDefinitionList(operationHost, [["操作 status", committed.status]]);
+                appendDefinitionList(operationHost, [["操作状態", committed.status]]);
                 return;
             }
             try {
                 const authoritativeStatus = await requestJson(`/api/retention/v1/mutations/${encodeURIComponent(committed.operation_id)}`, { signal: activeController.signal });
                 operationStatus.textContent = committedStatus(authoritativeStatus);
                 appendDefinitionList(operationHost, [
-                    ["操作 status", authoritativeStatus.status], ["結果コード", authoritativeStatus.result_code],
+                    ["操作状態", authoritativeStatus.status], ["結果コード", authoritativeStatus.result_code],
                     ["読み取り拒否", authoritativeStatus.read_denied], ["監査参照", authoritativeStatus.audit_event_id],
                 ]);
             } catch (failure) {
                 const code = failure instanceof RetentionRequestError ? failure.code : "retention_unknown_error";
-                appendDefinitionList(operationHost, [["操作 status 補足", `利用不可（${code}）`]]);
+                appendDefinitionList(operationHost, [["操作状態の補足", `利用不可（${code}）`]]);
             }
         })();
         const targetSupplement = (async () => {
@@ -570,16 +570,16 @@
             try {
                 const workerStatus = await requestJson("/api/retention/v1/status", { signal: activeController.signal });
                 appendDefinitionList(workerHost, [
-                    ["worker 状態", workerStatus.worker_state], ["物理削除待ち", workerStatus.pending_count],
+                    ["削除処理状態", workerStatus.worker_state], ["物理削除待ち", workerStatus.pending_count],
                     ["キュー投入", workerStatus.queued_count], ["物理削除中", workerStatus.deleting_count], ["物理削除失敗", workerStatus.failed_count],
                 ]);
             } catch (failure) {
                 const code = failure instanceof RetentionRequestError ? failure.code : "retention_unknown_error";
-                appendDefinitionList(workerHost, [["worker 状態", `利用不可（${code}）`]]);
+                appendDefinitionList(workerHost, [["削除処理状態", `利用不可（${code}）`]]);
             }
         })();
         await Promise.allSettled([operationSupplement, targetSupplement, workerSupplement]);
-        setLive("確定結果を表示しました。物理削除の完了は #89 worker 状態で確認してください。");
+        setLive("操作は確定済みです。削除の完了は「削除処理の状態」で確認できます。");
     }
 
     async function refreshStatusAndPreviewOnce(code) {
@@ -605,22 +605,22 @@
         const targetRefresh = (async () => {
             try {
                 const targetStatus = await readTargetStatus();
-                appendDefinitionList(resultContent, [["再取得した対象状態", targetKind === "item" ? targetStatus.state : targetStatus.raw_retention_state]], "retention-details retention-refresh-details");
+                appendDefinitionList(resultContent, [["最新の対象状態", targetKind === "item" ? targetStatus.state : targetStatus.raw_retention_state]], "retention-details retention-refresh-details");
             } catch (failure) {
                 const code = failure instanceof RetentionRequestError ? failure.code : "retention_unknown_error";
-                appendDefinitionList(resultContent, [["再取得した対象状態", `利用不可（${code}）`]], "retention-details retention-refresh-details");
+                appendDefinitionList(resultContent, [["最新の対象状態", `利用不可（${code}）`]], "retention-details retention-refresh-details");
             }
         })();
         const workerRefresh = (async () => {
             try {
                 const worker = await requestJson("/api/retention/v1/status", { signal: activeController.signal });
                 appendDefinitionList(resultContent, [
-                    ["再取得した worker 状態", worker.worker_state], ["物理削除待ち", worker.pending_count],
+                    ["最新の削除処理状態", worker.worker_state], ["物理削除待ち", worker.pending_count],
                     ["キュー投入", worker.queued_count], ["物理削除中", worker.deleting_count], ["物理削除失敗", worker.failed_count],
                 ], "retention-details retention-refresh-details");
             } catch (failure) {
                 const code = failure instanceof RetentionRequestError ? failure.code : "retention_unknown_error";
-                appendDefinitionList(resultContent, [["再取得した worker 状態", `利用不可（${code}）`]], "retention-details retention-refresh-details");
+                appendDefinitionList(resultContent, [["最新の削除処理状態", `利用不可（${code}）`]], "retention-details retention-refresh-details");
             }
         })();
         await Promise.allSettled([targetRefresh, workerRefresh]);

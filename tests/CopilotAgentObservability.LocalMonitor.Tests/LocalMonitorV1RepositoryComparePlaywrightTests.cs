@@ -428,10 +428,10 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await Expect(result).ToContainTextAsync("比較ID:");
         await Expect(result).ToContainTextAsync("種類: セッション比較");
         await Expect(result).ToContainTextAsync("内容のSHA-256:");
-        await Expect(result).ToContainTextAsync("期待される効果（AIによる提案）:");
+        await Expect(result).ToContainTextAsync("期待される効果:");
         await Expect(result).ToContainTextAsync("<img src=x onerror=alert(1)>");
         Assert.Equal(0, await result.Locator("img").CountAsync());
-        var evidence = result.Locator("section").Filter(new() { Has = page.GetByRole(AriaRole.Heading, new() { Name = "正確な根拠", Exact = true }) });
+        var evidence = result.Locator("section").Filter(new() { Has = page.GetByRole(AriaRole.Heading, new() { Name = "根拠", Exact = true }) });
         await Expect(evidence.Locator("a")).ToHaveCountAsync(1);
         await Expect(evidence.Locator("a").First).ToHaveAttributeAsync("href", $"/sessions/{SessionId}?execution={ExecutionId}&node={NodeId}");
         Assert.DoesNotContain("<img", page.Url, StringComparison.Ordinal);
@@ -808,7 +808,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.Equal(["呼び出し回数", "失敗回数", "完了回数", "トークン合計", "呼び出しあり", "開始あり", "利用可能件数",
             "呼び出し回数・セッション数", "失敗回数・利用可能件数", "アーカイブ済みセッション数", "アーカイブ済みを含む", "入力トークン"],
             await structuralCells.Nth(1).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
-        Assert.Equal(["呼び出し回数", "開始回数", "失敗回数", "呼び出しあり", "トークン合計・利用できない状態",
+        Assert.Equal(["呼び出し回数", "開始回数", "失敗回数", "呼び出しあり",
             "アーカイブ済みリポジトリのセッション数", "アーカイブ済みを含む", "再試行件数"],
             await structuralCells.Nth(2).Locator(".local-monitor-compare-fact > span:first-child").AllTextContentsAsync());
         Assert.Equal(["相対差", "呼び出し回数・絶対差"],
@@ -830,6 +830,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
     public async Task EvidenceActionsUseAcceptedResultFieldsAndPagingKeepsRowsInsideTheirTables()
     {
         var read = JsonNode.Parse(await Golden("local-monitor-comparison-read.response.json"))!.AsObject();
+        read["results"]![0]!["row_key"] = "input_tokens";
         read["results"]!.AsArray().Add(new JsonObject
         {
             ["result_ordinal"] = 2, ["section_key"] = "target", ["row_kind"] = "scalar", ["row_key"] = "included_session_count",
@@ -948,6 +949,10 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
         await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await page.SetViewportSizeAsync(1366, 768);
+        await page.ScreenshotAsync(new() { Path = CompareArtifactPath("compare-results-1366x768.png") });
+        foreach (var disclosure in await page.Locator(".local-monitor-compare-evidence-actions > summary").AllAsync())
+            await disclosure.ClickAsync();
         var tokenSection = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = "トークン" }) });
         await Expect(tokenSection.GetByRole(AriaRole.Button, new() { Name = "中央値の根拠を表示", Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "件数の根拠を表示", Exact = true })).ToBeVisibleAsync();
@@ -1004,6 +1009,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
             var section = page.Locator(".local-monitor-compare-section").Filter(new() { Has = page.Locator("h2", new() { HasText = label }) });
             await section.GetByRole(AriaRole.Button, new() { Name = load, Exact = true }).ClickAsync();
             await Expect(section.GetByRole(AriaRole.Status)).ToContainTextAsync("1件を読み込みました");
+            await section.Locator(".local-monitor-compare-evidence-actions > summary").First.ClickAsync();
             var button = section.GetByRole(AriaRole.Button, new() { Name = action, Exact = true }).First;
             await button.ClickAsync();
             await Expect(page.Locator("#repository-compare-evidence-status")).ToContainTextAsync("1件の根拠を表示しています");

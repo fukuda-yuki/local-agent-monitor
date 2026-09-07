@@ -12,7 +12,7 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
     {
         { $"/repositories/{RepositoryId}/sessions", "repository", "対象リポジトリ", RepositoryId },
         { "/sessions", "all", "すべてのセッション", null },
-        { "/sessions/unassigned", "unassigned", "リポジトリ未設定のセッション", null },
+        { "/sessions/unassigned", "unassigned", "未設定のセッション", null },
     };
 
     [Theory]

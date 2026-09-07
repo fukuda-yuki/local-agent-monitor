@@ -5,14 +5,14 @@
       data-session-id="@Model.Path!.SessionId">
     <header class="local-monitor-session-context" data-session-context>
         <nav aria-label="パンくず"><a href="/sessions">セッション一覧</a> / <span data-session-breadcrumb>セッション</span></nav>
-        <div class="local-monitor-session-title-row"><h1 data-session-title>セッション</h1><button type="button" data-session-overview-open>概要</button><button type="button" data-session-ai-open hidden>AIで分析</button></div>
+        <div class="local-monitor-session-title-row"><h1 data-session-title>セッション</h1><button type="button" data-session-overview-open>情報・指示</button><button type="button" data-session-ai-open hidden>AIで分析</button></div>
         <div data-session-context-content role="status" aria-live="polite">セッションを読み込んでいます</div>
     </header>
     <section class="local-monitor-session-summary" data-session-summary aria-label="セッション全体の概要"></section>
     <section class="local-monitor-session-execution-workspace" aria-labelledby="session-execution-heading">
-        <h2 class="local-monitor-visually-hidden" id="session-execution-heading">実行タイムライン</h2>
+        <h2 id="session-execution-heading">活動</h2>
         <div class="local-monitor-session-executions" data-session-executions></div>
-        <aside class="local-monitor-session-inspector" data-session-overview aria-label="セッションの概要"></aside>
+        <aside class="local-monitor-session-inspector" data-session-overview aria-hidden="true" aria-label="セッションの概要"></aside>
     </section>
 </div>
 <dialog class="local-monitor-raw-dialog" data-raw-content-dialog aria-labelledby="local-monitor-raw-dialog-title">
@@ -25,7 +25,7 @@
 <dialog class="local-monitor-ai-dialog" data-session-ai-dialog aria-labelledby="local-monitor-session-ai-title">
     <div class="local-monitor-ai-dialog-frame">
         <header><h2 id="local-monitor-session-ai-title">セッションのAI分析</h2><button type="button" data-session-ai-close>閉じる</button></header>
-        <p data-session-ai-egress>モデルを選ぶと、送信先のサービスと利用上限の対象が表示されます。接続確認の成功は、選択したモデルが使えることや分析成功を保証しません。</p>
+        <p data-session-ai-egress>モデルを選ぶと、送信先と利用枠を確認できます。</p>
         <div data-session-ai-model class="local-monitor-ai-model">
             <label for="local-monitor-session-ai-model">分析に使うモデル</label>
             <select id="local-monitor-session-ai-model" data-session-ai-model-select disabled>
@@ -38,6 +38,6 @@
         <div data-session-ai-status role="status" aria-live="polite"></div>
         <nav data-session-ai-history aria-label="過去のセッション分析"></nav>
         <div data-session-ai-report></div>
-        <footer><button type="button" data-session-ai-regenerate>再分析</button><button type="button" data-session-ai-cancel hidden>キャンセル</button><button type="button" data-session-ai-more hidden>さらに読み込む</button></footer>
+        <footer><button type="button" data-session-ai-regenerate>再分析</button><button type="button" data-session-ai-cancel hidden>キャンセル</button><button type="button" data-session-ai-more hidden>さらに表示</button></footer>
     </div>
 </dialog>

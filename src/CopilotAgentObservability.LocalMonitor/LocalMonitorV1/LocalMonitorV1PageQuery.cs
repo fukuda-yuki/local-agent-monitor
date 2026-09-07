@@ -46,11 +46,11 @@ internal static class LocalMonitorV1PageQueryParser
 
         return routeKind switch
         {
-            LocalMonitorV1PrimaryRouteKind.RepositorySelection or
             LocalMonitorV1PrimaryRouteKind.ComparisonDetail =>
                 TrySelection(routeKind, components, out query),
             LocalMonitorV1PrimaryRouteKind.SessionDetail =>
                 TrySessionDetail(components, out query),
+            LocalMonitorV1PrimaryRouteKind.RepositorySelection or
             LocalMonitorV1PrimaryRouteKind.RepositorySessions or
             LocalMonitorV1PrimaryRouteKind.AllSessions or
             LocalMonitorV1PrimaryRouteKind.UnassignedSessions =>
@@ -358,7 +358,8 @@ internal static class LocalMonitorV1CanonicalUrlBuilder
         };
 
         var components = new List<string>();
-        if (query.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions
+        if (query.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySelection
+            or LocalMonitorV1PrimaryRouteKind.RepositorySessions
             or LocalMonitorV1PrimaryRouteKind.AllSessions
             or LocalMonitorV1PrimaryRouteKind.UnassignedSessions)
         {
@@ -418,7 +419,8 @@ internal static class LocalMonitorV1CanonicalUrlBuilder
         if (path.Classification != LocalMonitorV1PathClassification.Matched
             || path.RouteKind != query.RouteKind
             || query.RouteKind is not (
-                LocalMonitorV1PrimaryRouteKind.RepositorySessions
+                LocalMonitorV1PrimaryRouteKind.RepositorySelection
+                or LocalMonitorV1PrimaryRouteKind.RepositorySessions
                 or LocalMonitorV1PrimaryRouteKind.AllSessions
                 or LocalMonitorV1PrimaryRouteKind.UnassignedSessions))
         {
@@ -430,6 +432,7 @@ internal static class LocalMonitorV1CanonicalUrlBuilder
             LocalMonitorV1PrimaryRouteKind.RepositorySessions =>
                 request.Scope == "repository"
                 && string.Equals(request.RepositoryId, path.RepositoryId, StringComparison.Ordinal),
+            LocalMonitorV1PrimaryRouteKind.RepositorySelection or
             LocalMonitorV1PrimaryRouteKind.AllSessions =>
                 request.Scope == "all" && request.RepositoryId is null,
             LocalMonitorV1PrimaryRouteKind.UnassignedSessions =>

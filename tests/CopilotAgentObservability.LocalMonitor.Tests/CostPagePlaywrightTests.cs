@@ -44,7 +44,7 @@ public sealed class CostPagePlaywrightTests
         await Expect(page.Locator("#cost-range-totals")).ToContainTextAsync("provisional");
         await Expect(page.Locator("#cost-daily-trend")).ToContainTextAsync("2026-07-23 UTC");
         await Expect(page.Locator("#cost-groups")).ToContainTextAsync("input");
-        await Expect(page.Locator("#cost-groups")).ToContainTextAsync("partial");
+        await Expect(page.Locator("#cost-groups")).ToContainTextAsync("一部の暫定額");
         await Expect(page.Locator("#cost-session")).ToContainTextAsync("partial");
         await Expect(page.Locator("#cost-session")).ToContainTextAsync("unknown_model");
         await Expect(page.Locator("#cost-session")).ToContainTextAsync("stale");
@@ -53,7 +53,7 @@ public sealed class CostPagePlaywrightTests
         await Expect(page.Locator("#cost-session")).ToContainTextAsync("estimated_cost_not_invoice.v1");
         await Expect(page.Locator("#cost-session a[href^='/api/costs/']")).ToHaveCountAsync(1);
         await Expect(page.Locator("#cost-context-heading")).ToBeFocusedAsync();
-        await Expect(page.Locator("#cost-live")).ToContainTextAsync("exact estimate");
+        await Expect(page.Locator("#cost-live")).ToContainTextAsync("指定した推定費用を読み込みました");
         Assert.False(await page.EvaluateAsync<bool>("() => window.__costStorageTouched === true"));
         Assert.False(await page.EvaluateAsync<bool>("() => window.__costServiceWorkerTouched === true"));
         Assert.False(await page.EvaluateAsync<bool>("() => window.__costDatabaseTouched === true"));
@@ -88,8 +88,8 @@ public sealed class CostPagePlaywrightTests
         await Expect(page.Locator("label:has(#cost-filter-from)")).ToContainTextAsync("開始（UTC）");
         await Expect(page.Locator("label:has(#cost-filter-to)")).ToContainTextAsync("終了（UTC、含まない）");
         await Expect(page.Locator("label:has(#cost-filter-status)")).ToContainTextAsync("状態");
-        await Expect(page.Locator("label:has(#cost-filter-repository)")).ToContainTextAsync("Repository");
-        await Expect(page.Locator("label:has(#cost-filter-workspace)")).ToContainTextAsync("Workspace");
+        await Expect(page.Locator("label:has(#cost-filter-repository)")).ToContainTextAsync("リポジトリ");
+        await Expect(page.Locator("label:has(#cost-filter-workspace)")).ToContainTextAsync("ワークスペース");
         await page.Locator("#cost-filter-status").FocusAsync();
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#cost-filter-registry")).ToBeFocusedAsync();
@@ -118,7 +118,7 @@ public sealed class CostPagePlaywrightTests
         await Expect(page.Locator("#cost-groups-next")).ToBeHiddenAsync();
         Assert.Equal(string.Empty, await page.Locator("#cost-groups-next").GetAttributeAsync("data-cursor"));
         Assert.Contains("billing_mode=github_ai_credits", analyticsUrl, StringComparison.Ordinal);
-        await Expect(page.Locator("#cost-live")).ToContainTextAsync("incomplete");
+        await Expect(page.Locator("#cost-live")).ToContainTextAsync("全体の合計は未確定です");
     }
 
     [Fact(Timeout = 60_000)]
@@ -275,10 +275,10 @@ public sealed class CostPagePlaywrightTests
         });
 
         await page.GotoAsync($"{host.Url}/costs", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.GetByLabel("Source surface", new() { Exact = true })).ToHaveValueAsync("a-");
-        await Expect(page.GetByLabel("configure session-estimated-cost-threshold", new() { Exact = true })).ToBeCheckedAsync();
-        await Expect(page.GetByLabel("configure daily-estimated-cost-threshold", new() { Exact = true })).ToBeCheckedAsync();
-        await Expect(page.GetByLabel("configure period-estimated-cost-threshold", new() { Exact = true })).ToBeCheckedAsync();
+        await Expect(page.GetByLabel("取得元", new() { Exact = true })).ToHaveValueAsync("a-");
+        await Expect(page.GetByLabel("セッション予算を設定", new() { Exact = true })).ToBeCheckedAsync();
+        await Expect(page.GetByLabel("日別予算を設定", new() { Exact = true })).ToBeCheckedAsync();
+        await Expect(page.GetByLabel("直近期間の予算を設定", new() { Exact = true })).ToBeCheckedAsync();
         await page.Locator("#cost-preview").ClickAsync();
         await Expect(page.Locator("#cost-preview-result")).ToContainTextAsync("1 Session");
 

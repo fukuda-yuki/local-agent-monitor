@@ -462,7 +462,7 @@ public sealed class DoctorUiPlaywrightTests
             ("projection_failed", "記録済みデータを画面へ反映できませんでした", "open_projection_diagnostics", "反映処理の診断を確認してください", "error", "after_action"),
             ("session_unbound", "記録を Session に結び付けられません", "select_exact_session", "対象の Session を選択してください", "error", "after_action"),
             ("content_capture_disabled", "内容の記録が無効です", "enable_content_capture_if_desired", "必要な場合は内容の記録を有効にしてください", "warning", "after_action"),
-            ("sanitized_only_raw_unavailable", "内容は記録されていません", "restart_without_sanitized_only_if_desired", "必要な場合は通常モードで Monitor を再起動してください", "warning", "after_action"),
+            ("sanitized_only_raw_unavailable", "なし", "restart_without_sanitized_only_if_desired", "必要な場合は通常モードで Monitor を再起動してください", "warning", "after_action"),
             ("schema_drift_detected", "取得元のスキーマ変更を検出しました", "review_source_diagnostics", "取得元の診断を確認してください", "warning", "after_action"),
             ("ready_no_real_trace", "接続確認のための記録がまだありません", "run_bounded_source_interaction", "取得元で確認用の操作を実行してください", "info", "after_action"),
             ("first_trace_ready", "最初の記録を確認できました", "open_verified_trace_or_session", "確認済みの Trace または Session を開いてください", "info", "none"),
@@ -495,7 +495,7 @@ public sealed class DoctorUiPlaywrightTests
             var row = rows[index];
             var source = index % 2 == 0 ? "claude-code" : "github-copilot-cli";
             await page.Locator("#doctor-source").SelectOptionAsync(source);
-            await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("今回の記録にはありません");
+            await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("なし");
             await page.Locator("#doctor-primary-action").ClickAsync();
             await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync(row.Item2);
             await Expect(page.Locator("#doctor-next-action")).ToContainTextAsync(row.Item4);
@@ -536,7 +536,7 @@ public sealed class DoctorUiPlaywrightTests
         await page.Locator("#doctor-primary-action").ClickAsync();
 
         await Expect(page.Locator("#doctor-live")).ToHaveTextAsync("検証開始の結果を確認できませんでした。ページを再読み込みしてください。");
-        await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("今回の記録にはありません");
+        await Expect(page.Locator("#doctor-current-state")).ToContainTextAsync("なし");
         await Expect(page.Locator("#doctor-current-state code")).ToHaveCountAsync(0);
     }
 
@@ -769,8 +769,8 @@ public sealed class DoctorUiPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/diagnostics?session_id=missing&observation_id=missing", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.Locator("#doctor-session-target")).ToContainTextAsync("今回の記録にはありません");
-        await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("今回の記録にはありません");
+        await Expect(page.Locator("#doctor-session-target")).ToContainTextAsync("なし");
+        await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("なし");
         await Expect(page.Locator("body")).Not.ToContainTextAsync("evidence_not_found");
     }
 
@@ -791,8 +791,8 @@ public sealed class DoctorUiPlaywrightTests
 
         await Expect(page.Locator("#doctor-session-target")).ToContainTextAsync("Session の記録を読み込めませんでした");
         await Expect(page.Locator("#doctor-source-target")).ToContainTextAsync("ソース診断の記録を読み込めませんでした");
-        await Expect(page.Locator("#doctor-session-target")).Not.ToContainTextAsync("今回の記録にはありません");
-        await Expect(page.Locator("#doctor-source-target")).Not.ToContainTextAsync("今回の記録にはありません");
+        await Expect(page.Locator("#doctor-session-target")).Not.ToContainTextAsync("なし");
+        await Expect(page.Locator("#doctor-source-target")).Not.ToContainTextAsync("なし");
     }
 
     private static Task RouteSourcesAsync(IPage page) =>

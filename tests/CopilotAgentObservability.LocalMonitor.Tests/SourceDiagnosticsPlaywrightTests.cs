@@ -27,7 +27,7 @@ public sealed class SourceDiagnosticsPlaywrightTests
 
         var row = page.Locator("#ingestion-history-rows tr");
         await Expect(row.Locator("[data-fact-state='not-observed']")).ToHaveCountAsync(1);
-        await Expect(row).ToContainTextAsync("今回の記録にはありません");
+        await Expect(row).ToContainTextAsync("なし");
         await Expect(row.Locator("p")).ToContainTextAsync("取り込み履歴をこの記録で確認できません");
         await Expect(row).Not.ToContainTextAsync("0件");
         await Expect(row).Not.ToContainTextAsync("まだ取り込みがありません");
@@ -56,8 +56,8 @@ public sealed class SourceDiagnosticsPlaywrightTests
 
         Assert.True(await page.EvaluateAsync<bool>("() => typeof window.LocalMonitorV1FactState?.render === 'function'"));
         await Expect(page.Locator("#source-diagnostics-rows tr")).ToHaveCountAsync(1);
-        await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("今回の記録にはありません");
-        await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("実際に使われなかったとは断定できません");
+        await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("なし");
+        await Expect(page.Locator("#source-diagnostics-rows")).ToContainTextAsync("ソース互換性の診断対象をこの記録で確認できません");
         await Expect(page.Locator("#source-diagnostics-rows [data-fact-state='not-observed']")).ToHaveCountAsync(1);
     }
 
@@ -121,7 +121,7 @@ public sealed class SourceDiagnosticsPlaywrightTests
         var table = page.Locator("#source-diagnostics-rows");
         foreach (var expected in new[]
         {
-            "対応済み", "対応済み（未知フィールドあり）", "この取得元では記録できません", "記録が一部欠けています",
+            "対応済み", "対応済み（未知フィールドあり）", "未対応", "一部欠落",
             "認識済みレコードの欠落を検出しました", "未知フィールドがあります",
             "payload を解析できませんでした", "アダプター処理に失敗しました", "対応は不要です",
             "未知フィールドを確認してください", "sanitized なアダプター診断を確認してください",
@@ -146,7 +146,7 @@ public sealed class SourceDiagnosticsPlaywrightTests
         await Expect(table.Locator("tr").Nth(1).Locator("td").Last.Locator("span").Nth(0)).ToHaveTextAsync("1");
         await Expect(table.Locator("tr").Nth(1).Locator("td").Last.Locator("span").Nth(1)).ToHaveTextAsync("2");
         await Expect(table.Locator("tr").Nth(1).Locator("td").Last.Locator("span").Nth(2)).ToHaveTextAsync("3");
-        await Expect(table).ToContainTextAsync("今回の記録にはありません");
+        await Expect(table).ToContainTextAsync("なし");
     }
 
     [Fact]

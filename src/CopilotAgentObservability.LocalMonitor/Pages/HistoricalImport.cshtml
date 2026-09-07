@@ -11,7 +11,7 @@
     <header class="historical-import-head">
         <div>
             <h2 class="monitor-page-title">履歴インポート</h2>
-            <p class="monitor-subtle">明示的に選んだ履歴ソースを、メタデータだけでプレビューしてから取り込みます。</p>
+            <p class="monitor-subtle">履歴を選び、取り込み内容を確認します。</p>
         </div>
         <span class="monitor-badge">sanitized metadata</span>
     </header>
@@ -19,7 +19,7 @@
     <section class="panel historical-import-source-panel" aria-labelledby="historical-import-source-heading">
         <div class="panel-head">
             <span class="panel-title" id="historical-import-source-heading">ソースを選択</span>
-            <span class="panel-meta">ページを開いただけでは検出・読み取りを開始しません</span>
+            <span class="panel-meta">選択後に読み取りを開始します</span>
         </div>
 
         <div class="historical-import-source-legend" id="historical-import-source-legend" aria-label="ソース種別の凡例">
@@ -38,8 +38,8 @@
                     <span class="historical-import-badge badge-unsupported">Unsupported</span>
                 </span>
                 <span>範囲: 選択 root の session-state/{Session ID}/events.jsonl</span>
-                <span>読み取り: metadata_only · content risk: not_read</span>
-                <span>現在の profile は候補を許可しません</span>
+                <span>本文を除いた情報だけを読み取ります</span>
+                <span>現在の取得元設定では取り込めません</span>
             </button>
             <button class="historical-import-source-card" type="button" data-source-selection="claude-code" aria-pressed="false">
                 <span class="historical-import-source-card-head">
@@ -48,8 +48,8 @@
                     <span class="historical-import-badge badge-unsupported">Unsupported</span>
                 </span>
                 <span>範囲: 公式 hook 参照または明示選択した 1 ファイル</span>
-                <span>読み取り: metadata_only · content risk: not_read</span>
-                <span>現在の profile は候補を許可しません</span>
+                <span>本文を除いた情報だけを読み取ります</span>
+                <span>現在の取得元設定では取り込めません</span>
             </button>
         </div>
 
@@ -72,7 +72,7 @@
             </div>
 
             <div class="historical-import-field">
-                <label for="historical-import-reference">正確なローカル参照</label>
+                <label for="historical-import-reference">ローカルパスまたは参照</label>
                 <input id="historical-import-reference" type="text" maxlength="4096" required spellcheck="false" autocomplete="off" />
                 <span class="historical-import-help">この値は preview、履歴、ログ、URL に表示しません。</span>
             </div>
@@ -91,7 +91,7 @@
             <fieldset class="historical-import-capture">
                 <legend>読み取り範囲</legend>
                 <label><input type="radio" name="historical-import-capture" value="metadata_only" checked disabled /> メタデータのみ</label>
-                <p class="historical-import-help">本文・プロンプト・応答・ツール引数は取り込みません。content import はこの版では利用できません。</p>
+                <p class="historical-import-help">本文・プロンプト・応答・ツール引数は取り込みません。</p>
             </fieldset>
 
             <label class="historical-import-consent">
@@ -121,7 +121,7 @@
 
     <section class="panel historical-import-progress" id="historical-import-progress" aria-labelledby="historical-import-progress-heading" hidden>
         <h3 id="historical-import-progress-heading">インポート進行中</h3>
-        <p>トランザクションを実行しています。完了するまで同じ要求を再送信しません。</p>
+        <p>取り込み中…</p>
         <progress aria-label="履歴インポートの進行" max="1"></progress>
     </section>
 
@@ -136,7 +136,7 @@
     <section class="panel historical-import-observations" aria-labelledby="historical-import-observations-heading">
         <div class="panel-head">
             <span class="panel-title" id="historical-import-observations-heading">観測一覧</span>
-            <span class="panel-meta">live と historical は別の読み取りモデルです</span>
+            <span class="panel-meta">ライブ記録と取り込み履歴</span>
         </div>
         <div class="historical-import-tabs" role="tablist" aria-label="観測ソース">
             <button class="historical-import-tab" type="button" role="tab" aria-selected="false" data-source-kind="live">Live</button>
@@ -148,7 +148,7 @@
             <div id="historical-import-observation-detail-content"></div>
             <div class="historical-import-trace-control">
                 <button class="monitor-btn" id="historical-import-trace-button" type="button" disabled>トレースを開く</button>
-                <span class="historical-import-help" id="historical-import-trace-unavailable">trace_identity がありません。</span>
+                <span class="historical-import-help" id="historical-import-trace-unavailable">対応するトレースの記録がありません。</span>
             </div>
         </section>
     </section>
