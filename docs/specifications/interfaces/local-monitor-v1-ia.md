@@ -295,7 +295,7 @@ route/transport contract so a known expired URL deterministically returns
 The screen has three vertical regions:
 
 1. compact Session context;
-2. fixed Session summary;
+2. Session-wide summary, independent of node selection;
 3. execution workspace with contextual inspector.
 
 ### Session context
@@ -310,9 +310,13 @@ The screen has three vertical regions:
 
 Opaque technical IDs are not the title.
 
-### Fixed summary
+### Session-wide summary
 
 The summary always represents the complete Session snapshot and does not change when a node is selected.
+Primary token values and the five activity facts remain visible. Each missing-state
+label may disclose its explanation in place, without reclassifying that state.
+Capture coverage and observed component details share an explicitly labelled
+expandable section; the summary grows with its content rather than clipping it.
 
 #### トークン合計
 
@@ -404,6 +408,11 @@ Common structure:
 - exact status/content/time/parent;
 - retry/recovery relationship;
 - raw content only through an authorized read.
+
+Available content actions precede an expandable list of other content states.
+Exact technical evidence remains available, and optional node AI actions follow
+the observed facts. The context breadcrumb says `セッション詳細`; the heading
+and overview retain the full server-provided instruction label.
 
 There are no page-level `整形 / raw` tabs.
 
@@ -680,7 +689,9 @@ copy remain #137/#169-owned and are not byte-frozen.
 
 ## 16. Dimensions and scrolling
 
-Hard validation viewport: **1366×768**.
+Primary validation viewports: **1366×768** and **1920×1080**, plus 200% zoom
+and narrow reflow. Dimensions below are presentation defaults, not clipping
+budgets for Japanese text.
 
 ### Shared
 
@@ -698,24 +709,27 @@ Hard validation viewport: **1366×768**.
 
 ### Session Explorer
 
-- title/action region: maximum 64px;
-- filter region: maximum 88px;
-- list owns remaining height and scrolls internally;
-- row target height 52–64px.
+- title/actions and filters wrap to their content height;
+- the list has bounded internal scrolling (up to 65dvh); the page may scroll vertically;
+- instruction links show up to three lines and open the exact full detail;
+- row height follows content, with comfortable control spacing;
+- narrow filter disclosures expand in flow instead of outside the viewport.
 
 ### Session detail
 
-- context region: maximum 72px;
-- fixed summary: 104px;
-- workspace uses the remaining height;
-- inspector width: default 380px, min 360px, max 420px;
-- timeline is flexible and internally scrollable.
+- context and summary grow to fit text and expanded facts;
+- the page scrolls vertically without nested fixed-height summary scrolling;
+- inspector width: min 360px, max 420px; it remains alongside the timeline
+  on desktop and scrolls within the available viewport below the shared header;
+- each execution timeline has bounded internal scrolling (up to 60dvh / 640px),
+  preserving its scroll position across collapse and rerender;
+- long node names wrap; nested rows retain indentation and level semantics.
 
 At widths below 1180px, the inspector becomes a right overlay/drawer instead of forcing page horizontal scrolling. At the hard 1366px viewport it is a simultaneous second pane.
 
 ### Compare
 
-- cohort/scope header: maximum 112px;
+- cohort/scope header grows and wraps to fit its content;
 - fixed metric header remains visible;
 - metric/named-row body scrolls internally;
 - long named sections use search/pagination, not page-width expansion.
@@ -725,7 +739,26 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 - 960×640 target;
 - max width `calc(100vw - 40px)`;
 - max height `calc(100vh - 40px)`;
-- section content scrolls inside the modal.
+- section content scrolls inside the modal;
+- at narrow widths, section navigation reflows into two columns above the content;
+- the active section has a visible edge and bold label in addition to background color.
+
+### Visual foundation
+
+The existing dark theme uses shared semantic CSS variables for surfaces, text,
+controls, spacing and focus. Body text is 16px, labels 14px, and supplementary
+text 13px; these defaults do not replace actual contrast/reflow checks. Controls
+normally have a 40px minimum height. Focus uses a yellow and black double
+indicator. Essential control borders have separate contrast from decorative
+panel dividers. Repository registration guidance is disclosed on demand.
+
+Design references (consulted 2026-09-07):
+- [Digital Agency Design System](https://design.digital.go.jp/), beta v2.17.1;
+- [Foundations](https://design.digital.go.jp/dads/foundations/), same edition;
+- [Color](https://design.digital.go.jp/dads/foundations/color/), updated 2026-08-05;
+- [Typography](https://design.digital.go.jp/dads/foundations/typography/), same edition;
+- [Buttons](https://design.digital.go.jp/dads/components/button/), updated 2024-09-10;
+- [WCAG 2.2 Quick Reference](https://www.w3.org/WAI/WCAG22/quickref/), WCAG 2.2.
 
 ## 17. Accessibility
 

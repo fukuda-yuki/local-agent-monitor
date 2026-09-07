@@ -859,7 +859,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
     }
 
     [Fact]
-    public async Task WorkspaceUsesInternalScrollingAndDismissibleNarrowInspectorOverlay()
+    public async Task Workspace_ReflowsSummaryAndPreservesScrollableTimelineAndDismissibleInspector()
     {
         using var temp = new MonitorTempDirectory(); await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         PlaywrightBrowserPath.ConfigureDefault(); using var playwright = await Playwright.CreateAsync(); await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
@@ -874,10 +874,15 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
         Assert.True(await page.Locator(".local-monitor-session-summary").EvaluateAsync<bool>("e => e.getBoundingClientRect().width > innerWidth * .75"));
         var sessionSummary = page.Locator("[data-session-summary]");
-        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => e.scrollHeight >= e.clientHeight"));
+        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => e.scrollHeight <= e.clientHeight + 1"));
         Assert.True(await sessionSummary.EvaluateAsync<bool>("e => e.scrollWidth <= e.clientWidth + 1"));
         Assert.True(await sessionSummary.EvaluateAsync<bool>("e => [...e.querySelectorAll('.local-monitor-session-summary-card')].every(card => card.getBoundingClientRect().right <= e.getBoundingClientRect().right + 1)"));
-        await sessionSummary.EvaluateAsync("e => e.scrollTop = e.scrollHeight"); Assert.True(await sessionSummary.Locator("[data-session-fixed-coverage]").EvaluateAsync<bool>("e => { const summary=e.closest('[data-session-summary]').getBoundingClientRect(), coverage=e.getBoundingClientRect(); return coverage.bottom > summary.top && coverage.bottom <= summary.bottom + 1; }")); await sessionSummary.EvaluateAsync("e => e.scrollTop = 0");
+        var coverage = sessionSummary.Locator("[data-session-fixed-coverage]");
+        await Expect(coverage.Locator("ul")).ToBeHiddenAsync();
+        await coverage.Locator("summary").ClickAsync();
+        await Expect(coverage.Locator("ul")).ToBeVisibleAsync();
+        Assert.True(await sessionSummary.EvaluateAsync<bool>("e => e.scrollHeight <= e.clientHeight + 1"));
+        await coverage.Locator("summary").ClickAsync();
         var executionWorkspace = page.Locator(".local-monitor-session-execution-workspace"); await Expect(executionWorkspace).ToBeVisibleAsync(); Assert.True(await executionWorkspace.EvaluateAsync<bool>("e => e.getBoundingClientRect().height >= 360"));
         var executionToggle = page.Locator("[data-execution-toggle]").First; var executionTitle = executionToggle.Locator("strong"); var executionSummary = executionToggle.Locator("span");
         Assert.True(await executionTitle.EvaluateAsync<bool>("e => e.getBoundingClientRect().width >= 240"));
@@ -892,7 +897,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.EvaluateAsync("() => window.LocalMonitorV1History.push({ execution: null, node: null })"); await page.SetViewportSizeAsync(1000, 975); var inspector = page.Locator("[data-session-overview]"); await Expect(inspector).ToHaveAttributeAsync("aria-hidden", "true"); await Expect(page.GetByRole(AriaRole.Button, new() { Name = "インスペクターを閉じる" })).ToHaveCountAsync(0);
         var contextFacts = page.Locator("[data-session-context-content]"); await Expect(contextFacts).Not.ToContainTextAsync(longInstruction); await Expect(page.Locator("[data-session-title]")).ToHaveTextAsync(longInstruction); await Expect(page.Locator("[data-session-source]")).ToHaveTextAsync("VS Code"); await Expect(page.Locator("[data-session-time]")).ToHaveTextAsync("2026-08-26T01:02:03.0000000+00:00 – 2026-08-26T01:02:04.0000000+00:00 · 1,000 ms"); Assert.True(await contextFacts.EvaluateAsync<bool>("e => { const bounds=e.closest('[data-session-context]').getBoundingClientRect(); return [...e.children].every(item => { const rect=item.getBoundingClientRect(); return rect.left >= bounds.left && rect.right <= bounds.right + 1 && rect.bottom <= bounds.bottom + 1; }); }"));
         Assert.False(await page.EvaluateAsync<bool>("() => document.querySelector('[data-session-executions]').inert || document.querySelector('.monitor-shell-header').inert"));
-        Assert.True(await page.EvaluateAsync<bool>("() => document.querySelector('.monitor-shell-header').getBoundingClientRect().top >= 0 && document.querySelector('[data-session-workspace]').getBoundingClientRect().bottom <= innerHeight + 1"));
+        Assert.True(await page.Locator("[data-session-workspace]").EvaluateAsync<bool>("e => getComputedStyle(e).overflowY !== 'hidden' && e.scrollHeight <= e.clientHeight + 1"));
         Assert.False(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"));
         var overviewOpen = page.GetByRole(AriaRole.Button, new() { Name = "概要", Exact = true }); await overviewOpen.ClickAsync(); await Expect(inspector).ToHaveAttributeAsync("role", "dialog"); var overviewClose = page.GetByRole(AriaRole.Button, new() { Name = "インスペクターを閉じる" }); await Expect(overviewClose).ToBeFocusedAsync(); await overviewClose.ClickAsync(); await Expect(overviewOpen).ToBeFocusedAsync();
         await page.Locator("[data-timeline-node]").First.ClickAsync(); await Expect(inspector).ToHaveAttributeAsync("role", "dialog"); await Expect(inspector).ToHaveAttributeAsync("aria-modal", "true");
@@ -1201,9 +1206,12 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString()))); await page.RouteAsync("**/timeline?*", r => { urls.Add(r.Request.Url); var executionId = new Uri(r.Request.Url).Query.Split('&').Single(part => part.StartsWith("execution_id=", StringComparison.Ordinal)).Split('=')[1]; var response = executionId == "9a5590c8-46e3-7069-af48-3844d2bf17a4" ? timeline.DeepClone().AsObject() : empty.DeepClone().AsObject(); response["execution_id"] = executionId; return r.FulfillAsync(Json(response.ToJsonString())); }); await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         await page.SetViewportSizeAsync(1000, 975); await Expect(page.Locator("[data-execution-toggle]")).ToHaveCountAsync(8); await Expect(page.Locator("[data-execution-toggle][aria-expanded=true]")).ToHaveCountAsync(1);
         var latestExecution = page.Locator("[data-execution-toggle][aria-expanded=true]").Locator("xpath=parent::*"); await Expect(latestExecution.Locator("[data-execution-fact-summary]")).ToBeHiddenAsync(); await Expect(latestExecution.Locator("[data-execution-scroll]")).ToBeVisibleAsync();
-        var executionRegion = page.Locator("[data-session-executions]"); Assert.True(await executionRegion.EvaluateAsync<bool>("e => e.scrollHeight > e.clientHeight")); await executionRegion.EvaluateAsync("e => e.scrollTop = e.scrollHeight"); Assert.True(await page.Locator("[data-execution-toggle]").Last.EvaluateAsync<bool>("e => { const region=e.closest('[data-session-executions]').getBoundingClientRect(), row=e.getBoundingClientRect(); return row.top >= region.top && row.bottom <= region.bottom + 1; }"));
+        var executionRegion = page.Locator("[data-session-executions]");
+        Assert.True(await executionRegion.EvaluateAsync<bool>("e => e.scrollHeight <= e.clientHeight + 1"));
+        await page.Locator("[data-execution-toggle]").Last.ScrollIntoViewIfNeededAsync();
+        Assert.True(await page.Locator("[data-execution-toggle]").Last.EvaluateAsync<bool>("e => { const row=e.getBoundingClientRect(); return row.top >= 0 && row.bottom <= innerHeight + 1; }"));
         var collapsed = page.Locator("[data-execution-toggle][aria-expanded=false]"); await Expect(collapsed).ToHaveCountAsync(7); var collapsedExecution = page.Locator("[data-execution-id='8a5590c8-46e3-7001-af48-3844d2bf17a4']");
-        await Expect(collapsedExecution.Locator(":scope > [data-execution-fact-summary]")).ToBeHiddenAsync(); Assert.True(await collapsedExecution.EvaluateAsync<bool>("e => e.getBoundingClientRect().height < 100"));
+        await Expect(collapsedExecution.Locator(":scope > [data-execution-fact-summary]")).ToBeHiddenAsync(); Assert.True(await collapsedExecution.EvaluateAsync<bool>("e => e.getBoundingClientRect().height < 160"));
         await collapsedExecution.Locator("[data-execution-toggle]").ClickAsync(); var expandedFacts = collapsedExecution.Locator("[data-execution-fact-summary]"); await Expect(expandedFacts).ToBeHiddenAsync(); var disclosure = collapsedExecution.GetByText("記録状態を確認（8項目）", new() { Exact = true }); await disclosure.ClickAsync(); await Expect(expandedFacts).ToBeVisibleAsync();
         foreach (var key in new[] { "tokens", "input", "output", "skill", "tool", "subagent", "error", "retry" }) await Expect(expandedFacts.Locator($"[data-execution-fact='{key}'] [data-fact-state='not-observed']")).ToHaveCountAsync(1);
         Assert.Equal(2, urls.Count); Assert.DoesNotContain("8a5590c8-46e3-7001-af48-3844d2bf17a4", urls[0]); Assert.Contains("8a5590c8-46e3-7001-af48-3844d2bf17a4", urls[1]);
@@ -1845,7 +1853,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         fixture = "summary-nonrecorded-evidence.json";
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("2026/8/26 10:02 最終観測 のセッション");
-        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("2026/8/26 10:02 最終観測 のセッション");
+        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("セッション詳細");
         await Expect(page.Locator("[data-session-context-content] strong")).ToHaveCountAsync(0);
         await Expect(page.Locator("[data-session-overview]")).ToContainTextAsync("セッションの概要");
         await Expect(page.Locator("[data-session-source]")).ToContainTextAsync("VS Code");
@@ -1861,7 +1869,7 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         fixture = "summary-empty.json";
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.GetByRole(AriaRole.Heading, new() { Level = 1 })).ToHaveTextAsync("日時不明のセッション");
-        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("日時不明のセッション");
+        await Expect(page.Locator("[data-session-breadcrumb]")).ToHaveTextAsync("セッション詳細");
         await Expect(page.Locator("[data-session-context-content] strong")).ToHaveCountAsync(0);
 
         fixture = "summary-full.json";

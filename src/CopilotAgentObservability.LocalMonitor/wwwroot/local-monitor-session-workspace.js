@@ -334,6 +334,17 @@
     else renderFact(target, { state: item.state, count: null });
   };
 
+  function compactFact(target, value) {
+    renderFact(target, value);
+    const explanation = target.querySelector("p");
+    if (!explanation) return;
+    const disclosure = el("details");
+    const label = el("summary");
+    for (const child of [...target.childNodes]) if (child !== explanation) label.append(child);
+    disclosure.append(label, explanation);
+    target.append(disclosure);
+  }
+
   function namedFact(title, value, dataName) {
     const card = tokenMetric(title, value);
     card.dataset[`sessionFixed${dataName}`] = "";
@@ -344,7 +355,7 @@
     const card = el("div", "local-monitor-session-summary-card");
     card.append(el("h2", null, title));
     if (value.state === "recorded") card.append(el("strong", null, valueLabel(value.value)));
-    else renderFact(card.appendChild(el("div")), value);
+    else compactFact(card.appendChild(el("div")), value);
     return card;
   }
 
@@ -1118,7 +1129,6 @@
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
     const overview = el("button", null, "セッションの概要に戻る"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); openNarrowInspector(root.querySelector("[data-session-overview-open]")); });
     section.append(overview, el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
-    if (aiReady) appendNodeAi(section, node.node_id);
     if (node.kind === "tool") {
       appendInspectorFact(section, "開始", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(section, "終了", node.timing.ended_at === null ? { state: "not_observed" } : { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(section, "所要時間", node.timing.duration_ms === null ? { state: "not_observed" } : { state: node.timing.state, value: `${node.timing.duration_ms} ms` });
       appendInspectorFact(section, "呼び出し元", metadata.caller, "node_id"); appendInspectorFact(section, "ライフサイクル", metadata.lifecycle, "value", value => STATUS_LABELS[value]); appendInspectorFact(section, "状態", metadata.status, "value", value => STATUS_LABELS[value]); appendInspectorFact(section, "終了状態", metadata.exit);
@@ -1151,7 +1161,12 @@
     } else if (node.kind === "retry") {
       appendInspectorFact(section, "試行回数", metadata.attempt); appendInspectorFact(section, "対象", metadata.target, "node_id"); appendInspectorFact(section, "復旧", metadata.recovered, "value", value => value ? "はい" : "いいえ");
     }
-    if (node.kind !== "skill") for (const part of CONTENT_PARTS) appendContentAction(section, detail, part);
+    if (node.kind !== "skill") {
+      const unavailable = el("details", "local-monitor-unavailable-content");
+      unavailable.append(el("summary", null, "その他の内容の記録状態"));
+      for (const part of CONTENT_PARTS) appendContentAction(detail.content[part].state === "available" ? section : unavailable, detail, part);
+      if (unavailable.childElementCount > 1) section.append(unavailable);
+    }
     if (detail.parent_path.length) { section.append(el("h3", null, "親項目の経路")); const path = el("ol"); for (const item of detail.parent_path) path.append(el("li", null, item.name.state === "recorded" ? item.name.text : KIND_LABELS[item.kind])); section.append(path); }
     appendRelated(section, "再試行", detail.related.retry); appendRelated(section, "復旧", detail.related.recovery); appendRelated(section, "子項目", detail.related.children);
     const refs = node.technical_references; const technical = el("details"); const referenceLabels = { source_kind: "取得元の種類", source_identity: "取得元ID", trace_id: "トレースID", span_id: "スパンID", event_id: "イベントID" }; technical.append(el("summary", null, "技術情報")); for (const key of ["source_kind", "source_identity", "trace_id", "span_id", "event_id"]) if (refs[key] !== null) technical.append(el("p", null, `${referenceLabels[key]}: ${refs[key]}`)); section.append(technical);
@@ -1160,6 +1175,7 @@
       evidence.href = `/traces/${encodeURIComponent(refs.trace_id)}${refs.span_id === null ? "" : `?span=${encodeURIComponent(refs.span_id)}`}`;
       section.append(evidence);
     }
+    if (aiReady) appendNodeAi(section, node.node_id);
     inspector.append(section);
     if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
@@ -1320,7 +1336,7 @@
     const session = summary.session;
     const safeInstant = session.timing.started_at ?? session.timing.last_seen_at;
     const sessionLabel = session.instruction.label !== null ? session.instruction.label : safeInstant === null ? "日時不明のセッション" : `${new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(safeInstant))}${session.timing.started_at === null ? " 最終観測" : ""} のセッション`;
-    root.querySelector("[data-session-breadcrumb]").textContent = sessionLabel;
+    root.querySelector("[data-session-breadcrumb]").textContent = "セッション詳細";
     root.querySelector("[data-session-title]").textContent = sessionLabel;
     const context = root.querySelector("[data-session-context-content]");
     context.replaceChildren(el("span", null, session.status === "active" && session.timing.state === "not_observed" ? "状態未観測" : STATUS_LABELS[session.status]));
@@ -1362,8 +1378,8 @@
     const cacheRead = namedFact("キャッシュから読み込み", observedCache?.subtotal ?? session.tokens.cache_read, "CacheRead");
     if (observedCache) cacheRead.append(el("small", null, `観測小計 · ${format(observedCache.observed_call_count)}/${format(observedCache.applicable_call_count)} 呼出し`));
     const newInput = namedFact("新規入力", session.tokens.new_input, "NewInput");
-    const coverageCard = el("div", "local-monitor-session-summary-card"); coverageCard.dataset.sessionFixedCoverage = "";
-    coverageCard.append(el("h2", null, "取得範囲"));
+    const coverageCard = el("details", "local-monitor-session-summary-card"); coverageCard.dataset.sessionFixedCoverage = "";
+    coverageCard.append(el("summary", null, "取得範囲・トークンの内訳を確認"));
     const coverageList = el("ul", "local-monitor-session-coverage");
     for (const item of session.capture.coverage) {
       const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
@@ -1372,9 +1388,9 @@
       coverageList.append(row);
     }
     coverageCard.append(coverageList);
-    summaryRoot.append(total, cache, input, output, cacheRead, newInput, coverageCard);
+    summaryRoot.append(total, input, output, cache, cacheRead, newInput);
     if (session.tokens.observed_components) {
-      const observed = el("div", "local-monitor-session-summary-card");
+      const observed = el("div", "local-monitor-session-observed-components");
       observed.append(el("h2", null, "成分別の観測範囲"));
       for (const [key, label] of [["input", "入力"], ["output", "出力"], ["total", "producer合計"], ["reasoning", "推論"], ["cache_creation", "キャッシュ書き込み"]]) {
         const item = session.tokens.observed_components[key];
@@ -1384,12 +1400,14 @@
         row.append(el("small", null, ` 観測小計 · ${format(item.observed_call_count)}/${format(item.applicable_call_count)} 呼出し`));
         observed.append(row);
       }
-      summaryRoot.append(observed);
+      coverageCard.append(observed);
     }
     for (const [key, label] of [["skill", "スキル"], ["tool", "ツール"], ["subagent", "サブエージェント"], ["error", "エラー"], ["retry", "再試行"]]) {
       const card = el("div", "local-monitor-session-summary-card"); card.append(el("h2", null, label));
-      renderFact(card.appendChild(el("div")), session.activity[key]); summaryRoot.append(card);
+      compactFact(card.appendChild(el("div")), session.activity[key]); summaryRoot.append(card);
     }
+
+    summaryRoot.append(coverageCard);
 
     for (const execution of summary.executions) if (openLatest) executionMemory(execution.execution_id).open = execution.latest;
     renderExecutions();
