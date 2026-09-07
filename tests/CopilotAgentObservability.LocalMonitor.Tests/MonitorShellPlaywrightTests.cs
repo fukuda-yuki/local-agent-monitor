@@ -38,6 +38,42 @@ public class MonitorShellPlaywrightTests
         await Expect(summary).Not.ToContainTextAsync("最古の保留 0秒");
     }
 
+    [Theory]
+    [InlineData("configured_not_checked", "not_checked", "GitHub認証は未確認")]
+    [InlineData("authentication_required", "authentication_required", "GitHub認証が必要です")]
+    [InlineData("unavailable", "unavailable", "SDK・GitHub認証を確認できません")]
+    public async Task Shell_AiReadiness_ExplainsPerRunDestinationIndependentlyOfGitHubAuthentication(
+        string state, string result, string expectedState)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await StartReadyHostAsync(temp);
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
+        var page = await browser.NewPageAsync();
+        var generationRequests = new List<string>();
+        page.Request += (_, request) =>
+        {
+            if (request.Url.Contains("/ai/", StringComparison.Ordinal)) generationRequests.Add(request.Url);
+        };
+        await page.RouteAsync("**/api/local-monitor/v1/settings/ai-readiness", route => route.FulfillAsync(new()
+        {
+            Status = 200, ContentType = "application/json",
+            Body = $$"""{"provider":"github_copilot","selected_model":"legacy-model","selected_configuration":"standard","readiness_state":"{{state}}","last_check_result":"{{result}}","provider_egress_notice":"selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action"}""",
+        }));
+
+        await page.GotoAsync($"{host.Url}/sessions?settings=ai");
+
+        var section = page.Locator("[data-settings-section='ai']");
+        await Expect(section).ToContainTextAsync(expectedState);
+        await Expect(section).ToContainTextAsync("GitHubホスト型またはBYOKプロバイダー");
+        await Expect(section).ToContainTextAsync("推論先とモデルは解析画面で選択します");
+        await Expect(section).ToContainTextAsync("設定済みモデル legacy-model");
+        await Expect(section).ToContainTextAsync("BYOKの利用可否や各モデルの実行成功を保証する確認ではありません");
+        await Expect(section).ToContainTextAsync("明示的にAI操作を開始した場合に限り");
+        Assert.Empty(generationRequests);
+    }
+
     [Fact]
     public async Task SharedPaths_MatchCanonicalBuildersAndRejectEveryNonIdentityWithoutSideEffects()
     {
@@ -665,7 +701,7 @@ public class MonitorShellPlaywrightTests
             await route.FulfillAsync(new()
             {
                 Status = 200, ContentType = "application/json",
-                Body = $"{{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"{(route.Request.Method == "POST" ? "ready" : "configured_not_checked")}\",\"last_check_result\":\"{(route.Request.Method == "POST" ? "ready" : "not_checked")}\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action\"}}",
+                Body = $"{{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"{(route.Request.Method == "POST" ? "ready" : "configured_not_checked")}\",\"last_check_result\":\"{(route.Request.Method == "POST" ? "ready" : "not_checked")}\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action\"}}",
             });
         });
         await page.RouteAsync("**/api/monitor/source-diagnostics?limit=1", route => route.FulfillAsync(new()
@@ -750,7 +786,10 @@ public class MonitorShellPlaywrightTests
         await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("gpt-5");
         await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("未確認");
         await page.Locator("[data-settings-ai-check]").ClickAsync();
-        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("接続できます");
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("GitHub認証を確認済み");
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("GitHubホスト型またはBYOKプロバイダー");
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("設定済みモデル gpt-5");
+        await Expect(page.Locator("[data-settings-section='ai']")).ToContainTextAsync("実行時に観測されたモデルを示しません");
         Assert.NotNull(aiCheckRequest);
         Assert.Equal("local-monitor", aiCheckRequest.Headers["x-monitor-csrf"]);
         await page.Locator("[data-settings-navigation='archive']").ClickAsync();
@@ -1373,7 +1412,7 @@ public class MonitorShellPlaywrightTests
             await route.FulfillAsync(new()
             {
                 Status = 200, ContentType = "application/json",
-                Body = $"{{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"{(route.Request.Method == "POST" ? "ready" : "configured_not_checked")}\",\"last_check_result\":\"{(route.Request.Method == "POST" ? "ready" : "not_checked")}\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action\"}}",
+                Body = $"{{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"{(route.Request.Method == "POST" ? "ready" : "configured_not_checked")}\",\"last_check_result\":\"{(route.Request.Method == "POST" ? "ready" : "not_checked")}\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action\"}}",
             });
         });
         await page.GotoAsync($"{host.Url}/sessions?settings=ai", new() { WaitUntil = WaitUntilState.DOMContentLoaded });

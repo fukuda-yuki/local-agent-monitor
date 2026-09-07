@@ -115,14 +115,15 @@
         runtime,
         link("/diagnostics", "詳しい受信診断を開く"));
     } else if (token === "ai") {
-      const ai = card("GitHub Copilot", "AI設定を確認しています。");
+      const ai = card("GitHub Copilot SDK・GitHub認証", "AI設定を確認しています。");
       ai.dataset.settingsAi = "";
-      const check = element("button", null, "接続を確認");
+      const check = element("button", null, "GitHub認証を確認");
       check.type = "button";
       check.dataset.settingsAiCheck = "";
       section.append(ai,
         check,
-        element("p", "local-monitor-settings-note", "選択した内容は、明示的にAI操作を開始した場合に限りGitHub Copilotへ送信されます。資格情報は表示されません。"));
+        element("p", "local-monitor-settings-note", "解析にはGitHub Copilot SDKを使用します。選択した内容は、明示的にAI操作を開始した場合に限り、その解析で選択した推論先（GitHubホスト型またはBYOKプロバイダー）へ送信されます。推論先とモデルは解析画面で選択します。資格情報は表示されません。"),
+        element("p", "local-monitor-settings-note", "ここではSDKの稼働とGitHub認証を確認します。BYOKの利用可否や各モデルの実行成功を保証する確認ではありません。設定済みモデルは解析ごとの選択や実行時に観測されたモデルを示しません。"));
     } else if (token === "storage") {
       const storage = card("保存状態", "保存状態を確認しています。");
       storage.dataset.settingsStorageSummary = "";
@@ -432,15 +433,15 @@
   }
 
   function renderAi(value, generation, target, stateTarget) {
-    const states = Object.freeze({ unconfigured: "未設定", configured_not_checked: "未確認", ready: "接続できます",
-      authentication_required: "認証が必要です", unavailable: "利用できません", check_failed: "接続確認に失敗しました" });
+    const states = Object.freeze({ unconfigured: "SDK未設定", configured_not_checked: "GitHub認証は未確認", ready: "GitHub認証を確認済み",
+      authentication_required: "GitHub認証が必要です", unavailable: "SDK・GitHub認証を確認できません", check_failed: "SDK・GitHub認証の確認に失敗しました" });
     if (!exact(value, ["provider", "selected_model", "selected_configuration", "readiness_state", "last_check_result", "provider_egress_notice"])
         || value.provider !== "github_copilot" || typeof value.selected_model !== "string" || typeof value.selected_configuration !== "string"
         || !Object.hasOwn(states, value.readiness_state)
         || !["not_checked", "unconfigured", "ready", "authentication_required", "unavailable", "check_failed"].includes(value.last_check_result)
-        || value.provider_egress_notice !== "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action") throw new Error();
+        || value.provider_egress_notice !== "selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action") throw new Error();
     if (generation !== requestGeneration) return;
-    const text = `${states[value.readiness_state]} · GitHub Copilot · モデル ${value.selected_model} · 設定 ${value.selected_configuration}`;
+    const text = `${states[value.readiness_state]} · GitHub Copilot SDK · 設定済みモデル ${value.selected_model} · 設定 ${value.selected_configuration}`;
     target.textContent = text;
     stateTarget.textContent = states[value.readiness_state];
   }
@@ -452,7 +453,7 @@
     aiCheckController?.abort();
     const controller = aiCheckController = new AbortController();
     button.disabled = true;
-    target.textContent = "接続を確認しています。";
+    target.textContent = "SDK・GitHub認証を確認しています。";
     try {
       const response = await fetch("/api/local-monitor/v1/settings/ai-readiness", {
         method: "POST", cache: "no-store", credentials: "same-origin",
@@ -463,7 +464,7 @@
       renderAi(await response.json(), generation, target, owned.get("state").querySelector("[data-settings-state-ai] p"));
     } catch {
       if (!controller.signal.aborted && generation === requestGeneration && selectedSettings === "ai")
-        target.textContent = "接続確認に失敗しました。";
+        target.textContent = "SDK・GitHub認証の確認に失敗しました。";
     } finally {
       if (generation === requestGeneration && selectedSettings === "ai") button.disabled = false;
       if (aiCheckController === controller) aiCheckController = null;
