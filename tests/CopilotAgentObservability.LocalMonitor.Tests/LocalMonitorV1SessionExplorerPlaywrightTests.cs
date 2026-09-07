@@ -704,8 +704,8 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(row.Locator("[data-session-label]")).ToHaveTextAsync("Synthetic session");
         await Expect(row.Locator("[data-session-status]")).ToHaveTextAsync("実行中");
         await Expect(row.Locator("[data-session-summary]")).ToContainTextAsync("スキル 1件");
-        await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("125");
-        await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("40%");
+        await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("入力 100");
+        await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("出力 25");
         await Expect(row.Locator("[data-session-started] time"))
             .ToHaveAttributeAsync("datetime", "2026-01-02T00:00:00.0000000+00:00");
         await Expect(page.Locator("[data-session-preview-pane]")).ToHaveCountAsync(0);
@@ -751,12 +751,15 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
                 region.scrollHeight, region.clientHeight];
             }
             """);
-        Assert.True(layout[0] <= 64);
-        Assert.True(layout[1] <= 88);
+        Assert.True(layout[0] > 0 && layout[1] > 0);
+        Assert.True(await page.Locator("#session-explorer-filters").EvaluateAsync<bool>(
+            "e => e.scrollHeight <= e.clientHeight + 1 && [...e.children].every(child => { const box=child.getBoundingClientRect(), bounds=e.getBoundingClientRect(); return box.top >= bounds.top && box.bottom <= bounds.bottom + 1; })"));
         Assert.True(layout[2] <= layout[3]);
         Assert.True(layout[4] >= layout[5]);
         var rowBox = Assert.IsType<LocatorBoundingBoxResult>(await row.BoundingBoxAsync());
-        Assert.InRange(rowBox.Height, 52, 64);
+        Assert.True(rowBox.Height >= 64);
+        Assert.True(await page.Locator("[data-session-row]").EvaluateAsync<bool>(
+            "e => { const cell=e.querySelector('[data-session-open]'); return cell.scrollWidth <= cell.clientWidth + 1 && getComputedStyle(cell).whiteSpace === 'normal'; }"));
         var identityDisclosure = row.Locator(".local-monitor-session-identity .local-monitor-session-fact-disclosure > summary");
         await identityDisclosure.PressAsync("Enter");
         var identityPanel = row.Locator(".local-monitor-session-identity .local-monitor-session-fact-panel");
@@ -1675,7 +1678,8 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             Assert.True(await reason.EvaluateAsync<bool>(
                 "node => node.scrollWidth <= node.clientWidth && getComputedStyle(node).whiteSpace === 'normal' && getComputedStyle(node.parentElement).overflow === 'visible'"));
         }
-        await Expect(archived.Locator("[data-session-tokens]")).ToContainTextAsync("内訳を表示できません");
+        await Expect(archived.Locator("[data-session-tokens]")).ToContainTextAsync("入力 10");
+        await Expect(archived.Locator("[data-session-tokens]")).ToContainTextAsync("出力 2");
         var archivedFacts = archived.Locator(".local-monitor-session-identity .local-monitor-session-fact-disclosure > summary");
         await archivedFacts.PressAsync("Enter");
         await Expect(archived.Locator("[data-capture-note='token_inconsistent']"))
@@ -2286,6 +2290,13 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         var item = document["items"]![0]!;
         item["summary"]!["subagent"]!["state"] = "certification_pending";
         item["tokens"]!["state"] = "certification_pending";
+        item["tokens"]!["input"]!["state"] = "certification_pending";
+        item["tokens"]!["input"]!["value"] = null;
+        foreach (var name in new[] { "new_input", "cache_read_ratio_basis_points" })
+        {
+            item["tokens"]![name]!["state"] = "certification_pending";
+            item["tokens"]![name]!["value"] = null;
+        }
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route =>
             route.FulfillAsync(Json(Canonical(document))));
 
@@ -2293,7 +2304,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
         await Expect(page.Locator("[data-session-summary]")).ToContainTextAsync("安定して取得できるか未確認です");
         await Expect(page.Locator("[data-session-tokens]")).ToContainTextAsync("安定して取得できるか未確認です");
-        await Expect(page.Locator("[data-session-tokens]")).ToContainTextAsync("125");
+        await Expect(page.Locator("[data-session-tokens]")).ToContainTextAsync("出力 25");
         await Expect(page.Locator("[data-fact-state='certification-pending']")).ToHaveCountAsync(2);
         await Expect(page.Locator("[data-fact-state='certification-pending'] .fact-state-primary"))
             .ToHaveTextAsync(["安定して取得できるか未確認です", "安定して取得できるか未確認です"]);
@@ -2301,7 +2312,7 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
 
     [Fact]
     [Trait("ValidationLane", "Nightly")]
-    public async Task MaximumPositiveSummaryAndTokenStateRemainWithinTheDense1366RowTarget()
+    public async Task DenseRow_ReflowsLongSummaryAndKeepsComponentStateDisclosureAccessible()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
@@ -2320,6 +2331,13 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             item["summary"]![name]!["count"] = 123456789;
         }
         item["tokens"]!["state"] = "certification_pending";
+        item["tokens"]!["input"]!["state"] = "certification_pending";
+        item["tokens"]!["input"]!["value"] = null;
+        foreach (var name in new[] { "new_input", "cache_read_ratio_basis_points" })
+        {
+            item["tokens"]![name]!["state"] = "certification_pending";
+            item["tokens"]![name]!["value"] = null;
+        }
         item["tokens"]!["cache_read_ratio_basis_points"]!["state"] = "source_unsupported";
         item["tokens"]!["cache_read_ratio_basis_points"]!["value"] = null;
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route =>
@@ -2331,7 +2349,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await Expect(row.Locator("[data-session-summary]")).ToContainTextAsync("再試行: 123,456,789件");
         await Expect(row.Locator("[data-session-tokens]")).ToContainTextAsync("安定して取得できるか未確認です");
         var rowBox = Assert.IsType<LocatorBoundingBoxResult>(await row.BoundingBoxAsync());
-        Assert.InRange(rowBox.Height, 52, 64);
+        Assert.True(rowBox.Height >= 64);
+        Assert.True(await page.Locator("[data-session-row]").EvaluateAsync<bool>(
+            "e => { const cell=e.querySelector('[data-session-open]'); return cell.scrollWidth <= cell.clientWidth + 1 && getComputedStyle(cell).whiteSpace === 'normal'; }"));
         Assert.True(await page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth <= innerWidth"));
         var summaryDisclosure = row.Locator("[data-session-summary] .local-monitor-session-fact-disclosure");
         await summaryDisclosure.Locator("summary").PressAsync("Enter");
@@ -2344,8 +2364,6 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await summaryDisclosure.Locator("summary").PressAsync("Enter");
         var tokenDisclosure = row.Locator("[data-session-tokens] .local-monitor-session-fact-disclosure");
         await tokenDisclosure.Locator("summary").PressAsync("Enter");
-        await Expect(tokenDisclosure.Locator(".local-monitor-session-fact-panel"))
-            .ToContainTextAsync("キャッシュから読み込み");
         await Expect(tokenDisclosure.Locator(".local-monitor-session-fact-panel"))
             .ToContainTextAsync("安定して取得できるか未確認です");
     }
@@ -2381,6 +2399,13 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         item["tokens"]!["state"] = "capture_gap";
         item["tokens"]!["total"]!["state"] = "capture_gap";
         item["tokens"]!["total"]!["value"] = null;
+        item["tokens"]!["input"]!["state"] = "capture_gap";
+        item["tokens"]!["input"]!["value"] = null;
+        foreach (var name in new[] { "new_input", "cache_read_ratio_basis_points" })
+        {
+            item["tokens"]![name]!["state"] = "capture_gap";
+            item["tokens"]![name]!["value"] = null;
+        }
         await page.RouteAsync("**/api/local-monitor/v1/sessions", route =>
             route.FulfillAsync(Json(Canonical(document))));
 
@@ -2426,7 +2451,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
             .ToContainTextAsync("検証できません");
         var rowBox = Assert.IsType<LocatorBoundingBoxResult>(
             await page.Locator("[data-session-row]").BoundingBoxAsync());
-        Assert.InRange(rowBox.Height, 52, 64);
+        Assert.True(rowBox.Height >= 64);
+        Assert.True(await page.Locator("[data-session-row]").EvaluateAsync<bool>(
+            "e => { const cell=e.querySelector('[data-session-open]'); return cell.scrollWidth <= cell.clientWidth + 1 && getComputedStyle(cell).whiteSpace === 'normal'; }"));
     }
 
     [Fact]
@@ -2651,7 +2678,9 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
         var tokenCell = page.Locator("[data-session-tokens]");
-        await Expect(tokenCell).ToContainTextAsync("今回の記録にはありません");
+        await Expect(tokenCell).ToContainTextAsync("入力 100");
+        await Expect(tokenCell).ToContainTextAsync("出力 25");
+        await Expect(tokenCell).Not.ToContainTextAsync("125");
         await Expect(tokenCell).Not.ToContainTextAsync("0件");
     }
 
