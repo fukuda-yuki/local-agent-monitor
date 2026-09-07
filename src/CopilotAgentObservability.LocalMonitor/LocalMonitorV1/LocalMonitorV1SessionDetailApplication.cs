@@ -43,8 +43,29 @@ internal static class LocalMonitorV1SessionDetailApplication
         Set(w,"source",session.Sources);Set(w,"model",session.Models);w.WritePropertyName("version");w.WriteStartObject();var versions=detail.Versions??[];w.WriteString("state",versions.Count==0?"not_observed":"recorded");w.WritePropertyName("values");JsonSerializer.Serialize(w,versions);w.WriteEndObject();
         w.WritePropertyName("timing");w.WriteStartObject();w.WriteString("state",session.TimingState);Nullable(w,"started_at",session.StartedAt);Nullable(w,"ended_at",session.EndedAt);Nullable(w,"last_seen_at",session.LastSeenAt);Number(w,"duration_ms",session.DurationMilliseconds);w.WriteEndObject();LocalMonitorV1CollectionApplication.ObservedActivity(w,session);Tokens(w,session.Tokens);Activity(w,SummaryActivity(session));w.WritePropertyName("capture");w.WriteStartObject();w.WriteString("state",CaptureState(session.Completeness));w.WritePropertyName("notes");JsonSerializer.Serialize(w,session.CaptureNotes);Coverage(w,session,detail,versions);w.WriteEndObject();w.WriteEndObject();
         w.WritePropertyName("executions");w.WriteStartArray();foreach(var execution in detail.Executions)Execution(w,execution,detail);w.WriteEndArray();
+        Conversation(w,detail);
+        w.WritePropertyName("llm_calls");w.WriteStartArray();foreach(var call in detail.Nodes.Where(n=>n.Kind=="llm_call").OrderBy(TimeGroup).ThenBy(n=>n.StartUtcTicks).ThenBy(n=>n.SourceOrdinal).ThenBy(n=>n.NodeId,StringComparer.Ordinal)){w.WriteStartObject();w.WriteString("node_id",call.NodeId);w.WriteString("execution_id",call.ExecutionId);Nullable(w,"requested_model",call.RequestedModel);Nullable(w,"response_model",call.ResponseModel);w.WriteEndObject();}w.WriteEndArray();
         w.WritePropertyName("technical_references");w.WriteStartObject();w.WritePropertyName("native_session_ids");JsonSerializer.Serialize(w,detail.NativeSessionIds??[]);w.WritePropertyName("trace_ids");JsonSerializer.Serialize(w,detail.Executions.Select(e=>e.TraceId).Where(static id=>id is not null).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));w.WriteEndObject();w.WriteEndObject();
     });
+
+    private static void Conversation(Utf8JsonWriter w, LocalWorkspaceSessionDetailContribution detail)
+    {
+        var messages = detail.Nodes.Where(n => n.SourceKind == "session_event" && n.NameText is "user.message" or "UserPromptSubmit" or "userPromptSubmitted" or "assistant.message")
+            .OrderBy(TimeGroup).ThenBy(n => n.StartUtcTicks).ThenBy(n => n.SourceOrdinal).ThenBy(n => n.NodeId, StringComparer.Ordinal).ToArray();
+        w.WritePropertyName("conversation");w.WriteStartArray();
+        foreach (var node in messages)
+        {
+            var content = detail.Content.FirstOrDefault(c => c.NodeId == node.NodeId && c.Part is "instruction" or "event_content");
+            var call = detail.Nodes.SingleOrDefault(n => n.NodeId == node.ParentNodeId && n.Kind == "llm_call" && node.RelationshipAuthority == "exact");
+            w.WriteStartObject();w.WriteString("node_id",node.NodeId);w.WriteString("execution_id",node.ExecutionId);
+            w.WriteString("role",node.NameText == "assistant.message" ? "assistant" : "user");
+            w.WriteString("time_authority",node.TimeAuthority);Nullable(w,"recorded_at",Instant(node.StartUtcTicks));
+            w.WriteString("part",content?.Part ?? (node.NameText == "assistant.message" || node.NameText == "user.message" ? "event_content" : "instruction"));
+            w.WriteString("content_state",content?.State ?? "not_captured");Nullable(w,"call_node_id",call?.NodeId);
+            w.WriteString("correspondence","unknown");w.WriteEndObject();
+        }
+        w.WriteEndArray();
+    }
 
     internal static byte[] SerializeTimeline(LocalRepositorySessionDetailSnapshot snapshot,string? executionId,string? parentNodeId,int limit,string? after,byte[] key)
     {
@@ -94,6 +115,8 @@ internal static class LocalMonitorV1SessionDetailApplication
         w.WritePropertyName("metadata");w.WriteStartObject();w.WriteString("kind",n.Kind);
         switch(n.Kind)
         {
+            case "llm_call":
+                ScalarFact(w,"requested_model",n.RequestedModel);ScalarFact(w,"response_model",n.ResponseModel);w.WriteString("observation_scope","exact_call");break;
             case "tool":
                 var tool=n.ToolMetadata;NodeReferenceFact(w,"caller",tool?.CallerState??"not_observed",tool?.CallerNodeId);StateScalarFact(w,"lifecycle",ToolLifecycleState(tool,n.Lifecycle),n.Lifecycle=="unknown"?null:n.Lifecycle);StateScalarFact(w,"status",n.Status=="unknown"?"not_observed":"recorded",n.Status=="unknown"?null:n.Status);StateFact(w,"exit",tool?.ExitState??"not_observed");
                 StateScalarFact(w,"mcp_server_identity",tool?.McpServerIdentityState??"not_observed",tool?.McpServerIdentity);StateScalarFact(w,"mcp_server_name",tool?.McpServerNameState??"not_observed",tool?.McpServerName);StateScalarFact(w,"mcp_tool_name",tool?.McpToolNameState??"not_observed",tool?.McpToolName);

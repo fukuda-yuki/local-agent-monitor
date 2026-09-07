@@ -160,11 +160,12 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Single(store.GetDetail(before.SessionId)!.Runs);
         Assert.Equal(0, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
         var resumed = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
-        Assert.Equal(0, resumed.ProcessNextBatch());
+        Assert.Equal(1, resumed.ProcessNextBatch());
         Assert.Equal(before.SessionId, Assert.Single(store.ListMostRecent(10)).SessionId);
         Assert.Single(store.GetDetail(before.SessionId)!.Runs);
         Assert.Equal(2, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));
         Assert.Equal(1, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content WHERE json_extract(content_json,'$.value')='instruction [REDACTED]';"));
+        Assert.Equal(0, resumed.ProcessNextBatch());
         store.UpsertProjectionState(new(SqliteSessionOtelEnricher.ContentProjectorKey, 0, 0, ObservedAt));
         Assert.Equal(0, resumed.ProcessNextBatch());
         Assert.Equal(2, Count(temp.DatabasePath, "SELECT COUNT(*) FROM session_event_content;"));

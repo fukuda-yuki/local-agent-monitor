@@ -78,6 +78,7 @@ internal static class LocalMonitorV1SessionCursorCodec
         WriteBoolean(stream, request.HasRetry);
         WriteNullableString(stream, request.QueryNormalized);
         WriteUInt16(stream, request.Limit is null ? (ushort)0 : checked((ushort)request.Limit.Value));
+        if (request.InvestigationUnit != "all") WriteRequiredString(stream, request.InvestigationUnit);
         return stream.ToArray();
     }
 

@@ -17,7 +17,11 @@
             <h1 id="session-explorer-title">@Model.ExplorerHeading</h1>
             <p><span id="session-result-count">読み込み中</span></p>
         </div>
-        <button type="button" id="session-compare-mode">比較を作成</button>
+        <button type="button" id="session-compare-mode" disabled="@(repositoryId is null)">比較を作成</button>
+        @if (repositoryId is null)
+        {
+            <a href="/repositories">比較するリポジトリを選択</a>
+        }
         @if (Options.RepositoryAiEnabled)
         {
             <button type="button" id="session-ai-open" hidden>現在の絞り込みをAIで分析</button>
@@ -25,15 +29,20 @@
     </header>
 
     <form id="session-explorer-filters" class="local-monitor-session-explorer-filters" role="search">
+        <label>調査対象 <select id="session-investigation-unit"><option value="work_session">作業セッション</option><option value="observation_fragment">未結合の観測断片</option><option value="all">すべての記録</option></select></label>
+        <p id="session-unit-counts" role="status"></p>
         <label class="local-monitor-search-primary"><input aria-label="検索" id="session-search" type="search" autocomplete="off" placeholder="セッションを検索" /></label>
         <button type="submit" class="monitor-btn-primary">検索</button>
+        <p>検索対象は取得済みの短いラベル・スキル名・ツール名です。本文全体は検索しません。</p>
         <details class="local-monitor-advanced-filters"><summary>絞り込み</summary><div>
         <label>モデル（1行1件） <textarea id="session-model" rows="1" autocomplete="off"></textarea></label>
+        <label>観測済みモデルを追加 <select id="session-observed-model"><option value="">モデルを選択</option></select></label>
         <details class="local-monitor-session-filter-menu">
             <summary>期間（日時）</summary>
             <div>
-                <label>開始 (UTC) <input id="session-from" type="text" autocomplete="off" placeholder="2026-01-01T00:00:00.0000000+00:00" /></label>
-                <label>終了 (UTC) <input id="session-to" type="text" autocomplete="off" placeholder="2026-02-01T00:00:00.0000000+00:00" /></label>
+                <label>開始（端末の現地時刻） <input id="session-from" type="datetime-local" step="0.001" autocomplete="off" /></label>
+                <label>終了（端末の現地時刻・含まない） <input id="session-to" type="datetime-local" step="0.001" autocomplete="off" /></label>
+                <p>端末のタイムゾーンで入力し、UTCに変換して検索します。</p>
             </div>
         </details>
         <details class="local-monitor-session-filter-menu">
@@ -64,10 +73,10 @@
         <details class="local-monitor-session-filter-menu local-monitor-session-presence-menu">
             <summary>記録の有無</summary>
             <div>
-                <label>スキル <select id="session-has-skill"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
-                <label>サブエージェント <select id="session-has-subagent"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
-                <label>エラー <select id="session-has-error"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
-                <label>再試行 <select id="session-has-retry"><option value="">指定なし</option><option value="true">あり</option><option value="false">なし</option></select></label>
+                <label>スキル <select id="session-has-skill"><option value="">指定なし</option><option value="true">観測あり</option><option value="false">0件を確認</option></select></label>
+                <label>サブエージェント <select id="session-has-subagent"><option value="">指定なし</option><option value="true">観測あり</option><option value="false">0件を確認</option></select></label>
+                <label>エラー <select id="session-has-error"><option value="">指定なし</option><option value="true">観測あり</option><option value="false">0件を確認</option></select></label>
+                <label>再試行 <select id="session-has-retry"><option value="">指定なし</option><option value="true">観測あり</option><option value="false">0件を確認</option></select></label>
             </div>
         </details>
         <label>表示件数
@@ -82,6 +91,10 @@
         <button type="submit" class="monitor-btn-primary">適用</button>
         </div></details>
     </form>
+    @if (repositoryId is not null)
+    {
+        <section id="saved-comparisons" data-saved-comparisons data-repository-id="@repositoryId" aria-label="保存した比較"><h2>保存した比較</h2><p>この端末に30日間保存。バックアップ・復元の対象外</p><button type="button" data-saved-comparisons-refresh>保存一覧を更新</button><p data-saved-comparisons-status role="status" aria-live="polite"></p><ul data-saved-comparisons-list></ul></section>
+    }
 
     <p id="session-explorer-status" role="status" aria-live="polite">セッションを読み込んでいます。</p>
     <div class="local-monitor-session-table-region" tabindex="0" aria-label="セッション一覧">
@@ -104,6 +117,16 @@
     </div>
 
     <aside id="session-compare-bar" class="local-monitor-session-compare-bar" hidden aria-label="比較対象の選択">
+        <details><summary>条件から比較候補を選択</summary>
+            <p>現在の絞り込みを固定して最大200件を選択します。選択後に採用・除外を確認して確定します。</p>
+            <button type="button" data-candidate-filter="a">現在の条件を基準に</button>
+            <button type="button" data-candidate-filter="b">現在の条件を比較対象に</button>
+            <button type="button" id="session-skill-digests-load">履歴スキルのダイジェストを取得</button>
+            <label>取得済みの履歴 <select id="session-skill-digest"><option value="">履歴を取得してください</option></select></label>
+            <button type="button" data-candidate-skill="a">この履歴を基準に</button>
+            <button type="button" data-candidate-skill="b">この履歴を比較対象に</button>
+            <p id="session-candidate-status" role="status" aria-live="polite">履歴がない場合は変更境界を推定しません。行の手動選択も利用できます。</p>
+        </details>
         <p><span data-cohort-count="a">基準 0件</span> / <span data-cohort-count="b">比較対象 0件</span></p>
         <div id="session-compare-validation" class="local-monitor-session-compare-validation" role="status" aria-live="polite">
             <span data-compare-validation-primary>基準と比較対象を1件以上選択してください。</span>

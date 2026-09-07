@@ -16,6 +16,8 @@ internal enum LocalWorkspaceNodeContentReadDisposition
     Expired,
     Deleted,
     ReadDenied,
+    NotCaptured,
+    Oversized,
 }
 
 internal enum LocalWorkspaceNodeContentTerminalResult { Sealed, CompletedWithoutRaw, Lost, Busy }
@@ -415,6 +417,8 @@ internal sealed class LocalWorkspaceNodeContentReader(
     {
         try
         {
+            if (locator.StoreKind == "raw_record")
+                return await LocalWorkspaceOtelInputContext.ReadAsync(retentionContext, timeProvider, sessionId, nodeId, locator, cancellationToken).ConfigureAwait(false);
             return await ReadCoreAsync(sessionId, nodeId, locator, cancellationToken).ConfigureAwait(false);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
@@ -422,6 +426,10 @@ internal sealed class LocalWorkspaceNodeContentReader(
             return new(LocalWorkspaceNodeContentReadDisposition.Busy, null);
         }
         catch (SqliteException)
+        {
+            return new(LocalWorkspaceNodeContentReadDisposition.Unavailable, null);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or FormatException or DecoderFallbackException or JsonException)
         {
             return new(LocalWorkspaceNodeContentReadDisposition.Unavailable, null);
         }

@@ -7,6 +7,85 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalComparisonStoreTests
 {
     [Fact]
+    public void SavedComparison_RestartPreservesReceiptUntilAbsoluteExpiryAndCleanup()
+    {
+        using var database = new ComparisonDatabase(); database.Initialize();
+        var clock = new FixedTimeProvider(CreatedAt.AddHours(1));
+        var store = new SqliteLocalComparisonStore(database.Path, clock);
+        var snapshot = Snapshot(); store.Accept(snapshot, default);
+        var originalBytes = ComparisonJson.Read(store.Read(RepositoryId, ComparisonId, default).Snapshot!);
+        var saved = store.SavedLifetime(RepositoryId, ComparisonId, true, default);
+        Assert.Equal(LocalComparisonSaveStatus.Found, saved.Status);
+        Assert.Equal(CreatedAt.AddHours(1).AddDays(30), saved.Lifetime!.SavedUntil);
+        clock.Set(CreatedAt.AddDays(2));
+        var restarted = new SqliteLocalComparisonStore(database.Path, clock); restarted.EnsureSchema();
+        Assert.Equal(saved.Lifetime, restarted.SavedLifetime(RepositoryId, ComparisonId, true, default).Lifetime);
+        Assert.Equal(originalBytes, ComparisonJson.Read(restarted.Read(RepositoryId, ComparisonId, default).Snapshot!));
+        Assert.Equal(0, restarted.CleanupExpired(default).CleanedCount);
+        Assert.Single(restarted.ListSaved(RepositoryId, default).Items);
+        Assert.Empty(restarted.ListSaved(OtherRepositoryId, default).Items);
+        Assert.Equal(LocalComparisonSaveStatus.NotFound, restarted.SavedLifetime(OtherRepositoryId, ComparisonId, true, default).Status);
+        clock.Set(saved.Lifetime.SavedUntil!.Value);
+        Assert.Equal(LocalComparisonReadStatus.Expired, restarted.Read(RepositoryId, ComparisonId, default).Status);
+        Assert.Empty(restarted.ListSaved(RepositoryId, default).Items);
+        Assert.Equal(LocalComparisonSaveStatus.Expired, restarted.SavedLifetime(RepositoryId, ComparisonId, true, default).Status);
+        Assert.Equal(1, restarted.CleanupExpired(default).CleanedCount);
+        using var connection = database.Open();
+        Assert.Equal(0, Scalar(connection, "SELECT COUNT(*) FROM local_comparison_saved_lifetimes;"));
+        Assert.Equal(1, Scalar(connection, $"SELECT COUNT(*) FROM local_comparison_expiry_tombstones WHERE expired_at='{Timestamp(saved.Lifetime.SavedUntil.Value)}';"));
+    }
+
+    [Fact]
+    public void RemoveSave_OriginalExpiryResumesWithoutRenewalOrSourceRestoration()
+    {
+        using var database = new ComparisonDatabase(); database.Initialize();
+        var clock = new FixedTimeProvider(CreatedAt.AddHours(1));
+        var store = new SqliteLocalComparisonStore(database.Path, clock); store.Accept(Snapshot(), default);
+        var first = store.SavedLifetime(RepositoryId, ComparisonId, true, default).Lifetime!;
+        clock.Set(CreatedAt.AddHours(2));
+        Assert.Equal(ExpiresAt, store.SavedLifetime(RepositoryId, ComparisonId, false, default).Lifetime!.EffectiveExpiresAt);
+        Assert.Equal(first.SavedUntil, store.SavedLifetime(RepositoryId, ComparisonId, true, default).Lifetime!.SavedUntil);
+        using (var connection = database.Open()) Execute(connection, $"DELETE FROM sessions WHERE session_id='{SessionA}';");
+        clock.Set(CreatedAt.AddDays(2));
+        Assert.Equal(LocalComparisonReadStatus.Found, store.Read(RepositoryId, ComparisonId, default).Status);
+        using (var connection = database.Open()) Assert.Equal(0, Scalar(connection, $"SELECT COUNT(*) FROM sessions WHERE session_id='{SessionA}';"));
+        var removed = store.SavedLifetime(RepositoryId, ComparisonId, false, default);
+        Assert.Equal(LocalComparisonSaveStatus.Found, removed.Status);
+        Assert.False(removed.Lifetime!.Available);
+        Assert.Equal(LocalComparisonReadStatus.Expired, store.Read(RepositoryId, ComparisonId, default).Status);
+        Assert.Equal(LocalComparisonSaveStatus.Expired, store.SavedLifetime(RepositoryId, ComparisonId, true, default).Status);
+        Assert.Equal(1, store.CleanupExpired(default).CleanedCount);
+    }
+
+    [Fact]
+    public void Save_FullTwentyRejectsWithoutEvictionAndExistingSaveRemainsIdempotent()
+    {
+        using var database = new ComparisonDatabase(); database.Initialize();
+        var store = new SqliteLocalComparisonStore(database.Path, new FixedTimeProvider(CreatedAt));
+        var ids = Enumerable.Range(1, 21).Select(index => $"0198f5b8-0c00-7000-8000-{index:D12}").ToArray();
+        foreach (var id in ids) store.Accept(Snapshot(id), default);
+        foreach (var id in ids.Take(20)) Assert.Equal(LocalComparisonSaveStatus.Found, store.SavedLifetime(RepositoryId, id, true, default).Status);
+        Assert.Equal(LocalComparisonSaveStatus.LimitReached, store.SavedLifetime(RepositoryId, ids[20], true, default).Status);
+        Assert.Equal(LocalComparisonSaveStatus.Found, store.SavedLifetime(RepositoryId, ids[0], true, default).Status);
+        Assert.Equal(20, store.ListSaved(RepositoryId, default).Items.Count);
+        Assert.Equal(LocalComparisonSaveStatus.Found, store.SavedLifetime(RepositoryId, ids[0], false, default).Status);
+        Assert.Equal(LocalComparisonSaveStatus.Found, store.SavedLifetime(RepositoryId, ids[20], true, default).Status);
+        Assert.DoesNotContain(store.ListSaved(RepositoryId, default).Items, item => item.ComparisonId == ids[0]);
+    }
+
+    [Fact]
+    public void Ensure_ExactV1MigrationPreservesExistingReceiptBytes()
+    {
+        using var database = new ComparisonDatabase(); database.Initialize();
+        var store = new SqliteLocalComparisonStore(database.Path, new FixedTimeProvider(CreatedAt));
+        store.Accept(Snapshot(), default);
+        var before = ComparisonJson.Read(store.Read(RepositoryId, ComparisonId, default).Snapshot!);
+        using (var connection = database.Open()) Execute(connection, "DROP TABLE local_comparison_saved_lifetimes; UPDATE schema_version SET version=1 WHERE component='local_comparison';");
+        store.EnsureSchema();
+        Assert.Equal(before, ComparisonJson.Read(store.Read(RepositoryId, ComparisonId, default).Snapshot!));
+        Assert.False(store.SavedLifetime(RepositoryId, ComparisonId, null, default).Lifetime!.IsSaved);
+    }
+    [Fact]
     public void FrozenLegacyV1FactFrameDecodesDirectArchiveWithoutRepositoryArchive()
     {
         const string frozenGzipBase64 = "H4sIAAAAAAACCt2YwW7UMBCGU1SgElttS9m2VyRuyNRZCQhVDzwE98jrzIK1biYaj0PL0+Mkm7RdcahED7WtyFFsy/4/jTP5nSzLrjQ2xiIL9RNqFrhyQK1aGWv49sKiVlZovG4UGYe1cOCcCfe10nzR5lmWfZD5t2L9eVUIqaUUX2Woiq6Sd+WR45YyjPuu/rOEOfbysTog0EgVVGPD8W+kjWuUhnLLMvY8FmRPPqieQu99le+XcvlFyEIsix9SXvbXp+3yH/unZ40yM3XjuWTcQO120F7kMq64HKLnBzSHcNNYow2Xf4BwWi//Z9fzjREjK5sa1bFW+heUBKpKDW0xoOnAxkFRanhHWyll5akHTIZsDjegfR8zjb7mdEJ2jRWEFOIpNbI5I9oy2B6bGNip25gAZeo2mLoEt+Q751e9hy0dK+LE6N4AEVJqUARMt4lBnU/7sDs3WWCoEiNcTIRrZWxyeHcBHA8pqRmukyGZjLYrrfCdDEklTbizbku2EPgIbIpf8Ze9S4lLcz/RfucbI9R9MGa7CLW/duhJg4vmh9LwNm5Vi1ZZD6HhVX+YioxiNoieIOYDVRmSUyczMprFjvoJ60hVqmGgSLlOd+VPYLPRndZBcVxQb+9LH4D+AlqViETJGAAA";
@@ -361,7 +440,7 @@ public sealed class LocalComparisonStoreTests
         };
     }
 
-    private static LocalComparisonSnapshotWrite Snapshot()
+    internal static LocalComparisonSnapshotWrite Snapshot(string? comparisonId = null, string? repositoryId = null)
     {
         var referenceA = new LocalComparisonSourceReference(
             "workspace_session", SessionA, null, null, null, Revision);
@@ -370,10 +449,10 @@ public sealed class LocalComparisonStoreTests
         var prepared = new LocalComparisonApplicationService(
             store: null,
             new FixedTimeProvider(CreatedAt),
-            _ => ComparisonId).Prepare(new(
-                RepositoryId,
-                new([Session(SessionA, referenceA, 10m)], 0),
-                new([Session(SessionB, referenceB, 20m)], 0),
+            _ => comparisonId ?? ComparisonId).Prepare(new(
+                repositoryId ?? RepositoryId,
+                new([Session(SessionA, referenceA, 10m, repositoryId)], 0),
+                new([Session(SessionB, referenceB, 20m, repositoryId)], 0),
                 ScopeConditionDigest()));
         Assert.Equal(LocalComparisonCreateStatus.Accepted, prepared.Status);
         return Assert.IsType<LocalComparisonSnapshotWrite>(prepared.Snapshot);
@@ -382,7 +461,8 @@ public sealed class LocalComparisonStoreTests
     private static LocalComparisonSessionFact Session(
         string sessionId,
         LocalComparisonSourceReference reference,
-        decimal inputTokens)
+        decimal inputTokens,
+        string? repositoryId = null)
     {
         LocalComparisonObservedScalar Observed(decimal value) => new(
             new LocalComparisonScalarObservation(
@@ -411,7 +491,7 @@ public sealed class LocalComparisonStoreTests
             StringComparer.Ordinal);
         return new(
             sessionId,
-            RepositoryId,
+            repositoryId ?? RepositoryId,
             Revision,
             IsSelectable: true,
             IsArchived: false,

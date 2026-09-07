@@ -14,6 +14,52 @@ public sealed class RetentionMutationPreviewApplicationTests
     private static readonly DateTimeOffset Now = new(2026, 7, 20, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void SessionManagement_ReadsAuthoritativeMixedStateWithoutCreatingWorkflowRecords()
+    {
+        using var fixture = Fixture.Create(itemCount: 3);
+        fixture.SetState("retained_by_policy");
+        fixture.Execute("UPDATE retention_items SET expires_at=$past WHERE state='expiring';",
+            ("$past", Now.AddSeconds(-1).ToString("O", CultureInfo.InvariantCulture)));
+        var result = fixture.Application.ReadSessionManagement(fixture.SessionId);
+        var status = Assert.IsType<RetentionSessionManagementResponse>(result.Status);
+        Assert.Null(result.ErrorCode);
+        Assert.Equal(3, status.TargetItemCount);
+        Assert.Equal(1, status.CurrentState.PinnedItemCount);
+        Assert.Equal(1, status.CurrentState.ReadableItemCount);
+        Assert.Equal(2, status.CurrentState.ReadDeniedItemCount);
+        Assert.Equal(2, status.ExpiringItemCount);
+        Assert.Equal(Now.AddSeconds(-1), status.EarliestExpiresAt);
+        Assert.Equal(status.EarliestExpiresAt, status.LatestExpiresAt);
+        Assert.Equal(0, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_previews;"));
+        Assert.Equal(0, fixture.Scalar("SELECT COUNT(*) FROM retention_confirmation_bindings;"));
+        Assert.Equal(0, fixture.Scalar("SELECT COUNT(*) FROM retention_mutation_idempotency;"));
+    }
+
+    [Fact]
+    public void SessionManagement_EmptySessionHasNoExpiryAndMissingSessionIsNotFound()
+    {
+        using var fixture = Fixture.Create(itemCount: 0);
+        var status = Assert.IsType<RetentionSessionManagementResponse>(fixture.Application.ReadSessionManagement(fixture.SessionId).Status);
+        Assert.Equal(0, status.TargetItemCount);
+        Assert.Null(status.EarliestExpiresAt);
+        Assert.Null(status.LatestExpiresAt);
+        Assert.Equal(RetentionMutationErrorCodes.TargetNotFound,
+            fixture.Application.ReadSessionManagement("018f2b4e-7c1a-7f1a-8a2b-6c3d4e5f6099").ErrorCode);
+    }
+
+    [Fact]
+    public void SessionManagement_ExcludesInvalidOwnershipAndNeverIncludesRawRecords()
+    {
+        using var fixture = Fixture.Create(itemCount: 2);
+        fixture.InjectNoLeakMarkers();
+        fixture.Execute("UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE item_id=$item;", ("$item", fixture.ItemId));
+        var status = Assert.IsType<RetentionSessionManagementResponse>(fixture.Application.ReadSessionManagement(fixture.SessionId).Status);
+        Assert.Equal(1, status.TargetItemCount);
+        Assert.Equal(1, status.ExcludedItemCount);
+        Assert.Equal("session_event_content", status.TargetScope);
+    }
+
+    [Fact]
     public void CreatePreview_PersistsTypedDigestConflictSnapshotAndExactlyFiveMinuteExpiry()
     {
         using var fixture = Fixture.Create();

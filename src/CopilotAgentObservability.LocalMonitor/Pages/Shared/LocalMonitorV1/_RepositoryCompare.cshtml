@@ -7,6 +7,7 @@
          data-comparison-id="@Model.Path?.ComparisonId"
          aria-labelledby="repository-compare-title">
     <header class="local-monitor-repository-compare-header">
+        <a data-investigation-return href="/repositories/@Model.Path?.RepositoryId/sessions">セッション一覧</a>
         <div>
             <p>@Model.ComparisonHeading</p>
             <h1 id="repository-compare-title">セッション比較</h1>
@@ -17,6 +18,14 @@
         </dl>
     </header>
     <p id="repository-compare-status" role="status" aria-live="polite">比較結果を読み込んでいます。</p>
+    <section data-comparison-save data-repository-id="@Model.Path?.RepositoryId" data-comparison-id="@Model.Path?.ComparisonId" aria-label="比較の保存">
+        <p>この端末に30日間保存。バックアップ・復元の対象外</p>
+        <p>保存は全体で20件まで。保存の解除後は作成から24時間の期限に戻ります。元の記録内容の保持期間は延長しません。</p>
+        <button type="button" data-comparison-save-button disabled>比較を保存</button>
+        <button type="button" data-comparison-unsave-button hidden>保存を解除</button>
+        <p data-comparison-save-status role="status" aria-live="polite">保存状態を確認しています。</p>
+        <a href="/repositories/@Model.Path?.RepositoryId/sessions#saved-comparisons">保存した比較の一覧へ</a>
+    </section>
     <div class="local-monitor-repository-compare-body" data-compare-sections></div>
     @if (Options.CompareAiEnabled)
     {

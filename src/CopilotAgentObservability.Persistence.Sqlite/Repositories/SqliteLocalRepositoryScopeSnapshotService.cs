@@ -413,7 +413,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || node.NodeId != LocalWorkspaceProjectionStore.StableNodeId(node.SourceKind, node.SourceIdentity)
                 || node.SourceOrdinal < 0 || !ValidNodeSource(node) || string.IsNullOrWhiteSpace(node.SourceIdentity)
                 || node.RelationshipAuthority is not ("exact" or "explicit" or "unknown")
-                || node.Kind is not ("execution" or "agent" or "skill" or "tool" or "subagent" or "event" or "error" or "retry" or "permission" or "unknown_relation_group")
+                || node.Kind is not ("execution" or "agent" or "llm_call" or "skill" or "tool" or "subagent" or "event" or "error" or "retry" or "permission" or "unknown_relation_group")
                 || node.NameState is not ("recorded" or "not_observed" or "invalid")
                 || (node.NameState == "recorded") != (node.NameText is not null)
                 || node.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
@@ -476,15 +476,22 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || !contentKeys.Add((content.NodeId, content.Part))
                 || content.Part is not ("instruction" or "tool_input" or "tool_result" or "error_message" or "subagent_input" or "event_content")
                 || content.State is not ("available" or "not_captured" or "expired" or "deleted" or "read_denied" or "oversized" or "invalid")
-                || content.StoreKind != "session_event_content"
-                || content.LocatorKind is not ("whole_event" or "json_pointer")
+                || (content.StoreKind == "raw_record" ? !ValidRawContext(content) : content.StoreKind != "session_event_content"
+                || content.LocatorKind is not ("whole_event" or "json_pointer"))
                 || content.LocatorKind == "whole_event" && (content.Part != "event_content" || content.JsonPointer is not null)
                 || content.LocatorKind == "json_pointer" && (content.Part == "event_content" || content.JsonPointer is null)
-                || content.State == "available" && (content.SelectedUtf8Bytes is null or < 0 or > 1_048_576
+                || content.State == "available" && ((content.StoreKind != "raw_record" && content.SelectedUtf8Bytes is null or < 0 or > 1_048_576)
                     || content.RetentionItemId is null || content.RetentionStoreInstanceId is null
                     || content.SourceCapturedAt is null || content.SourceExpiresAt is null || content.RetentionRevision is null or <= 0
                     || content.RetentionOwnershipReceipt is not { Length: 32 } || content.RetentionOwnerToken is not { Length: 32 }))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+
+        bool ValidRawContext(LocalWorkspaceContentAvailability content) =>
+            nodes.TryGetValue(content.NodeId, out var owner) && owner.Kind == "llm_call"
+            && content.Part == "event_content" && content.LocatorKind == "otel_input_context"
+            && content.JsonPointer is null && content.SelectedUtf8Bytes is null
+            && long.TryParse(content.SourceItemId, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var id)
+            && id > 0 && id.ToString(System.Globalization.CultureInfo.InvariantCulture) == content.SourceItemId;
 
         static bool ValidTime(string status, string authority, long? start, long? end, long? duration) => authority switch
         {
@@ -536,7 +543,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         static bool ValidNodeSource(LocalWorkspaceNodeDetail node) => node.SourceKind switch
         {
             "execution_root" => node.Kind == "execution",
-            "session_event" => node.Kind is "agent" or "event" or "error" or "retry" or "permission",
+            "session_event" => node.Kind is "agent" or "llm_call" or "event" or "error" or "retry" or "permission",
             "skill_invocation" => node.Kind == "skill",
             "semantic_tool" => node.Kind == "tool" && LowerHex(node.SourceIdentity, 64),
             "semantic_subagent" => node.Kind == "subagent" && LowerHex(node.SourceIdentity, 64),

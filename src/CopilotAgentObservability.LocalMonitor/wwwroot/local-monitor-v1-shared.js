@@ -200,6 +200,8 @@
     return saved && typeof saved === "object" ? structuredClone(saved) : initialState();
   }
 
+  let navigationGeneration = 0;
+  window.addEventListener("pagehide", () => { navigationGeneration++; });
   function change(patch, replace = false, cursorEligibility) {
     validatePatch(patch);
     const next = current();
@@ -208,7 +210,11 @@
       else next[key] = Array.isArray(value) ? [...value].sort() : value;
     }
     validateCombinedState(next, patch, cursorEligibility);
-    const state = { localMonitorV1: next };
+    navigationGeneration++;
+    const investigation = ["SessionDetail", "ComparisonDetail"].includes(routeKind) || Object.keys(patch).every(key => key === "settings" || key === "analysis")
+      ? history.state?.localMonitorInvestigation : null;
+    const state = { localMonitorV1: next,
+      ...(typeof investigation === "string" && /^[0-9a-f]{64}$/.test(investigation) ? { localMonitorInvestigation: investigation } : {}) };
     history[replace ? "replaceState" : "pushState"](state, "", buildUrl(next));
     document.dispatchEvent(new CustomEvent("cao-route-state", { detail: structuredClone(next) }));
     return structuredClone(next);
@@ -222,11 +228,48 @@
     closeSettings: (replace = false) => change({ settings: null }, replace),
   });
 
+  if (["SessionDetail", "ComparisonDetail"].includes(routeKind)) document.addEventListener("click", async event => {
+    const link = event.target.closest("[data-session-workspace] nav[aria-label='パンくず'] a[href='/sessions'], [data-repository-compare] a[data-investigation-return]");
+    const handle = history.state?.localMonitorInvestigation;
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey
+        || typeof handle !== "string" || !/^[0-9a-f]{64}$/.test(handle)) return;
+    event.preventDefault();
+    const generation = ++navigationGeneration;
+    try {
+      const response = await fetch("/api/local-monitor/v1/investigations/restore", {
+        method: "POST", credentials: "same-origin", cache: "no-store", redirect: "manual",
+        headers: { "Content-Type": "application/json", "x-monitor-csrf": "local-monitor" }, body: JSON.stringify({ handle }),
+      });
+      let path = "/sessions";
+      if (response.ok) {
+        const text = await response.text(); if (text.length > 65536) throw new TypeError("invalid investigation");
+        const value = JSON.parse(text); const search = value.saved?.search;
+        if (!search || !["all", "unassigned", "repository"].includes(search.scope)
+            || search.scope === "repository" && !UUID_V7.test(search.repository_id)) throw new TypeError("invalid investigation");
+        path = search.scope === "repository" ? `/repositories/${search.repository_id}/sessions` : search.scope === "unassigned" ? "/sessions/unassigned" : "/sessions";
+        const parameters = [];
+        for (const key of ["from", "to", "source", "status", "has_skill", "has_subagent", "has_error", "has_retry", "archive_scope"]) {
+          append(parameters, key, typeof search[key] === "boolean" ? String(search[key]) : search[key]);
+        }
+        if (search.scope === "repository" && (value.saved.cohorts.a.length || value.saved.cohorts.b.length)) append(parameters, "mode", "compare");
+        if (parameters.length) path += "?" + parameters.join("&");
+      } else if (response.status !== 410 && response.status !== 404) throw new TypeError("investigation unavailable");
+      if (generation !== navigationGeneration) return;
+      history.pushState({ localMonitorInvestigation: handle }, "", path);
+      window.location.reload();
+    } catch {
+      if (generation !== navigationGeneration) return;
+      let notice = link.parentElement.querySelector("[data-investigation-return-status]");
+      if (!notice) { notice = document.createElement("span"); notice.dataset.investigationReturnStatus = ""; notice.setAttribute("role", "status"); link.parentElement.append(notice); }
+      notice.textContent = "一覧の調査条件を確認できませんでした。もう一度操作してください。";
+    }
+  });
+
   const formatCount = value => value.toLocaleString("ja-JP");
   const factText = Object.freeze({
     observed_positive: value => [`${formatCount(value)}件`, null, true],
     observed_zero: () => ["0件", null, true],
-    not_observed: () => ["なし", null, false],
+    not_observed: () => ["未観測", null, false],
     unsupported: () => ["未対応", null, false],
     capture_gap: () => ["一部欠落", null, false],
     projection_invalid: () => ["読取不可", null, false],
@@ -235,7 +278,7 @@
       value === null || value === undefined ? null : "未確認",
       value !== null && value !== undefined,
     ],
-    raw_not_captured: () => ["なし", null, false],
+    raw_not_captured: () => ["未取得", null, false],
     raw_expired: () => ["期限切れ", null, false],
     raw_deleted: () => ["削除済み", null, false],
     raw_read_denied: () => ["表示不可", null, false],
@@ -386,8 +429,13 @@
   });
 
   if (routeKind) {
-    history.replaceState({ localMonitorV1: initialState() }, "", buildUrl(initialState()));
+    const documentPath = location.pathname;
+    const investigation = history.state?.localMonitorInvestigation;
+    history.replaceState({ localMonitorV1: initialState(),
+      ...(typeof investigation === "string" && /^[0-9a-f]{64}$/.test(investigation) ? { localMonitorInvestigation: investigation } : {}) }, "", buildUrl(initialState()));
     window.addEventListener("popstate", () => {
+      navigationGeneration++;
+      if (location.pathname !== documentPath) { location.reload(); return; }
       document.dispatchEvent(new Event("cao-route-popstate"));
       document.dispatchEvent(new CustomEvent("cao-route-state", { detail: current() }));
     });

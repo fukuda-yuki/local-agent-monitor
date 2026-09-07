@@ -4,7 +4,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed class LocalWorkspaceOtelExecutionProjection
 {
-    private sealed record Span(string EventId, string RunId, string TraceId, string SpanId, string? ParentId, string? Operation, string? Status, LocalWorkspaceTokenFacts Tokens, long? Start, long? End, string? AgentName);
+    private sealed record Span(string EventId, string RunId, string TraceId, string SpanId, string? ParentId, string? Operation, string? Status, LocalWorkspaceTokenFacts Tokens, long? Start, long? End, string? AgentName, string? RequestedModel, string? ResponseModel);
     private readonly Dictionary<string, Span> spans;
     private LocalWorkspaceOtelExecutionProjection(Dictionary<string, Span> spans) => this.spans = spans;
 
@@ -16,7 +16,7 @@ internal sealed class LocalWorkspaceOtelExecutionProjection
         command.CommandText = """
             SELECT e.event_id,e.run_id,m.trace_id,m.span_id,m.parent_span_id,m.operation,m.status,
               m.input_tokens,m.output_tokens,f.producer_total_tokens,m.reasoning_tokens,m.cache_read_tokens,m.cache_creation_tokens,
-              local_workspace_ticks(m.start_time),local_workspace_ticks(m.end_time),m.agent_name
+              local_workspace_ticks(m.start_time),local_workspace_ticks(m.end_time),m.agent_name,m.request_model,m.response_model
             FROM session_events e JOIN monitor_spans m ON e.trace_id=m.trace_id COLLATE BINARY
               AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
             LEFT JOIN local_workspace_span_facts f ON f.raw_record_id=m.raw_record_id AND f.span_ordinal=m.span_ordinal
@@ -38,7 +38,8 @@ internal sealed class LocalWorkspaceOtelExecutionProjection
                 reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6), new("llm_span", "recorded", 1, 1,
                     Fact(7), Fact(8), Fact(9), Fact(10), Fact(11), Fact(12), new("not_observed", null), new("not_observed", null)),
-                    reader.IsDBNull(13) ? null : reader.GetInt64(13), reader.IsDBNull(14) ? null : reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15));
+                    reader.IsDBNull(13) ? null : reader.GetInt64(13), reader.IsDBNull(14) ? null : reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15),
+                    reader.IsDBNull(16) ? null : reader.GetString(16), reader.IsDBNull(17) ? null : reader.GetString(17));
             result.Add(span.TraceId + "/" + span.SpanId, span);
         }
         if (result.Count > 4096) throw new LocalWorkspaceSessionDetailException("workspace_too_large");
@@ -114,7 +115,9 @@ internal sealed class LocalWorkspaceOtelExecutionProjection
                 ExecutionId = owner.ExecutionId,
                 ParentNodeId = parentId ?? (unknown ? unknownRoots[owner.ExecutionId].NodeId : root.NodeId),
                 RelationshipAuthority = unknown ? "unknown" : "exact",
-                Kind = isSpan && span.Operation == "invoke_agent" ? "agent" : isSpan && span.Status == "error" ? "error" : node.Kind,
+                RequestedModel = isSpan ? span.RequestedModel : null,
+                ResponseModel = isSpan ? span.ResponseModel : null,
+                Kind = isSpan && span.Operation == "chat" ? "llm_call" : isSpan && span.Operation == "invoke_agent" ? "agent" : isSpan && span.Status == "error" ? "error" : node.Kind,
                 Tokens = isSpan ? LocalWorkspaceSessionSnapshotContributor.MergeCallTokens(node.Tokens, span.Tokens) : node.Tokens,
                 NameState = isSpan && span.Operation == "invoke_agent" ? span.AgentName is null ? "not_observed" : "recorded" : node.NameState,
                 NameText = isSpan && span.Operation == "invoke_agent" ? span.AgentName : node.NameText,

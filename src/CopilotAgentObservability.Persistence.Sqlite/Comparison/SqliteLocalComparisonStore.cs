@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteLocalComparisonStore
+internal sealed partial class SqliteLocalComparisonStore
 {
     private const int MaximumMembershipRows = 200;
     private const int MaximumMembershipFactBytes = 1_048_576;
@@ -130,7 +130,7 @@ internal sealed class SqliteLocalComparisonStore
                 transaction.Commit();
                 return new(LocalComparisonReadStatus.NotFound, Snapshot: null);
             }
-            if (timeProvider.GetUtcNow() >= snapshot.ExpiresAt)
+            if (timeProvider.GetUtcNow() >= ReadSavedLifetime(connection, transaction, snapshot).EffectiveExpiresAt)
             {
                 transaction.Commit();
                 return new(LocalComparisonReadStatus.Expired, Snapshot: null);
@@ -553,10 +553,12 @@ internal sealed class SqliteLocalComparisonStore
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT comparison_id,repository_id,expires_at
-            FROM local_comparison_snapshots
-            WHERE expires_at<=$now
-            ORDER BY expires_at,comparison_id COLLATE BINARY
+            SELECT snapshot.comparison_id,snapshot.repository_id,
+                   CASE WHEN saved.is_saved=1 THEN saved.saved_until ELSE snapshot.expires_at END AS effective_expires_at
+            FROM local_comparison_snapshots AS snapshot
+            LEFT JOIN local_comparison_saved_lifetimes AS saved ON saved.comparison_id=snapshot.comparison_id
+            WHERE effective_expires_at<=$now
+            ORDER BY effective_expires_at,snapshot.comparison_id COLLATE BINARY
             LIMIT 256;
             """;
         command.Parameters.AddWithValue("$now", now);
@@ -628,6 +630,7 @@ internal sealed class SqliteLocalComparisonStore
     {
         foreach (var table in new[]
         {
+            "local_comparison_saved_lifetimes",
             "local_comparison_evidence",
             "local_comparison_results",
             "local_comparison_cohort_memberships",

@@ -193,9 +193,7 @@ public static class RetentionMutationPreviewProjector
     }
 
     private static bool IsReadable(RetentionPreviewItem item, DateTimeOffset now) =>
-        item.ReadDeniedAt is null
-        && (item.State == RetentionItemLifecycle.RetainedByPolicy
-            || item.State == RetentionItemLifecycle.Expiring && item.ExpiresAt is { } expiresAt && expiresAt > now);
+        RetentionMutationStateProjection.IsReadable(item.State, item.ExpiresAt, item.ReadDeniedAt, now);
 
     private static IReadOnlyList<RetentionActiveConflictSummary> ProjectConflicts(IReadOnlyList<RetentionMutationActiveConflictSnapshot> conflicts)
     {

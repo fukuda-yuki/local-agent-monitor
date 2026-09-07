@@ -89,6 +89,8 @@ internal static class MonitorHost
         "/local-monitor-settings.js",
         "/local-monitor-explorer.js",
         "/local-monitor-compare.js",
+        "/local-monitor-saved-comparisons.js",
+        "/local-monitor-session-retention.js",
         "/local-monitor-session-workspace.js",
         "/monitor.css",
         "/monitor.js",
@@ -376,7 +378,7 @@ internal static class MonitorHost
         builder.Services.AddSingleton(sessionOtelEnricher);
         if (testOptions?.StartSessionWriter ?? true)
         {
-            builder.Services.AddHostedService(_ => new SessionEventWriterWorker(sessionEventQueue, sessionEventNormalizer));
+            builder.Services.AddHostedService(_ => new SessionEventWriterWorker(sessionEventQueue, sessionEventNormalizer, eventBroker));
         }
         var rootsExecutionContextFactory = CreateRootsExecutionContextFactory();
         testOptions?.AnalysisRootsExecutionEnabledObserver?.Invoke(rootsExecutionContextFactory is not null);
@@ -474,7 +476,7 @@ internal static class MonitorHost
         }
         if (testOptions?.StartSessionOtelEnrichment ?? true)
         {
-            builder.Services.AddHostedService(_ => new SessionOtelEnrichmentWorker(sessionOtelEnricher, testOptions?.SessionOtelPollInterval));
+            builder.Services.AddHostedService(_ => new SessionOtelEnrichmentWorker(sessionOtelEnricher, testOptions?.SessionOtelPollInterval, eventBroker));
         }
 
         var retentionCatalog = new RetentionCatalogStore(retentionContext, timeProvider);
@@ -1214,7 +1216,18 @@ internal static class MonitorHost
                 if (await LocalMonitorV1HumanRoutes.TryDispatchAsync(context, humanScopeService, humanDetailService, timeProvider)) return;
                 await next(context);
             });
-            LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);
+            LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides,
+                app.Services.GetRequiredService<ILocalRepositoryComparisonInputSnapshotService>(), async (sessionId, snapshotId, cancellationToken) =>
+                {
+                    var metadata = await SkillInvocationSnapshotComposition.ReadMetadataAsync(options.DatabasePath,
+                        app.Services.GetRequiredService<SkillProjectionReadService>(), timeProvider, sessionId, snapshotId, cancellationToken);
+                    if (metadata.StatusCode != 200) return null;
+                    using var document = JsonDocument.Parse(metadata.BodyUtf8);
+                    var value = document.RootElement;
+                    return value.GetProperty("projection_validity").GetString() == "current"
+                        && value.GetProperty("snapshot_state").GetString() == "available"
+                        ? value.GetProperty("body_sha256").GetString() : null;
+                });
             LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(),
                 contentReader: new LocalWorkspaceNodeContentReader(retentionContext, timeProvider),
                 contentCheckpoint: testOptions?.LocalMonitorNodeContentRouteCheckpoint);

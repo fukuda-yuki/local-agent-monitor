@@ -45,15 +45,15 @@ The former unimplemented #133 collection GET is replaced by:
 POST /api/local-monitor/v1/sessions
 ```
 
-There is no `GET` alias, query reader, fallback, dual transport, server-side
-search handle, saved search or compatibility path. The POST is an idempotent
+There is no `GET` alias, query reader, fallback, dual transport,
+saved search or compatibility path. The collection POST is an idempotent
 read and creates no operation receipt, cookie, history row or server-side
 search session.
 
 This decision keeps `q` and dynamic `model` values out of URLs, browser
 history/storage/cache, cursors, logs, errors and reusable evidence. The cost is
-intentional: those two filters are not bookmarkable and reset on reload or
-back/forward navigation.
+intentional: those two filters are not bookmarkable. The bounded transient
+investigation receipt below supports ordinary reload/back/forward restoration.
 
 This specification does not change `/api/monitor/*`,
 `/api/session-workspace/*` v1, SSE, Canvas, or any technical-evidence route.
@@ -284,7 +284,7 @@ URL-safe Explorer state is the exact set in section 5. It may be restored by
 reload and browser back/forward.
 
 Dynamic `q` and `model` values exist only in the current document's form state,
-JavaScript memory and the POST request body. They are not written to:
+JavaScript memory, bounded process-memory investigation receipts and POST bodies. They are not written to:
 
 - URL path, query or fragment;
 - `history.state`;
@@ -295,23 +295,19 @@ JavaScript memory and the POST request body. They are not written to:
 - errors, diagnostics or reusable evidence.
 
 The controls use `autocomplete="off"`; the request uses Fetch
-`cache: "no-store"`. Reload resets `q` to null, `model` to an empty array and
-`limit` to null/default 50. Browser traversal also resets them except when the
-only changed URL-safe value is Repository Explorer `analysis`; that
-analysis-only back/forward transition preserves the current document's
-`q`/`model`/`limit`, list, filters, cohorts, selection and assignment state.
+`cache: "no-store"`. A live investigation receipt restores `q`, `model`,
+`limit`, page position and valid exact cohort IDs after revalidation on reload
+or traversal. An expired/evicted/restart receipt explicitly resets those values.
+An analysis-only transition preserves the current document's list state.
 The UI must not claim that a copied URL reproduces those transient values.
 
 A returned cursor may be placed in the human URL only when `q` is null,
-`model` is empty and the exact request body has `limit:null`, meaning default
+`model` is empty, `investigation_unit=all` and the exact request body has `limit:null`, meaning default
 50. The client emits null rather than explicit 50 for that default. When either
 dynamic filter is active or `limit` is any non-null value, the cursor and
-non-default limit remain in page memory and the POST body only; the client first
-removes any URL cursor. Reload/back clears that cursor and resets the limit to
-null/default 50, except that the analysis-only back/forward transition above
-preserves the current Explorer state's memory-only cursor and non-default
-limit. Reload and every other back/forward transition still clear that cursor
-and reset the limit. Changing any filter or limit clears the cursor. Neither
+non-default limit remain in page memory, a live investigation receipt and POST bodies; the client first
+removes any URL cursor. Unit-specific cursors likewise stay in the receipt. If receipt restoration cannot validate its cursor, the server re-runs page one and returns `page_reset:true`; filters and valid selections survive with an explicit page-position reset explanation.
+Changing any filter or limit clears the cursor. Neither
 client nor server repairs a mismatch or restarts at page one.
 
 ## 7. Session Explorer request wire
@@ -382,12 +378,13 @@ to null.
 | `scope` | Exact `all`, `unassigned` or `repository`. The Local Monitor browser derives it from the human page path; the endpoint does not trust or require `Referer`. |
 | `repository_id` | Canonical local Repository UUIDv7 only for `scope=repository`; otherwise exactly null. The browser copies it only from a validated Repository page route. |
 | `archive_scope` | Exact `active_only` or `include_archived`; never null. |
+| `investigation_unit` | Optional exact `all` (default), `work_session`, or `observation_fragment`; never null when present. Unit meaning and scoped facets are owned by the Session collection contract. |
 | `from` / `to` | Null or exact decoded UTC `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. A non-null value must parse as a real Gregorian `DateTimeOffset` instant and re-serialize byte-for-byte to that form; `from < to` when both exist. After that validation, each bound is converted to a signed Unix epoch millisecond as `floor((UTC instant - 1970-01-01T00:00:00Z) / 1ms)`, exactly matching `DateTimeOffset.ToUnixTimeMilliseconds` and the projection/cursor time basis. Filtering compares the Session accepted ordering epoch millisecond—the persisted accepted epoch, overridden by valid `last_seen_at` when native `started_at` is absent—with `from` inclusive (`>=`) and `to` exclusive (`<`); invalid-time Sessions do not match a non-null bound. Sub-millisecond fractions add no comparison precision, and pre-epoch values floor toward negative infinity (`1969-12-31T23:59:59.9999999+00:00`, one tick before the epoch, becomes `-1ms`). Two wire-distinct bounds in the same millisecond bucket may therefore form an empty effective interval even though parser-level `from < to` holds. Cursor request binding remains over the exact canonical request semantics and wire values; it does not substitute quantized timestamp text. |
 | `source` | Array of 0..16 distinct current source tokens from section 5. |
 | `model` | Array of 0..16 distinct dynamic values. Each has 1..128 Unicode scalars, at most 256 strict UTF-8 bytes, and no C0/C1 control or line/paragraph separator. No trim, normalization, case fold, alias or approximate match. |
 | `status` | Array of 0..16 distinct current status tokens from section 5. |
 | `has_skill`, `has_subagent`, `has_error`, `has_retry` | JSON Boolean or null; null means no predicate. |
-| `q` | Null or 1..200 Unicode scalars and at most 800 strict UTF-8 bytes, with no unpaired surrogate. NFKC followed by invariant lowercase must remain nonempty and at most 800 UTF-8 bytes. Original and normalized values are request-memory only. Matching uses ordinal substring comparison over exactly the three current normalized fact classes `label`, `skill`, and `tool`; it never searches prompts, Skill bodies, Tool payloads/results/errors, paths, or response text. |
+| `q` | Null or 1..200 Unicode scalars and at most 800 strict UTF-8 bytes, with no unpaired surrogate. NFKC followed by invariant lowercase must remain nonempty and at most 800 UTF-8 bytes. Original and normalized values are bounded request/receipt-memory only. Matching uses ordinal substring comparison over exactly the three current normalized fact classes `label`, `skill`, and `tool`; it never searches prompts, Skill bodies, Tool payloads/results/errors, paths, or response text. |
 | `cursor` | Null or the exact token in section 9. |
 | `limit` | Null or a canonical JSON integer 1..200. Null means 50. Decimal, exponent, string, Boolean, sign and negative-zero spellings are invalid. |
 
@@ -509,7 +506,7 @@ local-monitor-session-filter\0v1\0
 ```
 
 It then carries `scope` through `limit` in request-property order, omitting
-`cursor`. Encodings are:
+`cursor`. A nondefault `investigation_unit` appends its required-string encoding after limit; `all` (including omission) adds no bytes. Encodings are:
 
 - nullable string: byte `00` for null, otherwise `01` +
   `U32BE(byte_length)` + exact UTF-8 bytes;
@@ -747,12 +744,12 @@ local_comparison_expiry_tombstones
 ```
 
 - both IDs are canonical lowercase UUIDv7;
-- `expired_at` is the snapshot's exact expiry instant in UTC
+- `expired_at` is the comparison's exact effective expiry instant (including an explicit saved lifetime) in UTC
   `yyyy-MM-ddTHH:mm:ss.fffffff+00:00` form;
 - application and component schema validators reject any other value;
 - UPDATE and DELETE are rejected by immutable guards;
 - insert is exact insert-or-identical; a same-ID field mismatch fails closed;
-- when `now >= snapshot.expires_at`, reads return `410 comparison_expired`
+- when `now >= effective_expires_at`, reads return `410 comparison_expired`
   before cleanup;
 - cleanup atomically inserts/validates the tombstone and deletes all
   operational snapshot/result/evidence content;
@@ -852,9 +849,9 @@ Use synthetic identities and text only.
    147-character cursor, framing, HMACs, tamper/restart/filter mismatch,
    noncanonical encoding, valid-to-invalid group ordering and both exclusive
    resume predicates, including zero invalid-time bytes.
-6. Browser proof that q/model enter only the POST body; safe state survives;
-   q/model/non-default limit reset; URL cursor eligibility requires exact
-   q=null/model=[]/limit=null; no storage/cache/console/log/error leak or silent
+6. Browser proof that q/model enter only bounded POST/process-memory receipt state; safe state survives;
+   live receipts restore q/model/non-default limit, page position and valid selections through detail/reload/traversal; expired or stale receipts are explicit. URL cursor eligibility requires exact
+   q=null/model=[]/limit=null/investigation_unit=all; no storage/cache/console/log/error leak or silent
    cursor repair occurs.
 7. Pure-parser proof for exact API status/media/no-store/Allow/HEAD/error bytes
    and nonreflection; active HTTP proof waits for the canonical #134 response
@@ -867,3 +864,22 @@ Use synthetic identities and text only.
    restore absence, empty startup rematerialization and export exclusion.
 10. Atomic `/traces` retirement, deferred `/historical-analysis` retirement,
     surviving technical evidence and frozen Monitor/Workspace/SSE bytes.
+
+## Transient investigation receipts
+
+`POST /api/local-monitor/v1/investigations` creates a process-memory navigation receipt.
+The closed body is `{schema_version:"local-monitor-investigation.request.v1",search:<session-search request>,workspace_revision:<64 lowercase hex>,cohorts:{a:[UUIDv7],b:[UUIDv7]},scroll_y:<integer 0..10000000>}`.
+The exact current search request includes its page cursor; each cohort contains at most 200 distinct exact IDs. No collection result, prompt or response is stored.
+Success is `{handle:<64 lowercase hex>}`. Handles are random 256-bit values.
+`POST /api/local-monitor/v1/investigations/restore` accepts only `{handle:<64 lowercase hex>}` and returns `{saved:<saved body>,stale:<boolean>,page_reset:<boolean>,valid_selection:{a:[UUIDv7],b:[UUIDv7]}}` after reading the current authorized repository scope, rerunning its collection and revalidating selected IDs against current repository scope and archive eligibility (fixed cohorts may be outside the currently displayed filter). An expired, evicted or process-restart handle returns `410 investigation_expired`; no fallback silently restores old results.
+Both routes use the Session collection's existing loopback/Host/Origin/CSRF, strict JSON media, 32768-byte request and no-store response guards. Responses contain no raw result content.
+Receipts have a 30-minute absolute lifetime and at most 32 entries process-wide; oldest entries are evicted first. Browser history stores only the opaque handle in a separate `localMonitorInvestigation` member, never raw search/model text. It is not a URL parameter. Reload/back/forward can recover a still-live same-history handle; copied URLs cannot reproduce its filters. Stale revisions are explicitly reported and invalid selections are excluded. Ordinary investigation navigation uses this receipt contract.
+
+## Saved comparison route composition
+
+The routes in `local-monitor-v1-comparison.md` additionally expose raw-default `GET|HEAD /api/local-monitor/v1/repositories/{repositoryId}/comparisons/saved` and `GET|HEAD|POST|DELETE /api/local-monitor/v1/repositories/{repositoryId}/comparisons/{comparisonId}/saved`. Reads allow no query or body. Mutations accept exactly `{}` as UTF-8 `application/json; charset=utf-8`, require the normal same-origin/Host/CSRF guards (including DELETE), and return no-store. Existing comparison read errors remain authoritative; capacity failure is `409 saved_comparison_limit_reached`. Saved effective expiry governs read availability and tombstones, while the immutable comparison receipt's original 24-hour `expires_at` remains unchanged. The asset `local-monitor-saved-comparisons.js` is registered on repository Explorer and comparison detail pages.
+
+
+The read-only `GET|HEAD /api/retention/v1/sessions/{sessionId}/management` companion is defined in `retention-mutation.md` (Session management summary). It accepts no query/body, uses existing same-origin retention/no-store guards, and other methods return405. `local-monitor-session-retention.js` consumes it; the frozen Session retention response remains unchanged.
+
+Same-tab Session/detail and newly created comparison navigation carries the same opaque receipt handle into the destination history entry. The visible return-to-Session-list action resolves that handle through the restore endpoint and derives its repository/all/unassigned destination from the saved request. It restores the investigation without exposing raw filters in links. Native modified-click/new-tab or copied URLs have no receipt and use ordinary fresh navigation.

@@ -9,7 +9,7 @@ defined by Issue #85.
 Local Monitor v1 presents this as a focused flow opened from Unified Settings,
 not permanent navigation. Archive is separate reversible metadata and never a
 backup/restore operation. Node/Repository/Compare AI operational content and
-deterministic Compare snapshots are 24-hour non-backed-up state under their
+deterministic Compare snapshots are transient or explicitly saved non-backed-up state under their
 own accepted contracts; this interface does not create alternate ownership for
 them. The minimal #165/#166 comparison-expiry tombstone from
 [the route transport contract](local-monitor-v1-route-transport.md) is part of
@@ -289,7 +289,7 @@ happens to have no sidecar at one instant.
 
 ### Comparison staging projection
 
-The complete 24-hour Compare operational namespace is non-backed-up. Every
+The complete transient and explicitly saved Compare operational namespace is non-backed-up. Every
 installed #165/#166 table belongs to exactly one of these closed staging
 categories, in owner dependency order:
 
@@ -299,6 +299,7 @@ comparison_cohort_membership
 comparison_result
 comparison_evidence
 comparison_expiry_tombstone
+comparison_saved_lifetime
 ```
 
 The #165/#166 component registry supplies the exact table/object inventory for
@@ -332,10 +333,10 @@ runtime-backup owner performs this exact operation:
 2. Open only that staging database read/write, start one SQLite transaction,
    load the immutable component-version registry, and require every installed
    `local_comparison_*` table, index, and trigger to map to exactly one of the
-   five categories. Run every registered exact schema/row/immutable-guard
+   six categories. Run every registered exact schema/row/immutable-guard
    validator before the first drop. Validation is streaming and does not
    materialize the lifetime tombstone set or another operational table.
-3. Drop every registered exact table across all five categories in the
+3. Drop every registered exact table across all six categories in the
    registry's fixed reverse owner dependency order. Each statement uses only
    its registry literal, quoted table name; prefix discovery, caller-supplied
    names, row copy, best-effort delete, and source SQL are forbidden. Table-owned
@@ -365,12 +366,16 @@ readiness; no operational row or old tombstone is reconstructed. A
 missing table in an ordinary live source with no accepted restore projection is
 still corruption and is not silently repaired.
 
-The exact tombstone table is the currently named object in the
-`comparison_expiry_tombstone` category. Before another Compare operational
-table ships, #165/#166 must register its exact object names and validator in one
-of the other four categories and prove the common staging, manifest-absence,
-and restore-absence behavior above. No unregistered or future category is
-implicitly excluded.
+The `comparison_expiry_tombstone` category owns the exact tombstone table.
+The current `local_comparison` v2 additionally registers
+`local_comparison_saved_lifetimes` as `comparison_saved_lifetime`; it is dropped
+before its referenced snapshot. The marker's exact schema, snapshot relationship,
+first-save instant and 30-day expiry are validated before staging projection.
+Saving affects only local read/cleanup lifetime, not this backup boundary. A
+restored database receives the empty current comparison owner on startup, with
+no saved list or receipt reconstruction. The UI explicitly discloses that saved
+comparisons are excluded from backup/restore. Future categories still require
+explicit registration and the same staging, manifest and restore absence proof.
 
 The destination is closed and reopened read-only. `PRAGMA quick_check` must be
 the single row `ok`; `PRAGMA foreign_key_check` must be empty. Version, count,

@@ -6,6 +6,29 @@ namespace CopilotAgentObservability.LocalMonitor;
 
 internal static class ComparisonJson
 {
+    internal static byte[] SavedLifetime(LocalComparisonSavedLifetime value) => Write(j =>
+    {
+        j.WriteStartObject(); j.WriteString("schema_version", "local-monitor-comparison-saved.response.v1");
+        j.WriteString("comparison_id", value.ComparisonId); j.WriteString("repository_id", value.RepositoryId);
+        j.WriteBoolean("is_saved", value.IsSaved); Nullable(j, "first_saved_at", value.FirstSavedAt is { } first ? Time(first) : null);
+        Nullable(j, "saved_until", value.SavedUntil is { } until ? Time(until) : null);
+        j.WriteString("effective_expires_at", Time(value.EffectiveExpiresAt)); j.WriteBoolean("available", value.Available); j.WriteEndObject();
+    });
+
+    internal static byte[] SavedList(string repositoryId, IReadOnlyList<LocalComparisonSavedListItem> items) => Write(j =>
+    {
+        j.WriteStartObject(); j.WriteString("schema_version", "local-monitor-comparison-saved-list.response.v1");
+        j.WriteString("repository_id", repositoryId); j.WriteNumber("maximum_saved_count", SqliteLocalComparisonStore.MaximumSavedComparisons);
+        j.WritePropertyName("items"); j.WriteStartArray();
+        foreach (var item in items)
+        {
+            j.WriteStartObject(); j.WriteString("comparison_id", item.ComparisonId); j.WriteString("created_at", Time(item.CreatedAt));
+            j.WriteString("first_saved_at", Time(item.FirstSavedAt)); j.WriteString("saved_until", Time(item.SavedUntil));
+            j.WriteNumber("cohort_a_count", item.CohortACount); j.WriteNumber("cohort_b_count", item.CohortBCount);
+            j.WriteString("location", $"/repositories/{repositoryId}/comparisons/{item.ComparisonId}"); j.WriteEndObject();
+        }
+        j.WriteEndArray(); j.WriteEndObject();
+    });
     private static readonly (int Ordinal, string Key, string Label)[] Sections = [(1, "target", "対象"), (2, "tokens", "トークン"), (3, "input_token_breakdown", "入力トークンの内訳"), (4, "time_and_execution", "時間・実行量"), (5, "skills", "スキル"), (6, "tools", "ツール"), (7, "subagents", "サブエージェント"), (8, "errors_and_retries", "エラー・再試行"), (9, "conditions", "比較条件")];
 
     internal static byte[] Preview(LocalComparisonProjectionPreview x) => Write(j =>

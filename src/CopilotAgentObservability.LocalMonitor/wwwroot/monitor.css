@@ -11,6 +11,11 @@
 
 /* Session investigation: summary is stable across selection, never height-clipped. */
 .local-monitor-session-workspace { display: grid; gap: var(--monitor-space-4); min-width: 0; }
+[data-session-conversation] { min-width: 0; }
+[data-session-conversation] > ol { max-height: 24rem; overflow-y: auto; padding-inline: 2rem 0.5rem; scrollbar-gutter: stable; }
+[data-session-conversation] li { margin-block: 0.5rem; overflow-wrap: anywhere; }
+[data-session-conversation] button { margin: 0.2rem; }
+[data-session-conversation] > details[open] { max-height: 20rem; overflow-y: auto; }
 .local-monitor-session-context { min-width: 0; }
 .local-monitor-session-context nav { display: flex; gap: 8px; min-width: 0; margin-bottom: 8px; }
 .local-monitor-session-context [data-session-breadcrumb] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4391,3 +4396,7 @@ a.kpi-card:hover {
 .local-monitor-raw-dialog-frame { display: grid; grid-template-rows: auto auto minmax(8rem, 1fr); max-height: calc(100vh - 3rem); padding: 1rem; }
 .local-monitor-raw-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .local-monitor-raw-dialog pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+
+.local-monitor-freshness { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin-bottom: .75rem; font-size: .8125rem; }
+.local-monitor-freshness [data-new-record-notice] { color: var(--monitor-ink); }
+.local-monitor-freshness [hidden] { display: none; }

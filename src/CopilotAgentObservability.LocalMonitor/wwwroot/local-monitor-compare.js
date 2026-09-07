@@ -252,7 +252,7 @@
   }
 
   function renderFactState(target, token) {
-    if (token === "not_observed") { target.textContent = "なし"; return; }
+    if (token === "not_observed") { target.textContent = "未観測"; return; }
     const presentations = {
       recorded: { state: "observed_positive", recordedCount: 1n },
       explicit_zero: { state: "observed_zero", recordedCount: 0n, hasCompleteCoverageProof: true, sourceText: "保存済み比較", reasonText: "保存時点で明示的に 0 です" },
@@ -262,8 +262,8 @@
       certification_pending: { state: "certification_pending", recordedCount: null },
       not_captured: { state: "raw_not_captured", recordedCount: null, reasonText: "取得時に保存されていません" },
       expired: { state: "raw_expired", recordedCount: null, reasonText: "保存期間が終了しています" },
-      deleted: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は削除されています" },
-      read_denied: { state: "raw_not_captured", recordedCount: null, reasonText: "この項目は読み取れません" },
+      deleted: { state: "raw_deleted", recordedCount: null, reasonText: "この項目は削除されています" },
+      read_denied: { state: "raw_read_denied", recordedCount: null, reasonText: "この項目は読み取れません" },
       inconsistent: { state: "inconsistent", recordedCount: null, reasonText: "値を確定できません" },
       projection_invalid: { state: "projection_invalid", recordedCount: null, reasonText: "記録の整合性を確認できません" },
       too_large: { state: "projection_invalid", recordedCount: null, reasonText: "表示上限を超えています" },
@@ -379,7 +379,7 @@
       return region;
     });
     sections.replaceChildren(...nodes);
-    status.textContent = "保存済みの比較結果を表示しています。";
+    status.textContent = "作成時の比較結果を表示しています。";
   }
 
   function namedFamily(family, label) {
@@ -690,7 +690,7 @@
       && value.provider === "github_copilot" && (value.selected_model === null || nonblank(value.selected_model))
       && (value.selected_configuration === null || nonblank(value.selected_configuration))
       && readinessStates.includes(value.readiness_state) && checkResults.includes(value.last_check_result)
-      && value.provider_egress_notice === "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"
+      && value.provider_egress_notice === "selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action"
       && (value.readiness_state !== "ready" || value.last_check_result === "ready" && nonblank(value.selected_model) && nonblank(value.selected_configuration));
   }
 
@@ -729,6 +729,11 @@
     if (restoredAiRun) { aiGeneration++; activeAiRun = null; restoredAiRun = null; aiCancel.hidden = true; aiCancel.disabled = false; aiStatus.textContent = ""; aiResult.replaceChildren(); }
   });
   window.addEventListener("pagehide", () => { state.controller?.abort(); aiGeneration++; closeEvidence(); });
+  document.addEventListener("cao-comparison-expired", () => {
+    state.generation++; state.controller?.abort(); aiGeneration++; closeEvidence();
+    sections.replaceChildren(); if (aiSurface) aiSurface.hidden = true;
+    status.textContent = "保存を解除しました。作成から24時間が経過したため、この比較結果は利用できません。";
+  });
 
   (async () => {
     const generation = ++state.generation; state.controller?.abort(); state.controller = new AbortController();

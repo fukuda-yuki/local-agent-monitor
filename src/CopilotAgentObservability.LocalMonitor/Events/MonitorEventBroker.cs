@@ -34,17 +34,11 @@ internal sealed class MonitorEventBroker
 
     public void PublishProjectionChanged()
     {
-        var evt = new MonitorEvent(Interlocked.Increment(ref nextId), "projection");
-
-        Channel<MonitorEvent>[] snapshot;
         lock (gate)
         {
-            snapshot = subscribers.ToArray();
-        }
-
-        foreach (var subscriber in snapshot)
-        {
-            subscriber.Writer.TryWrite(evt);
+            var evt = new MonitorEvent(++nextId, "projection");
+            foreach (var subscriber in subscribers)
+                subscriber.Writer.TryWrite(evt);
         }
     }
 

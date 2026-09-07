@@ -90,7 +90,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.Equal(200, timeline.RootElement.GetProperty("properties").GetProperty("items").GetProperty("maxItems").GetInt32());
         Assert.Equal("^[A-Za-z0-9_-]{158}[AEIMQUYcgkosw048]$", timeline.RootElement.GetProperty("properties").GetProperty("next_cursor").GetProperty("pattern").GetString());
         AssertEnum(timelineDefs.GetProperty("item").GetProperty("properties").GetProperty("relationship_authority"), "exact", "explicit", "unknown");
-        AssertEnum(timelineDefs.GetProperty("item").GetProperty("properties").GetProperty("kind"), "execution", "agent", "skill", "tool", "subagent", "event", "error", "retry", "permission", "unknown_relation_group");
+        AssertEnum(timelineDefs.GetProperty("item").GetProperty("properties").GetProperty("kind"), "execution", "agent", "llm_call", "skill", "tool", "subagent", "event", "error", "retry", "permission", "unknown_relation_group");
         AssertEnum(timelineDefs.GetProperty("name").GetProperty("properties").GetProperty("state"), "recorded", "not_observed", "invalid");
         AssertEnum(timelineDefs.GetProperty("item").GetProperty("properties").GetProperty("lifecycle"), "selected", "started", "completed", "failed", "deselected", "unknown");
         AssertEnum(timelineDefs.GetProperty("item").GetProperty("properties").GetProperty("status"), "active", "completed", "failed", "unknown");
@@ -161,7 +161,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertFixture("node-nested.json", NodeToken, AssertNodeOrder);
         AssertFixture("node-related-serializer-only.json", NodeToken, AssertNodeOrder);
         AssertFixture("content-full.json", ContentToken, AssertContentOrder);
-        const string ContentGolden = "{\"schema_version\":\"local-monitor-node-content.response.v2\",\"workspace_revision\":\"042185c18a85d8f24d175a99ae9946f08c770af039ffde6150077cff16eeacf6\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"node_id\":\"node-a8a773d6614d5030f505ff195b452dd6\",\"part\":\"event_content\",\"state\":\"available\",\"source_reference\":{\"store_kind\":\"session_event_content\",\"source_item_id\":\"018f0000-0000-7000-8000-000000000004\",\"revision\":1},\"text\":\"A😀é\\n\",\"utf8_byte_length\":8,\"unicode_scalar_length\":4,\"truncation\":false}";
+        const string ContentGolden = "{\"schema_version\":\"local-monitor-node-content.response.v2\",\"workspace_revision\":\"18e629b48a679f3370b973894beb27bde10514fdd490fdde5b14f81533695f8d\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"node_id\":\"node-a8a773d6614d5030f505ff195b452dd6\",\"part\":\"event_content\",\"state\":\"available\",\"source_reference\":{\"store_kind\":\"session_event_content\",\"source_item_id\":\"018f0000-0000-7000-8000-000000000004\",\"revision\":1},\"text\":\"A😀é\\n\",\"utf8_byte_length\":8,\"unicode_scalar_length\":4,\"truncation\":false}";
         Assert.Equal(Encoding.UTF8.GetBytes(ContentGolden), File.ReadAllBytes(Path.Combine(FixtureRoot, "content-full.json")));
         Assert.Equal(504, Encoding.UTF8.GetByteCount(ContentGolden));
         using var nested = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "node-nested.json")));
@@ -256,7 +256,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     [Fact]
     public void TimelineCursorHasFrozen119ByteFrameAndLiteralFixtureBinding()
     {
-        const string Golden = "AcGFFpclIvgKEhG_4KyVHae7--c1l26HAP6fbHwrcy3jAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ26pzvOZELTKvWOcoymJTTQFBGuBK8Ch6G-z8FaSvUnjg";
+        const string Golden = "AXlrCubeTueOZKGkVaUOcZ_ITngj3bdVFaAP1YDiG_UZAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2PKMSEJ9hqf4IIRtcW2M8FHZwfE2qxc2iB3lrQ3Qyn4g";
         using var fixture = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "timeline-page.json")));
         Assert.Equal(Golden, fixture.RootElement.GetProperty("next_cursor").GetString());
         var bytes = DecodeBase64Url(Golden);
@@ -272,7 +272,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
         var filterFrame = TimelineFilterFrame(
             "018f0000-0000-7000-8000-000000000001",
-            "123f43a996e323544c67c74cbedeb64c6121b2cdf1455c2947ef56aa654cde76",
+            "6cccbfaee77a02a35a8a6a6ff625fbe0d1a192797fe839c903f9a6c8d5c636eb",
             "9a5590c8-46e3-7069-af48-3844d2bf17a4",
             null,
             1);
@@ -474,7 +474,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
 
     private static void AssertSummaryOrder(JsonElement root)
     {
-        AssertProperties(root, "schema_version", "workspace_revision", "session", "executions", "technical_references");
+        AssertProperties(root, "schema_version", "workspace_revision", "session", "executions", "conversation", "llm_calls", "technical_references");
         var session = root.GetProperty("session");
         AssertProperties(session, "session_id", "status", "completeness", "assignment", "archive", "instruction", "source", "model", "version", "timing", "tokens", "activity", "capture");
         AssertProperties(session.GetProperty("assignment"), "state", "authority", "revision", "repository_id", "candidate_repository_ids");
@@ -589,8 +589,11 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
 
     private static void AssertTokenOrder(JsonElement tokens)
     {
-        AssertProperties(tokens, "authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points");
-        Assert.All(tokens.EnumerateObject().Skip(4), component => AssertProperties(component.Value, "state", "value"));
+        var keys = new List<string> { "authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points" };
+        if (tokens.TryGetProperty("observed_components", out var observed)) keys.Add("observed_components");
+        AssertProperties(tokens, keys.ToArray());
+        Assert.All(tokens.EnumerateObject().Skip(4).Where(component => component.Name != "observed_components"), component => AssertProperties(component.Value, "state", "value"));
+        if (observed.ValueKind == JsonValueKind.Object) Assert.All(observed.EnumerateObject(), component => AssertProperties(component.Value, "subtotal", "observed_call_count", "applicable_call_count", "paired_input"));
     }
 
     private static void AssertActivityOrder(JsonElement activity)
@@ -658,9 +661,9 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         "recorded|not_observed|not_captured|expired|invalid", "session_run|llm_span|mixed|none",
         "complete|partial|not_observed|invalid", "raw_content_not_captured|raw_content_expired|source_unsupported|capture_gap|certification_pending|projection_invalid|token_inconsistent|cache_inconsistent",
         "selected|started|completed|failed|deselected|unknown", "recorded|missing|invalid", "missing|invalid",
-        "exact|explicit|unknown", "execution|agent|skill|tool|subagent|event|error|retry|permission|unknown_relation_group",
+        "exact|explicit|unknown", "execution|agent|llm_call|skill|tool|subagent|event|error|retry|permission|unknown_relation_group",
         "recorded|not_observed|invalid", "instruction|tool_input|tool_result|error_message|subagent_input|event_content",
-        "available|not_captured|expired|deleted|read_denied|oversized|invalid",
+        "available|not_captured|expired|deleted|read_denied|oversized|invalid", "user|assistant", "instruction|event_content",
         "instruction|source|model|version|timing|tokens|cache|skill|tool|subagent|error|retry",
         "recorded|complete_zero|not_observed|source_unsupported|capture_gap|certification_pending|inconsistent|projection_invalid",
         "complete|partial", "complete|partial|unavailable", "current|stale|invalid|certification_pending|unavailable",

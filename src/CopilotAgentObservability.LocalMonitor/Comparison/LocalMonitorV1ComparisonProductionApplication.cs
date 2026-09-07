@@ -25,6 +25,10 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
                 LocalMonitorV1ComparisonOperation.Create => await Create(repositoryId, LocalMonitorV1ComparisonParser.ParseCreate(body.Span), ct),
                 LocalMonitorV1ComparisonOperation.Read => Load(repositoryId, comparisonId!, ct, s => new(200, ComparisonJson.Read(s))),
                 LocalMonitorV1ComparisonOperation.Rows => Rows(repositoryId, comparisonId!, LocalMonitorV1ComparisonQueryParser.ParseRows(query), ct),
+                LocalMonitorV1ComparisonOperation.SavedList => SavedList(repositoryId, ct),
+                LocalMonitorV1ComparisonOperation.SavedRead => SavedLifetime(repositoryId, comparisonId!, null, ct),
+                LocalMonitorV1ComparisonOperation.Save => SavedLifetime(repositoryId, comparisonId!, true, ct),
+                LocalMonitorV1ComparisonOperation.RemoveSave => SavedLifetime(repositoryId, comparisonId!, false, ct),
                 _ => Evidence(repositoryId, comparisonId!, LocalMonitorV1ComparisonQueryParser.ParseEvidence(query), ct)
             };
         }
@@ -35,6 +39,26 @@ internal sealed class LocalMonitorV1ComparisonProductionApplication : ILocalMoni
         catch (LocalRepositoryScopeSnapshotException x) when (x.Error == LocalRepositoryScopeSnapshotError.PersistenceBusy) { return Error(503, "persistence_busy"); }
         catch (LocalWorkspaceSessionDetailException x) when (x.Error == "workspace_too_large") { return Error(409, "workspace_too_large"); }
         catch (LocalComparisonTooLargeException) { return Error(409, "workspace_too_large"); }
+    }
+
+    private LocalMonitorV1ComparisonResponse SavedList(string repositoryId, CancellationToken ct)
+    {
+        var result = store.ListSaved(repositoryId, ct);
+        return result.Status == LocalComparisonSaveStatus.PersistenceBusy
+            ? Error(503, "persistence_busy") : new(200, ComparisonJson.SavedList(repositoryId, result.Items));
+    }
+
+    private LocalMonitorV1ComparisonResponse SavedLifetime(string repositoryId, string comparisonId, bool? save, CancellationToken ct)
+    {
+        var result = store.SavedLifetime(repositoryId, comparisonId, save, ct);
+        return result.Status switch
+        {
+            LocalComparisonSaveStatus.Found => new(200, ComparisonJson.SavedLifetime(result.Lifetime!)),
+            LocalComparisonSaveStatus.Expired => Error(410, "comparison_expired"),
+            LocalComparisonSaveStatus.LimitReached => Error(409, "saved_comparison_limit_reached"),
+            LocalComparisonSaveStatus.PersistenceBusy => Error(503, "persistence_busy"),
+            _ => Error(404, "comparison_not_found"),
+        };
     }
 
     private async ValueTask<LocalMonitorV1ComparisonResponse> Preview(string repositoryId, LocalMonitorV1ComparisonPreviewRequest request, CancellationToken ct)

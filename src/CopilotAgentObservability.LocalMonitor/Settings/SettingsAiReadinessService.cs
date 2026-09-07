@@ -20,7 +20,7 @@ internal sealed class SettingsAiReadinessService(
     TimeSpan timeout,
     TimeProvider timeProvider) : IHostedLifecycleService, IAsyncDisposable
 {
-    private const string EgressNotice = "selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action";
+    private const string EgressNotice = "selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action";
     private readonly object sync = new();
     private readonly CancellationTokenSource stopping = new();
     private SettingsAiReadinessSnapshot snapshot = new(

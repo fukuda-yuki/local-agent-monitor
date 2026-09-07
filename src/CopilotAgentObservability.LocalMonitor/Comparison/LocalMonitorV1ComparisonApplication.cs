@@ -1,6 +1,6 @@
 namespace CopilotAgentObservability.LocalMonitor;
 
-internal enum LocalMonitorV1ComparisonOperation { Preview, Create, Read, Rows, Evidence }
+internal enum LocalMonitorV1ComparisonOperation { Preview, Create, Read, Rows, Evidence, SavedList, SavedRead, Save, RemoveSave }
 
 internal sealed record LocalMonitorV1ComparisonResponse(int StatusCode, byte[] Entity, string? Location = null);
 

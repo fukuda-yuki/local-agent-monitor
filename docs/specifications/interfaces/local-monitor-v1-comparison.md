@@ -17,7 +17,8 @@ recommendation, or narrative.
 
 ## Operations
 
-Exactly these five operations exist in raw-default composition:
+These immutable snapshot operations exist in raw-default composition, alongside
+the saved-lifetime resources defined below:
 
 ```text
 POST /api/local-monitor/v1/repositories/{repositoryId}/comparisons/preview
@@ -193,9 +194,70 @@ Each byte sequence above has no trailing newline.
 Precedence is host, method, framing/media/size/path/query, same-origin, CSRF for
 POST, cursor, lookup/Repository binding, expiry, selection/staleness, workspace
 size, persistence. Known expiry is 410; unknown/mismatched identity is 404.
-Errors and logs never echo request values or identifiers. Comparison lifetime
-is exactly 24 hours and operational comparison state remains excluded from
-backup.
+Errors and logs never echo request values or identifiers. Unsaved comparison
+lifetime is exactly 24 hours; explicitly saved comparison lifetime follows the
+saved-lifetime contract below. All operational comparison state remains excluded
+from backup.
+
+## Explicit local preservation
+
+The immutable snapshot retains its original `created_at`, `expires_at` (exactly
+24 hours after creation), selection, values, and provenance. The current
+`local_comparison` component is v2: an exact validated v1 is migrated by adding
+`local_comparison_saved_lifetimes` and advancing only the component version.
+The original v1 tables, guards, and receipt bytes remain unchanged. An absent
+component installs the complete empty v2; partial/unknown schemas fail closed.
+
+The saved-lifetime table contains `comparison_id` (exact snapshot foreign key),
+`first_saved_at`, `saved_until`, and integer `is_saved` (`0|1`). A first save is
+permitted only while the snapshot is available and before its original expiry.
+`saved_until` is exactly 30 days after `first_saved_at`. A repeated save is
+idempotent and never moves either instant. Removing and reapplying a save within
+the original lifetime retains those first-save instants. Removal after the
+original 24-hour expiry immediately makes the receipt unavailable.
+
+While `is_saved=1`, read and cleanup use `saved_until` as effective expiry;
+otherwise they use original snapshot expiry. At or after effective expiry,
+save/read return `comparison_expired`, list omits the comparison, and cleanup
+removes its marker and operational rows while retaining the existing tombstone
+with that effective expiry. There is no silent resave, renewal, eviction, or
+recomputation. At most 20 live saved comparisons exist globally, across all
+Repositories; admission is checked in the same immediate write transaction as
+the save. A full collection returns `409 saved_comparison_limit_reached`.
+
+The raw-default comparison owner adds these closed resources:
+
+- `GET|HEAD /api/local-monitor/v1/repositories/{repositoryId}/comparisons/saved`
+  lists that Repository's live saved comparisons, newest first-save instant
+  first, with ordinal comparison-ID tie breaking. It returns exactly
+  `{schema_version:"local-monitor-comparison-saved-list.response.v1",
+  repository_id,maximum_saved_count:20,items:[{comparison_id,created_at,
+  first_saved_at,saved_until,cohort_a_count,cohort_b_count,location}]}`.
+  `location` is the canonical human comparison path; counts use frozen
+  membership, and no labels/raw content are introduced. An empty list is valid.
+- `GET|HEAD|POST|DELETE /api/local-monitor/v1/repositories/{repositoryId}/comparisons/{comparisonId}/saved`
+  reads, explicitly saves, or removes preservation. POST and DELETE have exact
+  UTF-8 `{}` body, `application/json; charset=utf-8`, same-origin and existing
+  CSRF requirements. Every success is 200 with exactly
+  `{schema_version:"local-monitor-comparison-saved.response.v1",comparison_id,
+  repository_id,is_saved,first_saved_at,saved_until,effective_expires_at,available}`.
+  Save instants are null before first save. Removal succeeds even when it causes
+  `available:false`; later reads use the existing expiry error.
+
+These resources accept no query, reuse canonical UUID validation and existing
+closed errors/publication limits, and do not change the seven immutable
+comparison request/response shapes. GET/HEAD accept no body. Wrong methods are
+405 with the exact allowed methods. Read and save are scoped to the exact
+Repository/comparison pair. All results are no-store; HEAD has GET headers and
+no body. Errors never echo request values.
+
+The comparison detail offers explicit save/remove actions and the Repository
+Explorer offers the saved list with creation date, cohort counts, expiry and
+canonical reopen links. Both display `この端末に30日間保存。バックアップ・復元の対象外`.
+The list and markers survive process restart, but the entire operational
+comparison namespace, including saved markers, remains deliberately excluded
+from runtime backup/restore. Saving does not extend or restore source raw
+evidence retention; links continue through current independent authorization.
 
 Exact security/transport rule: POST request entity is strict UTF-8, at most
 16,384 bytes, exact `application/json; charset=utf-8`, same-origin, and requires

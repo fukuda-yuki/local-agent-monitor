@@ -42,8 +42,7 @@ public sealed class SqliteSessionOtelEnricher
         var rawResult = rawStore.ReadRawRecordsAsync(rows.Select(row => row.RawRecordId).ToArray(), RetentionReadKind.Operation, CancellationToken.None).AsTask().GetAwaiter().GetResult();
         if (rawResult.Lease is null)
         {
-            ProcessContentBatch(limit);
-            return 0;
+            return ProcessContentBatch(limit);
         }
         try
         {
@@ -98,12 +97,13 @@ public sealed class SqliteSessionOtelEnricher
             }
         }
         finally { rawResult.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-        ProcessContentBatch(limit);
-        return rows.Count;
+        var contentWrites = ProcessContentBatch(limit);
+        return rows.Count > 0 ? rows.Count : contentWrites;
     }
 
-    private void ProcessContentBatch(int limit)
+    private int ProcessContentBatch(int limit)
     {
+        var contentWrites = 0;
         var cursor = store.GetProjectionState(ContentProjectorKey)?.ProjectionCursor ?? 0;
         var metadataCursor = store.GetProjectionState(ProjectorKey)?.ProjectionCursor ?? 0;
         foreach (var row in ReadRows(cursor, limit).TakeWhile(row => row.Id <= metadataCursor))
@@ -116,11 +116,11 @@ public sealed class SqliteSessionOtelEnricher
                 {
                     if (result.Lease is null)
                     {
-                        if (result.Disposition is not (RetentionReadDisposition.LifecycleDenied or RetentionReadDisposition.SelectorUnavailable)) return;
+                        if (result.Disposition is not (RetentionReadDisposition.LifecycleDenied or RetentionReadDisposition.SelectorUnavailable)) return contentWrites;
                     }
                     else
                     {
-                        if (result.Disposition is not null) { _ = result.CompletePostGrantFailure(); return; }
+                        if (result.Disposition is not null) { _ = result.CompletePostGrantFailure(); return contentWrites; }
                         using (var reference = result.Lease.AcquireValueReference())
                         {
                             var raw = reference.Value.Single();
@@ -151,16 +151,18 @@ public sealed class SqliteSessionOtelEnricher
                                     UpdatedAt = timeProvider.GetUtcNow(),
                                 };
                                 ((SqliteSessionStore)store).WriteFromOtel(new(new(session, [], [], events), content), result.Lease.Grants);
+                                contentWrites++;
                             }
                         }
-                        if (result.Lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw) return;
+                        if (result.Lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw) return contentWrites;
                     }
                 }
-                catch (SessionOtelLeaseLostException) { return; }
+                catch (SessionOtelLeaseLostException) { return contentWrites; }
                 finally { result.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
             }
             store.UpsertProjectionState(new(ContentProjectorKey, row.Id, 0, timeProvider.GetUtcNow()));
         }
+        return contentWrites;
     }
 
     public long CountBacklog()

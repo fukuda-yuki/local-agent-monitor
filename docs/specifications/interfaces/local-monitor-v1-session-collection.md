@@ -12,7 +12,7 @@ transport, error and registration rules in
 [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md)
 with #133's semantic Session facts. It supersedes #133's former unimplemented
 `GET /api/local-monitor/v1/sessions` and incomplete response prose. There is no
-GET alias, compatibility reader, saved-search handle or fallback.
+GET alias, compatibility reader or fallback. Temporary investigation receipts use the separate routes defined in the route-transport authority.
 
 The executable Draft 2020-12 schema is
 [`session-collection.response.schema.json`](../contracts/local-monitor-v1/session-collection.response.schema.json).
@@ -197,3 +197,17 @@ The three test goldens are normative byte examples and are consumed verbatim by
   fixture's second matching candidate is the required `limit+1` lookahead.
 
 They contain synthetic UUIDv7 values and no real user data.
+
+## Investigation units and facets
+
+The collection request accepts optional `investigation_unit`: `all` (API default), `work_session`, or `observation_fragment`. Explorer defaults to `work_session`. Unit selection is part of cursor filter binding. `completeness=unbound` identifies a fragment without native Session binding under `SessionCompletenessCalculator`; other completeness levels identify source-bound work Sessions, including partial ones. This distinction does not assert source purpose: purpose remains unknown without authoritative purpose evidence. No identity merge is introduced. Display the source lifecycle separately from last-observed activity; a last-seen instant does not establish conversation completion.
+
+`POST /api/local-monitor/v1/sessions/facets` uses the same strict collection search body and guards, and returns `{work_session_count:<nonnegative integer>,observation_fragment_count:<nonnegative integer>,models:[<exact model ID>]}`. Counts/models cover the authorized repository and archive scope before other filters or pagination. Models are distinct ordinal-sorted observed IDs, bounded to 256; excess returns `409 workspace_too_large`, never silent truncation. Scope controls show both counts and retain exact fragment drill-down. Local datetime inputs convert the terminal's local timezone to canonical UTC; nonexistent local times are rejected. Search labels explain the bounded label/Skill/Tool scope and do not imply full-body search.
+
+## Comparison candidate resolution
+
+`POST /api/local-monitor/v1/sessions/candidates` accepts the closed body `{method:"filters"|"skill_digest"|"skill_options",search:<collection request>,skill_name:<string|null>,skill_digest:<64 lowercase hex|null>}`. Repository scope is required. Cursor must be null. `filters` and `skill_options` require null Skill selectors; `skill_digest` requires an exact observed Skill name and body SHA-256. The route uses the collection's normal POST guards and 32768-byte ceiling.
+
+All methods use current authorized collection facts. Fixed filters resolve across the complete bounded scope, without pagination, to at most 200 exact IDs. More matches return `409 workspace_too_large` without truncation. Archive-matching IDs may be proposed so the existing comparison preview explicitly explains archive exclusions according to the user's include-archived choice. `skill_options` returns at most 256 distinct ordinal-sorted `{name,digest}` choices and no selected IDs. Historical Skill choices use current-valid exact-linked invocation snapshot references and the existing snapshot metadata composition's current projection validity and historical body digest. They do not read raw content or current files, infer dates or approximate a change boundary. The unavailable count is the number of candidate Sessions with no provable historical digest (including Sessions with no historical Skill nodes); it is not a count of missing invocations. Unavailable proof/snapshots are reported explicitly; a missing digest never falls back to names or current definitions.
+
+Success is `{method,session_ids:[UUIDv7],workspace_revision:<64 lowercase hex>,skill_digests:[{name,digest}],unavailable_count:<integer>}`. Candidate IDs are ordinal-sorted and immutable for the subsequent explicit selection. The UI retains manual A/B, lets the user assign a fixed-filter snapshot or exact historical Skill digest to A/B, then always runs existing comparison included/excluded preview and explicit acceptance. Existing disjointness, archive, size, revision and metric rules remain authoritative. Candidate resolution itself does not create or save a comparison.

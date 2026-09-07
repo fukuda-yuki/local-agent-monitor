@@ -26,7 +26,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         page.Request += (_, request) => { if (request.Url.Contains("/ai/", StringComparison.Ordinal) || request.Url.EndsWith("/ai-readiness", StringComparison.Ordinal)) aiRequests.Add(request.Url); };
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         await Expect(page.Locator("[data-compare-ai]")).ToHaveCountAsync(0);
         Assert.Empty(errors);
         Assert.Empty(aiRequests);
@@ -42,7 +42,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
     [Theory]
     [InlineData("{\"readiness_state\":\"ready\"}")]
-    [InlineData("{\"provider\":\"github_copilot\",\"selected_model\":\"model\",\"selected_configuration\":\"test\",\"readiness_state\":\"ready\",\"last_check_result\":\"ready\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action\",\"extra\":true}")]
+    [InlineData("{\"provider\":\"github_copilot\",\"selected_model\":\"model\",\"selected_configuration\":\"test\",\"readiness_state\":\"ready\",\"last_check_result\":\"ready\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action\",\"extra\":true}")]
     [Trait("ValidationLane", "Nightly")]
     public async Task CompareAiRejectsMalformedReadyPayload(string readiness)
     {
@@ -57,7 +57,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await page.RouteAsync($"**/api/local-monitor/v1/repositories/{RepositoryId}/comparisons/{ComparisonId}", route => route.FulfillAsync(Json(readBody)));
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true })).ToHaveCountAsync(0);
     }
 
@@ -415,7 +415,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
             route.FulfillAsync(Json(readBody)));
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         var action = page.GetByRole(AriaRole.Button, new() { Name = "AIで解釈", Exact = true });
         await Expect(action).ToBeVisibleAsync();
         await action.ClickAsync();
@@ -465,7 +465,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         var failure = page.Locator("[data-compare-ai-status]");
         await Expect(failure).ToContainTextAsync("表示できません");
         await AssertVisibleFocusAndBlurCleanup(page, failure);
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         await Expect(page.Locator(".local-monitor-compare-section")).ToHaveCountAsync(9);
     }
 
@@ -559,7 +559,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         var page = await browser.NewPageAsync();
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         var cells = page.Locator(".local-monitor-compare-table").First.Locator("tbody > tr").First.Locator(":scope > th, :scope > td");
         var closedZero = cells.Nth(1).Locator(".local-monitor-compare-fact > span:nth-child(2)");
         var unavailableCount = cells.Nth(2).Locator(".local-monitor-compare-fact > span:nth-child(2)");
@@ -633,7 +633,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         var url = host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}";
         await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         Assert.Equal(new[] { "対象", "トークン", "入力トークンの内訳", "時間・実行量", "スキル", "ツール", "サブエージェント", "エラー・再試行", "比較条件" },
             await page.Locator(".local-monitor-compare-section > h2").AllTextContentsAsync());
         await Expect(page.Locator("[data-compare-cohort-count='a']")).ToHaveTextAsync("1件");
@@ -709,7 +709,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         Assert.True(layout[6] <= 0, $"Compare cell content overflows its cell by {layout[6]}px.");
 
         await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         Assert.Equal(url, page.Url);
 
         var privacy = await page.EvaluateAsync<string[]>("""
@@ -728,11 +728,11 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
 
         await page.GotoAsync(host.Url + "/sessions", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.GoBackAsync(new PageGoBackOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         await page.GoForwardAsync(new PageGoForwardOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(page.Locator("[data-session-explorer]")).ToBeVisibleAsync();
         await page.GoBackAsync(new PageGoBackOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
     }
 
     [Fact]
@@ -796,7 +796,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
 
         var body = page.Locator(".local-monitor-repository-compare-body");
         foreach (var (_, label) in rowLabels) await Expect(body).ToContainTextAsync(label);
@@ -948,7 +948,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         });
 
         await page.GotoAsync(host.Url + $"/repositories/{RepositoryId}/comparisons/{ComparisonId}");
-        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("保存済み");
+        await Expect(page.Locator("#repository-compare-status")).ToContainTextAsync("作成時の比較結果");
         await page.SetViewportSizeAsync(1366, 768);
         await page.ScreenshotAsync(new() { Path = CompareArtifactPath("compare-results-1366x768.png") });
         foreach (var disclosure in await page.Locator(".local-monitor-compare-evidence-actions > summary").AllAsync())
@@ -1040,7 +1040,7 @@ public sealed class LocalMonitorV1RepositoryComparePlaywrightTests
         return Path.Combine(directory, name);
     }
 
-    private static string Readiness() => """{"provider":"github_copilot","selected_model":"model","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action"}""";
+    private static string Readiness() => """{"provider":"github_copilot","selected_model":"model","selected_configuration":"test","readiness_state":"ready","last_check_result":"ready","provider_egress_notice":"selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action"}""";
 
     private static string Run(string state, string result, string? error = null) => $$"""{"run_id":"{{RunId}}","state":"{{state}}","scope_kind":"comparison","session_id":null,"node_id":null,"repository_id":"{{RepositoryId}}","comparison_id":"{{ComparisonId}}","error":{{(error is null ? "null" : $"\"{error}\"")}},"result":{{result}}}""";
 

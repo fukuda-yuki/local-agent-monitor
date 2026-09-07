@@ -149,7 +149,17 @@ internal static class LocalMonitorV1CollectionApplication
             && (request.QueryNormalized is null || p.SearchTexts.Any(text => text.Contains(request.QueryNormalized, StringComparison.Ordinal)));
     }
 
-    internal static bool SelectorMatches(LocalRepositoryScopeSessionSnapshot row,LocalMonitorV1SessionSearchRequest request)=>InScope(row,request)&&Matches(row,request);
+    internal static bool SelectorMatches(LocalRepositoryScopeSessionSnapshot row,LocalMonitorV1SessionSearchRequest request)=>InScope(row,request)&&Matches(row,request)
+        && (request.InvestigationUnit == "all" || (((LocalWorkspaceProjectionRow)row.Session).Completeness == "unbound") == (request.InvestigationUnit == "observation_fragment"));
+    internal static bool SelectionScopeMatches(LocalRepositoryScopeSessionSnapshot row, LocalMonitorV1SessionSearchRequest request) => InScope(row, request);
+
+    internal static byte[] SerializeFacets(LocalRepositoryScopeSnapshot snapshot, LocalMonitorV1SessionSearchRequest request)
+    {
+        var rows = snapshot.Sessions.Where(row => InScope(row, request)).Select(row => (LocalWorkspaceProjectionRow)row.Session).ToArray();
+        var models = rows.SelectMany(row => row.Models.Values).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        if (models.Length > 256) throw new LocalMonitorV1CollectionException("workspace_too_large");
+        return JsonSerializer.SerializeToUtf8Bytes(new { work_session_count = rows.Count(row => row.Completeness != "unbound"), observation_fragment_count = rows.Count(row => row.Completeness == "unbound"), models });
+    }
 
     private static bool Fact(LocalWorkspaceFact<long> fact, bool? wanted) => wanted is null
         || wanted == true && fact.State == "recorded" && fact.Value > 0

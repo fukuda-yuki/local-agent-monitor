@@ -21,7 +21,7 @@ public sealed class SettingsAiReadinessRouteTests
         using var get = await host.Client.GetAsync(Path);
         Assert.Equal(HttpStatusCode.OK, get.StatusCode);
         Assert.True(get.Headers.CacheControl?.NoStore);
-        Assert.Equal("{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"configured_not_checked\",\"last_check_result\":\"not_checked\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_github_copilot_only_after_explicit_ai_action\"}", await get.Content.ReadAsStringAsync());
+        Assert.Equal("{\"provider\":\"github_copilot\",\"selected_model\":\"gpt-5\",\"selected_configuration\":\"standard\",\"readiness_state\":\"configured_not_checked\",\"last_check_result\":\"not_checked\",\"provider_egress_notice\":\"selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action\"}", await get.Content.ReadAsStringAsync());
         using var post = Request(HttpMethod.Post, csrf: "local-monitor");
         using var checkedResponse = await host.Client.SendAsync(post);
         Assert.Equal(HttpStatusCode.OK, checkedResponse.StatusCode);

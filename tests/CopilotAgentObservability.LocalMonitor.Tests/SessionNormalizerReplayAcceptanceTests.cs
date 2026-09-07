@@ -258,7 +258,7 @@ public sealed class SessionNormalizerReplayAcceptanceTests
         }
         clock.Advance(TimeSpan.FromDays(91));
         var before = Snapshot(temp.DatabasePath);
-        var replay = () => normalizer.NormalizeAndWrite(Envelope(
+        Action replay = () => normalizer.NormalizeAndWrite(Envelope(
             "copilot-compatible-hook",
             "copilot-cli",
             Event("content-event", "user.message", $"{{\"value\":\"{replayValue}\"}}")));

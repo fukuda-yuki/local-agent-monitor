@@ -97,7 +97,7 @@ internal sealed record FactStatePresentationRequest(
 
 internal sealed class FactStatePresentation
 {
-    private const string NotObservedPrimary = "なし";
+    private const string NotObservedPrimary = "未観測";
 
     private FactStatePresentation(
         string primaryText,
@@ -143,7 +143,7 @@ internal sealed class FactStatePresentation
             FactState.CaptureGap => ("一部欠落", null, false),
             FactState.CertificationPending =>
                 (PositiveCountText(count!.Value), "未確認", true),
-            FactState.RawNotCaptured => ("なし", null, false),
+            FactState.RawNotCaptured => ("未取得", null, false),
             FactState.RawExpired => ("期限切れ", null, false),
             FactState.RawDeleted => ("削除済み", null, false),
             FactState.RawReadDenied => ("表示不可", null, false),

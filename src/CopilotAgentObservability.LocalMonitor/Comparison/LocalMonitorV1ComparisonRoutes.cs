@@ -14,9 +14,42 @@ internal static class LocalMonitorV1ComparisonRoutes
     {
         app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons/preview", context => DispatchPost(context, application, LocalMonitorV1ComparisonOperation.Preview));
         app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons", context => DispatchPost(context, application, LocalMonitorV1ComparisonOperation.Create));
+        app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons/saved", context => DispatchSaved(context, application, list: true));
+        app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons/{comparisonId}/saved", context => DispatchSaved(context, application, list: false));
         app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons/{comparisonId}", context => DispatchRead(context, application, LocalMonitorV1ComparisonOperation.Read));
         app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons/{comparisonId}/rows", context => DispatchRead(context, application, LocalMonitorV1ComparisonOperation.Rows));
         app.Map("/api/local-monitor/v1/repositories/{repositoryId}/comparisons/{comparisonId}/evidence", context => DispatchRead(context, application, LocalMonitorV1ComparisonOperation.Evidence));
+    }
+
+    private static async Task DispatchSaved(HttpContext context, ILocalMonitorV1ComparisonApplication application, bool list)
+    {
+        var read = HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method);
+        var save = HttpMethods.IsPost(context.Request.Method);
+        var remove = HttpMethods.IsDelete(context.Request.Method);
+        if (!read && (list || (!save && !remove)))
+        { context.Response.Headers.Allow = list ? "GET, HEAD" : "GET, HEAD, POST, DELETE"; await Error(context, 405, "method_not_allowed"); return; }
+        string? comparisonId = null;
+        if (!TryRepository(context, out var repositoryId) || (!list && !TryId(context, "comparisonId", out comparisonId)) || context.Request.QueryString.HasValue)
+        { await Error(context, 400, "invalid_request"); return; }
+        if (read)
+        {
+            if (context.Request.ContentLength is > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
+            { await Error(context, 400, "invalid_request"); return; }
+        }
+        else
+        {
+            if (context.Request.ContentType != "application/json; charset=utf-8" || context.Request.Headers.ContentEncoding.Count != 0 || context.Request.ContentLength > 2)
+            { await Error(context, 400, "invalid_request"); return; }
+            var body = await ReadBody(context);
+            if (body is null || !body.AsSpan().SequenceEqual("{}"u8))
+            { await Error(context, 400, "invalid_request"); return; }
+        }
+        if (MonitorHost.IsCrossSiteRequest(context) || (!read && !MonitorHost.HasMonitorCsrfHeader(context)))
+        { await Error(context, 403, "csrf_rejected"); return; }
+        var operation = list ? LocalMonitorV1ComparisonOperation.SavedList
+            : read ? LocalMonitorV1ComparisonOperation.SavedRead
+            : save ? LocalMonitorV1ComparisonOperation.Save : LocalMonitorV1ComparisonOperation.RemoveSave;
+        await Publish(context, await application.ExecuteAsync(operation, repositoryId!, comparisonId, ReadOnlyMemory<byte>.Empty, "", context.RequestAborted));
     }
 
     private static async Task DispatchPost(HttpContext context, ILocalMonitorV1ComparisonApplication application, LocalMonitorV1ComparisonOperation operation)

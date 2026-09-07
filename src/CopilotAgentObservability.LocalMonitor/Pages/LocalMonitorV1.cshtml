@@ -70,9 +70,14 @@ else
     else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.SessionDetail)
     {
         <script src="/local-monitor-session-workspace.js" defer></script>
+        <script src="/local-monitor-session-retention.js" defer></script>
     }
     else if (Model.RouteKind == LocalMonitorV1PrimaryRouteKind.ComparisonDetail)
     {
         <script src="/local-monitor-compare.js" defer></script>
+    }
+    @if (Model.RouteKind is LocalMonitorV1PrimaryRouteKind.RepositorySessions or LocalMonitorV1PrimaryRouteKind.ComparisonDetail)
+    {
+        <script src="/local-monitor-saved-comparisons.js" defer></script>
     }
 }

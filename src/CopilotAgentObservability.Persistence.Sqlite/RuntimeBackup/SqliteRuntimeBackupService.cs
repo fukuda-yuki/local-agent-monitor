@@ -1726,7 +1726,7 @@ public sealed class SqliteRuntimeBackupService
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_ai_analysis") && (!LocalAiAnalysisSchemaV1.IsValid(connection, componentTransaction) || !ValidateLocalAiRows(connection,componentTransaction,localAiValidationTime??publicationTime??DateTimeOffset.UtcNow,allowDeniedContent:workspaceShapeOnly||allowDeniedLocalAiContent))) return false;
                 if (versions.ContainsKey("local_comparison"))
-                    LocalComparisonSchemaV1.Validate(connection, componentTransaction, allowLegacyRepositoryCatalog: true);
+                    LocalComparisonSchemaV1.ValidateSupportedBackup(connection, componentTransaction, allowLegacyRepositoryCatalog: true);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
                     if (workspaceShapeOnly && versions["local_workspace_projection"] == 4)
@@ -1940,7 +1940,7 @@ public sealed class SqliteRuntimeBackupService
         {
             using var replica = new SqliteConnection("Data Source=:memory:");
             replica.Open(); connection.BackupDatabase(replica); SetPragma(replica, "foreign_keys", false);
-            foreach (var table in LocalComparisonSchemaV1.TableNames.Reverse()) { using var drop = replica.CreateCommand(); drop.CommandText = $"DROP TABLE \"{table}\";"; drop.ExecuteNonQuery(); }
+            foreach (var table in LocalComparisonSchemaV1.TablesForVersion(versions["local_comparison"]).Reverse()) { using var drop = replica.CreateCommand(); drop.CommandText = $"DROP TABLE \"{table}\";"; drop.ExecuteNonQuery(); }
             var without = versions.Where(item => item.Key != "local_comparison").ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
             return ValidateExecutableObjects(replica, without);
         }
@@ -2049,7 +2049,7 @@ public sealed class SqliteRuntimeBackupService
             replica.Open();
             connection.BackupDatabase(replica);
             SetPragma(replica, "foreign_keys", false);
-            foreach (var table in LocalComparisonSchemaV1.TableNames.Reverse())
+            foreach (var table in LocalComparisonSchemaV1.TablesForVersion(versions["local_comparison"]).Reverse())
             {
                 using var drop = replica.CreateCommand(); drop.CommandText = $"DROP TABLE \"{table}\";"; drop.ExecuteNonQuery();
             }

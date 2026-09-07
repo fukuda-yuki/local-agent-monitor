@@ -8,6 +8,78 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1CollectionApplicationTests
 {
     [Fact]
+    public void InvestigationUnits_KeepExactUnboundFragmentsReachableWithScopedFacets()
+    {
+        var work = Session(1, model: "Exact-A");
+        var fragment = Session(2, model: "Exact-B");
+        fragment = fragment with { Session = ((LocalWorkspaceProjectionRow)fragment.Session) with { Completeness = "unbound" } };
+        var snapshot = new LocalRepositoryScopeSnapshot(new(LocalRepositoryScopeKind.All, null), [], [work, fragment, Session(3, archived: true, model: "Archived")]);
+        var request = new LocalMonitorV1SessionSearchRequest("all", null, "active_only", null, null, [], [], [], null, null, null, null, null, null, null, 1) { InvestigationUnit = "work_session" };
+        using var workPage = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request, new byte[32]));
+        Assert.Equal(work.SessionId, Assert.Single(workPage.RootElement.GetProperty("items").EnumerateArray()).GetProperty("session_id").GetString());
+        using var fragments = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request with { InvestigationUnit = "observation_fragment" }, new byte[32]));
+        Assert.Equal(fragment.SessionId, Assert.Single(fragments.RootElement.GetProperty("items").EnumerateArray()).GetProperty("session_id").GetString());
+        using var facets = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeFacets(snapshot, request with { Models = ["Exact-A"] }));
+        Assert.Equal(1, facets.RootElement.GetProperty("work_session_count").GetInt32());
+        Assert.Equal(1, facets.RootElement.GetProperty("observation_fragment_count").GetInt32());
+        Assert.Equal(new[] { "Exact-A", "Exact-B" }, facets.RootElement.GetProperty("models").EnumerateArray().Select(value => value.GetString()!).ToArray());
+        var cursor = LocalMonitorV1SessionCursorCodec.Encode(new byte[32], request, new(LocalMonitorV1SessionSortGroup.ValidTime, 1, work.SessionId));
+        Assert.False(LocalMonitorV1SessionCursorCodec.TryDecode(cursor, new byte[32], request with { InvestigationUnit = "observation_fragment" }, out _));
+    }
+
+    [Fact]
+    public async Task FilterCandidates_ResolveAllMatchingExactIdsIncludingArchivePreviewCandidatesWithoutTruncation()
+    {
+        const string repository = "018f0000-0000-7000-8000-000000000138";
+        var service = new CandidateSource(new(new(LocalRepositoryScopeKind.Repository, repository), [], [Session(1, repository), Session(2, repository, archived: true), Session(3, repository, model: "other")]));
+        using var result = JsonDocument.Parse(await LocalMonitorV1CandidateApplication.ResolveAsync(CandidateBody(repository, "filters"), service, null, null, new byte[32], default));
+        Assert.Equal(new[] { Session(1).SessionId, Session(2).SessionId }, result.RootElement.GetProperty("session_ids").EnumerateArray().Select(id => id.GetString()!).ToArray());
+        var oversized = new CandidateSource(new(new(LocalRepositoryScopeKind.Repository, repository), [], Enumerable.Range(1, 201).Select(i => Session(i, repository)).ToArray()));
+        var error = await Assert.ThrowsAsync<LocalMonitorV1CollectionException>(() => LocalMonitorV1CandidateApplication.ResolveAsync(CandidateBody(repository, "filters"), oversized, null, null, new byte[32], default));
+        Assert.Equal("workspace_too_large", error.Error);
+    }
+
+    [Fact]
+    public async Task HistoricalCandidates_UseOnlyExactProvedDigestAndExplainMissingSnapshots()
+    {
+        const string repository = "018f0000-0000-7000-8000-000000000138";
+        var service = new CandidateSource(new(new(LocalRepositoryScopeKind.Repository, repository), [], [Session(1, repository), Session(2, repository), Session(3, repository)]));
+        var digest = new string('a', 64);
+        Task<string?> ReadDigest(Guid session, Guid snapshot, CancellationToken token) => Task.FromResult<string?>(session.ToString("D") == Session(1).SessionId ? digest : new string('b', 64));
+        using var options = JsonDocument.Parse(await LocalMonitorV1CandidateApplication.ResolveAsync(CandidateBody(repository, "skill_options"), service, service, ReadDigest, new byte[32], default));
+        Assert.Equal(2, options.RootElement.GetProperty("skill_digests").GetArrayLength());
+        Assert.Equal(1, options.RootElement.GetProperty("unavailable_count").GetInt32());
+        using var selected = JsonDocument.Parse(await LocalMonitorV1CandidateApplication.ResolveAsync(CandidateBody(repository, "skill_digest", "synthetic-skill", digest), service, service, ReadDigest, new byte[32], default));
+        Assert.Equal(Session(1).SessionId, Assert.Single(selected.RootElement.GetProperty("session_ids").EnumerateArray()).GetString());
+        Assert.Equal(3, service.LastExactIds!.Count);
+    }
+
+    private static JsonElement CandidateBody(string repository, string method, string? name = null, string? digest = null) => JsonSerializer.SerializeToElement(new
+    {
+        method, skill_name = name, skill_digest = digest,
+        search = new { schema_version = "local-monitor-session-search.request.v1", scope = "repository", repository_id = repository, archive_scope = "active_only",
+            from = (string?)null, to = (string?)null, source = Array.Empty<string>(), model = new[] { "m" }, status = Array.Empty<string>(), has_skill = (bool?)null, has_subagent = (bool?)null, has_error = (bool?)null, has_retry = (bool?)null, q = (string?)null, cursor = (string?)null, limit = (int?)null },
+    });
+
+    private sealed class CandidateSource(LocalRepositoryScopeSnapshot snapshot) : ILocalRepositoryScopeSnapshotService, ILocalRepositoryComparisonInputSnapshotService
+    {
+        internal IReadOnlyList<string>? LastExactIds;
+        public ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken) => ValueTask.FromResult(snapshot);
+        public ValueTask<LocalRepositoryComparisonInputSnapshot> ReadComparisonInputAsync(LocalRepositoryScopeRequest request, CancellationToken cancellationToken)
+        {
+            LastExactIds = request.ExactTargetSessionIds;
+            return ValueTask.FromResult(new LocalRepositoryComparisonInputSnapshot(snapshot, snapshot.Sessions.Select(row =>
+            {
+                var projection = (LocalWorkspaceProjectionRow)row.Session;
+                var node = new LocalWorkspaceNodeDetail("node-" + new string('a', 32), row.SessionId, "execution", "session_event", "source", 1, null, "source", "skill", "recorded", "synthetic-skill", "observed", "unknown", "unknown", null, null, null,
+                    projection.Activity, projection.Tokens, null, null, null, SkillMetadata: new("current", "not_observed", null, "not_observed", null, "not_observed", null,
+                        row.SessionId == Session(3).SessionId ? "not_observed" : "recorded", row.SessionId == Session(3).SessionId ? null : row.SessionId));
+                return new LocalRepositoryComparisonSessionInput(row, null, new string('a', 64), new([node], [], [], "synthetic", "synthetic"));
+            }).ToArray()));
+        }
+    }
+
+    [Fact]
     public void OtelObservationDateFiltersWithoutNativeLifecycleTiming()
     {
         var observed = Session(1, startedAt: null);

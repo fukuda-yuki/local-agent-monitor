@@ -110,18 +110,20 @@ Only non-sensitive filter/pagination state is reflected in the URL:
 - cursor
 - `mode=compare`
 
-Dynamic `q` and `model` filters exist only in the current page form/JavaScript
-memory and the closed body of
-`POST /api/local-monitor/v1/sessions`. They are never URL/history/storage/log
-state and reset on reload or back/forward. The POST is the sole Session
-collection transport; there is no GET alias, saved-search handle or fallback.
-Non-default `limit` is also transient request state. A cursor may enter the URL
-only for exact `q=null`, `model=[]`, `limit=null`/default 50; otherwise cursor
-and limit remain page-memory/POST state and reload clears them. The exact
-request, timestamp, cursor and conditional cursor-in-URL grammars are owned by
-the route/transport contract.
+Dynamic `q` and `model` filters remain in page memory, bounded process-memory
+investigation receipts and closed POST bodies. Raw filter values never enter
+URLs, browser history/storage or logs. Only an opaque receipt handle enters
+`history.state`. The Session collection transport remains POST-only.
+Live receipts restore filters, investigation unit, non-default page size,
+page position, valid A/B selections and scroll through detail, reload and
+back/forward navigation. Expiry, eviction or process restart resets transient
+state with an explanation; stale page cursors reset page position while
+preserving filters and valid selections. Exact bounds, safe URL cursor
+eligibility and restoration validation belong to the route/transport contract.
 
-Checkbox selection before a comparison snapshot is created is transient and is not encoded as hundreds of Session IDs in the URL. Reload before preview resets the unchecked draft. After preview, the comparison has an opaque server snapshot ID and a stable Compare route.
+Draft comparison selections use the same transient receipt rather than URL
+Session IDs. Preview still validates explicit candidates before creation;
+created comparisons have an opaque snapshot ID and a stable Compare route.
 
 ## 4. Existing route disposition
 
@@ -583,13 +585,18 @@ The raw-default `AI設定` section reads and explicitly checks one closed
 Settings-owned readiness resource at
 `/api/local-monitor/v1/settings/ai-readiness`. Its GET and POST expose only the
 provider, selected model, selected configuration, closed readiness and
-last-check states, and the fixed provider-egress notice. The POST action
-`接続を確認` uses the owned Copilot SDK status and runtime identity certifier;
+last-check states, and the fixed provider-egress notice
+`selected_content_may_be_sent_to_the_selected_inference_provider_only_after_explicit_ai_action`.
+The provider identifies GitHub Copilot SDK transport, not the per-run inference
+destination. Settings explains that an explicit analysis sends selected content
+to its selected GitHub-hosted or BYOK inference provider. The POST action
+`GitHub認証を確認` uses the owned Copilot SDK status and runtime identity certifier;
 it creates no analysis run, SDK session, snapshot, result or retained item.
 The `selected_model` fact is the legacy configured identifier, not the
 account-discovered catalogue and not a per-run selection. Authentication
-`ready` does not mean a listed model is executable or that analysis will
-succeed. Session/node model discovery and selection stay on the analysis UI.
+`ready` confirms that GitHub authentication check, not BYOK eligibility, model
+execution or analysis success. Session/node model discovery and selection stay
+on the analysis UI. Configured values never become observed execution facts.
 
 The raw-default `保存・バックアップ` section reads the exact same-origin,
 no-store `GET /api/local-monitor/v1/settings/storage` aggregate. It reports
@@ -643,7 +650,8 @@ The shared C# and browser fact renderer use concise primary labels:
 | Fact | Primary label |
 |---|---|
 | positive / proven zero | count + `件` / `0件` |
-| not observed / raw not captured | `なし` |
+| not observed | `未観測` |
+| raw not captured | `未取得` |
 | unsupported | `未対応` |
 | capture gap | `一部欠落` |
 | projection invalid | `読取不可` |
@@ -651,9 +659,25 @@ The shared C# and browser fact renderer use concise primary labels:
 | raw expired / deleted / read denied | `期限切れ` / `削除済み` / `表示不可` |
 | inconsistent | `不整合` |
 
-`なし` describes the available record, not a numeric zero or a claim that a tool was unused. It adds no repeated generic caveat. Existing source-specific explanations and exceptional-state reasons remain available; the semantic state, zero-proof checks and eligibility for derived visualization do not change. Internal enum names are not primary labels.
+`未観測` denotes missing observation evidence; `未取得` denotes content that
+was not captured. Neither denotes numeric zero or proves that a tool was unused.
+Presence filters use `観測あり` for a recorded positive count and `0件を確認`
+only for a proven recorded zero; missing observations do not match either.
+Existing source-specific explanations and exceptional-state reasons remain
+available; zero-proof checks and derived-visualization eligibility are unchanged.
+Internal enum names are not primary labels.
 
 ## 15. State matrices
+
+Explorer and Session detail show the browser's snapshot retrieval time,
+explicitly distinguished from source activity time. The existing projection
+SSE notification announces newly received records without claiming that the
+selected Session changed. It never mixes new facts into the displayed snapshot.
+An explicit refresh saves live Explorer investigation context and reloads the
+document; detail keeps its exact selected-node URL, which the new snapshot
+validates. The old document and all its pending responses are discarded.
+Only diagnostics consumes legacy ingestion/trace refresh requests; primary
+pages do not fetch those unused collections on every notification.
 
 ### Core page states
 

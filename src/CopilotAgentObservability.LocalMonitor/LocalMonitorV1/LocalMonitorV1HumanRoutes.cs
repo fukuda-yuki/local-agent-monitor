@@ -27,6 +27,8 @@ internal static class LocalMonitorV1HumanRoutes
         "/local-monitor-explorer.js",
         "/local-monitor-session-workspace.js",
         "/local-monitor-compare.js",
+        "/local-monitor-saved-comparisons.js",
+        "/local-monitor-session-retention.js",
     };
     private static readonly HashSet<string> PrimaryAssets = new(StringComparer.Ordinal)
     {
@@ -39,6 +41,8 @@ internal static class LocalMonitorV1HumanRoutes
         "/local-monitor-explorer.js",
         "/local-monitor-session-workspace.js",
         "/local-monitor-compare.js",
+        "/local-monitor-saved-comparisons.js",
+        "/local-monitor-session-retention.js",
     };
 
     internal static bool IsPrimaryAsset(PathString path) =>

@@ -13,7 +13,7 @@ internal sealed class SessionEventNormalizer
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public void NormalizeAndWrite(SessionIngestEnvelope envelope)
+    public bool NormalizeAndWrite(SessionIngestEnvelope envelope)
     {
         var inputEvents = envelope.Events!;
         var persistedInputEvents = inputEvents.Where(item => !IsReasoningOrDelta(item.Type!)).ToArray();
@@ -178,6 +178,7 @@ internal sealed class SessionEventNormalizer
                 checked((state?.UnsupportedEventVersionCount ?? 0) + newUnsupportedCount),
                 now));
         }
+        return existing is null || nativeResolution is null || hasNewDurableSourceIdentity;
     }
 
     private static bool IsLifecycleStart(string type) => type is "session.start" or "SessionStart";
