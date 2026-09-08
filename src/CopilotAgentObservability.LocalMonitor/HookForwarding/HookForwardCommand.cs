@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
@@ -344,6 +345,7 @@ internal static class HookForwardCommand
         JsonElement toolName = default;
         JsonElement toolInput = default;
         JsonElement permissionSuggestions = default;
+        JsonElement traceparent = default;
         var seen = 0;
 
         foreach (var property in root.EnumerateObject())
@@ -379,6 +381,10 @@ internal static class HookForwardCommand
                     bit = 1 << 6;
                     permissionSuggestions = property.Value;
                     break;
+                case "traceparent":
+                    bit = 1 << 7;
+                    traceparent = property.Value;
+                    break;
                 default:
                     return false;
             }
@@ -391,20 +397,35 @@ internal static class HookForwardCommand
             seen |= bit;
         }
 
-        if (seen != 0b111_1111
+        if (seen is not (0b111_1111 or 0b1111_1111)
             || hookName.ValueKind != JsonValueKind.String
-            || !hookName.ValueEquals("PermissionRequest")
+            || !(hookName.ValueEquals("permissionRequest") || hookName.ValueEquals("PermissionRequest"))
             || !TryReadPermissionIdentifier(sessionId, out nativeSessionId)
             || !TryReadPermissionIdentifier(toolName, out _)
             || cwd.ValueKind != JsonValueKind.String
             || toolInput.ValueKind != JsonValueKind.Object
             || permissionSuggestions.ValueKind != JsonValueKind.Array
+            || (traceparent.ValueKind != JsonValueKind.Undefined
+                && (!hookName.ValueEquals("permissionRequest") || !IsPermissionTraceparentValid(traceparent)))
             || !TryReadPermissionTimestamp(timestamp, out occurredAt))
         {
             return false;
         }
 
         return true;
+    }
+
+    private static bool IsPermissionTraceparentValid(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var value = element.GetString()!;
+        return value.Length == 55
+            && value.StartsWith("00-", StringComparison.Ordinal)
+            && ActivityContext.TryParse(value, traceState: null, out _);
     }
 
     private static bool TryReadPermissionIdentifier(JsonElement element, out string value)
