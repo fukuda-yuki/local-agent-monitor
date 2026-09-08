@@ -11,6 +11,63 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class RuntimeBackupLocalAiComponentTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData("snapshot")]
+    [InlineData("result")]
+    public async Task Restore_ExistingSessionReport_PreservesCurrentReadDenial(string? deniedKind)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-local-ai-existing-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "source.db");
+            var time = Time();
+            var catalog = Initialize(source, time);
+            new CopilotAgentObservability.LocalMonitor.Analysis.SqliteMonitorAnalysisStore(source,
+                RetentionCatalogContext.InitializeNewOwnedDatabase(source, time), time).CreateSchema();
+            var run = Complete(new LocalAiAnalysisStoreV1(source, catalog, time), false);
+            var service = new SqliteRuntimeBackupService(time);
+            var archive = Path.Combine(root, "backup.zip");
+            var created = service.CreateAndPublish(source, archive);
+            Assert.True(created.Success, created.ErrorCode);
+            if (deniedKind is not null)
+            {
+                using var connection = Open(source);
+                Execute(connection, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
+                using var expire = connection.CreateCommand();
+                expire.CommandText = "UPDATE retention_items SET expires_at=$expired WHERE source_item_id LIKE $source;";
+                expire.Parameters.AddWithValue("$expired", time.GetUtcNow().AddSeconds(3).ToString("O"));
+                expire.Parameters.AddWithValue("$source", $"local_ai:{deniedKind}:%");
+                Assert.Equal(1, expire.ExecuteNonQuery());
+                time.Advance(TimeSpan.FromSeconds(4));
+                var prepared = await catalog.PrepareCleanupBatchAsync(time.GetUtcNow(), 10, 0, TimeSpan.FromSeconds(1), CancellationToken.None);
+                Assert.False(prepared.CoverageBlocked);
+            }
+
+            var preview = service.Preview(archive, source);
+            Assert.True(preview.Success, preview.ErrorCode);
+            Assert.Equal(deniedKind is null ? 0 : 1, preview.TerminalReconciliationCount);
+            var restored = service.Restore(archive, source, new RuntimeRestoreOptions());
+
+            Assert.True(restored.Success, restored.ErrorCode);
+            Assert.True(restored.PreRestoreBackupCreated);
+            Assert.Equal(deniedKind is null ? 0 : 1, restored.TerminalReconciliationCount);
+            using var read = Open(source);
+            Assert.Equal(deniedKind == "snapshot" ? 0L : 1L, Scalar(read, "SELECT COUNT(*) FROM local_ai_snapshots WHERE payload_json IS NOT NULL;"));
+            Assert.Equal(deniedKind == "result" ? 0L : 1L, Scalar(read, "SELECT COUNT(*) FROM local_ai_results WHERE result_json IS NOT NULL;"));
+            Assert.Equal(deniedKind is null ? 0L : 1L, Scalar(read, "SELECT COUNT(*) FROM retention_items WHERE read_denied_at IS NOT NULL;"));
+            var report = Assert.Single(new LocalAiAnalysisStoreV1(source, catalog, time).GetSessionReports(SessionId, null, null).Items);
+            Assert.Equal(run.RunId, report.RunId);
+            Assert.Equal(deniedKind == "result" ? "expired" : "retained", report.ContentState);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, true);
+        }
+    }
+
     [Fact]
     public void BackupValidation_AllowsEarlierBoundedRepositoryExpiryAndRejectsLaterExpiry()
     {

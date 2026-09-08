@@ -1082,6 +1082,15 @@ raw source is physically absent, deleting only the exact receipt-bound SQLite
 source when necessary. The installed database must retain the current
 tombstone/read denial and must not contain readable/restored raw bytes.
 
+For durable Session AI content, `analysis_run_raw` identities use
+`local_ai:snapshot:<uuid>` or `local_ai:result:<uuid>`, independently of legacy
+numeric analysis-run identities. Reconciliation checks the exact content row
+and ownership receipt; source removal clears only its raw JSON bytes, retaining
+the immutable snapshot/result metadata and run history. Current-target preflight
+accepts read-denied bytes awaiting cleanup so their denial can be reconciled
+into staging. Archive and installed-state validation still require those bytes
+to be absent. Snapshot and result retention remain independent.
+
 If exact lifecycle, ownership receipt, item identity, source removal, or audit
 reconciliation cannot be proven transactionally, restore fails
 `restore_tombstone_reconcile_failed`. Confirmation can never override this
