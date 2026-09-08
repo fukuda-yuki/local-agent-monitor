@@ -1351,7 +1351,7 @@ byte-for-byte unchanged and installation fails with
 Claude Code event, not a GitHub Copilot CLI event; it remains valid only in the
 separate Claude Hook mapping below.
 
-#### Copilot CLI 1.0.75 `PermissionRequest` admission arm
+#### Copilot CLI `PermissionRequest` admission arm
 
 In the no-`--source` forwarder, presence of an ordinal, case-sensitive root
 property named `hookName` selects this arm. Selection happens before value
@@ -1374,7 +1374,11 @@ permissionSuggestions
 
 Their accepted values are closed:
 
-- `hookName` is the JSON string `PermissionRequest` exactly.
+- `hookName` is the JSON string `permissionRequest` exactly, as emitted by
+  the CLI permission routing path. The previously supported exact
+  `PermissionRequest` value remains accepted with the same seven-property
+  contract. No other spelling is accepted; this is event-specific matching,
+  not case folding.
 - `sessionId` and `toolName` are JSON strings containing 1 through 256 Unicode
   scalar values and encoding to at most 1,024 strict UTF-8 bytes after JSON
   unescape. An unpaired surrogate is invalid. Each string must contain at least
@@ -1400,7 +1404,7 @@ An accepted input uses the existing `copilot-compatible-hook` v1 envelope with
 `source_surface=hook-unknown`, `native_session_id=sessionId`, event type
 `PermissionRequest`, and the converted `occurred_at`. Existing whole-input
 canonical event identity and recursive property/string sanitization apply
-unchanged to the accepted root. This arm does not establish aliases, a generic
+unchanged to the accepted root. This arm does not establish further aliases, a generic
 Copilot payload schema, source inference, or a producer guarantee for another
 event or version.
 
@@ -1947,7 +1951,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
 | VS Code channel/profile, running-state, and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation. They assert the exact tagged v1 `desired_state` union (never an inline document), 1 MiB-plus-sentinel settings reads, supported-version drift as `recovery_required`, and transient materialization with exact expected hash. They also assert exactly one post-gate Stable-then-Insiders `--status` call per eligible channel, zero calls after an early gate failure and during `Revalidate`, no retry/sleep, no stdout leakage, all representable observations (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`; `TimedOut`), and the four dual-channel per-record restart combinations with top-level action deduplication only; revalidation proves persisted record requirements are unchanged. Contract shape/validation tests close the warning/action values. |
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
-| Copilot CLI 1.0.75 `PermissionRequest` admission | `HookForwarderTests` cover selector exclusivity, the exact seven-property inventory and duplicates, every property type and bound, exact decimal/exponent integrality and Unix-millisecond range boundaries, silent no-request rejection, unchanged canonical identity/sanitization/`hook-unknown`, and every unaffected Copilot Hook arm |
+| Copilot CLI `PermissionRequest` admission | `HookForwarderTests` cover the two exact event-specific selectors, selector exclusivity, the exact seven-property inventory and duplicates, every property type and bound, exact decimal/exponent integrality and Unix-millisecond range boundaries, silent no-request rejection, unchanged canonical identity/sanitization/`hook-unknown`, and every unaffected Copilot Hook arm. `SessionWorkspaceRouteTests` cover forwarder-to-HTTP-to-storage admission and content readback. |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
 | Claude nested settings and private-plan arm | `ClaudeSettingsDocumentTests` and `SetupStorageTests` cover exact nested ownership, preservation, malformed/duplicate/oversize input, both existing v1 fixture byte identities, `claude_settings_owned_values_v1` bounds and arm relation, and secret/path/command non-leakage outside the private plan |

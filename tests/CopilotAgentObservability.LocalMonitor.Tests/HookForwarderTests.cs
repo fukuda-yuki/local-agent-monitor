@@ -40,7 +40,10 @@ public sealed class HookForwarderTests
     {
         { "hookName", "null" },
         { "hookName", "1" },
-        { "hookName", "\"permissionRequest\"" },
+        { "hookName", "\"permissionrequest\"" },
+        { "hookName", "\"PERMISSIONREQUEST\"" },
+        { "hookName", "\"permission_request\"" },
+        { "hookName", "\"permissionRequest \"" },
         { "sessionId", "null" },
         { "sessionId", "1" },
         { "sessionId", "{}" },
@@ -193,6 +196,20 @@ public sealed class HookForwarderTests
     public async Task CopilotCliPermissionRequest_NonIntegralOrOutOfRangeTimestampMakesNoRequest(string timestampJson)
     {
         await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(timestampJson));
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_PreviouslySupportedExactSelectorRemainsAccepted()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        await RunAsync(CreatePermissionRequestPayload(rawOverrides: new Dictionary<string, string>
+        {
+            ["hookName"] = "\"PermissionRequest\"",
+        }), handler: handler);
+
+        Assert.Equal(1, handler.Attempts);
+        using var document = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("PermissionRequest", document.RootElement.GetProperty("events")[0].GetProperty("type").GetString());
     }
 
     [Fact]
@@ -818,7 +835,7 @@ public sealed class HookForwarderTests
     {
         var properties = new List<KeyValuePair<string, string>>
         {
-            new("hookName", "\"PermissionRequest\""),
+            new("hookName", "\"permissionRequest\""),
             new("sessionId", "\"native-123\""),
             new("timestamp", timestampJson),
             new("cwd", "\"SYNTHETIC_CWD\""),
@@ -865,7 +882,7 @@ public sealed class HookForwarderTests
 
     private static string GetPermissionRequestPropertyJson(string propertyName) => propertyName switch
     {
-        "hookName" => "\"PermissionRequest\"",
+        "hookName" => "\"permissionRequest\"",
         "sessionId" => "\"native-123\"",
         "timestamp" => "0",
         "cwd" => "\"SYNTHETIC_CWD\"",

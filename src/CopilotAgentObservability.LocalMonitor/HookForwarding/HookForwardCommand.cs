@@ -393,7 +393,7 @@ internal static class HookForwardCommand
 
         if (seen != 0b111_1111
             || hookName.ValueKind != JsonValueKind.String
-            || !hookName.ValueEquals("PermissionRequest")
+            || !(hookName.ValueEquals("permissionRequest") || hookName.ValueEquals("PermissionRequest"))
             || !TryReadPermissionIdentifier(sessionId, out nativeSessionId)
             || !TryReadPermissionIdentifier(toolName, out _)
             || cwd.ValueKind != JsonValueKind.String
