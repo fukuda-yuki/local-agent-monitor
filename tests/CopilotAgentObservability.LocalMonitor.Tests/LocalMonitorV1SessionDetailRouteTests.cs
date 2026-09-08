@@ -1539,13 +1539,27 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         }
     }
 
-    private sealed class CapturingDetailService : ILocalRepositorySessionDetailSnapshotService
+    [Theory]
+    [InlineData("node_not_found")]
+    [InlineData("execution_not_found")]
+    public async Task Detail_ProjectionTargetAbsent_ReturnsNotFoundForGetAndHead(string error)
+    {
+        using var host = await StartDetailRouteAsync(new CapturingDetailService(error));
+        var revision = new string('a', 64);
+        var path = error == "node_not_found"
+            ? $"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-00000000000000000000000000000001?workspace_revision={revision}"
+            : $"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={revision}&execution_id=018f0000-0000-7000-8000-000000000002";
+
+        await AssertContentErrorParity(host.Client, path, 404, error);
+    }
+
+    private sealed class CapturingDetailService(string error = "session_not_found") : ILocalRepositorySessionDetailSnapshotService
     {
         internal LocalRepositorySessionDetailRequest? Request { get; private set; }
         public ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(LocalRepositorySessionDetailRequest request, CancellationToken cancellationToken)
         {
             Request = request;
-            throw new LocalWorkspaceSessionDetailException("session_not_found");
+            throw new LocalWorkspaceSessionDetailException(error);
         }
     }
 

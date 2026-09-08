@@ -787,7 +787,9 @@ public sealed class SqliteRuntimeBackupService
                 ? PreflightForMigration(
                     database,
                     immutableReadOnly: false,
-                    retentionCoverageValidation: RetentionCoverageValidation.Restorable)
+                    retentionCoverageValidation: RetentionCoverageValidation.Restorable,
+                    allowDeniedLocalAiContent: true,
+                    localAiValidationTime: timeProvider.GetUtcNow())
                 : new RuntimeBackupPreflightResult(true, null, new Dictionary<string, int>(), []);
             if (!current.Success) return PreviewFailure(RuntimeBackupErrorCodes.RestoreIncompatible, context.Result.ArchiveSha256);
             if (targetExists && current.ComponentVersions?.ContainsKey("retention") == true)
@@ -907,7 +909,9 @@ public sealed class SqliteRuntimeBackupService
                 var current = PreflightForMigration(
                     database,
                     immutableReadOnly: false,
-                    retentionCoverageValidation: RetentionCoverageValidation.Restorable);
+                    retentionCoverageValidation: RetentionCoverageValidation.Restorable,
+                    allowDeniedLocalAiContent: true,
+                    localAiValidationTime: timeProvider.GetUtcNow());
                 if (!current.Success) return RestoreFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
                 if (current.ComponentVersions?.ContainsKey("retention") == true)
                     ValidateRetentionInvariants(database, immutableReadOnly: false);
@@ -4454,6 +4458,8 @@ public sealed class SqliteRuntimeBackupService
     private static bool SourceExists(SqliteConnection connection, Dictionary<string, object?> row, SqliteTransaction? transaction = null)
     {
         var kind = Convert.ToString(row["store_kind"], CultureInfo.InvariantCulture); var source = Convert.ToString(row["source_item_id"], CultureInfo.InvariantCulture)!;
+        if (kind == "analysis_run_raw" && source.StartsWith("local_ai:", StringComparison.Ordinal))
+            return LocalAiSourceExists(connection, transaction, row, source);
         string? sql = kind switch { "session_event_content" => "SELECT EXISTS(SELECT 1 FROM session_event_content WHERE event_id=$id);", "raw_record" => "SELECT EXISTS(SELECT 1 FROM raw_records WHERE id=$id);", "analysis_run_raw" => "SELECT EXISTS(SELECT 1 FROM monitor_analysis_runs WHERE id=$id AND (result_markdown IS NOT NULL OR error_message IS NOT NULL OR EXISTS(SELECT 1 FROM monitor_analysis_events WHERE run_id=monitor_analysis_runs.id)));", _ => null };
         if (sql is null) return false; var table = kind switch { "session_event_content" => "session_event_content", "raw_record" => "raw_records", _ => "monitor_analysis_runs" }; if (!TableExists(connection, table, transaction)) return false;
         using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$id", kind == "session_event_content" ? source : long.Parse(source, CultureInfo.InvariantCulture)); return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
@@ -4462,10 +4468,51 @@ public sealed class SqliteRuntimeBackupService
     private static void DeleteSource(SqliteConnection connection, SqliteTransaction transaction, Dictionary<string, object?> row)
     {
         var kind = Convert.ToString(row["store_kind"], CultureInfo.InvariantCulture); var source = Convert.ToString(row["source_item_id"], CultureInfo.InvariantCulture)!;
+        if (kind == "analysis_run_raw" && source.StartsWith("local_ai:", StringComparison.Ordinal))
+        {
+            if (!LocalAiSourceExists(connection, transaction, row, source)) return;
+            var parts = source.Split(':');
+            connection.CreateFunction<string, string, long>("local_ai_retention_delete_authorized",
+                (contentKind, id) => contentKind == parts[1] && id == parts[2] ? 1L : 0L, isDeterministic: false);
+            try
+            {
+                Execute(connection, transaction, parts[1] == "snapshot"
+                    ? "UPDATE local_ai_snapshots SET payload_json=NULL,evidence_index_json=NULL WHERE snapshot_id=$id AND scope_kind='session';"
+                    : "UPDATE local_ai_results SET result_json=NULL WHERE result_id=$id;", parts[2]);
+            }
+            finally
+            {
+                connection.CreateFunction<string, string, long>("local_ai_retention_delete_authorized", static (_, _) => 0L, isDeterministic: false);
+            }
+            return;
+        }
         if (kind == "session_event_content" && TableExists(connection, "session_event_content", transaction)) Execute(connection, transaction, "DELETE FROM session_event_content WHERE event_id=$id;", source);
         else if (kind == "raw_record" && TableExists(connection, "raw_records", transaction)) Execute(connection, transaction, "DELETE FROM raw_records WHERE id=$id;", long.Parse(source, CultureInfo.InvariantCulture));
         else if (kind == "analysis_run_raw" && TableExists(connection, "monitor_analysis_runs", transaction))
         { if (TableExists(connection, "monitor_analysis_events", transaction)) Execute(connection, transaction, "DELETE FROM monitor_analysis_events WHERE run_id=$id;", long.Parse(source, CultureInfo.InvariantCulture)); Execute(connection, transaction, "UPDATE monitor_analysis_runs SET result_markdown=NULL,error_message=NULL WHERE id=$id;", long.Parse(source, CultureInfo.InvariantCulture)); }
+    }
+
+    private static bool LocalAiSourceExists(SqliteConnection connection, SqliteTransaction? transaction, Dictionary<string, object?> row, string source)
+    {
+        var parts = source.Split(':');
+        if (parts.Length != 3 || parts[1] is not ("snapshot" or "result") || !LocalAiResultValidatorV1.CanonicalUuid7(parts[2]))
+            throw new InvalidOperationException();
+        var snapshot = parts[1] == "snapshot";
+        if (!TableExists(connection, snapshot ? "local_ai_snapshots" : "local_ai_results", transaction)) return false;
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = snapshot
+            ? $"SELECT {BoundedTextProjection("created_at")},typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32,created_at,retention_owner_token,payload_json IS NOT NULL OR evidence_index_json IS NOT NULL FROM local_ai_snapshots WHERE snapshot_id=$id AND scope_kind='session';"
+            : $"SELECT {BoundedTextProjection("created_at")},typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32,created_at,retention_owner_token,result_json IS NOT NULL FROM local_ai_results WHERE result_id=$id;";
+        command.Parameters.AddWithValue("$id", parts[2]);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return false;
+        if (reader.GetInt64(0) != 1 || reader.GetInt64(1) != 1) throw new InvalidOperationException();
+        var captured = reader.GetString(2);
+        var receipt = RetentionOwnershipReceipt.CreateLocalAi(new(TextValue(row, "store_instance_id"), parts[1], parts[2],
+            captured, DateTimeOffset.ParseExact(captured, "O", CultureInfo.InvariantCulture).UtcDateTime.Ticks, reader.GetFieldValue<byte[]>(3)));
+        if (!BytesEqual(row["ownership_receipt"], receipt)) throw new InvalidOperationException();
+        return reader.GetInt64(4) == 1;
     }
 
     private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, object value) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$id", value); command.ExecuteNonQuery(); }
