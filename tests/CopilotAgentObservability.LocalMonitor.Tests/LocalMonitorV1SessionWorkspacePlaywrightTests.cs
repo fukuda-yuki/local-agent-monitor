@@ -51,14 +51,19 @@ public sealed class LocalMonitorV1SessionWorkspacePlaywrightTests
         node["node"]!["metadata"] = JsonNode.Parse("""{"kind":"llm_call","requested_model":{"state":"recorded","value":"requested-a"},"response_model":{"state":"recorded","value":"observed-b"},"observation_scope":"exact_call"}""");
         node["node"]!["tokens"]!["input"] = JsonNode.Parse("""{"state":"recorded","value":41}""");
         summary["steps"] = new JsonArray(StepFromNode(node["node"]!.AsObject()));
-        var full = new string('x', 300) + "<script>window.__injected=true</script>終端";
+        var full = new string('x', 3000) + "<script>window.__injected=true</script>終端";
         await page.RouteAsync("**/summary", r => r.FulfillAsync(Json(summary.ToJsonString())));
         await page.RouteAsync("**/timeline?*", r => r.FulfillAsync(Json(timeline.ToJsonString())));
         await page.RouteAsync("**/nodes/*?*", r => r.FulfillAsync(Json(node.ToJsonString())));
         await page.RouteAsync("**/nodes/*/content?*", r => { var isResponse = r.Request.Url.Contains("22222222222222222222222222222222"); var content = ContentDocument(revision, isResponse ? "event_content" : "instruction", isResponse ? "exact response" : full); content["node_id"] = isResponse ? "node-22222222222222222222222222222222" : nodeId; return r.FulfillAsync(Json(content.ToJsonString())); });
         await page.GotoAsync(host.Url + $"/sessions/{SessionId}");
         var journey = page.Locator("[data-session-conversation]"); await Expect(journey.Locator("li")).ToHaveCountAsync(3); await Expect(journey.Locator("ol")).ToBeHiddenAsync();
+        await page.SetViewportSizeAsync(553, 493);
         await journey.GetByRole(AriaRole.Button, new() { Name = "依頼の全文を読む", Exact = true }).ClickAsync(); await Expect(page.Locator("[data-raw-content-text]")).ToHaveTextAsync(full); Assert.False(await page.EvaluateAsync<bool>("() => Boolean(window.__injected)"));
+        Assert.True(await page.EvaluateAsync<bool>("""
+            () => document.querySelector('[data-raw-content-formatted] pre').getBoundingClientRect().bottom
+                <= document.querySelector('[data-raw-content-source]').getBoundingClientRect().top
+            """), "The source disclosure must follow the readable content without overlapping it.");
         await page.Locator("[data-raw-content-close]").ClickAsync();
         await journey.GetByRole(AriaRole.Button, new() { Name = "記録されたテキスト応答を読む", Exact = true }).ClickAsync(); await Expect(page.Locator("[data-raw-content-text]")).ToHaveTextAsync("exact response"); await page.Locator("[data-raw-content-close]").ClickAsync();
         await page.Locator("[data-step-node]").ClickAsync();
