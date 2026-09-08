@@ -143,9 +143,14 @@ public sealed class LocalMonitorV1SessionExplorerRouteTests
             LocalRepositorySessionDetailRequest request,
             CancellationToken cancellationToken)
         {
+            var fact = new LocalWorkspaceFact<long>("not_observed", null);
+            var activity = new LocalWorkspaceActivityFacts(fact, fact, fact, fact, fact);
+            var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, fact, fact, fact, fact, fact, fact, fact, fact);
+            var row = new LocalWorkspaceProjectionRow(request.SessionId, 0, 0, "not_observed", null, "unknown", "partial",
+                new("not_observed", []), new("not_observed", []), activity, tokens, "not_observed", null, null, null, null, [], "fixture");
             var session = new LocalRepositoryScopeSessionSnapshot(
                 request.SessionId,
-                new SessionRow(request.SessionId),
+                row,
                 0,
                 LocalRepositoryScopeAssignmentState.Unassigned,
                 LocalRepositoryScopeAssignmentAuthority.None,

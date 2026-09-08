@@ -93,7 +93,7 @@
     </form>
     @if (repositoryId is not null)
     {
-        <section id="saved-comparisons" data-saved-comparisons data-repository-id="@repositoryId" aria-label="保存した比較"><h2>保存した比較</h2><p>この端末に30日間保存。バックアップ・復元の対象外</p><button type="button" data-saved-comparisons-refresh>保存一覧を更新</button><p data-saved-comparisons-status role="status" aria-live="polite"></p><ul data-saved-comparisons-list></ul></section>
+        <details id="saved-comparisons" data-saved-comparisons data-repository-id="@repositoryId" aria-label="保存した比較"><summary>保存した比較</summary><p>この端末に30日間保存。バックアップ・復元の対象外</p><button type="button" data-saved-comparisons-refresh>保存一覧を更新</button><p data-saved-comparisons-status role="status" aria-live="polite"></p><ul data-saved-comparisons-list></ul></details>
     }
 
     <p id="session-explorer-status" role="status" aria-live="polite">セッションを読み込んでいます。</p>
@@ -112,6 +112,13 @@
             <tbody id="session-explorer-rows"></tbody>
         </table>
     </div>
+    <details data-sparse-sessions hidden>
+        <summary data-sparse-session-count>記録が少ないセッション</summary>
+        <p class="local-monitor-muted">このページで指示・呼出し使用量・ツール活動を確認できない記録です。各セッションから元の記録を開けます。</p>
+        <div class="local-monitor-session-table-region" tabindex="0" aria-label="記録が少ないセッション一覧">
+            <table><thead><tr><th scope="col" data-compare-column hidden>比較対象</th><th scope="col">セッション</th><th scope="col">活動</th><th scope="col">入力・出力トークン</th><th scope="col">日時</th><th scope="col"><span class="visually-hidden">操作</span></th></tr></thead><tbody data-sparse-session-rows></tbody></table>
+        </div>
+    </details>
     <div class="local-monitor-session-pagination">
         <button type="button" id="session-load-more" hidden>次のページ</button>
     </div>

@@ -1220,8 +1220,10 @@ public sealed class LocalMonitorV1SessionExplorerPlaywrightTests
         await TabToAsync("#session-limit");
         await TabToAsync("#session-include-archived");
         await TabToAsync(".local-monitor-advanced-filters button[type='submit']");
+        await TabToAsync("[data-saved-comparisons] > summary");
+        await page.Keyboard.PressAsync("Enter");
         await TabToAsync("[data-saved-comparisons-refresh]");
-        await TabToAsync(".local-monitor-session-table-region");
+        await TabToAsync(".local-monitor-session-table-region[aria-label='セッション一覧']");
         await TabToAsync("[data-session-row]:first-child [data-session-open]");
         await TabToAsync("[data-session-row]:first-child .local-monitor-session-identity .local-monitor-session-fact-disclosure > summary");
         await TabToAsync("[data-session-row]:first-child [data-session-summary] .local-monitor-session-fact-disclosure > summary");

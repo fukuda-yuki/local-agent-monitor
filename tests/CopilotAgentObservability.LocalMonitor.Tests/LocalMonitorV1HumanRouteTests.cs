@@ -1127,9 +1127,14 @@ public sealed class LocalMonitorV1HumanRouteTests
             LocalRepositorySessionDetailRequest request,
             CancellationToken cancellationToken)
         {
+            var fact = new LocalWorkspaceFact<long>("not_observed", null);
+            var activity = new LocalWorkspaceActivityFacts(fact, fact, fact, fact, fact);
+            var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, fact, fact, fact, fact, fact, fact, fact, fact);
+            var row = new LocalWorkspaceProjectionRow(request.SessionId, 0, 0, "not_observed", null, "unknown", "partial",
+                new("not_observed", []), new("not_observed", []), activity, tokens, "not_observed", null, null, null, null, [], "fixture");
             var session = new LocalRepositoryScopeSessionSnapshot(
                 request.SessionId,
-                new SessionRow(request.SessionId),
+                row,
                 0,
                 LocalRepositoryScopeAssignmentState.Unassigned,
                 LocalRepositoryScopeAssignmentAuthority.None,
@@ -1142,15 +1147,16 @@ public sealed class LocalMonitorV1HumanRouteTests
                 0,
                 true,
                 null);
-            var fact = new LocalWorkspaceFact<long>("not_observed", null);
-            var activity = new LocalWorkspaceActivityFacts(fact, fact, fact, fact, fact);
-            var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 1, fact, fact, fact, fact, fact, fact, fact, fact);
             var execution = new LocalWorkspaceExecutionDetail("9a5590c8-46e3-7069-af48-3844d2bf17a4", request.SessionId,
                 "session_run", "run", 0, "completed", "completed", null, null, "missing", null, null, null, activity, tokens, ChildCount: 1, Latest: true);
-            var previousExecution = execution with { ExecutionId = "8a5590c8-46e3-7069-af48-3844d2bf17a4", Latest = false };
+            var previousExecution = execution with { ExecutionId = "8a5590c8-46e3-7069-af48-3844d2bf17a4", Latest = false, SourceOrdinal = 1 };
             var node = new LocalWorkspaceNodeDetail("node-a8a773d6614d5030f505ff195b452dd6", request.SessionId, execution.ExecutionId,
                 "session_event", "event", 0, null, "exact", "event", "recorded", "user.message", "completed", "completed", "missing", null, null, null,
                 activity, tokens, null, null, null);
+            var root = new LocalWorkspaceNodeDetail("node-2db4028cf76015c954848d7dcbb5deca", request.SessionId, execution.ExecutionId,
+                "execution_root", "run", 0, null, "exact", "execution", "not_observed", null, "completed", "completed", "missing", null, null, null,
+                activity, tokens, null, null, null);
+            var previousRoot = root with { NodeId = "node-33333333333333333333333333333333", ExecutionId = previousExecution.ExecutionId };
             if (request.Kind == LocalRepositorySessionDetailRequestKind.Node)
             {
                 if (staleNode || request.ExpectedWorkspaceRevision != new string('1', 64))
@@ -1162,7 +1168,7 @@ public sealed class LocalMonitorV1HumanRouteTests
                 session,
                 new LocalWorkspaceSessionDetailContribution(
                     request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [execution] : [execution, previousExecution],
-                    request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [node] : [], [], []),
+                    request.Kind == LocalRepositorySessionDetailRequestKind.Node ? [root, node] : [root, previousRoot, node], [], []),
                 new string('1', 64)));
         }
     }

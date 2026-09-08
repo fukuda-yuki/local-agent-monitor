@@ -315,7 +315,10 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                       AND e.source_adapter='otel-exact' AND e.type='otel.span'
                       AND local_workspace_ticks(m.start_time) IS NOT NULL
                       AND (m.end_time IS NULL OR local_workspace_ticks(m.end_time)>=local_workspace_ticks(m.start_time))
-                      AND (SELECT COUNT(*) FROM monitor_spans other WHERE lower(other.trace_id)=m.trace_id AND lower(other.span_id)=m.span_id)=1
+                      AND COALESCE((WITH owners AS MATERIALIZED (
+                          SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                          FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT other.owner_count FROM owners other
+                        WHERE other.trace_key=m.trace_id AND other.span_key=m.span_id),0)=1
                     GROUP BY e.session_id;
                     """;
                 range.Parameters.AddWithValue("$ids", ids);
@@ -358,14 +361,15 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
               LEFT JOIN local_workspace_span_facts fact
                 ON fact.raw_record_id=span.raw_record_id AND fact.span_ordinal=span.span_ordinal
               WHERE event.run_id IS NOT NULL AND span.category='llm_call' COLLATE BINARY
-                AND (SELECT COUNT(*) FROM monitor_spans owner
-                  WHERE lower(owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                    AND lower(owner.span_id)=lower(span.span_id) COLLATE BINARY)=1
-                AND (SELECT COUNT(*) FROM session_events owner
-                  WHERE owner.source_adapter='otel-exact' COLLATE BINARY
-                    AND owner.type='otel.span' COLLATE BINARY
-                    AND lower(owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                    AND lower(owner.source_event_id)=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY)=1
+                AND COALESCE((WITH owners AS MATERIALIZED (
+                    SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                    FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT owner.owner_count FROM owners owner
+                  WHERE owner.trace_key=lower(span.trace_id) COLLATE BINARY AND owner.span_key=lower(span.span_id) COLLATE BINARY),0)=1
+                AND COALESCE((WITH owners AS MATERIALIZED (
+                    SELECT lower(trace_id) trace_key,lower(source_event_id) source_key,COUNT(*) owner_count
+                    FROM session_events WHERE source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
+                    GROUP BY lower(trace_id),lower(source_event_id)) SELECT owner.owner_count FROM owners owner
+                  WHERE owner.trace_key=lower(span.trace_id) COLLATE BINARY AND owner.source_key=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY),0)=1
                 AND event.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
               """
             : string.Empty;
@@ -383,14 +387,15 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 JOIN local_workspace_span_facts fact
                   ON fact.raw_record_id=span.raw_record_id AND fact.span_ordinal=span.span_ordinal
                 WHERE span.operation='chat' COLLATE BINARY AND fact.retry_count IS NOT NULL
-                  AND (SELECT COUNT(*) FROM monitor_spans owner
-                    WHERE lower(owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                      AND lower(owner.span_id)=lower(span.span_id) COLLATE BINARY)=1
-                  AND (SELECT COUNT(*) FROM session_events owner
-                    WHERE owner.source_adapter='otel-exact' COLLATE BINARY
-                      AND owner.type='otel.span' COLLATE BINARY
-                      AND lower(owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                      AND lower(owner.source_event_id)=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY)=1
+                  AND COALESCE((WITH owners AS MATERIALIZED (
+                      SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                      FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT owner.owner_count FROM owners owner
+                    WHERE owner.trace_key=lower(span.trace_id) COLLATE BINARY AND owner.span_key=lower(span.span_id) COLLATE BINARY),0)=1
+                  AND COALESCE((WITH owners AS MATERIALIZED (
+                      SELECT lower(trace_id) trace_key,lower(source_event_id) source_key,COUNT(*) owner_count
+                      FROM session_events WHERE source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
+                      GROUP BY lower(trace_id),lower(source_event_id)) SELECT owner.owner_count FROM owners owner
+                    WHERE owner.trace_key=lower(span.trace_id) COLLATE BINARY AND owner.source_key=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY),0)=1
                   AND (event.status='gap_before_capture' OR event.content_state='unsupported')
                   AND event.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
                 GROUP BY event.session_id),
@@ -406,14 +411,15 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                   JOIN local_workspace_span_facts fact
                     ON fact.raw_record_id=span.raw_record_id AND fact.span_ordinal=span.span_ordinal
                   WHERE event.run_id IS NOT NULL AND span.operation='chat' COLLATE BINARY AND fact.retry_count IS NOT NULL
-                    AND (SELECT COUNT(*) FROM monitor_spans owner
-                      WHERE lower(owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                        AND lower(owner.span_id)=lower(span.span_id) COLLATE BINARY)=1
-                    AND (SELECT COUNT(*) FROM session_events owner
-                      WHERE owner.source_adapter='otel-exact' COLLATE BINARY
-                        AND owner.type='otel.span' COLLATE BINARY
-                        AND lower(owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                        AND lower(owner.source_event_id)=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY)=1
+                    AND COALESCE((WITH owners AS MATERIALIZED (
+                        SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                        FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT owner.owner_count FROM owners owner
+                      WHERE owner.trace_key=lower(span.trace_id) COLLATE BINARY AND owner.span_key=lower(span.span_id) COLLATE BINARY),0)=1
+                    AND COALESCE((WITH owners AS MATERIALIZED (
+                        SELECT lower(trace_id) trace_key,lower(source_event_id) source_key,COUNT(*) owner_count
+                        FROM session_events WHERE source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
+                        GROUP BY lower(trace_id),lower(source_event_id)) SELECT owner.owner_count FROM owners owner
+                      WHERE owner.trace_key=lower(span.trace_id) COLLATE BINARY AND owner.source_key=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY),0)=1
                     AND event.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))) exact
                 GROUP BY exact.session_id),
               otel_tool_totals AS (
@@ -428,14 +434,15 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                   WHERE span.operation='execute_tool' COLLATE BINARY AND span.category IN ('tool_call','error')
                     AND length(span.trace_id)=32 AND span.trace_id=lower(span.trace_id) AND span.trace_id NOT GLOB '*[^0-9a-f]*'
                     AND length(span.span_id)=16 AND span.span_id=lower(span.span_id) AND span.span_id NOT GLOB '*[^0-9a-f]*'
-                    AND (SELECT COUNT(*) FROM monitor_spans owner
-                      WHERE lower(owner.trace_id)=span.trace_id COLLATE BINARY
-                        AND lower(owner.span_id)=span.span_id COLLATE BINARY)=1
-                    AND (SELECT COUNT(*) FROM session_events owner
-                      WHERE owner.source_adapter='otel-exact' COLLATE BINARY
-                        AND owner.type='otel.span' COLLATE BINARY
-                        AND lower(owner.trace_id)=span.trace_id COLLATE BINARY
-                        AND lower(owner.source_event_id)=span.trace_id||'/'||span.span_id COLLATE BINARY)=1
+                    AND COALESCE((WITH owners AS MATERIALIZED (
+                        SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                        FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT owner.owner_count FROM owners owner
+                      WHERE owner.trace_key=span.trace_id COLLATE BINARY AND owner.span_key=span.span_id COLLATE BINARY),0)=1
+                    AND COALESCE((WITH owners AS MATERIALIZED (
+                        SELECT lower(trace_id) trace_key,lower(source_event_id) source_key,COUNT(*) owner_count
+                        FROM session_events WHERE source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
+                        GROUP BY lower(trace_id),lower(source_event_id)) SELECT owner.owner_count FROM owners owner
+                      WHERE owner.trace_key=span.trace_id COLLATE BINARY AND owner.source_key=span.trace_id||'/'||span.span_id COLLATE BINARY),0)=1
                     AND event.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))) exact
                 GROUP BY exact.session_id)
               """
@@ -505,14 +512,15 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
               WHERE span.operation='execute_tool' COLLATE BINARY AND span.category='tool_call' COLLATE BINARY
                 AND length(span.trace_id)=32 AND span.trace_id=lower(span.trace_id) AND span.trace_id NOT GLOB '*[^0-9a-f]*'
                 AND length(span.span_id)=16 AND span.span_id=lower(span.span_id) AND span.span_id NOT GLOB '*[^0-9a-f]*'
-                AND (SELECT COUNT(*) FROM monitor_spans owner
-                  WHERE lower(owner.trace_id)=span.trace_id COLLATE BINARY
-                    AND lower(owner.span_id)=span.span_id COLLATE BINARY)=1
-                AND (SELECT COUNT(*) FROM session_events owner
-                  WHERE owner.source_adapter='otel-exact' COLLATE BINARY
-                    AND owner.type='otel.span' COLLATE BINARY
-                    AND lower(owner.trace_id)=span.trace_id COLLATE BINARY
-                    AND lower(owner.source_event_id)=span.trace_id||'/'||span.span_id COLLATE BINARY)=1
+                AND COALESCE((WITH owners AS MATERIALIZED (
+                    SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                    FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT owner.owner_count FROM owners owner
+                  WHERE owner.trace_key=span.trace_id COLLATE BINARY AND owner.span_key=span.span_id COLLATE BINARY),0)=1
+                AND COALESCE((WITH owners AS MATERIALIZED (
+                    SELECT lower(trace_id) trace_key,lower(source_event_id) source_key,COUNT(*) owner_count
+                    FROM session_events WHERE source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
+                    GROUP BY lower(trace_id),lower(source_event_id)) SELECT owner.owner_count FROM owners owner
+                  WHERE owner.trace_key=span.trace_id COLLATE BINARY AND owner.source_key=span.trace_id||'/'||span.span_id COLLATE BINARY),0)=1
                 AND span.tool_name IS NOT NULL AND length(span.tool_name)>0
                 AND item.state IN ('expiring','retained_by_policy')
                 AND item.read_denied_at IS NULL AND item.deleted_at IS NULL AND item.error_code IS NULL
@@ -859,14 +867,15 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 AND event.trace_id=span.trace_id COLLATE BINARY
               WHERE event.session_id=owner.session_id AND event.run_id IS NOT NULL
                 AND span.category='llm_call' COLLATE BINARY
-                AND (SELECT COUNT(*) FROM monitor_spans exact_owner
-                  WHERE lower(exact_owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                    AND lower(exact_owner.span_id)=lower(span.span_id) COLLATE BINARY)=1
-                AND (SELECT COUNT(*) FROM session_events exact_owner
-                  WHERE exact_owner.source_adapter='otel-exact' COLLATE BINARY
-                    AND exact_owner.type='otel.span' COLLATE BINARY
-                    AND lower(exact_owner.trace_id)=lower(span.trace_id) COLLATE BINARY
-                    AND lower(exact_owner.source_event_id)=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY)=1
+                AND COALESCE((WITH owners AS MATERIALIZED (
+                    SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                    FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT exact_owner.owner_count FROM owners exact_owner
+                  WHERE exact_owner.trace_key=lower(span.trace_id) COLLATE BINARY AND exact_owner.span_key=lower(span.span_id) COLLATE BINARY),0)=1
+                AND COALESCE((WITH owners AS MATERIALIZED (
+                    SELECT lower(trace_id) trace_key,lower(source_event_id) source_key,COUNT(*) owner_count
+                    FROM session_events WHERE source_adapter='otel-exact' COLLATE BINARY AND type='otel.span' COLLATE BINARY
+                    GROUP BY lower(trace_id),lower(source_event_id)) SELECT exact_owner.owner_count FROM owners exact_owner
+                  WHERE exact_owner.trace_key=lower(span.trace_id) COLLATE BINARY AND exact_owner.source_key=lower(span.trace_id||'/'||span.span_id) COLLATE BINARY),0)=1
               """
             : string.Empty;
         var tokenOwnerOverflow = $"""

@@ -112,7 +112,7 @@ Schema token: `local-monitor-session-summary.response.v2`. It is sole-current;
 there is no v1 selector, negotiation path, or fallback.
 
 Top-level property order is `schema_version, workspace_revision, session,
-executions, conversation, llm_calls, technical_references`.
+executions, conversation, steps, llm_calls, technical_references`.
 
 `session` property order is `session_id, status, completeness, assignment,
 archive, instruction, source, model, version, timing, tokens, activity,
@@ -220,9 +220,9 @@ nullable canonical recorded timestamp. Part is the existing exact `instruction`
 or `event_content` selector. Content state uses the existing seven-state content
 availability vocabulary. An exact parent LLM call supplies `call_node_id`;
 otherwise it is null. `correspondence` is currently `unknown`: a shared call does
-not prove a one-to-one instruction/response match. Instructions link directly to
-responses with the same exact call binding, labeled as responses from that call
-while individual correspondence remains unknown. Envelope observations remain
+not prove a one-to-one instruction/response match. Call details link to available
+responses with the same exact call binding while individual correspondence
+remains unknown. Envelope observations remain
 visible as recorded observations, not inferred new turns. Full retained content
 is read on demand through the existing revision-bound content route, rendered
 inertly, and never replaced by the bounded Session heading preview.
@@ -234,7 +234,8 @@ They do not alter the Session collection model fact.
 
 For an exact LLM call, `event_content` checks retained input context from its
 unique raw Trace/Span owner. It returns captured `gen_ai.system_instructions`
-and `gen_ai.input.messages` values as inert text only after raw-record Retention
+and `gen_ai.input.messages` / `gen_ai.output.messages` values as a JSON object of
+unchanged captured attribute strings, rendered inertly only after raw-record Retention
 access approval. Availability means the raw span can be checked, not that these
 attributes or any particular role were captured. Missing attributes are
 `404 raw_content_not_captured`. The runtime locator uses `raw_record` and
@@ -242,6 +243,31 @@ attributes or any particular role were captured. Missing attributes are
 bounded authorized read. The raw retention tuple and effective expiry state
 participate in workspace revision. All existing leases, owner binding, size
 limits and terminal states remain enforced. No new part token is added.
+
+A failed semantic OTel Tool may expose `error_message` from the unique exact
+event/Trace/Span owner. Its raw locator is `otel_error`; the selector reads only
+the captured `error.type` string from that span. Missing or duplicate attributes
+do not produce invented diagnostics. This locator has the same owner receipt,
+lease, current-revision, expiry, size and publication checks as call context.
+Neither summary nor node metadata reads raw payloads or obtains access leases.
+
+`steps` is a closed chronological array of at most 4,096 semantic nodes, ordered
+by time authority, start, source ordinal and node ID. Each item is exactly
+`{node_id,execution_id,parent_node_id,relationship_authority,kind,name,status,timing,usage,content_parts}`.
+Kinds are `agent|llm_call|tool|skill|subagent|error|retry|permission`. Names,
+relationships, status and timing use the same authenticated node facts as the
+timeline. `usage` is null for non-calls; a call contains exactly `input`, `output`,
+`cache_read` and `cache_creation`, each an existing `{state,value}` component.
+`content_parts` lists available parts in the existing canonical part order.
+It contains references and sanitized values only, never content bodies.
+
+The HTML route embeds its already validated summary as JSON in a non-executing
+script element using HTML-safe JSON escaping. The browser applies the same
+closed validation as the API response. Initial activity and resource views reuse
+this snapshot rather than constructing another summary or fetching every call.
+Refresh and stale-revision recovery use the existing summary API. Hierarchical
+timeline reads remain on demand. No shared cache, schema bypass, or publication
+gate replacement is part of this read path.
 
 Captured call input history and system/developer context are separate from this
 user conversation. Historical Skill content retains its own snapshot entry point;

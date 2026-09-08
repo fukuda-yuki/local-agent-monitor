@@ -161,7 +161,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertFixture("node-nested.json", NodeToken, AssertNodeOrder);
         AssertFixture("node-related-serializer-only.json", NodeToken, AssertNodeOrder);
         AssertFixture("content-full.json", ContentToken, AssertContentOrder);
-        const string ContentGolden = "{\"schema_version\":\"local-monitor-node-content.response.v2\",\"workspace_revision\":\"18e629b48a679f3370b973894beb27bde10514fdd490fdde5b14f81533695f8d\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"node_id\":\"node-a8a773d6614d5030f505ff195b452dd6\",\"part\":\"event_content\",\"state\":\"available\",\"source_reference\":{\"store_kind\":\"session_event_content\",\"source_item_id\":\"018f0000-0000-7000-8000-000000000004\",\"revision\":1},\"text\":\"A😀é\\n\",\"utf8_byte_length\":8,\"unicode_scalar_length\":4,\"truncation\":false}";
+        const string ContentGolden = "{\"schema_version\":\"local-monitor-node-content.response.v2\",\"workspace_revision\":\"365d75ca150111d5d0797f99cf7ef74f7b1aa697bf7d9958df634e132a64aab4\",\"session_id\":\"018f0000-0000-7000-8000-000000000001\",\"node_id\":\"node-a8a773d6614d5030f505ff195b452dd6\",\"part\":\"event_content\",\"state\":\"available\",\"source_reference\":{\"store_kind\":\"session_event_content\",\"source_item_id\":\"018f0000-0000-7000-8000-000000000004\",\"revision\":1},\"text\":\"A😀é\\n\",\"utf8_byte_length\":8,\"unicode_scalar_length\":4,\"truncation\":false}";
         Assert.Equal(Encoding.UTF8.GetBytes(ContentGolden), File.ReadAllBytes(Path.Combine(FixtureRoot, "content-full.json")));
         Assert.Equal(504, Encoding.UTF8.GetByteCount(ContentGolden));
         using var nested = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "node-nested.json")));
@@ -256,7 +256,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     [Fact]
     public void TimelineCursorHasFrozen119ByteFrameAndLiteralFixtureBinding()
     {
-        const string Golden = "AXlrCubeTueOZKGkVaUOcZ_ITngj3bdVFaAP1YDiG_UZAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2PKMSEJ9hqf4IIRtcW2M8FHZwfE2qxc2iB3lrQ3Qyn4g";
+        const string Golden = "AUkgbmJd5c6IwSguh0id0F6RAkJEzF91zJPtLo_Z48WxAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2cQoE2yJac7E7-6TIGTqAsKM2xT_-_cmkFI3nE1STrNE";
         using var fixture = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "timeline-page.json")));
         Assert.Equal(Golden, fixture.RootElement.GetProperty("next_cursor").GetString());
         var bytes = DecodeBase64Url(Golden);
@@ -272,7 +272,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
         var filterFrame = TimelineFilterFrame(
             "018f0000-0000-7000-8000-000000000001",
-            "6cccbfaee77a02a35a8a6a6ff625fbe0d1a192797fe839c903f9a6c8d5c636eb",
+            "2ab689c71c10f9df53391d137f0d54e6dcdebdab38c11bbf3fb337d62ffee783",
             "9a5590c8-46e3-7069-af48-3844d2bf17a4",
             null,
             1);
@@ -474,7 +474,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
 
     private static void AssertSummaryOrder(JsonElement root)
     {
-        AssertProperties(root, "schema_version", "workspace_revision", "session", "executions", "conversation", "llm_calls", "technical_references");
+        AssertProperties(root, "schema_version", "workspace_revision", "session", "executions", "conversation", "steps", "llm_calls", "technical_references");
         var session = root.GetProperty("session");
         AssertProperties(session, "session_id", "status", "completeness", "assignment", "archive", "instruction", "source", "model", "version", "timing", "tokens", "activity", "capture");
         AssertProperties(session.GetProperty("assignment"), "state", "authority", "revision", "repository_id", "candidate_repository_ids");
@@ -662,6 +662,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         "complete|partial|not_observed|invalid", "raw_content_not_captured|raw_content_expired|source_unsupported|capture_gap|certification_pending|projection_invalid|token_inconsistent|cache_inconsistent",
         "selected|started|completed|failed|deselected|unknown", "recorded|missing|invalid", "missing|invalid",
         "exact|explicit|unknown", "execution|agent|llm_call|skill|tool|subagent|event|error|retry|permission|unknown_relation_group",
+        "agent|llm_call|tool|skill|subagent|error|retry|permission",
         "recorded|not_observed|invalid", "instruction|tool_input|tool_result|error_message|subagent_input|event_content",
         "available|not_captured|expired|deleted|read_denied|oversized|invalid", "user|assistant", "instruction|event_content",
         "instruction|source|model|version|timing|tokens|cache|skill|tool|subagent|error|retry",

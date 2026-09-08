@@ -37,7 +37,8 @@
     } catch { if (!controller.signal.aborted && root.isConnected) root.textContent = "保持・期限の状態を確認できません。保持管理画面で再確認してください。"; }
   }
   window.LocalMonitorSessionRetention = Object.freeze({ refresh });
-  const refreshAll = () => document.querySelectorAll("[data-session-retention-status]").forEach(refresh);
+  const refreshAll = () => document.querySelectorAll("[data-session-retention-status]").forEach(root => { if (!root.closest("details") || root.closest("details").open) refresh(root); });
+  document.querySelectorAll(".local-monitor-session-management").forEach(disclosure => disclosure.addEventListener("toggle", () => { if (disclosure.open) refresh(disclosure.querySelector("[data-session-retention-status]")); }));
   document.addEventListener("cao-retention-state-changed", refreshAll);
   window.addEventListener("pagehide", () => document.querySelectorAll("[data-session-retention-status]").forEach(root => reads.get(root)?.abort()));
   refreshAll();

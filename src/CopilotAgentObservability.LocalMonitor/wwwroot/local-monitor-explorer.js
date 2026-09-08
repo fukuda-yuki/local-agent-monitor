@@ -1441,15 +1441,16 @@
     compare.hidden = !state.compareMode;
     if (state.compareMode) compare.append(cohortControl(item, "a", "基準"), cohortControl(item, "b", "比較対象"));
     const identity = element("td", "local-monitor-session-identity");
-    const link = element("a", "local-monitor-session-open", item.label.state === "recorded" ? item.label.text : fallbackLabel(item));
-    link.title = link.textContent;
+    const recordedLabel = item.label.state === "recorded" ? item.label.text : fallbackLabel(item);
+    const link = element("a", "local-monitor-session-open", recordedLabel.replace(/(^|\s)#{1,6}\s+/g, "$1").replace(/`/g, "").replace(/\s+/g, " ").trim());
+    link.title = recordedLabel;
     link.dataset.sessionOpen = "";
     link.dataset.sessionLabel = "";
     link.href = window.LocalMonitorV1Paths.session(item.session_id);
     const secondary = element("small");
     const metadataLine = element("span", "local-monitor-session-metadata-line", [...item.source.values.map(window.LocalMonitorV1FactState.sessionSourceLabel), ...item.model.values].join(" · "));
     secondary.append(metadataLine);
-    secondary.append(element("span", "local-monitor-session-metadata-line", `${item.completeness === "unbound" ? "未結合の観測断片" : "作業セッション"} · 用途不明`));
+    if (item.completeness === "unbound") secondary.append(element("span", "local-monitor-session-metadata-line", "未結合の観測断片"));
     const disclosure = element("details", "local-monitor-session-fact-disclosure");
     const disclosureSummary = element("summary", null, "詳細");
     disclosureSummary.setAttribute("aria-label", `${link.textContent}: 詳細`);
@@ -1548,9 +1549,20 @@
         state.exclusionReasons.set(item.session_id, item.archive.exclusion_reason);
       }
     }
-    rows.replaceChildren(...state.items.map(renderRow));
+    const hasInvestigationContent = item => item.label.state === "recorded"
+      || item.tokens.available_execution_count > 0
+      || item.summary.tool.state === "recorded" && item.summary.tool.count > 0;
+    const useful = state.items.filter(hasInvestigationContent);
+    const sparse = state.items.filter(item => !hasInvestigationContent(item));
+    rows.replaceChildren(...useful.map(renderRow));
+    const sparseRows = root.querySelector("[data-sparse-session-rows]");
+    if (sparseRows) {
+      sparseRows.replaceChildren(...sparse.map(renderRow));
+      root.querySelector("[data-sparse-sessions]").hidden = sparse.length === 0;
+      root.querySelector("[data-sparse-session-count]").textContent = `このページの記録が少ないセッション（${sparse.length}件）`;
+    }
     root.querySelectorAll("[data-compare-column]").forEach(node => { node.hidden = !state.compareMode; });
-    root.querySelector("#session-result-count").textContent = `${state.items.length.toLocaleString("ja-JP")}件`;
+    root.querySelector("#session-result-count").textContent = `${state.items.length.toLocaleString("ja-JP")}件 · 指示・使用量・ツール記録あり ${useful.length}件`;
     loadMore.hidden = state.nextCursor === null;
     loadMore.disabled = false;
     compareBar.hidden = !state.compareMode;
@@ -1589,7 +1601,6 @@
         ? "[data-session-assignment-picker]"
         : `[data-session-${request.action}]`;
       target = row?.querySelector(selector) ?? row?.querySelector("[data-session-open]");
-      if (target?.closest("details") instanceof HTMLDetailsElement) target.closest("details").open = true;
       if (target === null || target === undefined) {
         resultStatus.tabIndex = -1;
         target = resultStatus;
@@ -1600,7 +1611,10 @@
         target = resultStatus;
       } else target = loadMore;
     }
-    if (target instanceof HTMLElement && !target.hidden) target.focus({ preventScroll: true });
+    if (target instanceof HTMLElement && !target.hidden) {
+      for (let disclosure = target.closest("details"); disclosure; disclosure = disclosure.parentElement?.closest("details")) disclosure.open = true;
+      target.focus({ preventScroll: true });
+    }
   }
 
   function showError(message, returnControl, recovery) {
@@ -1632,6 +1646,8 @@
     state.items = [];
     state.nextCursor = null;
     rows.replaceChildren();
+    root.querySelector("[data-sparse-session-rows]")?.replaceChildren();
+    const sparseGroup = root.querySelector("[data-sparse-sessions]"); if (sparseGroup) sparseGroup.hidden = true;
     root.querySelector("#session-result-count").textContent = "読み込み中";
     loadMore.hidden = true;
     loadMore.disabled = true;

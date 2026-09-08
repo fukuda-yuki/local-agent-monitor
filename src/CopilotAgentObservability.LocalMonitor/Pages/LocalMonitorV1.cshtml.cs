@@ -12,6 +12,8 @@ internal sealed record LocalMonitorV1PageModel(
     string? ExplorerHeading,
     string? ComparisonHeading)
 {
+    internal string? SessionSummaryJson { get; init; }
+
     internal static LocalMonitorV1PageModel Success(
         LocalMonitorV1PrimaryPathResult path,
         LocalMonitorV1PageQuery query,
