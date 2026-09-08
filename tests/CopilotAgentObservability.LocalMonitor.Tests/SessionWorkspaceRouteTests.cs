@@ -14,13 +14,13 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SessionWorkspaceRouteTests
 {
     [Fact]
-    public async Task HookForward_PermissionRequestCommitsOnceAndExposesFilteredContent()
+    public async Task HookForward_ObservedPermissionRequestShapeCommitsOnceAndExposesFilteredContent()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp,
             repositoryAiEnabled: false, compareAiEnabled: false);
         const string payload = """
-            {"hookName":"permissionRequest","sessionId":"synthetic-permission-123","timestamp":1788499311386,"cwd":"SYNTHETIC_CWD","toolName":"powershell","toolInput":{"command":"echo synthetic","api_key":"remove-me"},"permissionSuggestions":[]}
+            {"hookName":"permissionRequest","sessionId":"synthetic-permission-123","timestamp":1788499311386,"cwd":"SYNTHETIC_CWD","toolName":"powershell","toolInput":{"command":"echo synthetic","api_key":"remove-me"},"permissionSuggestions":[],"traceparent":"00-11111111111111111111111111111111-2222222222222222-01"}
             """;
         using var output = new StringWriter();
         using var error = new StringWriter();
@@ -29,6 +29,7 @@ public sealed class SessionWorkspaceRouteTests
             payload.Replace("permissionRequest", "permissionrequest", StringComparison.Ordinal),
             payload.Replace("1788499311386", "\"1788499311386\"", StringComparison.Ordinal),
             payload.Replace("\"cwd\":", "\"unknown\":true,\"cwd\":", StringComparison.Ordinal),
+            payload.Replace("00-11111111111111111111111111111111-2222222222222222-01", "invalid", StringComparison.Ordinal),
         })
         {
             Assert.Equal(0, await ForwardAsync(input));
@@ -49,7 +50,7 @@ public sealed class SessionWorkspaceRouteTests
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT e.session_id,e.event_id,e.type,e.source_adapter,e.source_surface,
-                   e.occurred_at,e.content_state,n.native_session_id,c.content_json
+                   e.occurred_at,e.content_state,n.native_session_id,c.content_json,e.trace_id
             FROM session_events e
             JOIN session_native_ids n ON n.session_id=e.session_id
             JOIN session_event_content c ON c.event_id=e.event_id;
@@ -67,6 +68,9 @@ public sealed class SessionWorkspaceRouteTests
         var storedContent = reader.GetString(8);
         Assert.Contains("echo synthetic", storedContent, StringComparison.Ordinal);
         Assert.DoesNotContain("remove-me", storedContent, StringComparison.Ordinal);
+        using var storedPayload = JsonDocument.Parse(storedContent);
+        Assert.Equal("00-11111111111111111111111111111111-2222222222222222-01", storedPayload.RootElement.GetProperty("traceparent").GetString());
+        Assert.True(reader.IsDBNull(9));
         Assert.False(reader.Read());
 
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/sessions/{sessionId}/events/{eventId}/content");

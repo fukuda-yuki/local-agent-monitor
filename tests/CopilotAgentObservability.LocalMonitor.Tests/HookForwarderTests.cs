@@ -212,6 +212,60 @@ public sealed class HookForwarderTests
         Assert.Equal("PermissionRequest", document.RootElement.GetProperty("events")[0].GetProperty("type").GetString());
     }
 
+    [Theory]
+    [InlineData("00")]
+    [InlineData("01")]
+    [InlineData("ff")]
+    public async Task CopilotCliPermissionRequest_TraceparentRemainsPayloadEvidence(string flags)
+    {
+        var traceparent = $"00-11111111111111111111111111111111-2222222222222222-{flags}";
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        await RunAsync(CreatePermissionRequestPayload(extraProperties:
+            [new("traceparent", JsonSerializer.Serialize(traceparent))]), handler: handler);
+
+        Assert.Equal(1, handler.Attempts);
+        using var document = JsonDocument.Parse(handler.Body!);
+        var @event = document.RootElement.GetProperty("events")[0];
+        Assert.Equal("hook-unknown", document.RootElement.GetProperty("source_surface").GetString());
+        Assert.Equal(traceparent, @event.GetProperty("payload").GetProperty("traceparent").GetString());
+        Assert.Equal(JsonValueKind.Null, @event.GetProperty("trace_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, @event.GetProperty("parent_event_id").ValueKind);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("1")]
+    [InlineData("true")]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    [InlineData("\"\"")]
+    [InlineData("\"00-00000000000000000000000000000000-2222222222222222-01\"")]
+    [InlineData("\"00-11111111111111111111111111111111-0000000000000000-01\"")]
+    [InlineData("\"00-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-2222222222222222-01\"")]
+    [InlineData("\"00-11111111111111111111111111111111-2222222222222222-zz\"")]
+    [InlineData("\"01-11111111111111111111111111111111-2222222222222222-01\"")]
+    [InlineData("\"00-11111111111111111111111111111111-2222222222222222-01-extra\"")]
+    [InlineData("\" 00-11111111111111111111111111111111-2222222222222222-01\"")]
+    [InlineData("\"00-11111111111111111111111111111111-2222222222222222-01 \"")]
+    public async Task CopilotCliPermissionRequest_InvalidTraceparentMakesNoRequest(string value)
+    {
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(
+            extraProperties: [new("traceparent", value)]));
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_TraceparentHasExactPropertyAndSelectorScope()
+    {
+        const string value = "\"00-11111111111111111111111111111111-2222222222222222-01\"";
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(
+            extraProperties: [new("traceparent", value), new("traceparent", value)]));
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(
+            extraProperties: [new("traceParent", value)]));
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string> { ["hookName"] = "\"PermissionRequest\"" },
+            extraProperties: [new("traceparent", value)]));
+    }
+
     [Fact]
     public async Task CopilotCliPermissionRequest_ExactHookNamePresenceForbidsLegacyFallback()
     {

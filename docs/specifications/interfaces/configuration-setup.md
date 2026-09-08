@@ -1360,7 +1360,7 @@ pre-existing Copilot-compatible arm. When exact root `hookName` is absent, that
 pre-existing arm and all of its aliases and behavior remain unchanged.
 
 The selected root must be an object with exactly one occurrence of each of
-these seven ordinal properties and no other property:
+these seven ordinal properties:
 
 ```text
 hookName
@@ -1371,6 +1371,11 @@ toolName
 toolInput
 permissionSuggestions
 ```
+
+The `permissionRequest` spelling additionally permits one optional ordinal
+`traceparent` property. This is the eighth property present in retained genuine
+Copilot `hook.start` permission inputs with trace context; inputs without trace
+context retain the seven-property shape. No other root property is accepted.
 
 Their accepted values are closed:
 
@@ -1395,6 +1400,14 @@ Their accepted values are closed:
 - `cwd` is a JSON string, `toolInput` is a JSON object, and
   `permissionSuggestions` is a JSON array whose elements have no additional
   admission meaning.
+- When present, `traceparent` is a JSON string in the
+  [W3C Trace Context version `00` format](https://www.w3.org/TR/trace-context/#version-format):
+  exactly 55 ASCII characters, `00-` followed by a 32-character lowercase
+  hexadecimal nonzero trace ID, `-`, a 16-character lowercase hexadecimal
+  nonzero parent ID, `-`, and two lowercase hexadecimal flag characters.
+  Null, wrong types, whitespace, invalid IDs, additional suffixes and other
+  versions are rejected. The previously supported `PermissionRequest` spelling
+  retains its seven-property contract and does not admit this additional field.
 
 An unknown, missing, duplicate, wrong-cased, wrong-typed, out-of-range, or
 mixed-selector property makes the selected input invalid. The command then
@@ -1404,9 +1417,13 @@ An accepted input uses the existing `copilot-compatible-hook` v1 envelope with
 `source_surface=hook-unknown`, `native_session_id=sessionId`, event type
 `PermissionRequest`, and the converted `occurred_at`. Existing whole-input
 canonical event identity and recursive property/string sanitization apply
-unchanged to the accepted root. This arm does not establish further aliases, a generic
-Copilot payload schema, source inference, or a producer guarantee for another
-event or version.
+unchanged to the accepted root, including `traceparent` when present. The normal
+receiver stores filtered content through `SessionEventNormalizer` and the
+Session persistence owner. `traceparent` remains content evidence: it does not
+populate the envelope's `trace_id`, create a Session/OTel binding, or determine
+`source_surface`. This arm does not establish further aliases, a generic Copilot
+payload schema, source inference, or a producer guarantee for another event or
+version.
 
 ### GitHub Copilot App / SDK
 
@@ -1951,7 +1968,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
 | VS Code channel/profile, running-state, and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation. They assert the exact tagged v1 `desired_state` union (never an inline document), 1 MiB-plus-sentinel settings reads, supported-version drift as `recovery_required`, and transient materialization with exact expected hash. They also assert exactly one post-gate Stable-then-Insiders `--status` call per eligible channel, zero calls after an early gate failure and during `Revalidate`, no retry/sleep, no stdout leakage, all representable observations (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`; `TimedOut`), and the four dual-channel per-record restart combinations with top-level action deduplication only; revalidation proves persisted record requirements are unchanged. Contract shape/validation tests close the warning/action values. |
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
-| Copilot CLI `PermissionRequest` admission | `HookForwarderTests` cover the two exact event-specific selectors, selector exclusivity, the exact seven-property inventory and duplicates, every property type and bound, exact decimal/exponent integrality and Unix-millisecond range boundaries, silent no-request rejection, unchanged canonical identity/sanitization/`hook-unknown`, and every unaffected Copilot Hook arm. `SessionWorkspaceRouteTests` cover forwarder-to-HTTP-to-storage admission and content readback. |
+| Copilot CLI `PermissionRequest` admission | `HookForwarderTests` cover the two exact event-specific selectors, selector exclusivity, seven required properties and the optional camelCase-arm `traceparent`, duplicate/unknown properties, every property type and bound, exact decimal/exponent integrality and Unix-millisecond range boundaries, silent no-request rejection, unchanged canonical identity/sanitization/`hook-unknown`, and every unaffected Copilot Hook arm. `SessionWorkspaceRouteTests` cover the observed eight-property shape through forwarder-to-HTTP-to-storage admission and content readback without promoting trace context to a binding. |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
 | Claude nested settings and private-plan arm | `ClaudeSettingsDocumentTests` and `SetupStorageTests` cover exact nested ownership, preservation, malformed/duplicate/oversize input, both existing v1 fixture byte identities, `claude_settings_owned_values_v1` bounds and arm relation, and secret/path/command non-leakage outside the private plan |
