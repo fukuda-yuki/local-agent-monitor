@@ -45,6 +45,7 @@ public sealed class LocalComparisonSavedJourneyTests
             Assert.Equal(original, await restarted.Client.GetByteArrayAsync(Api(snapshot)));
             var page = await browser.NewPageAsync(); page.PageError += (_, error) => errors.Add(error);
             await page.GotoAsync($"{restarted.Url}/repositories/{snapshot.RepositoryId}/sessions");
+            await page.Locator("[data-saved-comparisons] > summary").ClickAsync();
             await Expect(page.Locator("[data-saved-comparisons-status]")).ToContainTextAsync("1件の保存した比較");
             var link = page.Locator("[data-saved-comparisons-list] a");
             await Expect(link).ToHaveAttributeAsync("href", Human(snapshot));
@@ -58,6 +59,7 @@ public sealed class LocalComparisonSavedJourneyTests
             using var expired = await restarted.Client.GetAsync(Api(snapshot));
             Assert.Equal(HttpStatusCode.Gone, expired.StatusCode);
             await page.GotoAsync($"{restarted.Url}/repositories/{snapshot.RepositoryId}/sessions");
+            await page.Locator("[data-saved-comparisons] > summary").ClickAsync();
             await Expect(page.Locator("[data-saved-comparisons-status]")).ToContainTextAsync("0件の保存した比較");
             await page.CloseAsync();
         }

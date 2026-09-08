@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
@@ -206,7 +207,7 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         var after = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
 
         Assert.Equal(before.WorkspaceRevision, after.WorkspaceRevision);
-        Assert.Equal(before.Detail.Content, after.Detail.Content);
+        Assert.Equal(JsonSerializer.Serialize(before.Detail.Content), JsonSerializer.Serialize(after.Detail.Content));
     }
 
     [Fact]

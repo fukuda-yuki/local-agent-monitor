@@ -50,6 +50,14 @@ to the existing local authorization, size and retention gates.
 Observed token components include their contributing/applicable call counts.
 The cache-read ratio means the proportion of paired input tokens read from
 cache, not a call hit rate. Producer totals are not reconstructed from components.
+The primary workspace is chronological captured activity with direct failure
+navigation, contextual input/output/error evidence and descriptive call usage.
+Retention, diagnostics, recording coverage and sparse discovery records remain
+reachable through deliberate entries. The initial read reuses a coherent bounded
+summary; resource views do not issue a request for every call. These presentation
+and query changes neither expand collection nor add quality evaluation, inferred
+cache contents, cross-Repository comparison or speculative AI capabilities.
+
 The investigation retains bounded transient navigation context and supports
 explicit preservation of immutable deterministic comparisons. The narrow
 transport, collection, detail and comparison owners define these behaviors.

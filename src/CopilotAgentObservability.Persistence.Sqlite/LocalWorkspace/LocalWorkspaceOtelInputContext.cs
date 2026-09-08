@@ -15,7 +15,13 @@ internal static class LocalWorkspaceOtelInputContext
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private const string BindingSql = """
         FROM local_workspace_nodes n
-        JOIN session_events e ON e.event_id=n.source_identity AND e.session_id=n.session_id
+        JOIN session_events e ON e.session_id=n.session_id AND (
+          n.source_kind='session_event' AND e.event_id=n.source_identity
+          OR n.source_kind='semantic_tool' AND EXISTS (
+            SELECT 1 FROM local_workspace_node_source_references reference
+            WHERE reference.node_id=n.node_id AND reference.event_id=e.event_id
+              AND reference.trace_id=e.trace_id COLLATE BINARY
+              AND reference.span_id=substr(e.source_event_id,34) COLLATE BINARY))
         JOIN monitor_spans m ON m.trace_id=e.trace_id COLLATE BINARY
           AND e.source_event_id=m.trace_id||'/'||m.span_id COLLATE BINARY
         LEFT JOIN raw_records r ON r.id=m.raw_record_id
@@ -23,28 +29,38 @@ internal static class LocalWorkspaceOtelInputContext
           AND i.source_item_id=CAST(m.raw_record_id AS TEXT)
           AND i.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
         LEFT JOIN retention_tombstones tombstone ON tombstone.item_id=i.item_id
-        WHERE n.session_id=$session_id AND n.source_kind='session_event'
-          AND e.source_adapter='otel-exact' AND e.type='otel.span' AND m.operation='chat'
+        WHERE n.session_id=$session_id
+          AND e.source_adapter='otel-exact' AND e.type='otel.span'
+          AND (n.source_kind='session_event' AND m.operation='chat'
+            OR n.source_kind='semantic_tool' AND m.operation='execute_tool' AND m.status='error')
           AND length(m.trace_id)=32 AND m.trace_id NOT GLOB '*[^0-9a-f]*'
           AND length(m.span_id)=16 AND m.span_id NOT GLOB '*[^0-9a-f]*'
-          AND (SELECT COUNT(*) FROM monitor_spans other
-            WHERE lower(other.trace_id)=m.trace_id AND lower(other.span_id)=m.span_id)=1
-          AND (SELECT COUNT(*) FROM session_events other WHERE other.source_adapter='otel-exact'
-            AND lower(other.source_event_id)=m.trace_id||'/'||m.span_id)=1
+          AND COALESCE((WITH owners AS MATERIALIZED (
+              SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+              FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT other.owner_count FROM owners other
+            WHERE other.trace_key=m.trace_id AND other.span_key=m.span_id),0)=1
+          AND COALESCE((WITH owners AS MATERIALIZED (
+              SELECT lower(source_event_id) source_key,COUNT(*) owner_count
+              FROM session_events WHERE source_adapter='otel-exact' GROUP BY lower(source_event_id)) SELECT other.owner_count FROM owners other
+            WHERE other.source_key=m.trace_id||'/'||m.span_id),0)=1
         """;
 
     internal static LocalWorkspaceSessionDetailContribution Apply(
         SqliteConnection connection, SqliteTransaction transaction, string sessionId,
         LocalWorkspaceSessionDetailContribution detail, DateTimeOffset acceptedAt)
     {
-        var calls = detail.Nodes.Where(node => node.Kind == "llm_call").ToArray();
+        var calls = detail.Nodes.Where(node => node.Kind == "llm_call" || node.Kind == "tool" && node.Status == "failed").ToArray();
         if (calls.Length == 0) return detail;
         var content = detail.Content.ToList();
-        foreach (var call in calls)
+        var callIds = calls.Select(call => call.NodeId).ToHashSet(StringComparer.Ordinal);
+        using var command = AvailabilityCommand(connection, transaction, sessionId);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
         {
-            var availability = ReadAvailability(connection, transaction, sessionId, call.NodeId, acceptedAt);
-            if (availability is null) continue;
-            content.RemoveAll(item => item.NodeId == call.NodeId && item.Part == "event_content");
+            var nodeId = reader.GetString(18);
+            if (!callIds.Contains(nodeId)) continue;
+            var availability = ReadAvailabilityRow(reader, nodeId, acceptedAt);
+            content.RemoveAll(item => item.NodeId == nodeId && item.Part == availability.Part);
             content.Add(availability);
         }
         return detail with { Content = content.AsReadOnly() };
@@ -52,19 +68,32 @@ internal static class LocalWorkspaceOtelInputContext
 
     internal static LocalWorkspaceContentAvailability? ReadAvailability(
         SqliteConnection connection, SqliteTransaction transaction, string sessionId,
-        string nodeId, DateTimeOffset acceptedAt)
+        string nodeId, DateTimeOffset acceptedAt, string part = "event_content")
     {
-        using var command = connection.CreateCommand();
+        using var command = AvailabilityCommand(connection, transaction, sessionId);
+        command.CommandText += " AND n.node_id=$node_id";
+        command.Parameters.AddWithValue("$node_id", nodeId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        var availability = ReadAvailabilityRow(reader, nodeId, acceptedAt);
+        return availability.Part == part ? availability : null;
+    }
+
+    private static SqliteCommand AvailabilityCommand(SqliteConnection connection, SqliteTransaction transaction, string sessionId)
+    {
+        var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             SELECT m.raw_record_id,m.trace_id,m.span_id,r.received_at,r.schema_version,r.retention_owner_token,
               i.item_id,i.store_instance_id,i.captured_at,i.expires_at,i.state,i.revision,i.ownership_receipt,
-              i.read_denied_at,i.deleted_at,i.error_code,tombstone.receipt_at,tombstone.deleted_at
-            """ + " " + BindingSql + " AND n.node_id=$node_id;";
+              i.read_denied_at,i.deleted_at,i.error_code,tombstone.receipt_at,tombstone.deleted_at,n.node_id,m.operation
+            """ + " " + BindingSql;
         command.Parameters.AddWithValue("$session_id", sessionId);
-        command.Parameters.AddWithValue("$node_id", nodeId);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
+        return command;
+    }
+
+    private static LocalWorkspaceContentAvailability ReadAvailabilityRow(SqliteDataReader reader, string nodeId, DateTimeOffset acceptedAt)
+    {
         var sourceId = reader.GetInt64(0).ToString(CultureInfo.InvariantCulture);
         var identity = reader.GetString(1) + "/" + reader.GetString(2);
         string? Text(int index) => reader.IsDBNull(index) ? null : reader.GetString(index);
@@ -81,9 +110,10 @@ internal static class LocalWorkspaceOtelInputContext
                 state = "invalid";
         }
         var revision = reader.IsDBNull(11) ? (long?)null : reader.GetInt64(11);
-        return new(nodeId, "event_content", state, sourceId,
+        var part = reader.GetString(19) == "chat" ? "event_content" : "error_message";
+        return new(nodeId, part, state, sourceId,
             identity + "|" + sourceId + "|" + revision?.ToString(CultureInfo.InvariantCulture),
-            "raw_record", "otel_input_context", null, null,
+            "raw_record", part == "event_content" ? "otel_input_context" : "otel_error", null, null,
             Text(6), Text(7), Text(8), Text(9), revision, receipt, token);
     }
 
@@ -99,7 +129,7 @@ internal static class LocalWorkspaceOtelInputContext
         command.Parameters.AddWithValue("$session_id", sessionId);
         using var reader = command.ExecuteReader();
         // Typed, length-framed rows keep owner changes in the coherent snapshot without reading raw bodies.
-        hash.AppendData("local-monitor-otel-input-context-v1\0"u8);
+        hash.AppendData("local-monitor-otel-call-context-v2\0"u8);
         Span<byte> length = stackalloc byte[4];
         while (reader.Read())
         {
@@ -146,7 +176,7 @@ internal static class LocalWorkspaceOtelInputContext
         using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(context.DatabasePath, SqliteOpenMode.ReadWrite);
         using var transaction = connection.BeginTransaction(deferred: false);
         var now = clock.GetUtcNow();
-        var current = ReadAvailability(connection, transaction, sessionId, nodeId, now);
+        var current = ReadAvailability(connection, transaction, sessionId, nodeId, now, locator.Part);
         if (current?.State != "available")
         {
             transaction.Rollback();
@@ -158,7 +188,7 @@ internal static class LocalWorkspaceOtelInputContext
                 _ => LocalWorkspaceNodeContentReadDisposition.Unavailable,
             }, null);
         }
-        if (locator.Part != "event_content" || locator.StoreKind != "raw_record" || locator.LocatorKind != "otel_input_context"
+        if (locator.Part != current.Part || locator.StoreKind != "raw_record" || locator.LocatorKind != current.LocatorKind
             || locator.RevisionInput != current.RevisionInput || locator.RetentionItemId != current.RetentionItemId
             || locator.SourceItemId != current.SourceItemId || locator.RetentionStoreInstanceId != current.RetentionStoreInstanceId
             || locator.SourceCapturedAt != current.SourceCapturedAt || locator.SourceExpiresAt != current.SourceExpiresAt
@@ -229,10 +259,10 @@ internal static class LocalWorkspaceOtelInputContext
             buffer.Write(chunk, 0, count);
         }
         var identity = locator.RevisionInput!.Split('|')[0].Split('/');
-        return SelectInput(buffer.ToArray(), identity[0], identity[1]);
+        return SelectInput(buffer.ToArray(), identity[0], identity[1], locator.Part == "error_message");
     }
 
-    internal static (byte[]? Bytes, LocalWorkspaceNodeContentReadDisposition Failure) SelectInput(byte[] raw, string traceId, string spanId)
+    internal static (byte[]? Bytes, LocalWorkspaceNodeContentReadDisposition Failure) SelectInput(byte[] raw, string traceId, string spanId, bool error = false)
     {
         using var document = JsonDocument.Parse(raw);
         var matches = new List<JsonElement>();
@@ -241,8 +271,8 @@ internal static class LocalWorkspaceOtelInputContext
                 foreach (var span in Array(scope, "spans"))
                     if (Text(span, "traceId") == traceId && Text(span, "spanId") == spanId) matches.Add(span);
         if (matches.Count != 1) return (null, LocalWorkspaceNodeContentReadDisposition.Unavailable);
-        var fields = new List<string>();
-        foreach (var key in new[] { "gen_ai.system_instructions", "gen_ai.input.messages" })
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var key in error ? new[] { "error.type" } : new[] { "gen_ai.system_instructions", "gen_ai.input.messages", "gen_ai.output.messages" })
         {
             var attributes = Array(matches[0], "attributes").Where(item => Text(item, "key") == key).ToArray();
             if (attributes.Length > 1) return (null, LocalWorkspaceNodeContentReadDisposition.Unavailable);
@@ -251,10 +281,10 @@ internal static class LocalWorkspaceOtelInputContext
                 return (null, LocalWorkspaceNodeContentReadDisposition.Unavailable);
             var text = Text(value, "stringValue");
             if (text is null) return (null, LocalWorkspaceNodeContentReadDisposition.Unavailable);
-            fields.Add(key + ":\n" + text);
+            fields.Add(key, text);
         }
         if (fields.Count == 0) return (null, LocalWorkspaceNodeContentReadDisposition.NotCaptured);
-        var output = StrictUtf8.GetBytes(string.Join("\n\n", fields));
+        var output = error ? StrictUtf8.GetBytes(fields["error.type"]) : JsonSerializer.SerializeToUtf8Bytes(fields);
         return output.Length > MaximumSelectedBytes
             ? (null, LocalWorkspaceNodeContentReadDisposition.Oversized)
             : (output, LocalWorkspaceNodeContentReadDisposition.Granted);

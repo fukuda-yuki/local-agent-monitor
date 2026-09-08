@@ -892,8 +892,10 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Null(session.Tokens.Total.Value);
     }
 
-    [Fact]
-    public async Task ExactCallInputContextReadsRetainedRawOwnerAndRejectsChangedRevision()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExactCallInputContextReadsRetainedRawOwnerAndRejectsChangedRevision(bool failedTool)
     {
         using var temp = new MonitorTempDirectory();
         temp.TimeProvider = new MutableTimeProvider(DateTimeOffset.Parse("2026-08-26T00:10:00Z"));
@@ -904,7 +906,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         const string captured = "2026-08-26T00:00:00.0000000+00:00";
         var receipt = CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateRawRecord(new(context.StoreInstanceId, 1, captured, DateTimeOffset.Parse(captured).UtcTicks, 1, token));
         var history = JsonSerializer.Serialize(new[] { new { role = "developer", content = "captured developer" }, new { role = "user", content = new string('x', 300) + "full initial instruction" }, new { role = "user", content = "additional instruction" } });
-        var payload = JsonSerializer.Serialize(new { resourceSpans = new[] { new { scopeSpans = new[] { new { spans = new[] { new { traceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", spanId = "bbbbbbbbbbbbbbbb", attributes = new[] { new { key = "gen_ai.system_instructions", value = new { stringValue = "captured system" } }, new { key = "gen_ai.input.messages", value = new { stringValue = history } } } } } } } } } });
+        var payload = JsonSerializer.Serialize(new { resourceSpans = new[] { new { scopeSpans = new[] { new { spans = new[] { new { traceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", spanId = "bbbbbbbbbbbbbbbb", attributes = new[] { new { key = "gen_ai.system_instructions", value = new { stringValue = "captured system" } }, new { key = "gen_ai.input.messages", value = new { stringValue = history } }, new { key = "error.type", value = new { stringValue = "synthetic execution failure" } } } } } } } } } });
         using (var connection = OpenFile(temp.DatabasePath))
         using (var command = connection.CreateCommand())
         {
@@ -916,6 +918,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
                 VALUES('raw-call-context',$store,'raw_record','1',1,$receipt,$captured,'2026-09-01T00:00:00.0000000+00:00','raw-default-90d',1,'expiring',1,1);
                 """;
             command.Parameters.AddWithValue("$captured", captured); command.Parameters.AddWithValue("$payload", payload); command.Parameters.AddWithValue("$token", token); command.Parameters.AddWithValue("$store", context.StoreInstanceId); command.Parameters.AddWithValue("$receipt", receipt); command.ExecuteNonQuery();
+            if (failedTool) LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE monitor_spans SET operation='execute_tool',category='tool_call',status='error' WHERE raw_record_id=1;");
             using var transaction = connection.BeginTransaction();
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.Parse("2026-08-26T00:10:01Z"), FixedSkillRegistryGenerationAuthority.Load()); transaction.Commit();
         }
@@ -926,22 +929,37 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         using var summaryResponse = await client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary");
         Assert.Equal(System.Net.HttpStatusCode.OK, summaryResponse.StatusCode);
         using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsStringAsync());
-        var call = summary.RootElement.GetProperty("llm_calls")[0].GetProperty("node_id").GetString(); var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
-        var path = $"/api/local-monitor/v1/sessions/{sessionId}/nodes/{call}/content?workspace_revision={revision}&part=event_content";
+        var call = summary.RootElement.GetProperty("steps").EnumerateArray().Single(step =>
+            step.GetProperty("kind").GetString() == (failedTool ? "tool" : "llm_call")
+            && step.GetProperty("content_parts").EnumerateArray().Any(value => value.GetString() == (failedTool ? "error_message" : "event_content"))).GetProperty("node_id").GetString(); var revision = summary.RootElement.GetProperty("workspace_revision").GetString();
+        var part = failedTool ? "error_message" : "event_content";
+        var path = $"/api/local-monitor/v1/sessions/{sessionId}/nodes/{call}/content?workspace_revision={revision}&part={part}";
         using var response = await client.GetAsync(path); Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Equal("raw_record", body.RootElement.GetProperty("source_reference").GetProperty("store_kind").GetString());
-        Assert.Contains(history, body.RootElement.GetProperty("text").GetString()); Assert.Contains("captured system", body.RootElement.GetProperty("text").GetString());
+        if (failedTool) Assert.Equal("synthetic execution failure", body.RootElement.GetProperty("text").GetString());
+        else
+        {
+            using var capturedContext = JsonDocument.Parse(body.RootElement.GetProperty("text").GetString()!);
+            Assert.Equal(history, capturedContext.RootElement.GetProperty("gen_ai.input.messages").GetString());
+            Assert.Equal("captured system", capturedContext.RootElement.GetProperty("gen_ai.system_instructions").GetString());
+        }
         LocalWorkspaceContentAvailability locator;
         using (var connection = OpenFile(temp.DatabasePath))
         using (var transaction = connection.BeginTransaction())
-            locator = LocalWorkspaceOtelInputContext.ReadAvailability(connection, transaction, sessionId, call!, temp.TimeProvider.GetUtcNow())!;
+            locator = LocalWorkspaceOtelInputContext.ReadAvailability(connection, transaction, sessionId, call!, temp.TimeProvider.GetUtcNow(), part)!;
         var publicationLoss = new RawInputContextPublicationLoss(temp.DatabasePath);
         var lost = await LocalWorkspaceOtelInputContext.ReadAsync(context, temp.TimeProvider, sessionId, call!, locator, CancellationToken.None, publicationLoss);
         Assert.True(publicationLoss.InvalidatedCommittedGrant);
         Assert.Equal(LocalWorkspaceNodeContentReadDisposition.Stale, lost.Disposition);
         Assert.Null(lost.Lease);
-        using (var connection = OpenFile(temp.DatabasePath)) LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE retention_items SET read_denied_at='2026-08-26T00:10:01.0000000+00:00',revision=revision+1 WHERE item_id='raw-call-context';");
+        using (var connection = OpenFile(temp.DatabasePath))
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE retention_items SET read_denied_at='2026-08-26T00:10:01.0000000+00:00',revision=revision+1 WHERE item_id='raw-call-context';");
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, temp.TimeProvider.GetUtcNow(), FixedSkillRegistryGenerationAuthority.Load());
+            transaction.Commit();
+        }
         using var stale = await client.GetAsync(path); Assert.Equal(System.Net.HttpStatusCode.Conflict, stale.StatusCode);
         using var updated = await client.GetAsync($"/api/local-monitor/v1/sessions/{sessionId}/summary"); using var updatedSummary = JsonDocument.Parse(await updated.Content.ReadAsStringAsync());
         var newRevision = updatedSummary.RootElement.GetProperty("workspace_revision").GetString(); Assert.NotEqual(revision, newRevision);
@@ -958,7 +976,7 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
             using var connection = OpenFile(databasePath);
             using var command = connection.CreateCommand();
             command.CommandText = "DELETE FROM retention_leases WHERE item_id='raw-call-context' AND lease_kind='access';";
-            InvalidatedCommittedGrant = command.ExecuteNonQuery() == 1;
+            InvalidatedCommittedGrant = command.ExecuteNonQuery() >= 1;
         }
     }
 

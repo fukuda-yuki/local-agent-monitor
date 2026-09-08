@@ -44,9 +44,48 @@ internal static class LocalMonitorV1SessionDetailApplication
         w.WritePropertyName("timing");w.WriteStartObject();w.WriteString("state",session.TimingState);Nullable(w,"started_at",session.StartedAt);Nullable(w,"ended_at",session.EndedAt);Nullable(w,"last_seen_at",session.LastSeenAt);Number(w,"duration_ms",session.DurationMilliseconds);w.WriteEndObject();LocalMonitorV1CollectionApplication.ObservedActivity(w,session);Tokens(w,session.Tokens);Activity(w,SummaryActivity(session));w.WritePropertyName("capture");w.WriteStartObject();w.WriteString("state",CaptureState(session.Completeness));w.WritePropertyName("notes");JsonSerializer.Serialize(w,session.CaptureNotes);Coverage(w,session,detail,versions);w.WriteEndObject();w.WriteEndObject();
         w.WritePropertyName("executions");w.WriteStartArray();foreach(var execution in detail.Executions)Execution(w,execution,detail);w.WriteEndArray();
         Conversation(w,detail);
+        Steps(w, detail);
         w.WritePropertyName("llm_calls");w.WriteStartArray();foreach(var call in detail.Nodes.Where(n=>n.Kind=="llm_call").OrderBy(TimeGroup).ThenBy(n=>n.StartUtcTicks).ThenBy(n=>n.SourceOrdinal).ThenBy(n=>n.NodeId,StringComparer.Ordinal)){w.WriteStartObject();w.WriteString("node_id",call.NodeId);w.WriteString("execution_id",call.ExecutionId);Nullable(w,"requested_model",call.RequestedModel);Nullable(w,"response_model",call.ResponseModel);w.WriteEndObject();}w.WriteEndArray();
         w.WritePropertyName("technical_references");w.WriteStartObject();w.WritePropertyName("native_session_ids");JsonSerializer.Serialize(w,detail.NativeSessionIds??[]);w.WritePropertyName("trace_ids");JsonSerializer.Serialize(w,detail.Executions.Select(e=>e.TraceId).Where(static id=>id is not null).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));w.WriteEndObject();w.WriteEndObject();
     });
+
+    private static void Steps(Utf8JsonWriter writer, LocalWorkspaceSessionDetailContribution detail)
+    {
+        writer.WritePropertyName("steps");
+        writer.WriteStartArray();
+        foreach (var node in detail.Nodes.Where(node => node.Kind is "agent" or "llm_call" or "tool" or "skill" or "subagent" or "error" or "retry" or "permission")
+            .OrderBy(TimeGroup).ThenBy(node => node.StartUtcTicks).ThenBy(node => node.SourceOrdinal).ThenBy(node => node.NodeId, StringComparer.Ordinal))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("node_id", node.NodeId);
+            writer.WriteString("execution_id", node.ExecutionId);
+            Nullable(writer, "parent_node_id", node.ParentNodeId);
+            writer.WriteString("relationship_authority", node.RelationshipAuthority);
+            writer.WriteString("kind", node.Kind);
+            writer.WritePropertyName("name");
+            writer.WriteStartObject();
+            writer.WriteString("state", node.NameState);
+            Nullable(writer, "text", node.NameText);
+            writer.WriteEndObject();
+            writer.WriteString("status", node.Status);
+            Timing(writer, node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds);
+            writer.WritePropertyName("usage");
+            if (node.Kind == "llm_call")
+            {
+                writer.WriteStartObject();
+                Value(writer, "input", node.Tokens.Input);
+                Value(writer, "output", node.Tokens.Output);
+                Value(writer, "cache_read", node.Tokens.CacheRead);
+                Value(writer, "cache_creation", node.Tokens.CacheCreation);
+                writer.WriteEndObject();
+            }
+            else writer.WriteNullValue();
+            writer.WritePropertyName("content_parts");
+            JsonSerializer.Serialize(writer, Parts.Where(part => detail.Content.Any(content => content.NodeId == node.NodeId && content.Part == part && content.State == "available")));
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
+    }
 
     private static void Conversation(Utf8JsonWriter w, LocalWorkspaceSessionDetailContribution detail)
     {

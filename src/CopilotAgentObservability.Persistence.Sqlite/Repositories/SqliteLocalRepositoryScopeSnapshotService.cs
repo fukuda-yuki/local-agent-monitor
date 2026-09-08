@@ -487,8 +487,9 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
 
         bool ValidRawContext(LocalWorkspaceContentAvailability content) =>
-            nodes.TryGetValue(content.NodeId, out var owner) && owner.Kind == "llm_call"
-            && content.Part == "event_content" && content.LocatorKind == "otel_input_context"
+            nodes.TryGetValue(content.NodeId, out var owner)
+            && (owner.Kind == "llm_call" && content.Part == "event_content" && content.LocatorKind == "otel_input_context"
+                || owner.Kind == "tool" && owner.Status == "failed" && content.Part == "error_message" && content.LocatorKind == "otel_error")
             && content.JsonPointer is null && content.SelectedUtf8Bytes is null
             && long.TryParse(content.SourceItemId, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var id)
             && id > 0 && id.ToString(System.Globalization.CultureInfo.InvariantCulture) == content.SourceItemId;

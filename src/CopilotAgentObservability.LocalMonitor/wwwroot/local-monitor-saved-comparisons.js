@@ -94,6 +94,8 @@
       } catch { if (!controller.signal.aborted) { list.replaceChildren(); status.textContent = "保存した比較を読み込めませんでした。"; } }
       finally { busy = false; refresh.disabled = false; }
     }
-    refresh.addEventListener("click", load); load();
+    refresh.addEventListener("click", load);
+    root.addEventListener("toggle", () => { if (root.open) load(); });
+    if (location.hash === "#saved-comparisons") root.open = true;
   }
 })();

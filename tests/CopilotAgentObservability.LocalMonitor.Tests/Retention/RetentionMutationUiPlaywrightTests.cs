@@ -26,6 +26,7 @@ public sealed class RetentionMutationUiPlaywrightTests
         var posts = new List<string>();
         page.Request += (_, request) => { if (request.Method == "POST" && request.Url.Contains("/api/retention/v1/", StringComparison.Ordinal)) posts.Add(request.Url); };
         await page.GotoAsync($"{fixture.Host.Url}/sessions/{fixture.SessionId}");
+        await page.Locator(".local-monitor-session-management > summary").ClickAsync();
         await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り拒否 1件");
         await page.GetByRole(AriaRole.Link, new() { Name = "保持・削除を管理", Exact = true }).ClickAsync();
         await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り可能 0件");
@@ -66,6 +67,7 @@ public sealed class RetentionMutationUiPlaywrightTests
         {
             WaitUntil = WaitUntilState.DOMContentLoaded,
         });
+        await page.Locator(".local-monitor-session-management > summary").ClickAsync();
         await Expect(page.Locator("[data-session-retention-status]")).ToContainTextAsync("読み取り可能 1件");
         await page.GetByRole(AriaRole.Link, new() { Name = "保持・削除を管理", Exact = true }).ClickAsync();
         await page.WaitForURLAsync($"{fixture.Host.Url}/retention/session/{fixture.SessionId}");

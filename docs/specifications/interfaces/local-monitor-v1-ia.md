@@ -199,6 +199,13 @@ Instruction previews may span two lines; the exact label remains in the link tit
 
 Selecting a row opens Session detail directly. There is no preview pane.
 
+Within each fetched page, rows with a recorded instruction, observed call usage,
+or positive recorded Tool activity form the main list. The remaining sparse
+records are in a labelled, counted disclosure on that same page. All records,
+filters, pagination, comparison selection and exact links remain reachable;
+grouping does not merge identities or infer purpose. Saved comparisons are a
+collapsed, lazily loaded entry within the existing Repository scope.
+
 The browser will obtain this list only through the #133/#134-owned closed
 body-bearing POST; this UI never reads Workspace or Repository tables directly.
 #133's semantic row requirements compose with the accepted exact success wire
@@ -290,62 +297,62 @@ route/transport contract so a known expired URL deterministically returns
 
 ## 8. Session detail workspace
 
-The screen has three vertical regions:
-
-1. compact Session context;
-2. Session-wide summary, independent of node selection;
-3. execution workspace with contextual inspector.
+The ordinary journey is a compact heading, a direct instruction/response entry,
+and a chronological execution workspace. Session-wide totals, recording coverage,
+retention management and technical references have deliberate disclosure entries.
+Selecting an action does not replace Session-wide facts.
 
 ### Session context
 
-- a concise first-instruction preview (up to 64 characters) or safe date-based label; the full recorded label remains in Session information;
-- status;
-- source;
-- start/end/duration;
-- archived indicator;
-- capture warning only when there is a limitation;
-- optional provider-ready `AIで分析` action.
+- a concise recorded first-instruction preview (up to 64 characters) or safe date label;
+- status, source and recorded time;
+- response-observed model identities from exact calls, separately from configured or unknown-role identities;
+- observed execution duration when recorded lifecycle duration is unavailable;
+- observed LLM-call and Tool counts and a direct failed-action filter;
+- archived indicator and optional provider-ready `AIで分析` action.
 
-Opaque technical IDs are not the title.
+The full label and all recorded model/version facts remain in `セッション情報`.
+Opaque IDs are never the heading. Repeated recording flags and generic limitation
+paragraphs do not occupy the primary workspace.
 
-### Session-wide summary
+The instruction entry opens the complete retained instruction. A text-response
+entry is offered only for an available recorded text response. Tool requests and
+reasoning observations are distinguished in the content view; they are not new
+conversational text responses. A collapsed observation list keeps every original
+instruction/output reference reachable, including unavailable observations.
 
-The summary always represents the complete Session snapshot and does not change when a node is selected.
-Input, output and observed cache-read ratio remain primary; the five activity facts form a compact inline strip. Total tokens, cache components, coverage and denominator details remain in `内訳・記録状態`. Each missing-state
-label may disclose its explanation in place, without reclassifying that state.
-Capture coverage and observed component details share an explicitly labelled
-expandable section; the summary grows with its content rather than clipping it.
+### Chronological activity and call usage
 
-#### トークン合計
+`時系列` is the initial view. It presents the sanitized semantic actions in the
+summary, in recorded time/source order, without initial timeline or per-call
+requests. Rows show a meaningful kind/name, call ordinal and observed model where
+applicable, status, relative time and duration. Unknown timing stays explicit.
+Known tool names may have a short descriptive Japanese label while retaining the
+recorded name. No label establishes parentage or inferred task purpose.
 
-- total;
-- exact input/output horizontal bar;
-- numeric labels.
+The user can filter failures, LLM calls or tools and sort recorded duration,
+input, output or cache-read values in descending order. Missing values sort after
+recorded values and retain their state. These are descriptive comparisons, not
+quality scores or anomaly judgments.
 
-#### 入力トークンの内訳
+`呼出し別の使用量` displays input, output, cache-read and cache-creation observations
+from the same bounded summary. Separate bars and numeric rows link to the exact
+call inspector. Each component retains observed/applicable call coverage; missing
+components are never zero-height recorded values. No individual call fetch is
+needed to populate the view, and Session or parent totals never fill a missing
+call component.
 
-- cache read ratio when consistent;
-- exact cache-read/new-input horizontal bar;
-- cache write/creation as a separate supplementary value.
+### Session information and management
 
-No subjective cache grade or monetary claim is shown.
+The inspector is initially closed. `セッション情報` opens the full heading label,
+additional instruction count, Session model/version/source/status/time facts,
+capture coverage and expandable technical references. The Session-wide usage
+disclosure keeps observed subtotals, producer totals, component denominators,
+paired-input cache ratios and missing-state explanations accessible without
+repeating them above the activity list. These facts never change with selection.
 
-Other fixed items:
-
-- Skill;
-- Tool;
-- Sub-agent;
-- Error / Retry.
-
-### Initial inspector
-
-Normal entry leaves the inspector closed and uses the width for activity. `情報・指示` opens Session information with:
-
-- initial instruction;
-- additional instruction count;
-- source/status/time/execution count;
-- capture coverage;
-- expandable technical information.
+`保持・管理` loads its retention summary only when opened. Its focused management
+route preserves the existing confirmation and deletion contracts.
 
 ## 9. Hierarchical timeline
 
@@ -359,9 +366,9 @@ Session
 
 Each row combines semantic hierarchy on the left and timing/duration/parallelism on the right.
 
-- no separate tree/waterfall tabs;
-- latest execution is expanded by default;
-- when its complete root page contains exactly one Agent with children, expand that exact structural level with one bounded child-page request; retain normal pagination and request-generation ownership;
+- `階層・元の記録` deliberately opens this evidence view; it is fetched on demand;
+- latest execution is expanded when this view is opened;
+- retain normal pagination and request-generation ownership at every expanded level;
 - previous execution headers retain summary/error/retry facts while collapsed;
 - Agent identity is shown only with exact authority;
 - `Main Agent` is never invented;
@@ -382,7 +389,7 @@ Common structure:
 ### Tool
 
 - status/start/end/duration/caller/exit;
-- input/result/error on demand;
+- input/result on demand; selecting a failed Tool reads its available error through the same revision-bound authorized content path;
 - retry/recovery relation;
 - children;
 - MCP server identity only when exact.
@@ -408,7 +415,7 @@ Common structure:
 - retry/recovery relationship;
 - raw content only through an authorized read.
 
-Available content actions precede an expandable list of other content states.
+Available content actions precede a collapsed list of applicable unavailable content states. Nonapplicable fields are omitted. A selected LLM call exposes its captured input history, output and exact related responses; formatted content separates roles and text/reasoning/tool parts and keeps the original inert content in `元の記録`.
 Exact technical evidence remains available, and optional node AI actions follow
 the observed facts. The context breadcrumb says `セッション`; the heading
 and information panel retain access to the full server-provided instruction label. The heading uses the bounded preview. Both wide and narrow inspectors can be closed; the narrow inspector retains modal focus and background inertness.

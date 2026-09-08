@@ -23,9 +23,14 @@ internal sealed class LocalWorkspaceOtelExecutionProjection
             WHERE e.session_id=$session_id AND e.source_adapter='otel-exact' AND e.type='otel.span' AND e.run_id IS NOT NULL
               AND length(m.trace_id)=32 AND m.trace_id=lower(m.trace_id) AND m.trace_id NOT GLOB '*[^0-9a-f]*'
               AND length(m.span_id)=16 AND m.span_id=lower(m.span_id) AND m.span_id NOT GLOB '*[^0-9a-f]*'
-              AND (SELECT COUNT(*) FROM monitor_spans other WHERE lower(other.trace_id)=m.trace_id AND lower(other.span_id)=m.span_id)=1
-              AND (SELECT COUNT(*) FROM session_events other WHERE other.source_adapter='otel-exact'
-                AND lower(other.source_event_id)=m.trace_id||'/'||m.span_id)=1
+              AND COALESCE((WITH owners AS MATERIALIZED (
+                  SELECT lower(trace_id) trace_key,lower(span_id) span_key,COUNT(*) owner_count
+                  FROM monitor_spans GROUP BY lower(trace_id),lower(span_id)) SELECT other.owner_count FROM owners other
+                WHERE other.trace_key=m.trace_id AND other.span_key=m.span_id),0)=1
+              AND COALESCE((WITH owners AS MATERIALIZED (
+                  SELECT lower(source_event_id) source_key,COUNT(*) owner_count
+                  FROM session_events WHERE source_adapter='otel-exact' GROUP BY lower(source_event_id)) SELECT other.owner_count FROM owners other
+                WHERE other.source_key=m.trace_id||'/'||m.span_id),0)=1
             LIMIT 4097;
             """;
         command.Parameters.AddWithValue("$session_id", sessionId);

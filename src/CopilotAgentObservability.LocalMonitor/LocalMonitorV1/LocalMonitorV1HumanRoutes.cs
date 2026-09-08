@@ -253,6 +253,7 @@ internal static class LocalMonitorV1HumanRoutes
         CancellationToken cancellationToken)
     {
         LocalRepositoryScopeSnapshot? scopeSnapshot = null;
+        string? sessionSummaryJson = null;
         try
         {
             switch (path.RouteKind)
@@ -327,6 +328,8 @@ internal static class LocalMonitorV1HumanRoutes
                         if (node is null || query.ExecutionId is not null && node.ExecutionId != query.ExecutionId)
                             return (LocalMonitorV1PageModel.ResolvedError(path, query, "node_not_found", "open_session_overview"), 404);
                     }
+                    using (var summaryDocument = System.Text.Json.JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeSummary(snapshot)))
+                        sessionSummaryJson = System.Text.Json.JsonSerializer.Serialize(summaryDocument.RootElement);
                     break;
                 case LocalMonitorV1PrimaryRouteKind.ComparisonDetail:
                     scopeSnapshot = await scopeService.ReadAsync(
@@ -406,7 +409,7 @@ internal static class LocalMonitorV1HumanRoutes
 
         var explorer = ResolveExplorerPresentation(path, scopeSnapshot);
         return HasExactRenderer(viewEngine, path.RouteKind!.Value)
-            ? (LocalMonitorV1PageModel.Success(path, query, explorer.Scope, explorer.Heading), StatusCodes.Status200OK)
+            ? (LocalMonitorV1PageModel.Success(path, query, explorer.Scope, explorer.Heading) with { SessionSummaryJson = sessionSummaryJson }, StatusCodes.Status200OK)
             : (LocalMonitorV1PageModel.ResolvedError(path, query, "local_monitor_ui_unavailable", "retry"),
                 StatusCodes.Status503ServiceUnavailable);
     }

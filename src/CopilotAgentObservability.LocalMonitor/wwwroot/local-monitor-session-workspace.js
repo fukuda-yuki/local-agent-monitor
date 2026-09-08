@@ -9,7 +9,7 @@
   const REVISION = /^[0-9a-f]{64}$/;
   const FACT_STATES = new Set(["recorded", "not_observed", "source_unsupported", "capture_gap", "certification_pending", "not_captured", "expired", "redacted", "malformed", "oversized", "inconsistent", "projection_invalid"]);
   const COVERAGE_STATES = new Set(["recorded", "complete_zero", "not_observed", "source_unsupported", "capture_gap", "certification_pending", "inconsistent", "projection_invalid"]);
-  const ROOT_KEYS = ["schema_version", "workspace_revision", "session", "executions", "conversation", "llm_calls", "technical_references"];
+  const ROOT_KEYS = ["schema_version", "workspace_revision", "session", "executions", "conversation", "steps", "llm_calls", "technical_references"];
   const SESSION_KEYS = ["session_id", "status", "completeness", "assignment", "archive", "instruction", "source", "model", "version", "timing", "tokens", "activity", "capture"];
   const TOKEN_KEYS = ["authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points"];
   const ACTIVITY_KEYS = ["skill", "tool", "subagent", "error", "retry"];
@@ -37,6 +37,9 @@
   let nodePollGeneration = 0;
   let routeGeneration = 0;
   let summaryGeneration = 0;
+  let workspaceView = "activity";
+  let stepFilter = "all";
+  let stepSort = "time";
   class RouteSuperseded extends Error {}
   window.LocalMonitorSessionWorkspace = state;
 
@@ -302,6 +305,16 @@
     if (!Array.isArray(summary.llm_calls) || summary.llm_calls.length > 4096 || !summary.llm_calls.every(item => exact(item, ["node_id", "execution_id", "requested_model", "response_model"])
       && NODE.test(item.node_id) && summary.executions.some(execution => execution.execution_id === item.execution_id)
       && [item.requested_model, item.response_model].every(value => value === null || typeof value === "string" && value.length > 0))) throw new TypeError("invalid calls");
+    if (!Array.isArray(summary.steps) || summary.steps.length > 4096 || !distinct(summary.steps.map(item => item.node_id))
+      || !summary.steps.every(item => exact(item, ["node_id", "execution_id", "parent_node_id", "relationship_authority", "kind", "name", "status", "timing", "usage", "content_parts"])
+        && NODE.test(item.node_id) && summary.executions.some(execution => execution.execution_id === item.execution_id)
+        && (item.parent_node_id === null || NODE.test(item.parent_node_id)) && oneOf(item.relationship_authority, ["exact", "explicit", "unknown"])
+        && oneOf(item.kind, ["agent", "llm_call", "tool", "skill", "subagent", "error", "retry", "permission"])
+        && exact(item.name, ["state", "text"]) && oneOf(item.name.state, ["recorded", "not_observed", "invalid"])
+        && (item.name.state === "recorded" ? typeof item.name.text === "string" && item.name.text.length > 0 : item.name.text === null)
+        && oneOf(item.status, ["active", "completed", "failed", "unknown"]) && timing(item.timing, item.status, true)
+        && (item.kind === "llm_call" ? exact(item.usage, ["input", "output", "cache_read", "cache_creation"]) && Object.values(item.usage).every(fact => scalarFact(fact, "value")) : item.usage === null)
+        && Array.isArray(item.content_parts) && item.content_parts.every((part, index) => CONTENT_PARTS.includes(part) && (index === 0 || CONTENT_PARTS.indexOf(item.content_parts[index - 1]) < CONTENT_PARTS.indexOf(part))))) throw new TypeError("invalid steps");
     if (!distinct(summary.conversation.map(item => item.node_id)) || !distinct(summary.llm_calls.map(item => item.node_id))
       || summary.conversation.some(item => item.call_node_id !== null && !summary.llm_calls.some(call => call.node_id === item.call_node_id && call.execution_id === item.execution_id))) throw new TypeError("invalid conversation call binding");
     const range = summary.session.observed_activity;
@@ -409,6 +422,9 @@
     rawDialog.querySelector("[data-raw-content-title]").textContent = title;
     rawDialog.querySelector("[data-raw-content-status]").textContent = "読み込んでいます";
     rawDialog.querySelector("[data-raw-content-text]").textContent = "";
+    rawDialog.querySelector("[data-raw-content-reference]").textContent = "";
+    rawDialog.querySelector("[data-raw-content-formatted]")?.replaceChildren();
+    const source = rawDialog.querySelector("[data-raw-content-source]"); if (source) source.open = false;
     rawDialog.showModal();
     rawDialog.querySelector("[data-raw-content-close]").focus();
     return generation;
@@ -418,6 +434,46 @@
     if (generation !== rawContentGeneration) return;
     rawDialog.querySelector("[data-raw-content-status]").textContent = status;
     rawDialog.querySelector("[data-raw-content-text]").textContent = text;
+    const formatted = rawDialog.querySelector("[data-raw-content-formatted]");
+    if (formatted) renderCapturedText(formatted, text);
+  }
+
+  function renderCapturedText(target, text) {
+    target.replaceChildren();
+    if (!text) return;
+    const parse = value => { try { return JSON.parse(value); } catch { return value; } };
+    const block = (label, value) => {
+      const section = el("section", "local-monitor-content-block");
+      if (label) section.append(el("h3", null, label));
+      section.append(el("pre", null, typeof value === "string" ? value : JSON.stringify(value, null, 2)));
+      target.append(section);
+    };
+    const roles = { system: "システム指示", developer: "開発者指示", user: "ユーザー", assistant: "アシスタント", tool: "ツール結果" };
+    const messages = (value, scope) => {
+      value = typeof value === "string" ? parse(value) : value;
+      if (!Array.isArray(value)) { block(scope, value); return; }
+      if (!value.length) { block(scope, "記録された配列は空です"); return; }
+      value.forEach((message, index) => {
+        if (!message || typeof message !== "object") { block(`${scope} ${index + 1}`, message); return; }
+        const role = roles[message.role] ?? message.role ?? (scope === "システム指示" ? "システム" : "役割未観測");
+        const parts = Array.isArray(message.parts) ? message.parts : Array.isArray(message.content) ? message.content : null;
+        if (!parts) { block(`${scope} ${index + 1} · ${role}`, message.content ?? message); return; }
+        parts.forEach(part => {
+          const kind = { text: "テキスト", reasoning: "推論の観測", tool_call: "ツール要求", tool_call_response: "ツール結果" }[part?.type] ?? part?.type ?? "種別未観測";
+          block(`${scope} ${index + 1} · ${role} · ${kind}`, part?.type === "text" || part?.type === "reasoning" ? part.content ?? part.text ?? part : part);
+        });
+      });
+    };
+    const value = parse(text);
+    if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).some(key => ["gen_ai.system_instructions", "gen_ai.input.messages", "gen_ai.output.messages"].includes(key))) {
+      target.append(el("p", "local-monitor-muted", "この呼出しで記録された入出力"));
+      if (Object.hasOwn(value, "gen_ai.system_instructions")) messages(value["gen_ai.system_instructions"], "システム指示");
+      if (Object.hasOwn(value, "gen_ai.input.messages")) messages(value["gen_ai.input.messages"], "入力");
+      if (Object.hasOwn(value, "gen_ai.output.messages")) messages(value["gen_ai.output.messages"], "出力");
+      else block("出力", "この呼出しの出力本文は未取得です");
+    } else if (value && typeof value === "object" && typeof value.role === "string" && Array.isArray(value.parts)) messages([value], "記録");
+    else if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && ["value", "prompt"].some(key => typeof value[key] === "string")) block(null, value.value ?? value.prompt);
+    else block(null, value);
   }
 
   function validateContent(document, nodeId, part) {
@@ -444,7 +500,8 @@
       const document = validateContent(await requestJson(urlFactory, false, () => selectNode(executionId, nodeId, false, true, generation, currentContent), generation, currentContent), nodeId, part);
       throwIfRouteSuperseded(generation);
       if (!currentContent()) throw new RouteSuperseded();
-      publishRawText(document.text, `${format(document.utf8_byte_length)}バイト · ${format(document.unicode_scalar_length)} Unicodeスカラー · ${document.source_reference.store_kind} · ${document.source_reference.source_item_id} · リビジョン ${format(document.source_reference.revision)}`, contentGeneration);
+      publishRawText(document.text, "", contentGeneration);
+      rawDialog.querySelector("[data-raw-content-reference]").textContent = `${format(document.utf8_byte_length)}バイト · ${format(document.unicode_scalar_length)} Unicodeスカラー · ${document.source_reference.store_kind} / ${document.source_reference.source_item_id} · リビジョン ${document.source_reference.revision}`;
     } catch (error) { if (!(error instanceof RouteSuperseded)) publishRawText("", ({raw_content_not_captured:"未取得",raw_content_expired:"期限切れ",raw_content_deleted:"削除済み",raw_content_read_denied:"表示不可",local_monitor_ui_unavailable:"記録が不正または利用不可です"})[error?.code] ?? HTTP_CONTENT_LABELS[error?.status] ?? "記録表示不可でした", contentGeneration); }
   }
 
@@ -560,7 +617,7 @@
       row.setAttribute("aria-setsize", String(authoritativeSetSize ?? siblings.length)); row.setAttribute("aria-posinset", String(siblings.indexOf(node) + 1));
       row.setAttribute("aria-selected", String(state.selectedNodeId === node.node_id)); row.tabIndex = -1;
       if (node.child_count > 0) row.setAttribute("aria-expanded", String(memory.expanded.has(node.node_id)));
-      const label = node.name?.state === "recorded" ? node.name.text : KIND_LABELS[node.kind];
+      const label = stepLabel(node);
       row.append(el("strong", null, label), el("span", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
       if (node.timing.state === "recorded" && node.timing.started_at && node.timing.duration_ms !== null
           && execution.timing.state === "recorded" && execution.timing.started_at && execution.timing.duration_ms !== null) {
@@ -610,7 +667,101 @@
     return true;
   }
 
+  function stepLabel(node) {
+    if (node.kind === "llm_call") {
+      const index = state.summary.llm_calls.findIndex(call => call.node_id === node.node_id);
+      const call = state.summary.llm_calls[index];
+      return `LLM ${index < 0 ? "" : index + 1} · ${call?.response_model ?? "応答モデル未観測"}`;
+    }
+    const name = node.name.state === "recorded" ? node.name.text : null;
+    if (node.kind === "tool") {
+      const labels = { view: "ファイルを読む", create: "ファイルを作成", edit: "ファイルを編集", glob: "ファイルを探す", grep: "内容を検索", powershell: "コマンドを実行", read_powershell: "実行結果を読む", stop_powershell: "コマンドを停止" };
+      return labels[name] ? `${labels[name]} · ${name}` : name ?? "ツール";
+    }
+    return ({ "user.message": "ユーザー指示", "assistant.message": "出力の観測", "UserPromptSubmit": "ユーザー指示", "userPromptSubmitted": "ユーザー指示", "otel.span": KIND_LABELS[node.kind] })[name] ?? name ?? KIND_LABELS[node.kind];
+  }
+
+  function renderUsagePlot(target, calls) {
+    if (!calls.length) return;
+    const plot = el("div", "local-monitor-call-plots");
+    plot.append(el("p", "local-monitor-muted", "呼出し順の観測値。棒を選ぶと同じ呼出しの記録を開きます。"));
+    for (const [key, label] of [["duration", "時間 (ms)"], ["input", "入力トークン"], ["output", "出力トークン"], ["cache_read", "キャッシュ読込トークン"]]) {
+      const value = call => key === "duration" ? call.timing.duration_ms : call.usage[key].state === "recorded" ? call.usage[key].value : null;
+      const maximum = Math.max(1, ...calls.map(call => value(call) ?? 0));
+      const section = el("section"); section.append(el("h3", null, label));
+      const observed = calls.filter(call => value(call) !== null);
+      section.append(el("p", "local-monitor-chart-scale", `観測 ${observed.length}/${calls.length}呼出し · 目盛 0–${format(observed.length ? Math.max(...observed.map(value)) : 0)}`));
+      const chart = el("div", "local-monitor-call-chart"); chart.setAttribute("aria-label", label);
+      calls.forEach(call => {
+        const number = value(call);
+        const button = el("button", "local-monitor-call-bar"); button.type = "button"; button.dataset.callBar = call.node_id; button.dataset.callMetric = key;
+        const missing = key === "duration" ? call.timing.state === "invalid" ? "時刻が無効" : "時間未観測" : renderFact(el("span"), call.usage[key]).primaryText;
+        button.setAttribute("aria-label", `${stepLabel(call)} · ${label} ${number === null ? missing : format(number)}`);
+        button.title = button.getAttribute("aria-label"); button.setAttribute("aria-pressed", String(state.selectedNodeId === call.node_id));
+        const bar = el("span"); bar.style.height = `${number === null ? 0 : number / maximum * 100}%`;
+        button.dataset.valueState = number === null ? "missing" : number === 0 ? "zero" : "recorded";
+        if (number === null) button.append(document.createTextNode("?")); else button.append(bar);
+        button.addEventListener("click", () => openConversationNode(button, call.execution_id, call.node_id)); chart.append(button);
+      });
+      section.append(chart);
+      const axis = el("p", "local-monitor-chart-axis");
+      axis.append(el("span", null, `LLM ${state.summary.llm_calls.findIndex(call => call.node_id === calls[0].node_id) + 1}`),
+        el("span", null, `LLM ${state.summary.llm_calls.findIndex(call => call.node_id === calls.at(-1).node_id) + 1}`));
+      section.append(axis); plot.append(section);
+    }
+    target.append(plot);
+  }
+
   function renderExecutions() {
+    const source = root.querySelector("[data-session-executions]");
+    const target = root.querySelector("[data-session-steps]");
+    if (!target) return;
+    source.hidden = workspaceView !== "source"; target.hidden = workspaceView === "source";
+    root.querySelector("[data-step-controls]").hidden = workspaceView === "source";
+    root.querySelectorAll("[data-workspace-view]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.workspaceView === workspaceView)));
+    if (workspaceView === "source") { renderSourceExecutions(); return; }
+    const focused = document.activeElement?.dataset?.stepNode;
+    target.replaceChildren();
+    const steps = state.summary.steps;
+    let shown = steps.filter(step => (workspaceView !== "usage" || step.kind === "llm_call")
+      && (stepFilter === "all" || stepFilter === "failed" && step.status === "failed" || step.kind === stepFilter));
+    if (workspaceView === "usage") renderUsagePlot(target, shown);
+    if (stepSort !== "time") {
+      const value = step => stepSort === "duration" ? step.timing.duration_ms : step.usage?.[stepSort]?.state === "recorded" ? step.usage[stepSort].value : null;
+      shown = shown.toSorted((a, b) => value(a) === null ? value(b) === null ? 0 : 1 : value(b) === null ? -1 : value(b) - value(a));
+    }
+    root.querySelector("[data-step-count]").textContent = `${shown.length} / ${workspaceView === "usage" ? state.summary.llm_calls.length : steps.length} ${workspaceView === "usage" ? "呼出し" : "活動"}`;
+    if (!shown.length) target.append(el("p", "local-monitor-session-empty", steps.length ? "この条件に一致する活動はありません。" : "実行活動は未観測です。階層・元の記録から他の記録を確認できます。"));
+    const list = el("ol", "local-monitor-step-list");
+    shown.forEach((step, index) => {
+      const item = el("li"); item.dataset.stepStatus = step.status;
+      const button = el("button", "local-monitor-step-row"); button.type = "button";
+      button.dataset.stepNode = step.node_id; button.dataset.executionId = step.execution_id;
+      button.setAttribute("aria-pressed", String(state.selectedNodeId === step.node_id));
+      button.tabIndex = step.node_id === focused || !focused && (step.node_id === state.selectedNodeId || !shown.some(item => item.node_id === state.selectedNodeId) && index === 0) ? 0 : -1;
+      const when = step.timing.started_at;
+      const origin = state.summary.session.observed_activity?.started_at ?? state.summary.executions.find(execution => execution.execution_id === step.execution_id)?.timing.started_at;
+      const time = el("span", "local-monitor-step-time", when && origin ? `+${format(Math.max(0, Math.round((Date.parse(when) - Date.parse(origin)) / 1000)))}秒` : "時刻未観測");
+      const label = el("span", "local-monitor-step-label"); label.append(el("strong", null, stepLabel(step)));
+      if (step.relationship_authority === "unknown") label.append(el("small", null, "親子関係未確認"));
+      const status = el("span", "local-monitor-step-state", step.status === "unknown" ? "状態未観測" : STATUS_LABELS[step.status]);
+      button.append(time, label, status, el("span", "local-monitor-step-duration", timingLabel(step)));
+      if (workspaceView === "usage") {
+        const values = el("span", "local-monitor-step-usage");
+        for (const [key, label] of [["input", "入力"], ["output", "出力"], ["cache_read", "キャッシュ読込"], ["cache_creation", "キャッシュ作成"]]) {
+          const fact = step.usage[key]; values.append(el("span", null, `${label} ${fact.state === "recorded" ? format(fact.value) : renderFact(el("span"), fact).primaryText}`));
+        }
+        if (step.usage.cache_read.state === "recorded") values.append(el("small", null, `対応入力 ${step.usage.input.state === "recorded" ? format(step.usage.input.value) : "未観測"} · ペア観測 ${step.usage.input.state === "recorded" ? "1/1" : "0/1"} 呼出し`));
+        button.append(values);
+      }
+      button.addEventListener("click", () => openConversationNode(button, step.execution_id, step.node_id));
+      item.append(button); list.append(item);
+    });
+    target.append(list);
+    if (focused) target.querySelector(`[data-step-node='${focused}']`)?.focus();
+  }
+
+  function renderSourceExecutions() {
     const executions = root.querySelector("[data-session-executions]");
     const focusedNodeId = document.activeElement?.dataset?.timelineNode;
     for (const section of executions.querySelectorAll("[data-execution-id]")) {
@@ -1144,7 +1295,7 @@
     const node = detail.node; const metadata = node.metadata; inspector.replaceChildren();
     inspector.setAttribute("aria-hidden", "false"); root.classList.add("inspector-open");
     inspector.append(createInspectorClose());
-    inspector.setAttribute("aria-label", node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]);
+    inspector.setAttribute("aria-label", stepLabel(node));
     inspectorReturnFocus = { executionId: detail.execution.execution_id, nodeId: node.node_id };
     if (narrowInspector.matches) {
       inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-modal", "true"); inspector.setAttribute("aria-hidden", "false");
@@ -1152,15 +1303,21 @@
     }
     const section = el("section", "local-monitor-contextual-inspector"); section.dataset.inspectorKind = node.kind;
     const overview = el("button", null, "情報・指示"); overview.type = "button"; overview.addEventListener("click", () => { routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null }); fallbackSelection(false); openNarrowInspector(root.querySelector("[data-session-overview-open]")); });
-    section.append(el("h2", null, node.name.state === "recorded" ? node.name.text : KIND_LABELS[node.kind]), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
+    section.append(el("h2", null, stepLabel(node)), el("p", null, `${KIND_LABELS[node.kind]} · ${STATUS_LABELS[node.status]} · ${timingLabel(node)}`));
     const facts = el("details", "local-monitor-inspector-facts"); facts.append(el("summary", null, "時刻・属性"));
     if (node.kind === "llm_call") {
-      facts.open = true;
+      const usage = el("p", "local-monitor-selected-call-usage");
+      usage.textContent = [["input", "入力"], ["output", "出力"], ["cache_read", "キャッシュ読込"], ["cache_creation", "キャッシュ作成"]]
+        .map(([key, label]) => `${label} ${node.tokens[key].state === "recorded" ? format(node.tokens[key].value) : renderFact(el("span"), node.tokens[key]).primaryText}`).join(" · ");
+      section.append(usage);
       appendInspectorFact(facts, "要求・設定モデル", metadata.requested_model);
       appendInspectorFact(facts, "応答で観測したモデル", metadata.response_model);
-      facts.append(el("p", null, "観測範囲: このLLM呼び出しのみ"));
       for (const [key, label] of [["input", "入力"], ["output", "出力"], ["total", "取得元が報告した合計"], ["cache_read", "キャッシュ読み込み"], ["cache_creation", "キャッシュ書き込み"], ["new_input", "新規入力"]]) appendInspectorFact(facts, label, node.tokens[key]);
-      appendRelated(section, "この呼び出しの指示・応答と活動", detail.related.children);
+      const responses = state.summary.conversation.filter(item => item.call_node_id === node.node_id && item.content_state === "available");
+      for (const [index, response] of responses.entries()) {
+        const button = el("button", null, `${response.role === "user" ? "指示" : "テキスト応答"} ${index + 1}の全文`); button.type = "button";
+        button.addEventListener("click", () => readGenericContent(button, response.node_id, response.part, response.role === "user" ? "ユーザー指示" : "テキスト応答", response.execution_id)); section.append(button);
+      }
     } else if (node.kind === "tool") {
       appendInspectorFact(facts, "開始", { state: node.timing.state, value: node.timing.started_at }); appendInspectorFact(facts, "終了", node.timing.ended_at === null ? { state: "not_observed" } : { state: node.timing.state, value: node.timing.ended_at }); appendInspectorFact(facts, "所要時間", node.timing.duration_ms === null ? { state: "not_observed" } : { state: node.timing.state, value: `${node.timing.duration_ms} ms` });
       appendInspectorFact(facts, "呼び出し元", metadata.caller, "node_id"); appendInspectorFact(facts, "ライフサイクル", metadata.lifecycle, "value", value => STATUS_LABELS[value]); appendInspectorFact(facts, "状態", metadata.status, "value", value => STATUS_LABELS[value]); appendInspectorFact(facts, "終了状態", metadata.exit);
@@ -1196,10 +1353,14 @@
     if (node.kind !== "skill") {
       const unavailable = el("details", "local-monitor-unavailable-content");
       unavailable.append(el("summary", null, "未保存の内容"));
-      for (const part of CONTENT_PARTS) {
+      const applicable = node.kind === "llm_call" ? ["event_content", ...(node.status === "failed" ? ["error_message"] : [])]
+        : node.kind === "tool" ? ["tool_input", "tool_result", ...(node.status === "failed" ? ["error_message"] : [])]
+        : node.kind === "subagent" ? ["subagent_input"] : node.kind === "error" ? ["error_message", "event_content"]
+        : CONTENT_PARTS.filter(part => detail.content[part].state !== "not_captured");
+      for (const part of applicable) {
         if (node.kind === "llm_call" && part === "event_content") {
-          const context = el("button", null, "入力履歴・システム／開発者指示を確認"); context.type = "button";
-          if (detail.content[part].available) context.addEventListener("click", () => readGenericContent(context, node.node_id, part, "入力履歴・システム／開発者指示"));
+          const context = el("button", null, "この呼出しの入出力を開く"); context.type = "button";
+          if (detail.content[part].available) context.addEventListener("click", () => readGenericContent(context, node.node_id, part, "呼出しの入出力・システム指示"));
           else { context.disabled = true; context.textContent += ` · ${CONTENT_STATE_LABELS[detail.content[part].state]}`; }
           section.append(context);
         } else appendContentAction(detail.content[part].state === "available" ? section : unavailable, detail, part);
@@ -1218,6 +1379,18 @@
     section.append(overview);
     if (aiReady) appendNodeAi(section, node.node_id);
     inspector.append(section);
+    if (node.status === "failed" && detail.content.error_message.available) {
+      const error = el("section", "local-monitor-step-error"); error.dataset.stepError = "";
+      error.append(el("h3", null, "記録されたエラー"));
+      const body = el("div"); body.textContent = "読み込んでいます"; error.append(body); section.insertBefore(error, section.children[2] ?? null);
+      const generation = routeGeneration;
+      const current = () => state.selectedNodeId === node.node_id && error.isConnected && inspector.getAttribute("aria-hidden") === "false";
+      const url = () => requestUrl(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/nodes/${node.node_id}/content`, { workspace_revision: state.revision, part: "error_message" });
+      requestJson(url, false, null, generation, current).then(value => {
+        const content = validateContent(value, node.node_id, "error_message");
+        if (current() && generation === routeGeneration) renderCapturedText(body, content.text);
+      }).catch(failure => { if (current() && !(failure instanceof RouteSuperseded)) body.textContent = ({raw_content_not_captured:"未取得",raw_content_expired:"期限切れ",raw_content_deleted:"削除済み",raw_content_read_denied:"表示不可"})[failure.code] ?? HTTP_CONTENT_LABELS[failure.status] ?? "エラー本文を表示できません"; });
+    }
     if (narrowInspector.matches) requestAnimationFrame(() => inspector.querySelector("[data-inspector-close]")?.focus());
   }
 
@@ -1232,8 +1405,11 @@
     executionId = detail.execution.execution_id;
     const memory = executionMemory(executionId);
     const path = detail.parent_path.filter(parent => parent.node_id !== detail.execution.node_id);
-    if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation, current)) return false;
-    for (const parent of path) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
+    if (!state.summary.steps.some(step => step.node_id === nodeId)) workspaceView = "source";
+    if (workspaceView === "source") {
+      if (!memory.pages.has("root") && !await loadTimeline(executionId, null, null, false, generation, current)) return false;
+      for (const parent of path) if (!memory.pages.has(parent.node_id) && !await loadTimeline(executionId, parent.node_id, null, false, generation, current)) return false;
+    }
     throwIfRequestSuperseded(generation, current);
     state.selectedExecutionId = executionId; state.selectedNodeId = nodeId; memory.open = true;
     for (const parent of path) memory.expanded.add(parent.node_id);
@@ -1272,9 +1448,10 @@
         try { const selected = await selectNode(route.execution ?? null, route.node, false, false, generation); if (selected && generation === routeGeneration && closedAnalysis) root.querySelector("[data-timeline-node][aria-selected=true]")?.focus(); }
         catch (error) { if (error instanceof RouteSuperseded) return; if (error?.status === 404) fallbackSelection(true); else renderRouteRecovery(error); }
       } else if (route.execution) {
+        workspaceView = "source";
         const execution = state.summary.executions.find(item => item.execution_id === route.execution);
         if (!execution) { fallbackSelection(true); return; }
-        if (!executionMemory(execution.execution_id).pages.has("root") && !await loadTimeline(execution.execution_id, null, null, false, generation)) return;
+        if (workspaceView === "source" && !executionMemory(execution.execution_id).pages.has("root") && !await loadTimeline(execution.execution_id, null, null, false, generation)) return;
         if (generation !== routeGeneration) return;
         state.selectedExecutionId = execution.execution_id; state.selectedNodeId = null;
         for (const item of state.summary.executions) executionMemory(item.execution_id).open = item.execution_id === execution.execution_id;
@@ -1350,12 +1527,19 @@
     const target = inspectorReturnFocus; inspectorReturnFocus = null;
     if (!restoreFocus) return;
     if (target instanceof Element && target.isConnected && target !== document.body) target.focus();
-    else if (!(target instanceof Element)) root.querySelector(`[data-execution-id='${target?.executionId}'] [data-timeline-node='${target?.nodeId}']`)?.focus();
-    if (document.activeElement === document.body) root.querySelector("[data-execution-toggle]")?.focus();
+    else {
+      const nodeId = target instanceof Element ? target.dataset.stepNode ?? target.dataset.callBar ?? state.selectedNodeId : target?.nodeId;
+      const executionId = target instanceof Element ? state.selectedExecutionId : target?.executionId;
+      const metric = target instanceof Element ? target.dataset.callMetric : null;
+      const replacement = metric ? root.querySelector(`[data-call-bar='${nodeId}'][data-call-metric='${metric}']`)
+        : root.querySelector(`[data-step-node='${nodeId}'], [data-execution-id='${executionId}'] [data-timeline-node='${nodeId}']`);
+      replacement?.focus();
+    }
+    if (document.activeElement === document.body || inspector.contains(document.activeElement)) root.querySelector("[data-session-overview-open]")?.focus();
   }
 
   function setBackgroundInert(value) {
-    for (const target of root.querySelectorAll("[data-session-context], [data-session-summary], [data-session-conversation], [data-session-executions]")) target.inert = value;
+    for (const target of root.querySelectorAll("[data-session-context], .local-monitor-session-usage-summary, [data-session-conversation], .local-monitor-workspace-toolbar, .local-monitor-workspace-main")) target.inert = value;
     document.querySelector(".monitor-shell-header").inert = value;
     document.querySelector(".local-monitor-scope-navigation").inert = value;
   }
@@ -1398,8 +1582,8 @@
     const safeInstant = session.timing.started_at ?? session.timing.last_seen_at;
     const sessionLabel = session.instruction.label !== null ? session.instruction.label : safeInstant === null ? "日時不明のセッション" : `${new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(safeInstant))}${session.timing.started_at === null ? " 最終記録" : ""} のセッション`;
     root.querySelector("[data-session-breadcrumb]").textContent = "セッション";
-    const titleCharacters = Array.from(sessionLabel);
-    root.querySelector("[data-session-title]").textContent = titleCharacters.length > 64 ? `${titleCharacters.slice(0, 64).join("")}…` : sessionLabel;
+    const titleCharacters = Array.from(sessionLabel.split(/\s+#{1,6}\s+/)[0].replace(/^#{1,6}\s*|`/g, "").replace(/\s+/g, " ").trim());
+    root.querySelector("[data-session-title]").textContent = titleCharacters.length > 64 ? `${titleCharacters.slice(0, 64).join("")}…` : titleCharacters.join("");
     root.querySelector("[data-session-title]").title = sessionLabel;
     const context = root.querySelector("[data-session-context-content]");
     context.replaceChildren(el("span", null, session.status === "active" && session.timing.state === "not_observed" ? "状態不明" : STATUS_LABELS[session.status]));
@@ -1413,8 +1597,17 @@
     else renderFact(time, { state: session.timing.state, count: null });
     context.append(source, time);
 
+    const models = [...new Set(summary.llm_calls.map(call => call.response_model).filter(value => value !== null))];
+    context.append(el("strong", "local-monitor-observed-model", models.length ? models.join(" / ") : "応答モデル未観測"));
+    if (session.observed_activity) context.append(el("span", null, `観測実行 ${timingLabel({ timing: { state: "recorded", ...session.observed_activity } })}`));
+    context.append(el("span", null, summary.llm_calls.length ? `LLM ${format(summary.llm_calls.length)}呼出し` : "LLM呼出し未観測"));
+    if (session.activity.tool.state === "recorded") context.append(el("span", null, `ツール ${format(session.activity.tool.count)}件`));
+    const failures = el("button", "local-monitor-failure-entry", session.activity.error.state === "recorded" ? `失敗 ${format(session.activity.error.count)}件` : "失敗 未観測");
+    failures.type = "button"; failures.dataset.failureEntry = "";
+    failures.addEventListener("click", () => { workspaceView = "activity"; stepFilter = "failed"; root.querySelector("[data-step-filter]").value = "failed"; renderExecutions(); root.querySelector("[data-step-node]")?.focus(); root.querySelector("[data-step-controls]").scrollIntoView({ block: "nearest" }); });
+    context.append(failures);
+
     if (session.archive.state !== "active") context.append(el("span", null, " アーカイブ済み"));
-    if (session.capture.state !== "complete") context.append(el("span", null, "一部未記録"));
 
 
     const summaryRoot = root.querySelector("[data-session-summary]");
@@ -1445,14 +1638,6 @@
     const newInput = namedFact("新規入力", session.tokens.new_input, "NewInput");
     const coverageCard = el("details", "local-monitor-session-summary-card"); coverageCard.dataset.sessionFixedCoverage = "";
     coverageCard.append(el("summary", null, "内訳・記録状態"));
-    const coverageList = el("ul", "local-monitor-session-coverage");
-    for (const item of session.capture.coverage) {
-      const row = el("li"); row.append(el("span", null, `${SIGNAL_LABELS[item.signal_family]}: `));
-      const factTarget = row.appendChild(el("div"));
-      renderCoverageFact(factTarget, item);
-      coverageList.append(row);
-    }
-    coverageCard.append(coverageList);
     summaryRoot.append(input, output, cache);
     const tokenDetails = el("div", "local-monitor-session-observed-components"); tokenDetails.append(total, cacheRead, newInput); coverageCard.append(tokenDetails);
     if (cache.dataset.observationDetail) coverageCard.append(el("p", null, `キャッシュ比率: ${cache.dataset.observationDetail}`));
@@ -1498,37 +1683,46 @@
 
   function renderConversation(summary) {
     const target = root.querySelector("[data-session-conversation]");
-    target.replaceChildren(el("h2", null, "指示・応答"), el("p", null, "追加の指示を含む時系列の記録です。記録番号は会話の開始やターン数を保証しません。指示と応答の個別対応は未確認です。"));
-    if (!summary.conversation.length) target.append(el("p", null, "指示・応答は未観測です。"));
-    const list = el("ol");
-    let userObservation = 0;
-    for (const item of summary.conversation) {
-      const row = el("li"); row.dataset.conversationNode = item.node_id;
-      row.append(el("strong", null, item.role === "user" ? ++userObservation === 1 ? "最初に記録された指示" : `ユーザー指示（記録${userObservation}）` : "応答"), el("span", null, ` · ${item.recorded_at === null ? "時刻未観測" : shortTime(item.recorded_at)} · 対応不明 `));
-      if (item.content_state === "available") { const button = el("button", null, "全文を表示"); button.type = "button"; button.addEventListener("click", () => readGenericContent(button, item.node_id, item.part, item.role === "user" ? "ユーザー指示（全文）" : "応答（全文）", item.execution_id)); row.append(button); }
-      else row.append(el("span", null, CONTENT_STATE_LABELS[item.content_state]));
-      const detail = el("button", null, "記録の詳細"); detail.type = "button"; detail.addEventListener("click", () => openConversationNode(detail, item.execution_id, item.node_id)); row.append(detail);
-      if (item.call_node_id) { const call = el("button", null, "この記録のLLM呼び出し"); call.type = "button"; call.addEventListener("click", () => openConversationNode(call, item.execution_id, item.call_node_id)); row.append(call); }
-      if (item.role === "user" && item.call_node_id) {
-        for (const response of summary.conversation.filter(value => value.role === "assistant" && value.call_node_id === item.call_node_id)) {
-          const link = el("button", null, "同じ呼び出しの応答"); link.type = "button";
-          link.addEventListener("click", () => response.content_state === "available" ? readGenericContent(link, response.node_id, response.part, "同じ呼び出しの応答（個別対応は不明）", response.execution_id) : openConversationNode(link, response.execution_id, response.node_id)); row.append(link);
-        }
-      }
-      list.append(row);
+    target.replaceChildren();
+    const users = summary.conversation.filter(item => item.role === "user");
+    const outputs = summary.conversation.filter(item => item.role === "assistant" && item.content_state === "available");
+    const openText = (item, label, title) => {
+      const button = el("button", null, label); button.type = "button";
+      button.addEventListener("click", () => readGenericContent(button, item.node_id, item.part, title, item.execution_id));
+      return button;
+    };
+    const first = users.find(item => item.content_state === "available");
+    if (first) target.append(openText(first, "依頼の全文を読む", "ユーザー指示の全文"));
+    else target.append(el("span", "local-monitor-muted", `依頼本文: ${users.length ? CONTENT_STATE_LABELS[users[0].content_state] : "未観測"}`));
+    if (outputs.length) target.append(openText(outputs.at(-1), "記録されたテキスト応答を読む", "テキスト応答"));
+    else target.append(el("span", "local-monitor-muted", "表示できるテキスト応答はありません"));
+    if (summary.conversation.length) {
+      const observations = el("details"); observations.append(el("summary", null, `指示・出力の元の観測（${summary.conversation.length}件）`));
+      observations.append(el("p", null, "同じ呼出しの観測を含みます。個々の指示と応答の対応は未確認です。"));
+      const list = el("ol");
+      summary.conversation.forEach((item, index) => {
+        const row = el("li"); row.dataset.conversationNode = item.node_id;
+        const label = `${index + 1}. ${item.role === "user" ? "指示" : item.content_state === "available" ? "テキスト応答" : "出力の観測"} · ${item.recorded_at ? shortTime(item.recorded_at) : "時刻未観測"}`;
+        const button = el("button", null, label); button.type = "button";
+        button.addEventListener("click", () => openConversationNode(button, item.execution_id, item.node_id)); row.append(button);
+        if (item.content_state === "available") row.append(openText(item, `${index + 1}の全文`, item.role === "user" ? "ユーザー指示の全文" : "テキスト応答"));
+        list.append(row);
+      });
+      observations.append(list); target.append(observations);
     }
-    target.append(list);
-    const calls = el("details"); calls.append(el("summary", null, `LLM呼び出し（${summary.llm_calls.length}件）`));
-    for (const call of summary.llm_calls) { const button = el("button", null, `LLM呼び出し · ${call.response_model ?? call.requested_model ?? "モデル未観測"}`); button.type = "button"; button.addEventListener("click", () => openConversationNode(button, call.execution_id, call.node_id)); calls.append(button); }
-    target.append(calls);
   }
 
   async function load(refresh = false, applyCurrentRoute = true) {
     const requestGeneration = ++summaryGeneration;
     try {
-      const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error("セッションの概要を表示できません");
-      const body = await response.text();
+      const bootstrap = !refresh && root.querySelector("[data-session-bootstrap]");
+      let body;
+      if (bootstrap) { body = bootstrap.textContent; bootstrap.remove(); }
+      else {
+        const response = await fetch(`/api/local-monitor/v1/sessions/${root.dataset.sessionId}/summary`, { headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error("セッションの概要を表示できません");
+        body = await response.text();
+      }
       if (requestGeneration !== summaryGeneration) throw new RouteSuperseded();
       const summary = validate(JSON.parse(body));
       if (refresh && state.revision !== summary.workspace_revision) state.executionState.clear();
@@ -1536,21 +1730,6 @@
       document.dispatchEvent(new CustomEvent("local-monitor-snapshot-loaded", { detail: { observedAt: Date.now(), revision: state.revision } }));
       const route = window.LocalMonitorV1History.current();
       if (applyCurrentRoute && (route.node || route.execution || route.analysis)) await applyRoute(route);
-      else if (applyCurrentRoute) {
-        const latest = summary.executions.find(execution => execution.latest);
-        if (latest && !executionMemory(latest.execution_id).pages.has("root")) {
-          const generation = routeGeneration;
-          await loadTimeline(latest.execution_id, null, null, false, generation);
-          const memory = executionMemory(latest.execution_id);
-          const roots = memory.pages.get("root");
-          if (roots?.items.length === 1 && roots.nextCursor === null && roots.items[0].kind === "agent" && roots.items[0].child_count > 0) {
-            const nodeId = roots.items[0].node_id;
-            if (await loadTimeline(latest.execution_id, nodeId, null, false, generation) && generation === routeGeneration) {
-              memory.expanded.add(nodeId); renderExecutions();
-            }
-          }
-        }
-      }
     } catch (error) {
       if (error instanceof RouteSuperseded || requestGeneration !== summaryGeneration) return;
       root.querySelector("[data-session-context-content]").textContent = "セッションを読み込めませんでした";
@@ -1575,6 +1754,30 @@
     applyRoute(event.detail);
   });
   root.querySelector("[data-session-executions]").addEventListener("keydown", handleTreeKey);
+  root.querySelectorAll("[data-workspace-view]").forEach(button => button.addEventListener("click", async () => {
+    if (!state.summary) return;
+    workspaceView = button.dataset.workspaceView;
+    if (workspaceView === "usage") { stepFilter = "all"; root.querySelector("[data-step-filter]").value = "all"; }
+    renderExecutions();
+    if (workspaceView === "source") {
+      const generation = ++routeGeneration;
+      try {
+        if (state.selectedNodeId) await selectNode(state.selectedExecutionId, state.selectedNodeId, false, false, generation);
+        else {
+          const latest = state.summary.executions.find(execution => execution.latest);
+          if (latest && !executionMemory(latest.execution_id).pages.has("root")) await loadTimeline(latest.execution_id, null, null, false, generation);
+        }
+      } catch (error) { if (!(error instanceof RouteSuperseded)) renderRouteRecovery(error); }
+    }
+  }));
+  root.querySelector("[data-step-filter]").addEventListener("change", event => { stepFilter = event.target.value; renderExecutions(); });
+  root.querySelector("[data-step-sort]").addEventListener("change", event => { stepSort = event.target.value; renderExecutions(); });
+  root.querySelector("[data-session-steps]").addEventListener("keydown", event => {
+    const row = event.target.closest("[data-step-node]"); if (!row) return;
+    const rows = [...root.querySelectorAll("[data-step-node]")]; const index = rows.indexOf(row);
+    const next = event.key === "ArrowDown" ? rows[index + 1] ?? row : event.key === "ArrowUp" ? rows[index - 1] ?? row : event.key === "Home" ? rows[0] : event.key === "End" ? rows.at(-1) : null;
+    if (next) { event.preventDefault(); rows.forEach(button => button.tabIndex = -1); next.tabIndex = 0; next.focus(); }
+  });
   root.querySelector("[data-session-overview-open]").addEventListener("click", event => {
     routeGeneration++; state.ignoreRouteEvent = true; window.LocalMonitorV1History.push({ execution: null, node: null });
     fallbackSelection(false); openNarrowInspector(event.currentTarget);
@@ -1582,7 +1785,7 @@
   document.addEventListener("keydown", event => { if (event.key === "Escape" && !rawDialog.open && !sessionAiDialog.open && !document.querySelector("#settings-modal")?.open && inspector.getAttribute("aria-hidden") === "false") { event.preventDefault(); closeInspector(); } });
   inspector.addEventListener("keydown", event => {
     if (event.key !== "Tab" || !narrowInspector.matches || inspector.getAttribute("aria-hidden") === "true") return;
-    const focusable = [...inspector.querySelectorAll("button, input, select, textarea, a[href], summary, [tabindex]:not([tabindex='-1'])")].filter(item => !item.disabled && item.getClientRects().length > 0);
+    const focusable = [...inspector.querySelectorAll("button, input, select, textarea, a[href], summary, [tabindex]:not([tabindex='-1'])")].filter(item => !item.disabled && item.checkVisibility());
     if (!focusable.length) return; const first = focusable[0]; const last = focusable.at(-1);
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -1591,7 +1794,7 @@
   rawDialog?.querySelector("[data-raw-content-close]")?.addEventListener("click", closeRawDialog);
   rawDialog?.addEventListener("cancel", event => { event.preventDefault(); closeRawDialog(); });
   rawDialog?.addEventListener("keydown", event => {
-    if (event.key !== "Tab") return; const focusable = [...rawDialog.querySelectorAll("button, [tabindex]:not([tabindex='-1'])")]; if (!focusable.length) return;
+    if (event.key !== "Tab") return; const focusable = [...rawDialog.querySelectorAll("button, summary, [tabindex]:not([tabindex='-1'])")].filter(item => !item.disabled && item.checkVisibility()); if (!focusable.length) return;
     const first = focusable[0]; const last = focusable.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   const sessionAiDialog = document.querySelector("[data-session-ai-dialog]");

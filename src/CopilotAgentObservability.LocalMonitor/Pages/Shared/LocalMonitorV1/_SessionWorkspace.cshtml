@@ -5,24 +5,48 @@
       data-session-id="@Model.Path!.SessionId">
     <header class="local-monitor-session-context" data-session-context>
         <nav aria-label="パンくず"><a href="/sessions">セッション一覧</a> / <span data-session-breadcrumb>セッション</span></nav>
-        <div class="local-monitor-session-title-row"><h1 data-session-title>セッション</h1><button type="button" data-session-overview-open>情報・指示</button><button type="button" data-session-ai-open hidden>AIで分析</button></div>
+        <div class="local-monitor-session-title-row"><h1 data-session-title>セッション</h1><button type="button" data-session-overview-open>セッション情報</button><button type="button" data-session-ai-open hidden>AIで分析</button></div>
         <div data-session-context-content role="status" aria-live="polite">セッションを読み込んでいます</div>
-        <a href="/retention/session/@Model.Path!.SessionId">保持・削除を管理</a>
-        <div data-session-retention-status data-session-id="@Model.Path!.SessionId" aria-label="セッション本文の保持・期限" role="status" aria-live="polite"></div>
+        <details class="local-monitor-session-management"><summary>保持・管理</summary>
+            <a href="/retention/session/@Model.Path!.SessionId">保持・削除を管理</a>
+            <div data-session-retention-status data-session-id="@Model.Path!.SessionId" aria-label="セッション本文の保持・期限" role="status" aria-live="polite"></div>
+        </details>
     </header>
-    <section class="local-monitor-session-summary" data-session-summary aria-label="セッション全体の概要"></section>
     <section data-session-conversation aria-label="指示・応答"></section>
     <section class="local-monitor-session-execution-workspace" aria-labelledby="session-execution-heading">
-        <h2 id="session-execution-heading">活動</h2>
-        <div class="local-monitor-session-executions" data-session-executions></div>
+        <div class="local-monitor-workspace-toolbar">
+            <h2 id="session-execution-heading">実行の流れ</h2>
+            <div class="local-monitor-workspace-views" aria-label="実行の表示">
+                <button type="button" data-workspace-view="activity" aria-pressed="true">時系列</button>
+                <button type="button" data-workspace-view="usage" aria-pressed="false">呼出し別の使用量</button>
+                <button type="button" data-workspace-view="source" aria-pressed="false">階層・元の記録</button>
+            </div>
+        </div>
+        <div class="local-monitor-workspace-main">
+            <div data-step-controls class="local-monitor-step-controls">
+                <label>絞り込み <select data-step-filter><option value="all">すべての活動</option><option value="failed">失敗</option><option value="llm_call">LLM呼出し</option><option value="tool">ツール</option></select></label>
+                <label>並び順 <select data-step-sort><option value="time">時刻順</option><option value="duration">時間が長い順</option><option value="input">入力が多い順</option><option value="output">出力が多い順</option><option value="cache_read">キャッシュ読込が多い順</option></select></label>
+                <span data-step-count role="status"></span>
+            </div>
+            <div data-session-steps></div>
+            <div class="local-monitor-session-executions" data-session-executions hidden></div>
+        </div>
         <aside class="local-monitor-session-inspector" data-session-overview aria-hidden="true" aria-label="セッションの概要"></aside>
     </section>
+    <details class="local-monitor-session-usage-summary"><summary>セッション全体の使用量・観測範囲</summary>
+        <section class="local-monitor-session-summary" data-session-summary aria-label="セッション全体の概要"></section>
+    </details>
+    @if (Model.SessionSummaryJson is not null)
+    {
+        <script type="application/json" data-session-bootstrap>@Html.Raw(Model.SessionSummaryJson)</script>
+    }
 </div>
 <dialog class="local-monitor-raw-dialog" data-raw-content-dialog aria-labelledby="local-monitor-raw-dialog-title">
     <div class="local-monitor-raw-dialog-frame">
         <header><h2 id="local-monitor-raw-dialog-title" data-raw-content-title>記録内容</h2><button type="button" data-raw-content-close aria-label="閉じる">×</button></header>
         <div data-raw-content-status role="status" aria-live="polite"></div>
-        <pre data-raw-content-text tabindex="0"></pre>
+        <div data-raw-content-formatted></div>
+        <details data-raw-content-source><summary>元の記録</summary><p data-raw-content-reference></p><pre data-raw-content-text tabindex="0"></pre></details>
     </div>
 </dialog>
 <dialog class="local-monitor-ai-dialog" data-session-ai-dialog aria-labelledby="local-monitor-session-ai-title">
