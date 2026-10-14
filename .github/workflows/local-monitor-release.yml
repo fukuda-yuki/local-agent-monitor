@@ -21,6 +21,8 @@ concurrency:
 jobs:
   build-test-package:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       # Retention inventory diffs pinned historical SHAs; depth-1 omits them.
@@ -60,3 +62,23 @@ jobs:
           name: local-monitor-win-x64
           path: artifacts\local-monitor-release\local-monitor-win-x64.zip
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $releaseArgs = @(
+            'release', 'create', $env:RELEASE_TAG,
+            'artifacts\local-monitor-release\local-monitor-win-x64.zip',
+            '--verify-tag', '--title', "Local Monitor $env:RELEASE_TAG",
+            '--generate-notes'
+          )
+          if ($env:RELEASE_TAG.Contains('-')) {
+            $releaseArgs += @('--prerelease', '--latest=false')
+          }
+          & gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
