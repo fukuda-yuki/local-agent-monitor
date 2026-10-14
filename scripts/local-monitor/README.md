@@ -336,6 +336,18 @@ under `app/config-cli/`, `scripts/setup.ps1`, `scripts/first-trace.ps1`, the
 remaining scripts, README, manifest, and notices. It must not contain runtime
 DB, logs, state, raw telemetry, credentials, or PII.
 
+The **LocalMonitor Release ZIP** GitHub Actions workflow runs manually or when a
+`v*` tag is pushed. A successful tag build publishes the ZIP to GitHub Releases
+after its tests pass; tags containing `-` are published as prereleases and are
+not marked Latest. Manual branch runs produce an Actions artifact only. A manual
+tag run publishes only when `run_tests` is enabled; disabling tests never
+automatically publishes a Release. Publishing fails rather than overwriting an
+existing Release. Main-branch merges do not trigger this workflow.
+
+Package creation and publication do not establish product acceptance. Use the
+current validation and release criteria before declaring a stable release;
+preview release notes must identify outstanding validation and known issues.
+
 ## Skill discovery roots
 
 `start.ps1` and `install-startup-task.ps1` accept two repeatable array
